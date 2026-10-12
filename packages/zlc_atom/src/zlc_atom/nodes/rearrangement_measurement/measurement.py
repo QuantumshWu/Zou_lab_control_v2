@@ -18,7 +18,7 @@ class RearrangementMeasurement(CameraMeasurementNode):
 
     def __init__(self, *, camera, request, signal_plane, slm, slm_key, calibration,
                  calibration_path, science_context, science_context_path, target_intensity=None,
-                 target_path=None, target_rows=3, target_columns=3, phase_method="lpi",
+                 target_path=None, target_rows=3, target_columns=3,
                  frame_mode="fixed", motion_frames=16, max_camera_step=1., frame_rate_hz=60.,
                  minimum_separation=15., intensity_tolerance=1.01, motion_intensity_tolerance=1.10):
         super().__init__(camera=camera, request=request, signal_plane=signal_plane,
@@ -41,14 +41,14 @@ class RearrangementMeasurement(CameraMeasurementNode):
         self._weights = (weights, target[tuple(destination.T)])
         # Translation is irrelevant to displacements; Calibration owns binning.
         self._sensor_linear = affine[:2] * np.asarray(calibration.frame_contract.binning_yx)[::-1]
-        self.phase_method, self.frame_mode = phase_method, frame_mode
+        self.frame_mode = frame_mode
         self.motion_frames, self.max_camera_step = int(motion_frames), float(max_camera_step)
         self.frame_interval = 1. / float(frame_rate_hz)
         self.minimum_separation = float(minimum_separation)
         self.intensity_tolerance, self.motion_intensity_tolerance = intensity_tolerance, motion_intensity_tolerance
         self._configuration = dict(calibration_path=str(calibration_path), science_context_path=str(science_context_path),
             end_target_path=target_path, target_rows=target_rows, target_columns=target_columns,
-            phase_method=phase_method, frame_mode=frame_mode, motion_frames=motion_frames,
+            frame_mode=frame_mode, motion_frames=motion_frames,
             max_camera_step=max_camera_step, frame_rate_hz=frame_rate_hz, minimum_separation=minimum_separation,
             intensity_tolerance=intensity_tolerance, motion_intensity_tolerance=motion_intensity_tolerance,
             trigger_frame=0, restore_frame=request.frames_per_cycle - 1)
@@ -124,7 +124,14 @@ class RearrangementMeasurement(CameraMeasurementNode):
         self._cycle_evidence = {"cycle": record.source_ordinal // self.frames_per_cycle,
             "source_indices": plan["source_indices"].tolist(), "target_indices": plan["target_indices"].tolist(),
             "frames": result["motion_frames"], "played_frames": playback["played_frames"],
-            "timing_ms": dict(timings), "initial_frame_ordinal": record.source_ordinal}
+            "timing_ms": dict(timings), "initial_frame_ordinal": record.source_ordinal,
+            # Every map is played; its gates are reported here (worst map of each, none without maps).
+            "quality_accepted": bool(result["quality_accepted"]),
+            "gate_misses": np.flatnonzero(result["gate_misses"]).tolist(),
+            **{name: float(worst(result[key])) if len(result[key]) else None for name, key, worst in (
+                ("maximum_retained_intensity_ratio", "retained_intensity_ratios", np.max),
+                ("maximum_surplus_site_intensity_ratio", "surplus_site_intensity_ratios", np.max),
+                ("maximum_stray_intensity_ratio", "stray_intensity_ratios", np.max))}}
         # Only scalar cycle evidence survives; no complete phase sequence was collected.
         outcome.pop("result", None)
 
@@ -171,9 +178,7 @@ class RearrangementMeasurement(CameraMeasurementNode):
                 pupil_phase=-np.asarray(self.science_context["operator_wavefront"]),
                 phase_center_yx=tuple(self.science_context["pupil"]["center_xy"])[::-1],
                 source_intensities=self._weights[0], target_intensities=self._weights[1],
-                minimum_separation=self.minimum_separation, method=self.phase_method,
-                support_tolerance=self.intensity_tolerance,
-                maximum_motion_frames=self.motion_frames if self.frame_mode == "fixed" else 16,
+                minimum_separation=self.minimum_separation,
                 endpoint_data={"source_phase": self.science_context["phase"]},
                 stop_requested=context.cancel_requested) as (prepared, reused):
             self._prepared = prepared

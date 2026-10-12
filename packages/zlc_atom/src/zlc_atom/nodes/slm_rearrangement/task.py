@@ -114,7 +114,7 @@ class SlmRearrangementTask:
                  target_intensity=None, target_path=None,
                  pulse_sequence, pulse_path, before_period, after_period="",
                  exposure_seconds=.005, motion_frames=16, frame_rate_hz=60.,
-                 phase_method="lpi", frame_mode="fixed", max_camera_step=1.,
+                 frame_mode="fixed", max_camera_step=1.,
                  minimum_separation=15., intensity_tolerance=1.01, motion_intensity_tolerance=1.10,
                  save_phase_sequence=True, save_figure_artifact=None, recording_frames=None):
         self.camera, self.sequencer, self.slm = camera, sequencer, slm
@@ -128,10 +128,10 @@ class SlmRearrangementTask:
         self.before_period, self.after_period = str(before_period), str(after_period)
         self.exposure_seconds = float(exposure_seconds)
         self.motion_frames = int(motion_frames)
-        self.phase_method, self.frame_mode = str(phase_method), str(frame_mode)
+        self.frame_mode = str(frame_mode)
         self.max_camera_step = float(max_camera_step)
-        if self.phase_method not in {"iterative", "lpi"} or self.frame_mode not in {"fixed", "camera_step"}:
-            raise ValueError("Unknown phase method or frame policy")
+        if self.frame_mode not in {"fixed", "camera_step"}:
+            raise ValueError("Unknown frame policy")
         if not np.isfinite(self.max_camera_step) or self.max_camera_step <= 0:
             raise ValueError("Maximum camera displacement must be finite and positive")
         self._frame_count = self.motion_frames
@@ -196,7 +196,7 @@ class SlmRearrangementTask:
                 "before_period": self.before_period, "after_period": self.after_period,
                 "exposure_seconds": self.exposure_seconds,
                 "motion_frames": self.motion_frames if self.frame_mode == "fixed" else None,
-                "phase_method": self.phase_method, "frame_mode": self.frame_mode,
+                "frame_mode": self.frame_mode,
                 "recording_frames": self.recording_frames,
                 "requested_motion_frames": self.motion_frames,
                 "max_camera_step": self.max_camera_step, "camera_step_unit": "sensor pixel",
@@ -421,22 +421,18 @@ class SlmRearrangementTask:
         if self._result is not None:
             for key in ("motion_yx", "fraction", "support_intensity_ratios", "sites_yx",
                         "brightness_minimum_to_initial", "brightness_maximum_to_initial",
-                        "brightness_mean_to_initial", "phase_change_from_initial_rms_rad", "focal_phase_error_rms_rad", "phase_step_max_rad",
-                        "pupil_phase_step_rms_rad", "discard_intensity_ratios", "field_projection_updates",
-                        "coarse_field_projection_updates", "native_field_projection_updates",
-                        "background_limit_ratios", "focal_phase_error_max_rad", "main_lobe_envelope_ratios",
-                        "frame_solve_ms", "frame_copy_ms", "frame_ready_ms",
+                        "brightness_mean_to_initial", "phase_change_from_initial_rms_rad", "phase_step_max_rad",
+                        "pupil_phase_step_rms_rad", "discard_intensity_ratios", "surplus_site_intensity_ratios",
+                        "stray_intensity_ratios", "iterations", "correction_updates", "watched_stray_peaks",
+                        "gate_misses", "frame_solve_ms", "frame_ready_ms",
                         "center_sample_power_proxy", "background_intensity_ratios", "desired_amplitudes",
-                        "background_peak_yx", "background_peak_intensity", "background_peak_to_initial_ratios",
+                        "background_peak_yx", "background_peak_intensity",
                         "target_peak_yx", "target_peak_intensity", "source_site_intensities",
                         "source_site_intensity_ratios", "source_site_is_active",
                         "actual_fields", "active_sites", "movement_fraction", "phase_center_yx",
-                        "desired_spectrum_coefficients", "target_synthesis_coefficients",
-                        "endpoint_synthesis_coefficients", "endpoint_field",
-                        "source_field", "target_field", "target_requested_intensities",
-                        "source_synthesis_coefficients", "source_reconstruction_field",
-                        "start_synthesis_coefficients", "synthesis_coefficients",
-                        "retained_intensity_ratios", "all_active_support_intensity_ratios", "fading_intensity_ratios"):
+                        "endpoint_field",
+                        "source_field", "target_field", "target_requested_intensities", "synthesis_coefficients",
+                        "retained_intensity_ratios"):
                 if self._result.get(key) is not None:
                     arrays[key] = self._result[key]
             if self.save_phase_sequence:
@@ -511,31 +507,26 @@ class SlmRearrangementTask:
         if self._result is not None:
             summary["motion_diagnostics"] = {key: self._result[key] for key in
                 ("maximum_step", "recommended_motion_frames", "clearance", "fade_clearance",
-                 "surplus_stationary_clearance", "release_verified", "recommended_release_hold_frames",
-                 "discard_reference_limit", "discard_converged", "converged",
+                 "surplus_stationary_clearance", "surplus_site_limit", "stray_intensity_limits",
+                 "discard_converged", "focal_plane_accepted", "converged",
                  "noop", "fade_frames", "emitted_frame_count", "quality_evaluated",
-                 "quality_scope", "quality_accepted", "phase_interpolation", "field_phase_reference",
-                 "source_coefficient_basis", "target_coefficient_basis", "background_reference_intensity",
-                 "field_projection_initialization_factor",
-                 "endpoint_support_intensity_ratio", "endpoint_iterations", "endpoint_balance_ms") if key in self._result}
+                 "quality_scope", "quality_accepted", "phase_trajectory", "field_phase_reference",
+                 "destination_phase_offset_rad", "endpoint_support_intensity_ratio") if key in self._result}
             if "background_scope" in self._result:
                 summary["focal_background_diagnostics"] = {
-                    key: self._result[key] for key in (
-                        "background_scope", "peak_position_basis", "peak_assignment",
-                        "background_initial_reference_intensity", "background_peak_tolerance")}
-                peaks = np.asarray(self._result["background_peak_to_initial_ratios"])
+                    key: self._result[key] for key in ("background_scope", "peak_position_basis", "peak_assignment")}
+                peaks = np.asarray(self._result["background_intensity_ratios"])
                 if len(peaks):
                     summary["focal_background_diagnostics"].update(
-                        maximum_peak_to_initial_ratio=float(peaks.max()),
-                        final_peak_to_initial_ratio=float(peaks[-1]),
+                        maximum_intermediate_peak_to_weakest_target_ratio=float(np.max(peaks[:-1], initial=0.)),
                         final_peak_yx=(np.asarray(self._result["background_peak_yx"])[-1].tolist()
                                        if self._result["background_peak_intensity"][-1] > 0 else None),
-                        final_peak_to_weakest_target_ratio=float(self._result["background_intensity_ratios"][-1]))
+                        final_peak_to_weakest_target_ratio=float(peaks[-1]))
             minimum = np.asarray(self._result["brightness_minimum_to_initial"])
             maximum = np.asarray(self._result["brightness_maximum_to_initial"])
             if len(minimum):
                 site_phase = np.asarray(self._result["phase_step_max_rad"])
-                pupil_phase = np.asarray(self._result["pupil_phase_step_rms_rad"])
+                pupil_phase = np.asarray(self._result.get("pupil_phase_step_rms_rad", ()))
                 summary["computed_field_diagnostics"] = {
                     "basis": "Computed encoded maps, not measured optical response or confirmed playback; power is relative to each selected source trap",
                     "minimum_power_ratio": float(minimum.min()),
@@ -651,7 +642,7 @@ class SlmRearrangementTask:
         summary["timing_ms"] = dict(self._timings)
         context.register_artifact("summary", write_readable_json(directory/"summary.json", _plain_json(summary)), role="summary")
         lines = ["SLM Rearrangement", f"Status: {status}", f"Pulse: {self.pulse_path}",
-                 f"Method: {self.phase_method}; frame policy: {self.frame_mode}",
+                 f"Frame policy: {self.frame_mode}",
                  f"Weighted intensity ratio limits: motion {self.motion_intensity_tolerance:g}; final {self.intensity_tolerance:g}",
                  f"Computed maps: {summary['actual_motion_frames']}; nominal rate: {self.frame_rate_hz:g} Hz",
                  f"Maximum camera displacement: {self._camera_maximum_step} sensor pixel per frame",
@@ -706,7 +697,6 @@ class SlmRearrangementTask:
         self._camera_site_indices = self._camera_path_affine = None
         self._playback, self._result, self._plan = None, None, None
         sequence_prepared = False
-        diagnose_phase = self.phase_method == "lpi"
         workpoint = ExitStack()
         run_started = perf_counter()
         try:
@@ -714,14 +704,12 @@ class SlmRearrangementTask:
             context.report_progress("Acquiring the GPU optical working point")
             start = perf_counter()
             prepared, self._gpu_reused = workpoint.enter_context(acquire_rearrangement(shape_yx=self.slm.shape_yx,
-                    source_yx=self.points[0], target_yx=self.points[1], method=self.phase_method,
+                    source_yx=self.points[0], target_yx=self.points[1],
                     pupil_amplitude=self.science_context["pupil_amplitude"],
                     pupil_phase=-np.asarray(self.science_context["operator_wavefront"]),
                     phase_center_yx=tuple(self.science_context["pupil"]["center_xy"])[::-1],
                     source_intensities=self.weights[0], target_intensities=self.weights[1],
                     minimum_separation=self.minimum_separation,
-                    support_tolerance=self.intensity_tolerance,
-                    maximum_motion_frames=self.motion_frames if self.frame_mode == "fixed" else 16,
                     endpoint_data={"source_phase": self.science_context["phase"]},
                     stop_requested=context.cancel_requested))
             self._timings["gpu_prepare"] = (perf_counter()-start)*1000
@@ -829,7 +817,7 @@ class SlmRearrangementTask:
                         prepare_sequence()
                 nominal = self._frame_count*self._frame_interval
                 self._timings["estimated_nominal_playback"] = nominal*1000
-                context.report_progress(f"Computing {self._frame_count} maps using {self.phase_method}")
+                context.report_progress(f"Computing {self._frame_count} maps")
                 def before_play():
                     remaining = None if deadline is None else deadline-monotonic()
                     if remaining is not None and remaining < nominal:
@@ -842,13 +830,13 @@ class SlmRearrangementTask:
                         support_tolerance=self.intensity_tolerance, motion_support_tolerance=self.motion_intensity_tolerance,
                         stop_requested=stopped, before_play=before_play, timings=self._timings,
                         received_at_ns=cycle[0].host_received_at_ns, outcome=outcome,
-                        retain_phase_sequence=self.save_phase_sequence or diagnose_phase)
+                        retain_phase_sequence=True)
                 finally:
                     self._result, self._playback = outcome.get("result"), outcome.get("playback")
                     playback_finished_wall, playback_finished_at = outcome.get("finished_wall_ns"), outcome.get("finished_at")
                     self._timings["online_rearrangement"] = (perf_counter()-online_started)*1000
-                    if "first_verified_frame_ready" in self._timings:
-                        self._timings["first_verified_frame_ready"] += (solving_started-online_started)*1000
+                    if "first_frame_ready_for_playback" in self._timings:
+                        self._timings["first_frame_ready_for_playback"] += (solving_started-online_started)*1000
                 camera_path = self._camera_paths(self._result["motion_yx"], plan["source_indices"])
                 self._camera_maximum_step = float(np.max(np.linalg.norm(np.diff(camera_path,axis=0),axis=-1),initial=0.))
                 rounding = 32*np.finfo(float).eps*max(1.,float(np.max(abs(camera_path))))
@@ -906,10 +894,9 @@ class SlmRearrangementTask:
             self._timings["pulse_elapsed"] = report.elapsed_seconds*1000
             self._timings["pulse_report_retrieval_delay"] = report.report_delay_seconds*1000
             self._timings["experiment_before_save"] = (perf_counter()-run_started)*1000
-            if diagnose_phase:
-                diagnostics = rearrangement_diagnostics(prepared, self._result, stop_requested=context.cancel_requested)
-                self._timings["optical_diagnostics"] = float(diagnostics.pop("diagnostics_ms"))
-                self._result.update(diagnostics)
+            diagnostics = rearrangement_diagnostics(prepared, self._result, stop_requested=context.cancel_requested)
+            self._timings["optical_diagnostics"] = float(diagnostics.pop("diagnostics_ms"))
+            self._result.update(diagnostics)
             self._revision += 1
             path = self._result["motion_yx"]
             full_path = np.zeros((self._frame_count+1, len(self.points[0]), 2), dtype=np.float64)

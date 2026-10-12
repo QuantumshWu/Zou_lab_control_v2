@@ -140,8 +140,8 @@ the actual starting command. Preparation time and memory are separate from
 online latency.
 
 The caller supplies available integer indices in the original source roster.
-The planner minimizes the sum of actual Euclidean distances to match
-`min(available sources, target sites)`: surplus sources are discarded, while
+The planner matches `min(available sources, target sites)` and minimizes the
+longest actual path, detours included: surplus sources are discarded, while
 shortage fills a subset and reports the unfilled targets. Camera classification
 and target selection belong to the concrete Task, not the solver.
 
@@ -149,8 +149,10 @@ and target selection belong to the concrete Task, not the solver.
 plan = plan_rearrangement(prepared, available_source_indices)
 sequence = compute_rearrangement(
     prepared, plan, motion_frames=16, support_tolerance=1.01,
+    require_converged=False,  # report maps outside a gate instead of raising after the sequence
 )
 # Assigned paths produce N read-only maps; empty occupancy produces none.
+# sequence["gate_misses"] marks the maps outside a gate.
 if len(sequence["phase_codes"]):
     slm.prepare_phase_sequence(sequence["phase_codes"], 1 / 60)
     receipt = slm.play_phase_sequence()
@@ -158,15 +160,16 @@ prepared["close"]()
 ```
 
 The Task uses the same solver with `frame_ready(index, readonly_frame)`:
-each encoded map passes its bright/discard checks and host transfer before
-being submitted. A private two-frame uploader queue and a two-frame device
-queue overlap later computation, mapping/upload and local paced playback.
-The complete caller-owned read-only movie remains available for archival;
-published frames are never overwritten. The streaming device API is
-`prepare_phase_sequence(None, interval, frame_count=N)` followed by ordered
-`submit_phase_frame(index, frame)` and the existing playback call. The Task
-starts playback on the first verified map and skips preparation/playback for
-empty/no-change results.
+each map is submitted as soon as the GPU has finished it and its codes are on
+the host. A map outside a gate is still submitted and reported; only a
+computation failure (Stop or a non-finite field) stops submission. A private
+two-frame uploader queue and a two-frame device queue overlap later computation,
+mapping/upload and local paced playback. The complete caller-owned read-only
+movie remains available for archival; published frames are never overwritten.
+The streaming device API is `prepare_phase_sequence(None, interval,
+frame_count=N)` followed by ordered `submit_phase_frame(index, frame)` and the
+existing playback call. The Task starts playback on the first map and skips
+preparation/playback for empty/no-change results.
 
 `motion_frames=N` is the total displayed map count: it includes the endpoint
 and excludes the already displayed source. Unselected source light fades within
@@ -181,127 +184,98 @@ bound from the actual routed distance; this is not a globally optimal
 collision-constrained path planner. No valid schedule found does not mean
 physical impossibility.
 
-The solver retains the existing phase-projection/amplitude-update algorithm.
-Encoded full-aperture fields determine the weighted intensity-spread gate;
-discarding an occupied source also requires the maximum intensity in its native
-5 × 5 Fourier-pixel neighborhood, after fade, to be at most 0.01 of that site's
-initial center intensity. Adaptive complex-field projection uses the same sparse
-Fourier operator, not a second full-FFT removal solver. Unchanged, already
-verified maps are reused. Other background light, absolute brightness and
-movement per map remain diagnostics. Focal-site phase steps and pupil-weighted
-pixel-phase RMS steps are distinct reported measurements. Neither numerical
-gate proves atom release, moving-well shape, liquid-crystal response or survival.
+Every map is checked against three gates, all reported in `gate_misses`:
+kept-trap uniformity (weighted max/min, Motion and Final tolerances below),
+surplus-atom sites on the removal map and the next one (at most 0.2% of that
+atom's initial trap) and stray light (at most 20% of the current weakest kept
+trap on intermediate maps, 5% on the last map). Kept traps need not stay as
+deep as initially: each trap's power relative to its initial trap
+(`brightness_minimum_to_initial` and its maximum and mean) is reported, not
+gated. The gates judge the displayed maps; the liquid-crystal transition between
+two maps is not gated (its measured range is given with the Task below). The
+algorithm and what the stray-light number means are described there too. Phase
+steps and movement per map are reported alongside. No numerical gate proves
+atom release, moving-well shape, liquid-crystal response or survival.
 
 Optimization removes work before making the remaining operations faster:
-unchanged accepted frames are reused before unused amplitude trials; continuous
-clearance uses conservative pair-distance bounds, with the same exact segment
-formula for candidates; preparation builds only the bands its geometry can use
-and reserves one maximum movie buffer rather than two of every size class.
-There is no GPU-name, trap-count or chosen-grid shortcut. Held output buffers
-remain independently owned across another computation and workspace close.
+continuous clearance uses conservative pair-distance and path-box bounds, with
+the same exact segment formula for candidates; preparation builds only the
+bands its geometry can use. There is no GPU-name, trap-count or chosen-grid
+shortcut. Held output buffers remain independently owned across another
+computation and workspace close.
 
-Full-native 1024 × 1272, 25-bin-spacing measurements on an RTX 5070 Laptop GPU
-gave these same-process standalone generation medians, including host transfer:
+Photo-to-map times on an RTX 5070 Laptop GPU (full 1024 × 1272 maps, Fixed
+frame count; from the occupancy list to the first and to the last map on the
+host, planning, sampling and computation included; this solver and commit
+`de73d721` alternate in one process):
 
-| Case, 10 maps | Before | After |
-| --- | ---: | ---: |
-| Archived 35 → 9, no selected-trap motion | 68.9 ms | 46.4 ms |
-| 225 → 100, 112 occupied | 72.7 ms | 66.6 ms |
-| 400 sites, rigid motion | 223.2 ms | 45.5 ms |
-| 400 → 100, 200 occupied, nonrigid motion | 144.7 ms | 117.9 ms |
+| Case | Maps | Photo → first map | vs `de73d721` | Photo → last map | vs `de73d721` |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Recorded load (run 14, 30 atoms), 35 sites → 16 | 15 | 5.1 ms | 0.60 | 17.5 ms | 0.52 |
+| Recorded load (run 8, 25 atoms), 35 sites → 16 | 15 | 5.9 ms | 0.65 | 15.6 ms | 0.45 |
+| 400-site lattice → 100, 55% loaded | 28 | 15.2 ms | 0.42 | 36.8 ms | 0.42 |
+| 400-site lattice → 100, 86% loaded | 15 | 20.0 ms | 0.43 | 39.0 ms | 0.59 |
+| 400-site lattice → 100, 86% loaded, two maps | 2 | 20.9 ms | 0.48 | 25.3 ms | 0.64 |
+| Irregular 120 sites → 40, 60% loaded | 46 | 6.2 ms | 0.45 | 33.8 ms | 0.37 |
+| 400-site lattice → 100, 20% loaded (partial fill) | 87 | 8.9 ms | 0.19 | 69.7 ms | 0.35 |
+| Run 14 onto a central 3 × 3 target | 15 | 4.4 ms | 0.74 | 19.5 ms | 0.90 |
+| 13 atoms on the run 14 sites → 16 (partial fill) | 16 | 5.0 ms | 0.78 | 20.2 ms | 0.60 |
+| Run 14, central 3 × 5 target already full | 16 | 5.1 ms | 0.86 | 19.8 ms | 0.97 |
+| Run 14, filled target, one removal map | 1 | 4.5 ms | 1.01 | 4.5 ms | 0.97 |
 
-For the static case, 15/30 maps changed from 79.6/110.2 to 45.1/47.1 ms.
-Rigid-motion speedup mainly removes redundant geometry comparisons; it is not
-a claim that arbitrary 400-site rearrangement takes 45 ms. Independent complex128
-propagation checked every delivered map, also covering genuinely partial35-site
-occupancy, hold/resume and an odd 127×159 nontrivial pupil. The same bright 1.01 and
-discarded-region 0.01 gates remain. A hold/resume continuation can choose a
-different valid map after discarded intermediate work is removed; it is checked
-by the optical gates and phase diagnostics, not assumed bit-identical.
+Ratios are medians of paired rounds (16 for the first seven rows, 12 for the
+others) with the GPU about 25–45% busy with other work. The last map's stray
+light is measured on its delivered codes after it has been handed over (about
+4 ms on this GPU), so `compute_rearrangement` returns that much after the last
+map. With **Maximum camera step** the movement is sampled before computation,
+which adds 1–3 ms to the first map; the already full target and the single map
+then take about as long as with `de73d721`, which does not darken their surplus
+sites.
 
-Warmed source-35 preparation was approximately 355–385 ms after reduction,
-versus 417–476 ms in the recorded baseline cohort. A new CUDA compilation took
-2.49 s and is separate from online work. The max-30 pinned reservation fell from
-252 to 64 MiB; a first max-sized allocation actually consumes the reserved block.
-No unbounded working-point cache or global allocator clearing was added.
+Replays of the 14 recorded lab loads (on 16-, 9- and 4-site targets and on 1 × 2
+to 2 × 2 targets), 400-site lattices loaded 20–95%, irregular and partially
+filled arrays and weighted End Targets (10,591 maps, each scored by independent
+propagation of its delivered codes) put 0.2% of the maps outside the
+uniformity, surplus-site or stray-light gate. No intermediate map exceeds the
+20% stray-light gate; how often it stays within 5% of the weakest kept trap
+depends on the plan:
 
-Whole-online measurements start at occupancy-ready, include matching and
-first-callback stream prepare/bind, and end after the software playback call and
-remaining final hold. They exclude cold preparation, camera readout and saving.
-With the SAME current device transport, old and new solvers both pipelined:
+| Plans | Intermediate maps within 5% stray light |
+| --- | ---: |
+| Recorded loads onto 16-, 9- and 4-site targets | 95%, 100%, 98% |
+| 400-site lattice loaded 55–65% | 98–99.5% |
+| 400-site lattice loaded 75–80% | 95% |
+| 400-site lattice loaded 86% | 86% |
+| 400-site lattice loaded 90% / 95% | 66% / 33% (up to 12%) |
+| Weighted End Targets | about 90% |
+| Already full targets that only lose surplus atoms | 99.5% |
+| Two or three kept traps (1 × 2, 2 × 1, 1 × 3 targets) | 23% |
 
-| Case | First software output, before → after | Whole online, before → after |
-| --- | ---: | ---: |
-| Real35, 17 occupied, 9 destinations, 16 maps | 27.5 → 58.6 ms | 428.3 → 439.5 ms |
-| Nonrigid400 → 100, 200 occupied, 10 maps | 100.3 → 34.1 ms | 336.0 → 283.3 ms |
+With only two or three kept traps the phase-only hologram puts 5–11% (up to
+14%) into the neighbouring lattice sites on most maps.
 
-The small-case whole-flow gain was NOT proved in that cohort: stream setup
-varied 3.9→19.2 ms. Earlier sequential-versus-pipeline comparisons are a different
-baseline and must not be presented as this round's gain. Repeated hot/one-second
-idle probes also showed runtime outliers; no hard latency bound or attribution
-to GPU throttling is justified. A four-call follow-up observed 75–92 ms of standalone
-generation with unchanged iteration counts and only one 0.30 ms minor collection;
-that did not reproduce or explain the earlier 191 ms sample. These are simulated software presentation/ACK
-timings, not physical SLM or T400 measurements. Overlapping solve/feed/play
-windows must not be added, and GPU-to-host wait time is not all avoidable CPU work.
-
-Exact adjacent repeats now travel as a previous-frame reference and reuse the
-mapped pixels. Under exclusive ownership, known unchanged output is held without
-another DVI draw, USB switch/readback, or simulation-world propagation. Every
-authored interval remains; receipts distinguish logical steps from actual new
-presentation ACKs. Final settling is measured from the LAST actual presentation,
-not restarted by every hold. The verified two-unique-map replay gives:
-
-| Logical frames | Payload before → after | Local replay before → after | Simulated100 Mb/s replay before → after |
-| --- | ---: | ---: | ---: |
-| 10 | 13.03 → 2.61 MB | 231 → 196 ms | 1197 → 394 ms |
-| 15 | 19.54 → 2.61 MB | 319 → 286 ms | 1742 → 473 ms |
-| 30 | 39.08 → 2.61 MB | 579 → 530 ms | 3432 → 720 ms |
-
-This replay excludes GPU generation/setup and is not an actual LAN measurement.
-All-unique frames still pay a small exact-comparison cost (about1.8 ms in one local
-10-frame cohort); no universal speedup is claimed. Raw full-size 60 Hz traffic is
-about 625 Mb/s before overhead. Lossless compression was measured rather than
-enabled blindly: moving uint8 LZ4 streams grew, and shuffled native float32 saved
-about 16% but cost 29 ms to transform/encode/decode, unfavorable on local/gigabit
-links. No codec dependency, bandwidth guesser or speculative ACK window remains.
-
-### One-shot SLM Rearrangement Task
-
-Add **Task: Slm Rearrangement** in TaskConsole and select the camera, sequencer
-and SLM. Load one source **Calibration** and one source **SLM Science Context**,
-with a calibrated readout for each authored source site. **End Target** optionally
-loads an ordinary spots Target JSON. Leave it blank to use **Target rows** and
-**Target columns** (default 3 × 3): the Task selects the central complete
-rectangle of existing source grid sites and retains their weights. Rows/columns
-are disabled when an End Target is selected. Both input choices use the same
-registered readout and optical model; no final Context is required.
-Parameters use the existing four Fluent form sections: **Target grid**,
-**Imaging**, **Movement**, and **Quality and output**.
-
-Select one operator-authored **Imaging pulse**, then choose **Before imaging
-Period** and **After imaging Period** by their displayed names. Stable Period
-IDs are saved. The Task does not generate, rewrite or split the Pulse: it fires
-the full Pulse once, collects the first photograph, computes/uploads/plays the
-rearrangement while that Pulse continues, then verifies with the second photo.
-The Pulse must supply exactly two camera triggers, enough intervening time,
-and no new loading between the photographs.
-
-**Camera exposure** is independent of the selected Period lengths. The Task does
-not compare or adjust them; the operator owns integration and illumination timing
-and must use a Calibration valid for that actual readout. GPU/endpoint preparation
-and establishing the source phase happen before Fire. Only valid occupied sites
-from the first photograph enter matching. Surplus atoms are discarded by fading
-their traps; shortage is a normal partial fill, not an acquisition failure.
-Invalid classification remains invalid, never an empty-site assertion.
-
-**Phase method** selects the existing **Iterative** method or **LPI (phase
-interpolation)**. Both share the same assignment, fractional paths, collision
-checks, device mapping and playback. LPI interpolates site phases in the pupil's
-optical-axis reference and holds those coefficient phases during amplitude
-balancing. It is not a claim of one-FFT-per-frame performance or flicker-free
-physical response. Offline endpoint synthesis weights are distinct from the
-measured model fields. The exact input Science Context is still displayed first.
+Already full 2 × 2 to 5 × 5 targets that only lose surplus atoms (8,190 maps,
+1–16 maps per plan) have no map outside a gate, and with two or more maps no
+liquid-crystal transition after the first one takes a kept trap below its
+initial depth; a single map, which **Maximum camera step** chooses for them,
+starts from the prepared destination, and the transition from the photograph can
+take a trap down to 3–60% of its initial depth. Such plans with weighted End
+Targets miss about 6% of their maps (intermediate uniformity up to 1.18; with
+weights drawn from 0.25–1 the last map's weakest trap is up to 13% shallower
+than requested), and with two to four kept traps about 7% of their last maps
+reach 5.3–5.6% stray light. Partially filled last maps (449 plans) stay below
+4.7% stray light, below 3.0% with uniform weights. Removal maps that are also
+the last map on 400-site and irregular arrays loaded 60–95% (332 maps, one or
+two maps per plan) stay within their gates except one at 5.1% stray light. Small
+targets leave a few maps far outside their gates, all reported: 0.8% of the 1 ×
+3 transport maps reach uniformity 1.14–1.70, 4% of the crowded next maps leave a
+surplus-atom site at 1–8.6 times its gate, and a 2 × 2 removal map with one or
+two surplus atoms reaches 1.17 and four times its gate; in all 0.45% of the
+small-target maps. On about 50,000 replayed maps the reported `gate_misses`
+match the independent scores except that one removal map at 5.1%, reported at
+3.6% because its 64 watched points were full; reported last-map stray light is
+0.94–1.00 of the whole plane's on a filled last map and typically 0.96–1.00
+otherwise, as low as 0.55 when a peak lies between native samples.
 
 **Frame count** selects fixed total maps or **Maximum camera step**. Fixed mode
 uses **Movement frames** (default 16); camera-step mode uses the maximum 2D
@@ -317,11 +291,12 @@ At the fixed defaults, 16 maps / 60 Hz is about 267 ms nominal. Computation,
 upload and playback overlap; startup stalls extend the measured window. Authored
 time slots do not add a profile tail wait. **Motion intensity tolerance (%)**
 (default 10%) applies to all but the last map; **Final intensity tolerance (%)**
-(default 1%) applies to the last map and offline endpoints. These are the
-weighted maximum/minimum ratio minus one. LPI accepts retained-site uniformity;
-Iterative additionally enforces its removed-neighborhood criterion. The report
-distinguishes retained, fading and all-active fields and reports background after
-the photographs. Common trap-depth changes due to redistribution are allowed;
+(default 1%) applies to the last map. These are the weighted maximum/minimum
+ratio minus one. The report keeps these computed gates and, after the photographs, checks the
+whole focal plane of every played map with fourfold zero padding: its strongest
+peak farther than 2.5 Fourier pixels from every current kept trap, over the
+weakest current kept trap, is judged against the same 20%/5% as
+`focal_plane_accepted`, kept apart from the computed `quality_accepted`. Common trap-depth changes due to redistribution are allowed;
 uniformity is not an atom-survival guarantee.
 
 **Rearrangement Measurement** (`rearrangement_measurement`) integrates the same
@@ -344,7 +319,7 @@ working point. The solver retains one exclusively borrowed working point until
 process exit, an optical-input change, or a CUDA failure; Stop and removing a
 node do not discard healthy preparation. Task and Recording start fresh runs and
 can reuse the same working point. The source phase is still re-established and the camera
-armed for every experiment. Minimum total distance is not minimum longest move or minimum playback time.
+armed for every experiment. A minimum longest move is not a minimum playback time.
 Passing geometric clearance does not validate atomic transport. Pupil center
 and illumination must match the real beam, and phase
 continuity must be interpreted relative to the physical optical axis. A configured
@@ -354,16 +329,17 @@ Actual Config-filled periods and nested loops determine the conservative
 verification deadline. Camera reception continues independently during GPU/SLM
 work. Late playback or an evidently early verification photo is rejected;
 a host receive timestamp is not a physical exposure timestamp. The physical
-SLM owner plays verified frames locally as they arrive, confirms every logical
+SLM owner plays submitted frames locally as they arrive, confirms every logical
 step, and applies remaining final settle only once. Repeated holds reuse a prior
 confirmation rather than inventing new display ACKs. Update both client and server
 for sequence protocol v2. DVI acknowledgements prove software rendering,
 not vblank or liquid-crystal settling.
 Queue admission/upload acknowledgement is not display acknowledgement. Missing
 frames or slow acknowledgements extend actual cadence; frames are not skipped.
-If a later frame fails quality or computation, playback is cancelled and joined:
-earlier verified frames may already have played. The report keeps the actual
-confirmed prefix and partial outcome, not an assertion that nothing was shown.
+If a later map's computation fails (Stop or a non-finite field), playback is
+cancelled and joined: earlier maps may already have played. The report keeps the
+actual confirmed prefix and partial outcome, not an assertion that nothing was
+shown.
 
 The three automatic previews are before photo + occupancy, after photo +
 occupancy, and source/final phase. In fixed-frame mode the **trajectory** signal stores full ordered
@@ -398,8 +374,9 @@ NPZ + PNG pairs. No extra final Science Context is written. Report rendering
 and movie archival stay out of the photo-to-playback critical path.
 Preparation, readout, matching, complete calculation/host transfer, upload,
 playback/final settle and saving are separate timing windows; nested or
-overlapping windows must not be added. First verified host frame, first display
-acknowledgement, callback time (including backpressure) and total completion are reported separately.
+overlapping windows must not be added. First host frame handed to playback
+(`first_frame_ready_for_playback`), first display acknowledgement, callback time
+(including backpressure) and total completion are reported separately.
 Stop/failure saves partial evidence
 and the last confirmed phase; unknown device outcomes remain explicit.
 Target filling is not per-atom identity-tracked survival.
@@ -411,7 +388,7 @@ separate from observed logical-step/new-presentation cadence, photo receive
 and camera timestamp intervals, and the complete online window; these summaries
 derive from existing receipts rather than a new timing mechanism.
 
-Numerical/RPC/Task and public Figure tests cover verified prefixes, cancellation,
+Numerical/RPC/Task and public Figure tests cover played prefixes, cancellation,
 early upload EOF, retained output ownership, and exact static/dynamic overlays.
 The final combined native virtual Task flow passed with actual GPU computation,
 16 ordered logical confirmations, two valid photographs, exact final phase and

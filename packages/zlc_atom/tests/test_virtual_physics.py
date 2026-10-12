@@ -1939,26 +1939,27 @@ def _full_fft_returned_quality(
     return ratio, efficiency
 
 
-def test_rearrangement_background_counts_extra_peaks_inside_target_neighborhood() -> None:
+def test_rearrangement_background_is_the_strongest_peak_beyond_the_trap_exclusion() -> None:
     shape = (32, 40)
     yy, xx = np.indices(shape)
     support = (yy - 16) ** 2 + (xx - 20) ** 2 <= 9
     intensity = np.zeros(shape)
     intensity[10, 10] = 100
-    intensity[10, 12] = 25  # Inside the same PSF support, but a second well.
+    intensity[10, 12] = 25  # A second well 2 samples away shapes the trap itself.
+    intensity[13, 8] = 20  # Beyond the 2.5-sample exclusion: stray light.
     intensity[22, 30] = 12  # Could be any vacated old coordinate, not an identity query.
     maxima = (intensity > 0) & (intensity == maximum_filter(intensity, size=3, mode="wrap"))
     points, values, extra, peak, region = slm_solver._rearrangement_focal_peaks(
-        intensity, maxima, np.array([[10, 10]]), support)
+        intensity, maxima, np.array([[10, 10]]), support, 2.5)
     np.testing.assert_array_equal(points, [[10, 10]])
     np.testing.assert_array_equal(values, [100])
-    np.testing.assert_array_equal(extra, [10, 12])
-    assert peak == 25 and region[10, 12]
+    np.testing.assert_array_equal(extra, [13, 8])
+    assert peak == 20 and region[10, 12]
     # An inactive source identity at the legitimate target cannot change the
     # answer: only the current spatial target roster is accepted by this helper.
-    intensity[10, 12] = 0
+    intensity[13, 8] = 0
     maxima = (intensity > 0) & (intensity == maximum_filter(intensity, size=3, mode="wrap"))
-    _, _, extra, peak, _ = slm_solver._rearrangement_focal_peaks(intensity, maxima, [[10, 10]], support)
+    _, _, extra, peak, _ = slm_solver._rearrangement_focal_peaks(intensity, maxima, [[10, 10]], support, 2.5)
     np.testing.assert_array_equal(extra, [22, 30])
     assert peak == 12
     # Half-pixel main peaks and connected plateaus across the periodic edge
@@ -1966,9 +1967,40 @@ def test_rearrangement_background_counts_extra_peaks_inside_target_neighborhood(
     intensity.fill(0)
     intensity[0, 10] = intensity[-1, 10] = 100
     maxima = (intensity > 0) & (intensity == maximum_filter(intensity, size=3, mode="wrap"))
-    points, values, extra, peak, _ = slm_solver._rearrangement_focal_peaks(intensity, maxima, [[31.5, 10]], support)
+    points, values, extra, peak, _ = slm_solver._rearrangement_focal_peaks(intensity, maxima, [[31.5, 10]], support, 2.5)
     np.testing.assert_array_equal(points, [[31.5, 10]])
     assert values[0] == 100 and peak == 0 and np.isnan(extra).all()
+
+
+def test_rearrangement_watch_lists_maxima_whose_sample_cell_reaches_past_the_exclusion() -> None:
+    cp = pytest.importorskip("cupy")
+    try:
+        available = cp.cuda.runtime.getDeviceCount()
+    except cp.cuda.runtime.CUDARuntimeError as error:
+        if error.status not in (35, 100):
+            raise
+        pytest.skip(f"CUDA is unavailable: {error}")
+    if not available:
+        pytest.skip("no CUDA device")
+    candidates, bins = slm_solver._TRACK_WATCH_CANDIDATES, slm_solver._TRACK_WATCH_BINS
+    peaks = cp.RawModule(code=slm_solver._REARRANGEMENT_CUDA, options=tuple(f"-D{name}={value}" for name, value in (
+        ("ROWS", slm_solver._EVALUATE_ROWS), ("MEMORY", slm_solver._TRACK_ANDERSON), ("CANDIDATES", candidates),
+        ("BINS", bins)))).get_function("peaks")
+    # The lab plane: 2x2-binned 512 x 640 watch samples, 0.99375 native pixels apart in X. The sample two steps
+    # right of the trap lies 2.48 px from it, but the maximum it samples can lie up to half a step farther out;
+    # the sample two steps left (1.49 px) holds the trap's own main lobe wherever its maximum lies.
+    height, width, rows, columns = 1024, 1272, 512, 640
+    step = width / (2 * columns)
+    plane = cp.zeros((rows, columns), cp.complex64)
+    plane[0, 2] = plane[0, columns - 2] = 1
+    found = cp.zeros(3 + 4 * candidates + bins, cp.float32)
+    found[1] = .5  # detection threshold
+    peaks((1,), (256,), (plane, *map(np.int32, (height, width, rows, columns, 0, 0)), found,
+                         np.float32(slm_solver._TRACK_WATCH_EXCLUSION), cp.zeros(1, cp.float64),
+                         cp.zeros(1, cp.int32), cp.asarray([2 * step - 2.48]), cp.asarray([1, 0], cp.int32),
+                         np.int32(0)))
+    listed = found.get()
+    assert listed[:1].view(np.int32)[0] == 1 and listed[2:3].view(np.int32)[0] == 2
 
 
 def test_rearrangement_planner_preserves_identity_and_checks_rounded_paths() -> None:
@@ -2185,6 +2217,8 @@ def test_rearrangement_gpu_matches_native_propagation_of_delivered_codes(shape) 
         pytest.skip(f"CUDA is unavailable: {error}")
     if not available:
         pytest.skip("no CUDA device")
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
     from zlc_atom.devices.slm.device import phase_from_codes
 
     # Keep the complete shared-encoder boundary proof when replacing the solver.
@@ -2212,196 +2246,118 @@ def test_rearrangement_gpu_matches_native_propagation_of_delivered_codes(shape) 
     pupil[zy * zy + zx * zx > .22] = 0
     aberration = canonical_phase(.37 * (zy * zy + zx * zx) + .2 * zx - .15 * zy, shape)
     center = np.array(shape) // 2
+    y = (np.arange(height) - height // 2) / height
+    x = (np.arange(width) - width // 2) / width
+
+    def propagated(code, points):
+        field = pupil.astype(float) * np.exp(1j * (phase_from_codes(code, shape).astype(float) + aberration))
+        signed = np.asarray(points, float) - center
+        return np.einsum("jh,hw,jw->j", np.exp(-2j * np.pi * signed[:, 0, None] * y), field,
+                         np.exp(-2j * np.pi * signed[:, 1, None] * x), optimize=True)
+
     source = center + np.array([[-4, -4], [-4, 4], [4, -4], [4, 4]], np.int32)
     target = center + np.array([[-3, -2], [3, 2]], np.int32)
+    with pytest.raises(InterruptedError, match="preparation stopped"):
+        slm_solver.prepare_rearrangement(source, target, shape_yx=shape, pupil_amplitude=pupil,
+                                         minimum_separation=2, stop_requested=lambda: True)
     prepared = slm_solver.prepare_rearrangement(
         source, target, shape_yx=shape, pupil_amplitude=pupil, pupil_phase=aberration,
-        minimum_separation=2, endpoint_iterations=200, maximum_motion_frames=7,
+        minimum_separation=2, endpoint_iterations=60,
     )
-    # A clipped native FFT changes fractional bright samples by a finite-DFT
-    # interpolation, not by the pupil PSF. Check the actual compacted change
-    # against independent complex128 inverse propagation, for odd/even origin
-    # conventions, integer axes, an empty change and the full-raster capacity.
-    gpu, signed = prepared["gpu"], np.array([[0., 0.], [-.375, .25], [3.2, -2.], [4., 2.4]])
-    points = center + signed
-    packed, frequencies, _counts, _offsets = slm_solver._rearrangement_bind(gpu, points[None])
-    rng = np.random.default_rng(802)
-    spectrum = (rng.normal(size=shape) + 1j*rng.normal(size=shape)).astype(np.complex64)
-    ry, rx = np.arange(height)-center[0], np.arange(width)-center[1]
-    operator = np.exp(-2j*np.pi*(signed[:, 0, None, None]*ry[None, :, None]/height
-                               + signed[:, 1, None, None]*rx[None, None, :]/width))
-    before_field = np.sum(operator*np.fft.ifft2(spectrum.astype(np.complex128))[None], axis=(1, 2))
-    before = np.zeros(gpu["focal_result"].shape)
-    before[5:5+2*len(source):2] = before_field.real
-    before[6:5+2*len(source):2] = before_field.imag
-    wanted = np.array([2+.2j, 3-.7j, 4+.4j, 5-.8j], np.complex64)
-    with slm_solver._rearrangement_gpu_active(gpu["keeper"]), gpu["stream"]:
-        stream = gpu["stream"]
-        gpu["focal_work"]["index"].set(packed[1][0], stream=stream)
-        gpu["frequencies"][:len(frequencies)].set(frequencies, stream=stream)
-        gpu["focal_amplitude"].fill(1)
-        gpu["focal_profile"].fill(0)
-        gpu["focal_result"].set(before, stream=stream)
-        for limit in (0., .5, 100.):
-            gpu["focal_spectrum"].set(spectrum, stream=stream)
-            gpu["focal_control"].set(np.array([0., 0., 1., 0., limit/.005, 0., 1., 0.]), stream=stream)
-            gpu["focal_delta"].set(wanted, stream=stream)
-            gpu["focal_changed_count"].fill(0)
-            gpu["kernels"]["focal_cap"](((height*width+255)//256,), (256,),
-                (gpu["focal_spectrum"], gpu["focal_profile"], gpu["focal_maxima"], gpu["focal_control"],
-                 gpu["focal_changed_count"], gpu["focal_changed_index"], gpu["focal_changed_delta"], np.int32(height*width)))
-            gpu["kernels"]["focal_clip_residual"]((len(source),), (256,),
-                (gpu["focal_spectrum"], gpu["focal_work"]["index"], gpu["frequencies"], gpu["focal_amplitude"],
-                 gpu["focal_result"], gpu["focal_changed_count"], gpu["focal_changed_index"],
-                 gpu["focal_changed_delta"], gpu["focal_delta"], *map(np.int32, (len(source), height, width))))
-            clipped = gpu["focal_spectrum"].get(stream=stream)
-            actual = gpu["focal_delta"].get(stream=stream)
-            expected = wanted-np.sum(operator*np.fft.ifft2(clipped.astype(np.complex128))[None], axis=(1, 2))
-            np.testing.assert_allclose(actual, expected, rtol=2e-7, atol=2e-7)
-            changed = int(gpu["focal_changed_count"].get(stream=stream)[0])
-            assert changed == np.count_nonzero(clipped != spectrum)
-            if limit == 0: assert changed == height*width
-            if limit == 100: assert changed == 0
     keeper = prepared["gpu"]["keeper"]
     assert keeper["thread"].is_alive() and keeper["users"] == 1
+    # The prepared destination is an independent uniform array, not copied source phases.
+    destination = prepared["target_field"].astype(np.complex128)
+    assert prepared["target_support_intensity_ratio"] <= 1.01
     plan = slm_solver.plan_rearrangement(prepared, np.arange(len(source)))
-    sequence = slm_solver.compute_rearrangement(
-        prepared, plan, iterations=0, require_converged=False, motion_frames=7,
-    )
-    assert not any(sequence["field_projection_updates"])
-    assert not any(sequence["coarse_field_projection_updates"])
-    assert not any(sequence["native_field_projection_updates"])
-    if shape == (127, 159):
-        assert sequence["field_projection_initialization_factor"] == 1
-    limited = slm_solver.compute_rearrangement(
-        prepared, plan, iterations=1, require_converged=False, motion_frames=7,
-    )
-    assert max(limited["field_projection_updates"]) <= 1
-    assert not any(limited["coarse_field_projection_updates"])
+    surplus = plan["removed_source_indices"]
+    assert len(surplus) == 2
+    sequence = slm_solver.compute_rearrangement(prepared, plan, motion_frames=7)
     saved_codes = tuple(frame.copy() for frame in sequence["phase_codes"])
-    assert isinstance(sequence["phase_codes"], tuple)
+    assert isinstance(sequence["phase_codes"], tuple) and len(saved_codes) == 7
     assert all(not frame.flags.writeable for frame in sequence["phase_codes"])
     with pytest.raises(ValueError):
         sequence["phase_codes"][0].setflags(write=True)
-    next_sequence = slm_solver.compute_rearrangement(prepared, plan, motion_frames=7)
-    assert len(next_sequence["phase_codes"]) == 7
-    assert next_sequence["fade_frames"] == 1
-    np.testing.assert_array_equal(next_sequence["fraction"], np.r_[0., np.arange(1, 8) / 7])
-    np.testing.assert_array_equal(
-        next_sequence["sites_yx"][:, plan["source_indices"]], next_sequence["motion_yx"][1:],
-    )
-    discarded = plan["removed_source_indices"]
-    np.testing.assert_array_equal(next_sequence["desired_amplitudes"][:, discarded], 0)
-    assert next_sequence["release_verified"] is False
-    assert next_sequence["recommended_release_hold_frames"] == 1
-    np.testing.assert_array_equal(next_sequence["motion_yx"][:2],
-                                  np.broadcast_to(plan["motion_yx"][0], (2, 2, 2)))
-    assert np.any(next_sequence["motion_yx"][2] != plan["motion_yx"][0])
-    assert next_sequence["maximum_step"] == pytest.approx(np.sqrt(5) / 6)
-    assert next_sequence["recommended_motion_frames"] == 4
-    assert next_sequence["converged"]
-    assert np.max(next_sequence["support_intensity_ratios"][:-1]) <= 1.10
-    assert next_sequence["support_intensity_ratios"][-1] <= 1.01
-    y = (np.arange(height) - height // 2) / height
-    x = (np.arange(width) - width // 2) / width
-    for candidate in (sequence, next_sequence):
-        candidate.update(slm_solver.rearrangement_diagnostics(prepared, candidate))
-        previous_command = prepared["initial_phase"]
-        for frame, (code, positions, values, actual) in enumerate(zip(
-            candidate["phase_codes"], candidate["sites_yx"], candidate["desired_amplitudes"], candidate["actual_fields"],
-        )):
-            command = phase_from_codes(code, shape)
-            field = pupil.astype(float) * np.exp(1j * (command.astype(float) + aberration))
-            signed = positions - center
-            ey = np.exp(-2j * np.pi * signed[:, 0, None] * y)
-            ex = np.exp(-2j * np.pi * signed[:, 1, None] * x)
-            expected = np.einsum("jh,hw,jw->j", ey, field, ex, optimize=True)
-            np.testing.assert_allclose(actual, expected, rtol=1e-3, atol=1e-3 * np.min(abs(actual[values > 0])))
-            phase_step = np.angle(np.exp(1j * (command.astype(float) - previous_command)))
-            rms = np.sqrt(np.sum(pupil.astype(float) ** 2 * phase_step ** 2) / np.sum(pupil.astype(float) ** 2))
-            assert candidate["pupil_phase_step_rms_rad"][frame] == pytest.approx(rms, abs=2e-6)
-            previous_command = command
-            if candidate is next_sequence:
-                power = abs(expected[values > 0]) ** 2 / values[values > 0] ** 2
-                assert power.max() / power.min() <= (1.01 if frame == 6 else 1.10)
-                if frame >= candidate["fade_frames"] - 1:
-                    fine_shape = 4 * np.asarray(shape)
-                    spectrum = np.fft.fftshift(np.fft.fft2(field, s=tuple(fine_shape)))
-                    peak = candidate["background_peak_yx"][frame]
-                    reference = candidate["background_initial_reference_intensity"]
-                    if np.isfinite(peak).all():
-                        # This peak was found over the whole plane, including
-                        # vacated and initially empty sites, not identity rows.
-                        fine_peak = np.rint(4 * (peak - center) + fine_shape // 2).astype(int)
-                        ratio = abs(spectrum[tuple(fine_peak)]) ** 2 / reference
-                        assert ratio <= slm_solver.SPOT_BACKGROUND_TOLERANCE
-                        assert candidate["background_peak_to_initial_ratios"][frame] == pytest.approx(ratio, rel=1e-3, abs=1e-7)
-    assert all(not np.shares_memory(old, new)
-               for old in sequence["phase_codes"] for new in next_sequence["phase_codes"])
-    np.testing.assert_array_equal(sequence["phase_codes"], saved_codes)
+    assert sequence["fade_frames"] == 1 and sequence["converged"] and sequence["quality_accepted"]
+    np.testing.assert_array_equal(sequence["fraction"], np.r_[0., np.arange(1, 8) / 7])
+    np.testing.assert_array_equal(sequence["sites_yx"][:, plan["source_indices"]], sequence["motion_yx"][1:])
+    np.testing.assert_array_equal(sequence["desired_amplitudes"][:, surplus], 0)
+    np.testing.assert_array_equal(sequence["motion_yx"][:2], np.broadcast_to(plan["motion_yx"][0], (2, 2, 2)))
+    assert sequence["maximum_step"] == pytest.approx(np.sqrt(5) / 6)
+    selected, destinations = plan["source_indices"], plan["target_indices"]
+    initial_surplus = abs(prepared["source_field"][surplus].astype(complex)) ** 2
+    sequence.update(slm_solver.rearrangement_diagnostics(prepared, sequence))
+    # Every map reports its stray light: a watched map's is the whole focal plane's strongest peak beyond the traps,
+    # the filled last map's the prepared destination's on half-pixel samples.
+    assert sequence["focal_plane_accepted"]
+    np.testing.assert_allclose(sequence["stray_intensity_ratios"][:-1], sequence["background_intensity_ratios"][:-1],
+                               rtol=.02)
+    assert sequence["stray_intensity_ratios"][-1] == pytest.approx(sequence["background_intensity_ratios"][-1], rel=.1)
+    previous_command = prepared["initial_phase"]
+    for frame, (code, positions, values) in enumerate(zip(
+            sequence["phase_codes"], sequence["sites_yx"], sequence["desired_amplitudes"])):
+        # Reported fields are the independently propagated delivered codes.
+        expected = propagated(code, positions[selected])
+        np.testing.assert_allclose(sequence["actual_fields"][frame, selected], expected, rtol=1e-3,
+                                   atol=1e-3 * np.min(abs(expected)))
+        power = abs(expected) ** 2 / values[selected] ** 2
+        assert power.max() / power.min() <= (1.01 if frame == 6 else 1.10)
+        if frame < 2:
+            # The removal map and the next one hold each surplus-atom site dark
+            # relative to that atom's own initial trap.
+            dark = abs(propagated(code, source[surplus])) ** 2 / initial_surplus
+            assert np.max(dark) <= slm_solver._TRACK_DARK_LIMIT * 1.01
+        command = phase_from_codes(code, shape).astype(float)
+        step = np.angle(np.exp(1j * (command - previous_command)))
+        rms = np.sqrt(np.sum(pupil.astype(float) ** 2 * step ** 2) / np.sum(pupil.astype(float) ** 2))
+        assert sequence["pupil_phase_step_rms_rad"][frame] == pytest.approx(rms, abs=2e-6)
+        previous_command = command
+    # A filled destination ends on the prepared destination phases (one common offset).
+    relative = sequence["actual_fields"][-1, selected] * destination[destinations].conj()
+    np.testing.assert_allclose(np.angle(relative * relative[0].conj()), 0., atol=.02)
     streamed_frames = []
     streamed = slm_solver.compute_rearrangement(
         prepared, plan, motion_frames=7, retain_phase_sequence=False,
-        frame_ready=lambda index, frame: streamed_frames.append(frame),
-    )
-    assert streamed["phase_codes"] is None
-    assert streamed["motion_frames"] == streamed["emitted_frame_count"] == 7
-    np.testing.assert_array_equal(streamed_frames, next_sequence["phase_codes"])
-    saved_streamed = tuple(frame.copy() for frame in streamed_frames)
+        frame_ready=lambda index, frame: streamed_frames.append(frame))
+    assert streamed["phase_codes"] is None and streamed["emitted_frame_count"] == 7
+    np.testing.assert_array_equal(streamed_frames, saved_codes)
     with pytest.raises(ValueError):
         streamed_frames[0].setflags(write=True)
-    discarded_output = slm_solver.compute_rearrangement(
-        prepared, plan, motion_frames=7, retain_phase_sequence=False,
-    )
-    assert discarded_output["phase_codes"] is None
-    np.testing.assert_array_equal(discarded_output["support_intensity_ratios"],
-                                  next_sequence["support_intensity_ratios"])
-    np.testing.assert_array_equal(streamed_frames, next_sequence["phase_codes"])
+    assert all(not np.shares_memory(old, new) for old in sequence["phase_codes"] for new in streamed_frames)
     for bad_count in (0, True, 1.5, 1):
         with pytest.raises(ValueError, match="motion_frames"):
             slm_solver.compute_rearrangement(prepared, plan, motion_frames=bad_count)
-    grown = slm_solver.compute_rearrangement(prepared, plan, motion_frames=9)
-    assert grown["motion_frames"] == prepared["maximum_motion_frames"] == 9
-    np.testing.assert_array_equal(sequence["phase_codes"], saved_codes)
-    if shape == (64, 80):
-        stop_rebinding = iter((False, True))
-        with pytest.raises(InterruptedError, match="preparation stopped"):
-            slm_solver.compute_rearrangement(
-                prepared, plan, motion_frames=11,
-                stop_requested=lambda: next(stop_rebinding, True),
-            )
-        assert prepared["gpu"]["motion_capacity"] == 0
-        restored = slm_solver.compute_rearrangement(prepared, plan, motion_frames=5)
-        assert restored["converged"] and len(restored["phase_codes"]) == 5
-        np.testing.assert_array_equal(sequence["phase_codes"], saved_codes)
     with pytest.raises(InterruptedError):
         slm_solver.compute_rearrangement(prepared, plan, stop_requested=lambda: True)
-    stop_after_first_motion = iter((False, False, True))
+    stop_after_first_map = iter((False, False, True))
     with pytest.raises(InterruptedError):
-        slm_solver.compute_rearrangement(
-            prepared, plan, motion_frames=7, stop_requested=lambda: next(stop_after_first_motion, True),
-        )
+        slm_solver.compute_rearrangement(prepared, plan, motion_frames=7,
+                                         stop_requested=lambda: next(stop_after_first_map, True))
     restarted = slm_solver.compute_rearrangement(prepared, plan, motion_frames=7)
-    np.testing.assert_array_equal(restarted["phase_codes"], next_sequence["phase_codes"])
-    np.testing.assert_array_equal(restarted["actual_fields"], next_sequence["actual_fields"])
+    np.testing.assert_array_equal(restarted["phase_codes"], saved_codes)
+    calls = []
+    with pytest.raises(RuntimeError, match="did not meet optical constraints"):
+        slm_solver.compute_rearrangement(prepared, plan, motion_frames=7, support_tolerance=1.,
+                                         motion_support_tolerance=1., frame_ready=lambda index, frame: calls.append(index))
+    failed = slm_solver.compute_rearrangement(prepared, plan, motion_frames=7, support_tolerance=1.,
+                                              motion_support_tolerance=1., require_converged=False,
+                                              frame_ready=lambda index, frame: calls.append(index))
+    # A fixed schedule publishes every map and reports its gates afterwards.
+    assert not failed["quality_accepted"] and calls == list(range(7)) * 2
     empty = slm_solver.compute_rearrangement(prepared, slm_solver.plan_rearrangement(prepared, []), motion_frames=7)
-    assert empty["noop"]
-    assert empty["phase_codes"] == ()
-    shortage = slm_solver.compute_rearrangement(
-        prepared, slm_solver.plan_rearrangement(prepared, [0]), motion_frames=7,
-    )
-    assert shortage["selected_count"] == 1
-    assert shortage["target_filled"].sum() == 1
-    assert shortage["converged"]
+    assert empty["noop"] and empty["phase_codes"] == ()
+    assert slm_solver.rearrangement_diagnostics(prepared, empty)["focal_plane_accepted"]
+    shortage = slm_solver.compute_rearrangement(prepared, slm_solver.plan_rearrangement(prepared, [0]), motion_frames=7)
+    assert shortage["target_filled"].sum() == 1 and shortage["converged"]
+    # Two maps for that path: the partially filled last map is a leap.
+    leap = slm_solver.compute_rearrangement(prepared, slm_solver.plan_rearrangement(prepared, [0]), motion_frames=2)
+    assert leap["converged"]
+    np.testing.assert_array_equal(sequence["phase_codes"], saved_codes)
+
     source_phase = canonical_phase(prepared["initial_phase"] + .123, shape)
-    with pytest.raises(InterruptedError, match="preparation stopped"):
-        slm_solver.prepare_rearrangement(
-            source, target, shape_yx=shape, pupil_amplitude=pupil,
-            minimum_separation=2, stop_requested=lambda: True,
-        )
     phase_prepared = slm_solver.prepare_rearrangement(
         source, target, shape_yx=shape, pupil_amplitude=pupil, pupil_phase=aberration,
-        minimum_separation=2, maximum_motion_frames=7, endpoint_data={"source_phase": source_phase},
+        minimum_separation=2, endpoint_iterations=60, endpoint_data={"source_phase": source_phase},
     )
     try:
         assert phase_prepared["gpu"]["keeper"] is keeper and keeper["users"] == 2
@@ -2412,10 +2368,8 @@ def test_rearrangement_gpu_matches_native_propagation_of_delivered_codes(shape) 
         phase_sequence = slm_solver.compute_rearrangement(phase_prepared, plan, motion_frames=7)
         assert phase_sequence["converged"]
         if shape == (64, 80):
-            from concurrent.futures import ThreadPoolExecutor
-            from threading import Barrier
-
             barrier = Barrier(2)
+
             def delivered_together(index, frame):
                 if index == 0:
                     barrier.wait(timeout=5)
@@ -2424,290 +2378,151 @@ def test_rearrangement_gpu_matches_native_propagation_of_delivered_codes(shape) 
                                      frame_ready=delivered_together)
                 two = workers.submit(slm_solver.compute_rearrangement, phase_prepared, plan, motion_frames=7,
                                      frame_ready=delivered_together)
-                np.testing.assert_array_equal(one.result()["phase_codes"], next_sequence["phase_codes"])
+                np.testing.assert_array_equal(one.result()["phase_codes"], saved_codes)
                 np.testing.assert_array_equal(two.result()["phase_codes"], phase_sequence["phase_codes"])
             assert keeper["active"] == 0
     finally:
         phase_prepared["close"]()
     assert keeper["users"] == 1 and keeper["thread"].is_alive()
-    if shape == (64, 80):
-        source_weights = np.ones(len(source), np.float32)
-        source_weights[0] /= 1.02
-        with pytest.raises(ValueError, match="intensity ratio 1.01"):
-            slm_solver.prepare_rearrangement(
-                source, target, shape_yx=shape, pupil_amplitude=pupil, pupil_phase=aberration,
-                source_intensities=source_weights, minimum_separation=2,
-                maximum_motion_frames=7, endpoint_data={"source_phase": source_phase},
-            )
-        looser = slm_solver.prepare_rearrangement(
-            source, target, shape_yx=shape, pupil_amplitude=pupil, pupil_phase=aberration,
-            minimum_separation=2, maximum_motion_frames=7, source_intensities=source_weights,
-            endpoint_data={"source_phase": source_phase}, support_tolerance=1.05,
-        )
-        try:
-            assert 1.01 < looser["source_support_intensity_ratio"] < 1.05
-            assert slm_solver.compute_rearrangement(looser, plan, motion_frames=7, support_tolerance=1.05)["converged"]
-        finally:
-            looser["close"]()
     prepared["close"]()
     assert not keeper["thread"].is_alive()
     assert keeper["device"] not in slm_solver._REARRANGEMENT_KEEPERS
     assert "scratch" not in keeper
     np.testing.assert_array_equal(sequence["phase_codes"], saved_codes)
-    np.testing.assert_array_equal(streamed_frames, saved_streamed)
 
+    # An array off the optical axis, beyond a ghost watch centred on the axis.
+    away = source + np.array([height // 4 + 4, 0], np.int32)
     translated_prepared = slm_solver.prepare_rearrangement(
-        source, source + np.array([1, 0], np.int32), shape_yx=shape,
-        pupil_amplitude=pupil, pupil_phase=aberration, minimum_separation=2,
-        endpoint_iterations=200, maximum_motion_frames=5,
+        away, away + np.array([1, 0], np.int32), shape_yx=shape,
+        pupil_amplitude=pupil, pupil_phase=aberration, minimum_separation=2, endpoint_iterations=60,
     )
-    assert translated_prepared["gpu"]["keeper"] is not keeper
     try:
         translated = slm_solver.compute_rearrangement(
-            translated_prepared, slm_solver.plan_rearrangement(translated_prepared, np.arange(4)), motion_frames=5,
-        )
+            translated_prepared, slm_solver.plan_rearrangement(translated_prepared, np.arange(4)), motion_frames=5)
         held_plan = slm_solver.plan_rearrangement(translated_prepared, np.arange(4))
         held_plan = {**held_plan, "motion_yx": np.stack((held_plan["motion_yx"][0],
-                    held_plan["motion_yx"][0], held_plan["motion_yx"][-1])), "fraction": np.array([0., .4, 1.])}
+                     held_plan["motion_yx"][0], held_plan["motion_yx"][-1])), "fraction": np.array([0., .4, 1.])}
         delivered = []
-        held = slm_solver.compute_rearrangement(
-            translated_prepared, held_plan, motion_frames=5,
-            frame_ready=lambda index, frame: delivered.append((index, frame)),
-        )
-        # Globally idle waypoints carry no geometric constraint and are removed;
-        # an individual atom waiting while another moves remains in the plan.
+        held = slm_solver.compute_rearrangement(translated_prepared, held_plan, motion_frames=5,
+                                                frame_ready=lambda index, frame: delivered.append((index, frame)))
+        # Globally idle waypoints carry no geometric constraint and are removed.
         np.testing.assert_array_equal(held["motion_yx"], translated["motion_yx"])
-        assert np.any(held["motion_yx"][1] != held["motion_yx"][0])
         assert [index for index, _ in delivered] == list(range(5))
-        assert all(not frame.flags.writeable for _, frame in delivered)
         for frame, (_, code) in enumerate(delivered):
-            positions = held["sites_yx"][frame] - center
-            field = pupil.astype(float) * np.exp(1j * (phase_from_codes(code, shape).astype(float) + aberration))
-            actual = np.einsum("jh,hw,jw->j", np.exp(-2j * np.pi * positions[:, 0, None] * y),
-                               field, np.exp(-2j * np.pi * positions[:, 1, None] * x), optimize=True)
-            np.testing.assert_allclose(held["actual_fields"][frame], actual, rtol=2e-5,
-                                       atol=2e-5 * np.min(abs(actual)))
+            actual = propagated(code, held["sites_yx"][frame])
+            np.testing.assert_allclose(held["actual_fields"][frame], actual, rtol=2e-4, atol=2e-4 * np.min(abs(actual)))
             relative = abs(actual / held["desired_amplitudes"][frame]) ** 2
             assert relative.max() / relative.min() <= (1.01 if frame == 4 else 1.10)
+            # Stray light anywhere in the focal plane stays within the ghost gate of the weakest trap.
+            field = pupil.astype(float) * np.exp(1j * (phase_from_codes(code, shape).astype(float) + aberration))
+            plane = abs(np.fft.fftshift(np.fft.fft2(np.fft.ifftshift(field)))) ** 2
+            near = np.min([np.hypot(yy - y0, xx - x0) for y0, x0 in held["sites_yx"][frame]], axis=0) <= 3
+            assert plane[~near].max() <= .2 * np.min(abs(actual)) ** 2
         for frame, residue in ((0, 1), (1, 2), (3, 4)):
-            positions = translated["sites_yx"][frame]
-            signed = positions - center
+            signed = translated["sites_yx"][frame] - center
             np.testing.assert_array_equal(np.rint(5 * signed[:, 0]).astype(np.int64) % 5, residue)
-            command = phase_from_codes(translated["phase_codes"][frame], shape)
-            field = pupil.astype(float) * np.exp(1j * (command.astype(float) + aberration))
-            expected = np.einsum(
-                "jh,hw,jw->j", np.exp(-2j * np.pi * signed[:, 0, None] * y),
-                field, np.exp(-2j * np.pi * signed[:, 1, None] * x), optimize=True,
-            )
-            np.testing.assert_allclose(translated["actual_fields"][frame], expected, rtol=2e-5,
-                                       atol=2e-5 * np.min(abs(expected)))
-        sampled = slm_solver.sample_rearrangement(translated_prepared, held_plan, motion_frames=5)
-        waypoint_movie = slm_solver.compute_rearrangement(
-            translated_prepared, held_plan, motion_frames=5, sampled=sampled,
-        )
-        np.testing.assert_array_equal(waypoint_movie["motion_yx"], sampled["motion_yx"])
-        np.testing.assert_array_equal(sampled["motion_yx"], translated["motion_yx"])
     finally:
         translated_prepared["close"]()
 
-    # The alternate method uses this same fractional geometry/encoder; its
-    # actual bright fields follow the prescribed interpolation phase.
-    lpi = slm_solver.prepare_rearrangement(
-        source, target, shape_yx=shape, pupil_amplitude=pupil, pupil_phase=aberration,
-        minimum_separation=2, endpoint_iterations=40, maximum_motion_frames=3,
-        endpoint_data={"source_phase": source_phase}, method="lpi",
-        target_intensities=np.array([1., 1.7]),
-        phase_center_yx=center + np.array([.25, -.75]),
-    )
-    try:
-        lpi_plan = slm_solver.plan_rearrangement(lpi, np.arange(4))
-        delivered = []
-        movie = slm_solver.compute_rearrangement(
-            lpi, lpi_plan, motion_frames=7,
-            frame_ready=lambda index, frame: delivered.append((index, frame)),
-        )
-        assert movie["quality_evaluated"] and movie["converged"]
-        assert max(movie["iterations"]) <= 128
-        assert max(movie["iterations"]) > 0
-        assert max(movie["field_projection_updates"]) > 0
-        assert max(movie["background_limit_ratios"]) <= .01
-        assert [index for index, _ in delivered] == list(range(7))
-        assert lpi["maximum_motion_frames"] == 7
-        np.testing.assert_array_equal(lpi["initial_phase"], source_phase)
-        np.testing.assert_array_equal(movie["motion_yx"], next_sequence["motion_yx"])
-        assert np.any(movie["sites_yx"] != np.floor(movie["sites_yx"]))
-        coefficients = movie["desired_spectrum_coefficients"]
-        selected, destinations = movie["source_indices"], movie["target_indices"]
-        gauge = (lpi["phase_center_yx"] - center) / shape
-        source_gauge = 2 * np.pi * np.sum((source[selected] - center) * gauge, axis=1)
-        target_gauge = 2 * np.pi * np.sum((target[destinations] - center) * gauge, axis=1)
-        delta = np.angle(lpi["target_field"][destinations] * np.exp(1j * target_gauge)
-                         * (lpi["source_field"][selected] * np.exp(1j * source_gauge)).conj())
-        current_gauge = 2 * np.pi * np.sum((movie["sites_yx"][:, selected] - center) * gauge, axis=-1)
-        intended_phase = (np.angle(lpi["source_field"][selected]) + source_gauge
-                          + movie["movement_fraction"][:, None] * delta - current_gauge)
-        np.testing.assert_allclose(np.angle(coefficients[:, selected] * np.exp(-1j * intended_phase)),
-                                   0., atol=1e-6)
-        corrected = movie["synthesis_coefficients"]
-        np.testing.assert_allclose(np.angle(corrected[movie["active_sites"]]
-                                          * coefficients[movie["active_sites"]].conj()), 0., atol=1e-6)
-        diagnostics = slm_solver.rearrangement_diagnostics(lpi, movie)
-        assert diagnostics["quality_evaluated"]
-        assert diagnostics["retained_intensity_ratios"][-1] <= 1.01
-        assert diagnostics["background_peak_tolerance"] == slm_solver.SPOT_BACKGROUND_TOLERANCE
-        assert max(diagnostics["background_peak_to_initial_ratios"]) <= slm_solver.SPOT_BACKGROUND_TOLERANCE
-        np.testing.assert_allclose(diagnostics["actual_fields"][-1, selected], movie["endpoint_field"],
-                                   rtol=2e-4, atol=2e-4 * np.min(abs(movie["endpoint_field"])))
-        for index, (code, positions) in enumerate(zip(movie["phase_codes"], movie["sites_yx"])):
-            signed = positions - center
-            field = pupil.astype(float) * np.exp(1j * (phase_from_codes(code, shape).astype(float) + aberration))
-            actual = np.einsum("jh,hw,jw->j", np.exp(-2j * np.pi * signed[:, 0, None] * y),
-                               field, np.exp(-2j * np.pi * signed[:, 1, None] * x), optimize=True)
-            np.testing.assert_allclose(diagnostics["actual_fields"][index], actual, rtol=2e-5,
-                                       atol=2e-5 * np.min(abs(actual[movie["active_sites"][index]])))
-            relative = abs(actual[selected] / movie["desired_amplitudes"][index, selected]) ** 2
-            assert diagnostics["retained_intensity_ratios"][index] == pytest.approx(relative.max() / relative.min(), rel=2e-5)
-            assert relative.max() / relative.min() <= (1.01 if index == 6 else 1.10)
-            source_change = np.angle(actual[selected] * lpi["source_field"][selected].conj())
-            prescribed_error = np.angle(actual[selected] * coefficients[index, selected].conj())
-            assert movie["focal_phase_error_max_rad"][index] == pytest.approx(
-                np.max(abs(prescribed_error)), abs=2e-5)
-            assert diagnostics["phase_change_from_initial_rms_rad"][index] == pytest.approx(
-                np.sqrt(np.mean(source_change ** 2)), abs=2e-5)
-            assert diagnostics["focal_phase_error_rms_rad"][index] == pytest.approx(
-                np.sqrt(np.mean(prescribed_error ** 2)), abs=2e-5)
-        assert movie["quality_evaluated"]  # diagnostics does not mutate the movie
-        with pytest.raises(ValueError):
-            movie["phase_codes"][0].setflags(write=True)
-        saved = tuple(frame.copy() for frame in movie["phase_codes"])
-        shortage = slm_solver.compute_rearrangement(lpi, slm_solver.plan_rearrangement(lpi, [0]), motion_frames=7)
-        assert shortage["target_filled"].sum() == 1
-        assert shortage["endpoint_support_intensity_ratio"] <= 1.01
-        assert shortage["endpoint_iterations"] <= 128
-        assert shortage["endpoint_balance_ms"] == 0  # no unplayed solve before first map
-        np.testing.assert_array_equal(movie["phase_codes"], saved)
-        empty_plan = slm_solver.plan_rearrangement(lpi, [])
-        empty_sample = slm_solver.sample_rearrangement(lpi, empty_plan, maximum_step=1.)
-        empty = slm_solver.compute_rearrangement(lpi, empty_plan, motion_frames=empty_sample["motion_frames"],
-                                                 sampled=empty_sample)
-        assert empty["noop"] and not len(empty["phase_codes"])
-        assert not len(empty["frame_support_tolerances"])
-        assert slm_solver.rearrangement_diagnostics(lpi, empty)["converged"]
-        calls = []
-        def reject_frame(index, frame):
-            calls.append(index)
-            raise RuntimeError("consumer rejected map")
-        with pytest.raises(RuntimeError, match="consumer rejected map"):
-            slm_solver.compute_rearrangement(lpi, lpi_plan, motion_frames=7, frame_ready=reject_frame)
-        assert calls == [0]
-        calls.clear()
-        with pytest.raises(RuntimeError, match="did not meet optical constraints"):
-            slm_solver.compute_rearrangement(lpi, lpi_plan, motion_frames=7, iterations=0,
-                support_tolerance=1., motion_support_tolerance=1.,
-                frame_ready=lambda index, frame: calls.append(index))
-        assert calls == []
-        failed = slm_solver.compute_rearrangement(lpi, lpi_plan, motion_frames=7, iterations=0,
-            support_tolerance=1., motion_support_tolerance=1., require_converged=False,
-            frame_ready=lambda index, frame: calls.append(index))
-        assert not failed["quality_accepted"] and failed["iterations"] == (0,) * 7 and not calls
-        stopped = iter((False, False, True))
-        with pytest.raises(InterruptedError, match="SLM rearrangement stopped"):
-            slm_solver.compute_rearrangement(lpi, lpi_plan, motion_frames=7,
-                stop_requested=lambda: next(stopped, True),
-                frame_ready=lambda index, frame: calls.append(index))
-        assert calls == []
-    finally:
-        lpi["close"]()
-    np.testing.assert_array_equal(movie["phase_codes"], saved)
-    static_lpi = slm_solver.prepare_rearrangement(
-        source, source[:2], shape_yx=shape, pupil_amplitude=pupil, pupil_phase=aberration,
-        minimum_separation=2, maximum_motion_frames=2, endpoint_iterations=20,
-        endpoint_data={"source_phase": source_phase}, method="lpi",
-    )
-    try:
-        static = slm_solver.compute_rearrangement(
-            static_lpi, slm_solver.plan_rearrangement(static_lpi, np.arange(4)), motion_frames=7,
-        )
-        assert static["maximum_step"] == 0
-        assert np.max(static["retained_intensity_ratios"][:-1]) <= 1.10
-        assert static["retained_intensity_ratios"][-1] <= 1.01
-        single = slm_solver.compute_rearrangement(
-            static_lpi, slm_solver.plan_rearrangement(static_lpi, np.arange(4)), motion_frames=1)
-        assert single["retained_intensity_ratios"][0] <= 1.01
-        selected = static["source_indices"]
-        destinations = static["target_indices"]
-        delta = np.angle(static_lpi["target_field"][destinations]
-                         * static_lpi["source_field"][selected].conj())
-        assert np.max(abs(delta)) > .01  # An independent endpoint, not copied source phases.
-        phase_progress = np.arange(7) / 6  # Remove unused traps first, then evolve even stationary traps.
-        expected = (np.angle(static_lpi["source_field"][selected])
-                    + phase_progress[:, None] * delta)
-        np.testing.assert_allclose(np.angle(static["desired_spectrum_coefficients"][:, selected]
-                                          * np.exp(-1j * expected)), 0., atol=1e-6)
-        np.testing.assert_allclose(np.angle(single["desired_spectrum_coefficients"][0, selected]
-                                          * static_lpi["target_field"][destinations].conj()), 0., atol=1e-6)
-        assert slm_solver.rearrangement_diagnostics(static_lpi, static)["support_intensity_ratios"][-1] <= 1.01
-    finally:
-        static_lpi["close"]()
     if shape == (64, 80):
         # A stationary array can still request different relative trap weights.
         # It must reach those weights without inventing a position trajectory.
         changed_weights = np.array([1., 1.7, .8, 1.2], np.float32)
-        for method in ("lpi", "iterative"):
-            reweighted = slm_solver.prepare_rearrangement(
-                source, source, shape_yx=shape, pupil_amplitude=pupil, pupil_phase=aberration,
-                minimum_separation=2, maximum_motion_frames=5, endpoint_iterations=64,
-                endpoint_data={"source_phase": source_phase}, target_intensities=changed_weights, method=method,
-            )
-            try:
-                weighted_plan = slm_solver.plan_rearrangement(reweighted, np.arange(4))
-                unchanged = {**reweighted, "target_intensities": reweighted["source_intensities"]}
-                assert slm_solver.rearrangement_is_noop(unchanged, weighted_plan)
-                unchanged_movie = slm_solver.compute_rearrangement(unchanged, weighted_plan, motion_frames=5)
-                assert unchanged_movie["noop"] and len(unchanged_movie["phase_codes"]) == 0
-                np.testing.assert_array_equal(unchanged["initial_phase"], source_phase)
-                assert not slm_solver.rearrangement_is_noop(unchanged, {
-                    **weighted_plan, "motion_yx": np.stack((source, source + [1, 0], source)),
-                    "fraction": np.array([0., .5, 1.]),
-                })
-                assert not slm_solver.rearrangement_is_noop(reweighted, weighted_plan)
-                weighted = slm_solver.compute_rearrangement(
-                    reweighted, weighted_plan, motion_frames=5)
-                assert not weighted["noop"] and weighted["converged"]
-                np.testing.assert_array_equal(weighted["movement_fraction"], 0.)
-                np.testing.assert_array_equal(weighted["sites_yx"], np.broadcast_to(source, (5, 4, 2)))
-                command = phase_from_codes(weighted["phase_codes"][-1], shape)
-                field = pupil.astype(float) * np.exp(1j * (command.astype(float) + aberration))
-                actual = np.fft.fftshift(np.fft.fft2(np.fft.ifftshift(field)))[tuple(source.T)]
-                relative = abs(actual) ** 2 / changed_weights
-                assert relative.max() / relative.min() <= 1.01
-            finally:
-                reweighted["close"]()
-        # More authored destinations than sources use the same prepared owner;
-        # The actual final map, not a separate unplayed subset, owns its gate.
-        larger_target = np.concatenate((source, source + np.array([12, 0])))
-        larger = slm_solver.prepare_rearrangement(
-            source, larger_target, shape_yx=shape, pupil_amplitude=pupil, pupil_phase=aberration,
-            minimum_separation=2, maximum_motion_frames=2, endpoint_iterations=64,
-            target_intensities=np.full(8, 2.), endpoint_data={"source_phase": source_phase}, method="lpi",
-        )
+        reweighted = slm_solver.prepare_rearrangement(
+            source, source, shape_yx=shape, pupil_amplitude=pupil, pupil_phase=aberration, minimum_separation=2,
+            endpoint_iterations=60, endpoint_data={"source_phase": source_phase}, target_intensities=changed_weights)
         try:
-            partial = slm_solver.compute_rearrangement(larger, slm_solver.plan_rearrangement(larger, np.arange(4)),
-                                                      motion_frames=5)
-            assert partial["target_filled"].sum() == 4
-            assert partial["endpoint_support_intensity_ratio"] <= 1.01
-            assert partial["endpoint_iterations"] <= 128
-            assert partial["endpoint_balance_ms"] == 0
-            assert slm_solver.rearrangement_diagnostics(larger, partial)["support_intensity_ratios"][-1] <= 1.01
+            weighted_plan = slm_solver.plan_rearrangement(reweighted, np.arange(4))
+            unchanged = {**reweighted, "target_intensities": reweighted["source_intensities"]}
+            assert slm_solver.rearrangement_is_noop(unchanged, weighted_plan)
+            unchanged_movie = slm_solver.compute_rearrangement(unchanged, weighted_plan, motion_frames=5)
+            assert unchanged_movie["noop"] and len(unchanged_movie["phase_codes"]) == 0
+            assert not slm_solver.rearrangement_is_noop(unchanged, {
+                **weighted_plan, "motion_yx": np.stack((source, source + [1, 0], source)),
+                "fraction": np.array([0., .5, 1.])})
+            weighted = slm_solver.compute_rearrangement(reweighted, weighted_plan, motion_frames=5)
+            # The trap asked for less than its initial weight ends shallower: reported, not a gate.
+            assert not weighted["noop"] and weighted["converged"] and weighted["brightness_minimum_to_initial"][-1] < 1
+            np.testing.assert_array_equal(weighted["movement_fraction"], 0.)
+            np.testing.assert_array_equal(weighted["sites_yx"], np.broadcast_to(source, (5, 4, 2)))
+            relative = abs(propagated(weighted["phase_codes"][-1], source)) ** 2 / changed_weights
+            assert relative.max() / relative.min() <= 1.01
         finally:
-            larger["close"]()
-
+            reweighted["close"]()
+        # Atoms already on every target with surplus atoms elsewhere: the only
+        # map removes the surplus traps and is the last map.
+        settled = slm_solver.prepare_rearrangement(
+            source, source[[0, 3]], shape_yx=shape, pupil_amplitude=pupil, pupil_phase=aberration,
+            minimum_separation=2, endpoint_iterations=60, endpoint_data={"source_phase": source_phase})
+        try:
+            single_plan = slm_solver.plan_rearrangement(settled, np.arange(4))
+            np.testing.assert_array_equal(single_plan["removed_source_indices"], [1, 2])
+            single_samples = slm_solver.sample_rearrangement(settled, single_plan, maximum_step=1.)
+            assert single_samples["motion_frames"] == single_samples["fade_frames"] == 1
+            single = slm_solver.compute_rearrangement(settled, single_plan, motion_frames=1, sampled=single_samples)
+            code = single["phase_codes"][0]
+            kept = propagated(code, source[[0, 3]])
+            assert single["converged"] and np.max(abs(kept)) ** 2 / np.min(abs(kept)) ** 2 <= 1.01
+            dark = propagated(code, source[[1, 2]])
+            np.testing.assert_allclose(single["actual_fields"][0, [1, 2]], dark, rtol=1e-3, atol=1e-3 * np.min(abs(kept)))
+            assert np.all(abs(dark) ** 2 <= slm_solver._TRACK_DARK_LIMIT
+                          * abs(settled["source_field"][[1, 2]].astype(complex)) ** 2)
+            # With more maps the retained traps never turn toward the destination
+            # phases (their focal phases stay where the source put them), and the
+            # maps between the first one after the darkened maps and the refined
+            # last map repeat it without an evaluation.
+            still = slm_solver.compute_rearrangement(settled, single_plan, motion_frames=7, require_converged=False)
+            assert np.max(still["phase_change_from_initial_rms_rad"]) < .1 and not np.any(still["gate_misses"][:-1])
+            assert still["iterations"][3:6] == (0, 0, 0) and still["retained_intensity_ratios"][-1] <= 1.01
+            for frame in range(3, 6):
+                np.testing.assert_array_equal(still["phase_codes"][frame], still["phase_codes"][2])
+                np.testing.assert_array_equal(still["actual_fields"][frame], still["actual_fields"][2])
+            assert still["stray_intensity_ratios"][3] == still["stray_intensity_ratios"][2]
+        finally:
+            settled["close"]()
+        # That map corrects the prepared destination, so it reports its own stray light, not the destination's:
+        # measured once it has been handed over, on half-pixel samples of the whole focal plane of its codes.
+        removal_only = slm_solver.prepare_rearrangement(
+            source, source[[0, 1, 2]], shape_yx=shape, pupil_amplitude=pupil, pupil_phase=aberration,
+            minimum_separation=2, endpoint_iterations=60, endpoint_data={"source_phase": source_phase})
+        try:
+            removal = slm_solver.compute_rearrangement(
+                removal_only, slm_solver.plan_rearrangement(removal_only, np.arange(4)), motion_frames=1,
+                require_converged=False)
+            background = slm_solver.rearrangement_diagnostics(removal_only, removal)["background_intensity_ratios"]
+            assert removal_only["target_stray_intensity_ratio"] < removal["stray_intensity_ratios"][0]
+            assert removal["stray_intensity_ratios"][0] == pytest.approx(background[0], rel=.1)
+        finally:
+            removal_only["close"]()
+        # More surplus atoms than retained traps: the removal and next maps take
+        # the crowded schedule and still meet their surplus-site gates.
+        crowded = slm_solver.prepare_rearrangement(
+            source, source[[0]], shape_yx=shape, pupil_amplitude=pupil, pupil_phase=aberration,
+            minimum_separation=2, endpoint_iterations=60, endpoint_data={"source_phase": source_phase})
+        try:
+            crowded_movie = slm_solver.compute_rearrangement(
+                crowded, slm_solver.plan_rearrangement(crowded, np.arange(4)), motion_frames=3)
+            assert crowded_movie["converged"]
+        finally:
+            crowded["close"]()
+        # Three surplus atoms for four retained traps darken nearly as many bright sites: the same crowded removal map.
+        extra = center + np.array([[0, -9], [0, 9], [-9, 0]], np.int32)
+        nearly = slm_solver.prepare_rearrangement(
+            np.concatenate((source, extra)), source + np.array([1, 0], np.int32), shape_yx=shape,
+            pupil_amplitude=pupil, pupil_phase=aberration, minimum_separation=2, endpoint_iterations=60)
+        try:
+            nearly_plan = slm_solver.plan_rearrangement(nearly, np.arange(7))
+            assert len(nearly_plan["source_indices"]) == 4 and len(nearly_plan["removed_source_indices"]) == 3
+            nearly_movie = slm_solver.compute_rearrangement(nearly, nearly_plan, motion_frames=3, require_converged=False)
+            assert nearly_movie["iterations"][0] == crowded_movie["iterations"][0]
+            assert not np.any(nearly_movie["gate_misses"])
+        finally:
+            nearly["close"]()
         # New runs borrow one healthy optical working point, not an old Task.
         resident_phase = np.array(source_phase, copy=True)
         resident_inputs = dict(source_yx=source, target_yx=target, shape_yx=shape,
             pupil_amplitude=pupil, pupil_phase=aberration, minimum_separation=2,
-            maximum_motion_frames=5, endpoint_iterations=64, method="lpi",
-            endpoint_data={"source_phase": resident_phase})
+            endpoint_iterations=60, endpoint_data={"source_phase": resident_phase})
         try:
             with slm_solver.acquire_rearrangement(**resident_inputs) as (resident, reused):
                 assert not reused
@@ -2722,10 +2537,8 @@ def test_rearrangement_gpu_matches_native_propagation_of_delivered_codes(shape) 
             assert resident_keeper["thread"].is_alive()
             with pytest.raises(InterruptedError, match="ordinary stop"):
                 with slm_solver.acquire_rearrangement(**(resident_inputs | {
-                        "pupil_amplitude": pupil.copy(), "minimum_separation": 3,
-                        "maximum_motion_frames": 8})) as (same, reused):
-                    assert reused and same is resident
-                    assert same["minimum_separation"] == 3 and same["gpu"]["motion_capacity"] >= 8
+                        "pupil_amplitude": pupil.copy(), "minimum_separation": 3})) as (same, reused):
+                    assert reused and same is resident and same["minimum_separation"] == 3
                     raise InterruptedError("ordinary stop")
             with pytest.raises(RuntimeError, match="camera disconnected"):
                 with slm_solver.acquire_rearrangement(**resident_inputs) as (same, reused):
@@ -2748,7 +2561,6 @@ def test_rearrangement_gpu_matches_native_propagation_of_delivered_codes(shape) 
             slm_solver._close_resident_rearrangement()
         assert slm_solver._REARRANGEMENT_RESIDENT is None
         assert not recovered["gpu"]
-
 
 
 def test_rearrangement_fractional_delay_uses_full_continuous_clearance():

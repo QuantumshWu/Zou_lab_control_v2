@@ -15,6 +15,7 @@ import pytest
 from zlc_atom.devices.simulation.camera import VirtualCamera, VirtualCameraConfig
 from zlc_atom.devices.simulation.sequencer import VirtualPulseStreamer
 from zlc_atom.devices.slm.device import phase_from_codes
+from zlc_atom.devices.slm.solver import prepare_rearrangement_geometry
 from zlc_atom.nodes._framework.descriptor import ResolvedWorkspaceResource
 from zlc_atom.nodes.slm_rearrangement import task as task_module
 from zlc_atom.devices.slm import rearrangement as rearrangement_module
@@ -244,7 +245,9 @@ def experiment(tmp_path, monkeypatch, request):
         reused = state.prepared is not None
         if not reused:
             trace.append("prepare_gpu")
-            state.prepared = {"source_yx": kwargs["source_yx"], "target_yx": kwargs["target_yx"],
+            state.prepared = {**prepare_rearrangement_geometry(kwargs["source_yx"], kwargs["target_yx"],
+                                                               shape_yx=kwargs["shape_yx"],
+                                                               minimum_separation=kwargs["minimum_separation"]),
                 "gpu_info": {"device_name": "test CUDA boundary"},
                 "initial_phase": source_context["phase"]}
         state.prepared["minimum_separation"] = kwargs["minimum_separation"]
@@ -287,8 +290,9 @@ def experiment(tmp_path, monkeypatch, request):
         if samples is None:
             samples = task_module.sample_rearrangement(prepared, planned, motion_frames=kwargs["motion_frames"])
         return {"phase_codes": tuple(codes) if kwargs["retain_phase_sequence"] else None,
-                "motion_frames": frames, "converged": True,
-                "target_synthesis_coefficients": None,
+                "motion_frames": frames, "converged": True, "quality_accepted": True,
+                "gate_misses": np.zeros(frames, bool), "retained_intensity_ratios": np.full(frames, 1.005),
+                "surplus_site_intensity_ratios": np.zeros(frames), "stray_intensity_ratios": np.full(frames, .03),
                 "motion_yx": samples["motion_yx"],
                 "fraction": np.linspace(0, 1, kwargs["motion_frames"] + 1),
                 "support_intensity_ratios": np.full(frames, 1.005),
@@ -302,6 +306,8 @@ def experiment(tmp_path, monkeypatch, request):
 
     monkeypatch.setattr(task_module, "acquire_rearrangement", acquire)
     monkeypatch.setattr(task_module, "plan_rearrangement", plan)
+    monkeypatch.setattr(task_module, "rearrangement_diagnostics",
+                        lambda prepared, result, stop_requested=None: {"diagnostics_ms": .1})
     monkeypatch.setattr(rearrangement_module, "compute_rearrangement", compute)
     state.compute = compute
     state.task_arguments = dict(
@@ -312,7 +318,7 @@ def experiment(tmp_path, monkeypatch, request):
         target_rows=1 if getattr(request, "param", 4) == 2 else 2, target_columns=2,
         pulse_sequence=_sequence(), pulse_path=tmp_path / "operator.json",
         before_period="before", after_period="after", motion_frames=4,
-        minimum_separation=0., phase_method="iterative",
+        minimum_separation=0.,
         save_figure_artifact=_stub_figures,
     )
     state.task = SlmRearrangementTask(**state.task_arguments)
@@ -397,6 +403,9 @@ def test_rearrangement_measurement_first_frame_actions_and_camera_cycle_output(e
                  and node._cycle_evidence.get("cycle") == cycle)
             node._movement.result()
             assert e.compute_arguments["retain_phase_sequence"] is False
+            # Every map is played: the cycle evidence keeps its gate report.
+            assert node._cycle_evidence["quality_accepted"] and node._cycle_evidence["gate_misses"] == []
+            assert node._cycle_evidence["maximum_stray_intensity_ratio"] == .03
             assert len(cycles) == cycle  # no first-frame/partial-cycle publication
             assert e.slm.plays == cycle + 1
             e.camera.trigger(1)
@@ -449,7 +458,7 @@ def test_one_authored_pulse_runs_photograph_compute_play_verify_and_reopen_figur
     assert e.slm.plays == 1 and e.active_leases == 0
     assert e.context.terminal_sealed
     summary = json.loads((e.context.run_directory / "summary.json").read_text())
-    assert summary["intensity_tolerance"] == e.prepare_arguments["support_tolerance"] == 1.01
+    assert summary["intensity_tolerance"] == 1.01 and "support_tolerance" not in e.prepare_arguments
     assert summary["motion_intensity_tolerance"] == e.compute_arguments["motion_support_tolerance"] == 1.10
     assert e.compute_arguments["support_tolerance"] == 1.01
     assert "motion_support_tolerance" not in e.prepare_arguments
@@ -583,7 +592,7 @@ def test_shortage_fills_a_subset_and_empty_input_holds_the_phase(experiment, occ
         e.images[0][y, x] = 10
     result = e.task.execute(e.context)
     assert Path(result["artifact_path"]).is_file()
-    assert e.compute_arguments["retain_phase_sequence"] is False
+    assert e.compute_arguments["retain_phase_sequence"] is True  # post-run optical diagnostics
     with np.load(result["artifact_path"], allow_pickle=False) as saved:
         assert "phase_codes" not in saved
     summary = json.loads((e.context.run_directory / "summary.json").read_text())
@@ -640,7 +649,6 @@ def test_camera_step_uses_sensor_geometry_and_fresh_tasks_lease_gpu_preparation(
     assert e.trace.count("prepare_gpu") == 1
     assert len(e.leases) == 2 and e.active_leases == 0
     assert e.leases[-1]["minimum_separation"] == fresh.minimum_separation
-    assert e.leases[-1]["support_tolerance"] == 1.01
     np.testing.assert_array_equal(e.leases[-1]["endpoint_data"]["source_phase"], fresh.science_context["phase"])
 
 
@@ -657,7 +665,7 @@ def test_explicit_end_target_does_not_invent_calibration_for_a_new_position(expe
         target_intensity=target, target_path=old.context_path.parent / "end-target.json",
         pulse_sequence=old.sequence, pulse_path=old.pulse_path,
         before_period=old.before_period, after_period=old.after_period,
-        motion_frames=4, minimum_separation=0., phase_method="iterative", save_figure_artifact=_stub_figures)
+        motion_frames=4, minimum_separation=0., save_figure_artifact=_stub_figures)
     result = e.task.execute(e.context)
     summary = json.loads((e.context.run_directory / "summary.json").read_text())
     assert summary["assigned_atoms"] == 1 and summary["removed_atoms"] == 4
@@ -1019,12 +1027,11 @@ def test_failed_or_stopped_play_keeps_completed_before_photo(experiment, monkeyp
         def rejected(*args, **kwargs):
             ready = kwargs["frame_ready"]
             kwargs["frame_ready"] = lambda index, frame: ready(index, frame) if index == 0 else None
-            result = original(*args, **kwargs)
-            result["converged"] = False
-            return result
+            original(*args, **kwargs)
+            raise RuntimeError("SLM frame 1 has a non-finite encoded field; publication stopped")
 
         monkeypatch.setattr(rearrangement_module, "compute_rearrangement", rejected)
-        with pytest.raises(RuntimeError, match="encoded-field quality checks"):
+        with pytest.raises(RuntimeError, match="non-finite encoded field"):
             e.task.execute(e.context)
     summary = json.loads((e.context.run_directory / "summary.json").read_text())
     assert summary["status"] == ("stopped" if stopped else "failed")
@@ -1040,13 +1047,9 @@ def test_failed_or_stopped_play_keeps_completed_before_photo(experiment, monkeyp
         assert phase_device["command_revision"] < summary["device_snapshots"]["slm"]["command_revision"]
         assert not np.array_equal(e.slm.last_commanded_phase, phase.block.values[0, 0])
     elif ending == "numeric":
-        assert "encoded-field quality checks" in summary["error"]
-        assert summary["playback"]["cancelled"], "a successful cancelled play must not mask numerical rejection"
-        outcomes = summary["transport_outcomes"]
-        assert not outcomes["verification_accepted"]
-        assert outcomes["moving"]["judged"] is None and outcomes["stationary"]["occupied"] is None
-        assert all(item["after_valid"] is None and item["after_occupied"] is None
-                   for item in outcomes["assignments"])
+        assert "non-finite encoded field" in summary["error"]
+        assert summary["playback"]["cancelled"], "a successful cancelled play must not mask the numerical failure"
+        assert "transport_outcomes" not in summary
     with np.load(e.context.artifacts["partial_data"][0], allow_pickle=False) as data:
         np.testing.assert_array_equal(data["before_valid"], [True, True, False, True, True, True])
         assert "before_image" in data.files and "after_image" not in data.files
@@ -1086,14 +1089,12 @@ def test_real_period_form_preserves_choice_identity_and_updates_disabled_nominal
         resource = ResolvedWorkspaceResource(tmp_path / "pulse.json", "zlc.pulse/slm-rearrangement", sequence)
         values = SLM_REARRANGEMENT_SCHEMA.draft_values()
         camera_outputs = ("before_frame", "before_occupied", "after_frame", "after_occupied", "phase")
-        for phase_method in ("iterative", "lpi"):
-            assert tuple(output.name for output in LOGIC_NODE.outputs_for(
-                {**values, "phase_method": phase_method}, {})) == camera_outputs + ("trajectory", "intensity_ratio")
-            assert tuple(output.name for output in LOGIC_NODE.outputs_for(
-                {**values, "phase_method": phase_method, "frame_mode": "camera_step"}, {})) == camera_outputs
-            assert tuple(preview.output.name for preview in LOGIC_NODE.previews_for(
-                {**values, "phase_method": phase_method, "frame_mode": "camera_step"}, {})) == (
-                    "before_frame", "after_frame", "phase")
+        assert tuple(output.name for output in LOGIC_NODE.outputs_for(
+            values, {})) == camera_outputs + ("trajectory", "intensity_ratio")
+        assert tuple(output.name for output in LOGIC_NODE.outputs_for(
+            {**values, "frame_mode": "camera_step"}, {})) == camera_outputs
+        assert tuple(preview.output.name for preview in LOGIC_NODE.previews_for(
+            {**values, "frame_mode": "camera_step"}, {})) == ("before_frame", "after_frame", "phase")
 
         def project():
             values.update(LOGIC_NODE.resolve_defaults(values, {"pulse_template": resource}))
@@ -1109,7 +1110,6 @@ def test_real_period_form_preserves_choice_identity_and_updates_disabled_nominal
             ("Select Period", ""), ("Before image", "before"), ("Transport", "gap"), ("Verify image", "after")]
         assert form.read_value("nominal_playback_seconds") == pytest.approx(16/60)
         assert not form.widget_for("nominal_playback_seconds").isEnabled()
-        assert form.read_value("phase_method") == "lpi"
         assert form.read_value("minimum_separation") == 15.
         assert form.read_value("frame_mode") == "fixed"
         assert form.widget_for("motion_frames").isEnabled()
@@ -1148,21 +1148,7 @@ def test_real_period_form_preserves_choice_identity_and_updates_disabled_nominal
         assert not form.widget_for("max_camera_step").isEnabled()
         assert form.read_value("max_camera_step") == .75
         assert form.read_value("nominal_playback_seconds") == pytest.approx(32/60, abs=1e-6)
-        phase_method = form.widget_for("phase_method")
-        QtTest.QTest.keyClick(phase_method, QtCore.Qt.Key_Up)
-        app.processEvents()
-        assert patches[-1]["values"] == {"phase_method": "iterative"}
-        values.update(patches[-1]["values"])
-        project()
-        assert form.widget_for("intensity_error_percent").isEnabled()
         assert form.read_value("intensity_error_percent") == 1.
-        assert form.widget_for("motion_intensity_error_percent").isEnabled()
-        assert form.read_value("motion_intensity_error_percent") == 10.
-        QtTest.QTest.keyClick(phase_method, QtCore.Qt.Key_Down)
-        app.processEvents()
-        values.update(patches[-1]["values"])
-        project()
-        assert form.widget_for("intensity_error_percent").isEnabled()
         with pytest.raises(ValueError, match="max_camera_step"):
             SLM_REARRANGEMENT_SCHEMA.draft_values({**values, "frame_mode": "camera_step", "max_camera_step": 0.})
         resource = replace(resource, value=replace(sequence, periods=tuple(
@@ -1195,7 +1181,6 @@ def test_real_period_form_preserves_choice_identity_and_updates_disabled_nominal
             assert recording_form.widget_for("recording_frames").isEnabled()
             assert tuple(recording_form._forms) == tuple(form._forms)
             assert all(type(recording_form._forms[key]) is type(form._forms[key]) for key in form._forms)
-            assert recording_form.read_value("phase_method") == "lpi"
             assert recording_form.read_value("motion_intensity_error_percent") == 10.
             assert recording_form.read_value("intensity_error_percent") == 1.
             assert recording_fields["motion_intensity_error_percent"].label == "Motion intensity tolerance (%)"

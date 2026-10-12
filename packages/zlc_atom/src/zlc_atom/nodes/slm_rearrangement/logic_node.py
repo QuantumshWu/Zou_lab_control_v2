@@ -166,7 +166,7 @@ def _rearrangement_editor_factory(parent=None, *, schema=SLM_REARRANGEMENT_SCHEM
                 ("Target grid", ("target_rows","target_columns")),
                 ("Imaging", ("before_period","after_period","recording_frames","exposure_seconds")),
                 ("Movement", ("frame_mode","motion_frames","max_camera_step","frame_rate_hz","nominal_playback_seconds")),
-                ("Quality and output", ("phase_method","minimum_separation","motion_intensity_error_percent","intensity_error_percent","save_phase_sequence")),
+                ("Quality and output", ("minimum_separation","motion_intensity_error_percent","intensity_error_percent","save_phase_sequence")),
             )
             self._forms = {}
             for title, keys in self._groups:

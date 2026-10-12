@@ -16,7 +16,7 @@ from zlc_atom.nodes.camera.measurement import CameraMeasurementRequest, CAMERA_F
 from .measurement import RearrangementMeasurement
 
 
-_MOVEMENT_FIELDS = {"target_rows", "target_columns", "phase_method", "frame_mode", "motion_frames",
+_MOVEMENT_FIELDS = {"target_rows", "target_columns", "frame_mode", "motion_frames",
                     "max_camera_step", "frame_rate_hz", "minimum_separation", "nominal_playback_seconds",
                     "intensity_error_percent", "motion_intensity_error_percent"}
 REARRANGEMENT_MEASUREMENT_SCHEMA = AuthoringSchema(

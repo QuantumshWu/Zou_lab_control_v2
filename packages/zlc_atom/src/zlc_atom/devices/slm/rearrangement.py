@@ -32,15 +32,12 @@ REARRANGEMENT_FIELDS = (
             "GPU computation, upload, preparation and any additional optical settling are excluded."
         ),
     ),
-    AuthoringField("phase_method", "choice", "Phase method", "lpi",
-                   choices=(AuthoringChoice("iterative", "Iterative"), AuthoringChoice("lpi", "LPI (phase interpolation)")),
-                   description="LPI interpolates site phases, holds each frame's phases fixed during amplitude balancing, and records the iteration count. Both methods enforce the motion and final intensity tolerances."),
     AuthoringField("minimum_separation", "float", "Minimum trap distance (Fourier)", 15., minimum=0., unit="pixel",
                    description="Hard continuous separation of moving and stationary traps, including surplus atoms while they fade. Uses the same units as SLM Target grid spacing (for example, 25 gap); not camera pixels."),
     AuthoringField("motion_intensity_error_percent", "float", "Motion intensity tolerance (%)", 10., minimum=0.,
                    description="Weighted maximum/minimum intensity minus one for the initial removal and other intermediate maps. This is not a bound on absolute trap-depth change or atom loss."),
     AuthoringField("intensity_error_percent", "float", "Final intensity tolerance (%)", 1., minimum=0.,
-                   description="Weighted maximum/minimum intensity minus one for the actual last map and offline endpoints. A single-map sequence uses this final tolerance."),
+                   description="Weighted maximum/minimum intensity minus one for the actual last map. A single-map sequence uses this final tolerance."),
 )
 
 
@@ -97,9 +94,12 @@ def run_rearrangement(
 ):
     """Compute and feed one prepared device sequence; the caller owns its lease.
 
-    Task and Measurement share the same verified-prefix/error handling. Sequence
-    preparation/release and any Pulse deadline stay with the caller. ``outcome``
-    retains the actual numeric result and playback receipt when an error occurs.
+    Task and Measurement share the same playback/error handling. Every map is
+    played; maps outside their gates are reported in the result (gate_misses),
+    while a compute failure (Stop, a non-finite field) cancels playback at the
+    published prefix. Sequence preparation/release and any Pulse deadline stay
+    with the caller. ``outcome`` retains the actual numeric result and playback
+    receipt when an error occurs.
     """
     timings = {} if timings is None else timings
     outcome = {} if outcome is None else outcome
@@ -134,7 +134,7 @@ def run_rearrangement(
             nonlocal playback
             check_stop()
             if playback is None:
-                timings["first_verified_frame_ready"] = (perf_counter()-started)*1000
+                timings["first_frame_ready_for_playback"] = (perf_counter()-started)*1000
                 if before_play is not None:
                     before_play()
                 outcome["playback_attempted"] = True
@@ -172,8 +172,6 @@ def run_rearrangement(
                 retain_phase_sequence=retain_phase_sequence)
             timings["compute_and_feed"] = (perf_counter()-compute_started)*1000
             timings.update(("compute_"+name, float(value)) for name, value in result["timing_ms"].items())
-            if not result.get("quality_accepted", result["converged"]):
-                raise RuntimeError("The phase sequence did not pass its encoded-field quality checks; playback is stopped at its verified prefix. See the partial numeric report.")
             if playback is None:
                 receipt = {"frame_count": 0, "played_frames": 0, "cancelled": False,
                            "noop": True, "authored_timing_completed": True,
