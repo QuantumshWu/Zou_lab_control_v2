@@ -455,6 +455,10 @@ class _LayoutCandidate:
 #: line tells the operator; this tells whoever has to fix it.
 _LOG = logging.getLogger(__name__)
 
+#: An overlay nothing is judging this picture with: its producer is not
+#: running and what it last published describes another picture.
+_NO_OVERLAY = object()
+
 
 class PanelNotDrawable(ValueError):
     """There is nothing for this panel to draw, so there is no host target.
@@ -975,9 +979,7 @@ class ConsolePresenter:
             selected.signal,
             initial_target=selected,
             display_interval_ms=selected.interval_ms,
-            companion_signals=lambda target: (
-                (target.overlay_signal,) if target.overlay_signal else ()
-            ),
+            companion_signals=self._overlay_companions,
             project_input=lambda value, pub, front, target: self._project_panel_input(
                 binding, value, pub, front, state=target
             ),
@@ -1258,6 +1260,7 @@ class ConsolePresenter:
         resolved = projection.spec
         if resolved is None or not paints_image_surface(resolved):
             return snapshot, event_records
+        overlay_result = _NO_OVERLAY
         if selected.overlay_signal:
             if front is None:
                 raise CancelledError("the selected overlay has no coherent front")
@@ -1270,6 +1273,7 @@ class ConsolePresenter:
             )
             if overlay_result is None:
                 raise CancelledError("the selected overlay is not ready for this shot")
+        if overlay_result is not _NO_OVERLAY:
             overlay, overlay_publication, overlay_record = overlay_result
             event_records = (
                 *event_records,
@@ -1297,6 +1301,42 @@ class ConsolePresenter:
         binding.overlay_revision += 1
         return ImageFrame(snapshot, overlay), event_records
 
+    def _overlay_companions(self, target: PanelState) -> tuple[str, ...]:
+        """The overlay a panel's picture waits for, if it is coming at all.
+
+        One that is running or has published something is read with the
+        picture.  One whose producer was never started on this board -- a
+        loaded layout whose Occupancy row is not running -- is not waited
+        for: the picture is drawn without it, and it joins once it runs.
+        """
+
+        overlay = target.overlay_signal
+        if not overlay:
+            return ()
+        plane = self.session.signal_plane
+        if plane.is_generation_live(overlay) or plane.latest_publication(overlay) is not None:
+            return (overlay,)
+        return ()
+
+    def _overlay_mismatch(self, image_publication: object, overlay_publication: object) -> str:
+        """Why this judgement is not of this picture; empty when it is."""
+
+        plane = self.session.signal_plane
+        if plane.publication_roots(image_publication) != plane.publication_roots(overlay_publication):
+            return "image overlay publication is not from the image shot"
+        pending = [overlay_publication]
+        seen: set[int] = set()
+        while pending:
+            current = pending.pop()
+            if current is image_publication:
+                return ""
+            identity = id(current)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            pending.extend(plane.direct_parent_publications(current))
+        return "image overlay publication does not descend from the image"
+
     def _image_point_overlay(
         self,
         front: object,
@@ -1313,29 +1353,21 @@ class ConsolePresenter:
         """
 
         overlay_publication = front.publication(overlay_signal)
-        if overlay_publication is None:
-            return None
-        if self.session.signal_plane.publication_roots(
-            image_publication
-        ) != self.session.signal_plane.publication_roots(overlay_publication):
-            raise ValueError("image overlay publication is not from the image shot")
-        pending = [overlay_publication]
-        seen: set[int] = set()
-        while pending:
-            current = pending.pop()
-            if current is image_publication:
-                break
-            identity = id(current)
-            if identity in seen:
-                continue
-            seen.add(identity)
-            pending.extend(
-                self.session.signal_plane.direct_parent_publications(current)
-            )
-        else:
-            raise ValueError(
-                "image overlay publication does not descend from the image"
-            )
+        mismatch = (
+            ""
+            if overlay_publication is None
+            else self._overlay_mismatch(image_publication, overlay_publication)
+        )
+        if overlay_publication is None or mismatch:
+            # Nothing is judging this picture while the overlay's producer is
+            # not running (never started, or stopped on an earlier run): the
+            # picture is drawn without it rather than held for a judgement
+            # that is not coming.
+            if not self.session.signal_plane.is_generation_live(overlay_signal):
+                return _NO_OVERLAY
+            if overlay_publication is None:
+                return None
+            raise ValueError(mismatch)
         status = overlay_publication.value(overlay_signal)
         if status is None:
             return None
@@ -3795,10 +3827,9 @@ class ConsolePresenter:
                     and _run_of(latest) != binding.mount_attempted
                     # A companion the panel reads must be in the front the
                     # mount is prepared from, or the candidate stages nothing.
-                    and (
-                        not binding.state.overlay_signal
-                        or plane.latest_publication(binding.state.overlay_signal)
-                        is not None
+                    and all(
+                        plane.latest_publication(name) is not None
+                        for name in self._overlay_companions(binding.state)
                     )
                 ):
                     # Source arrival starts the ordinary mount here, never
