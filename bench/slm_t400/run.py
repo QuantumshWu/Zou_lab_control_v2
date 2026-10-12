@@ -22,9 +22,9 @@ Sections:
            (does the GPU start slow and speed up within a sequence?)
   seq      this checkout against de73d721 in one process, alternating: the Fixed task path from the occupancy
            list (plan + compute that samples itself) to the first and the last map, and each map's solve time
-  gap      the lab's timing: 0.65 s of idle GPU (the exposure, only the heater running) before the same Fixed path,
-           for this checkout at heater duty 0.1 (the old heater), 0.25, 0.5 and 1 (the default) and for de73d721
-           with its own heater, against a warm GPU; with a simulated 60 Hz playback of the maps as they get ready
+  gap      the lab's timing: 3 s of idle GPU (between shots and the exposure, only the solver's own heater running)
+           before the same Fixed path, for this checkout and de73d721, against a warm GPU; with a simulated 60 Hz
+           playback of the maps as they get ready
 """
 import argparse
 import contextlib
@@ -595,8 +595,7 @@ def section_seq(cp, mods, s, rounds):
 
 
 FRAME_MS = 1000 / 60
-EXPOSURE_S = .65
-DUTIES = (.1, .25, .5, 1.)
+IDLE_S = 3.
 
 
 def playback_end(ready_ms):
@@ -608,29 +607,24 @@ def playback_end(ready_ms):
 
 
 def section_gap(cp, mods, s, rounds):
-    """The lab's timing: the GPU idles EXPOSURE_S (the exposure) with only the solver's own heater running, then the
-    Fixed task path (plan + compute that samples itself). new: heater duty 0.1 (the old heater), 0.25, 0.5 and 1 (the
-    default); lpi: its own heater. 'warm': the same computation right after a sustained load (the bench's other
-    sections). playback_end_ms simulates 60 Hz playback of the maps as they become ready."""
-    new = mods["new"]
-    default = new._REARRANGEMENT_WARM_DUTY
+    """The lab's timing: the GPU idles IDLE_S (between shots and the exposure) with only the solver's own heater
+    running, then the Fixed task path (plan + compute that samples itself), for this checkout and de73d721 (each with
+    its own heater). 'warm': the same computation right after a sustained load (the bench's other sections).
+    playback_end_ms simulates 60 Hz playback of the maps as they become ready."""
     work = {v: prepare(m, s, v == "lpi") for v, m in mods.items()}
     big = cp.zeros(16 << 20, cp.float32)
     load = cp.ElementwiseKernel("", "float32 x", "x += 1e-6f", "bench_busy")
-    modes = ([("new", "warm", default)] + [("new", f"idle duty {d:g}", d) for d in DUTIES]
-             + [("lpi", "warm", None), ("lpi", "idle", None)])
-    rows = {f"{v} {mode}": [] for v, mode, _ in modes}
+    modes = [(v, mode) for v in mods for mode in ("warm", "idle")]
+    rows = {f"{v} {mode}": [] for v, mode in modes}
     try:
         for r in range(rounds + 1):
-            for v, mode, duty in (modes if r % 2 else modes[::-1]):
+            for v, mode in (modes if r % 2 else modes[::-1]):
                 m, prepared = mods[v], work[v]
                 stamps = []
                 with contextlib.ExitStack() as stack:
                     for o in mods:  # one heater at a time, as in the product
                         if o != v:
                             stack.enter_context(active(mods[o], work[o]))
-                    if duty is not None:
-                        new._REARRANGEMENT_WARM_DUTY = duty
                     if mode == "warm":
                         with active(m, prepared):
                             start = time.perf_counter()
@@ -638,7 +632,7 @@ def section_gap(cp, mods, s, rounds):
                                 load(big)
                                 cp.cuda.Device().synchronize()
                     else:
-                        time.sleep(EXPOSURE_S)  # this workspace's heater runs at its duty
+                        time.sleep(IDLE_S)  # only this workspace's heater runs
                     wall = time.strftime("%H:%M:%S")
                     t0 = time.perf_counter()
                     plan = m.plan_rearrangement(prepared, s["occupied"])
@@ -647,7 +641,6 @@ def section_gap(cp, mods, s, rounds):
                         motion_support_tolerance=1.10, require_converged=False,
                         frame_ready=lambda i, f: stamps.append(time.perf_counter()))
                     t1 = time.perf_counter()
-                new._REARRANGEMENT_WARM_DUTY = default
                 if r:
                     ready = [(x - t0) * 1e3 for x in stamps]
                     rows[f"{v} {mode}"].append(dict(
@@ -664,9 +657,8 @@ def section_gap(cp, mods, s, rounds):
             log("   %-18s photo->first %7.1f ms   photo->last %7.1f ms   photo->playback end %7.1f ms   maps %s" % (
                 key, sm["photo_first_ms"], sm["photo_last_ms"], sm["playback_end_ms"],
                 [round(x, 1) for x in sm["map_solve_ms_median"][:6]]))
-        return dict(exposure_s=EXPOSURE_S, frames=s["frames"], rows=rows, summary=summary)
+        return dict(idle_s=IDLE_S, frames=s["frames"], rows=rows, summary=summary)
     finally:
-        new._REARRANGEMENT_WARM_DUTY = default
         for prepared in work.values():
             prepared["close"]()
 
