@@ -329,11 +329,16 @@ the editor lists the actual input axes and embeds the supported operations.
 Axis names are case-sensitive; use the displayed name or full AxisId, for
 example `count("calibration.site")` for Occupancy's `Site` axis.
 The separate processor
-`frame_survival` asks, for every forward frame pair
+`frame_survival` asks, for selected forward frame pairs
 of a multi-frame cycle, whether a site an earlier frame saw loaded is still
 seen by a later one -- the pairs form one labelled `READOUT_EVENT` Point axis
-(`0-1`, `0-2`, `1-2` for three frames), each pair's value is the later verdict
-and its validity is that pair's own denominator. The `slm_feedback` Task takes one ordinary camera/readout Calibration and one
+(`0-1`, `0-2`, `1-2` for all pairs of three frames), each pair's value is the
+later verdict and its validity is that pair's own denominator. **Published pairs**
+is All forward pairs, Consecutive (k→k+1), From the first frame (0→k), To the
+last frame (k→last) -- each resolved against the frames the source carries --
+or Selected pairs, marked on a start × end matrix with ordinary table selection
+(drag a rectangle, Ctrl to add or remove, a row or column header for every pair
+from or to that frame). The `slm_feedback` Task takes one ordinary camera/readout Calibration and one
 strict Science Context. Calibration has no SLM or Science Context input.
 Feedback registers the Context's frozen spots Target to the measured camera
 sites at its own composition boundary; the full roster, including predicted

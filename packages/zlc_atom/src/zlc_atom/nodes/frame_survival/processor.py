@@ -13,7 +13,10 @@ classifier. This processor owns frame-general pairing for any multi-frame
 cycle.
 
 WHAT IT PUBLISHES.  One dataset, ``survival``, holding the selected forward
-frame pairs as ONE labelled point axis. By default a three-frame cycle carries pair
+frame pairs as ONE labelled point axis.  The selection is a rule resolved
+against the frames a cycle actually carries -- every forward pair, the
+consecutive ones, those from the first frame or those to the last -- or an
+explicit list of pairs.  Every forward pair of a three-frame cycle is the pair
 entries "0-1", "0-2", "1-2" straight from the data -- one identity per
 pair, the calibration model-axis pattern (numeric identity, readable
 labels).  A pair is WHICH sub-measurement of the cycle is being asked
@@ -78,11 +81,39 @@ def _forward_pairs(frames: int) -> tuple[tuple[int, int], ...]:
     )
 
 
-def _checked_pairs(pairs) -> tuple[tuple[int, int], ...] | None:
-    """Validate authored frame indices; None explicitly means all forward pairs."""
+#: Selections named by what they ask, resolved against the frames a cycle
+#: actually carries -- so a Pulse that gains or loses a photograph keeps the
+#: question instead of a list of pairs written for the old frame count.
+PAIR_RULES = ("all", "consecutive", "from_first", "to_last")
 
-    if pairs is None:
-        return None
+
+def _rule_pairs(rule: str, frames: int) -> tuple[tuple[int, int], ...]:
+    """The forward pairs one named selection asks of ``frames`` frames."""
+
+    if rule == "all":
+        return _forward_pairs(frames)
+    if rule == "consecutive":
+        return tuple((frame, frame + 1) for frame in range(frames - 1))
+    if rule == "from_first":
+        return tuple((0, frame) for frame in range(1, frames))
+    if rule == "to_last":
+        return tuple((frame, frames - 1) for frame in range(frames - 1))
+    raise ValueError(f"frame survival selection must be one of {', '.join(PAIR_RULES)} or explicit pairs")
+
+
+def _checked_selection(selection) -> str | tuple[tuple[int, int], ...]:
+    """A named rule, or validated explicit pairs."""
+
+    if isinstance(selection, str):
+        if selection not in PAIR_RULES:
+            raise ValueError(f"frame survival selection must be one of {', '.join(PAIR_RULES)} or explicit pairs")
+        return selection
+    return _checked_pairs(selection)
+
+
+def _checked_pairs(pairs) -> tuple[tuple[int, int], ...]:
+    """Validate authored frame indices."""
+
     if not isinstance(pairs, (tuple, list)) or not pairs:
         raise ValueError("frame survival pairs must contain at least one pair")
     checked = []
@@ -135,7 +166,7 @@ class FrameSurvivalProcessor:
         *,
         producer: str = "frame_survival",
         source_signal: str | None = None,
-        pairs: tuple[tuple[int, int], ...] | None = None,
+        pairs: str | tuple[tuple[int, int], ...] = "all",
     ) -> None:
         self.instance_id = str(producer).strip()
         if not self.instance_id:
@@ -143,7 +174,7 @@ class FrameSurvivalProcessor:
         self.source_signal = (
             None if source_signal is None else str(source_signal).strip()
         )
-        self.pairs = _checked_pairs(pairs)
+        self.pairs = _checked_selection(pairs)
         # Event and canonical geometry coexist; neither evicts the other's plan.
         self._plans: dict[bool, tuple[DatasetSchema, tuple]] = {}
 
@@ -247,7 +278,7 @@ class FrameSurvivalProcessor:
         if saved is not None and (saved[0] is schema or saved[0] == schema):
             return saved[1]
         frame_axis, _site_axis = self._source_axes(schema)
-        pairs = _forward_pairs(frame_axis.size) if self.pairs is None else self.pairs
+        pairs = _rule_pairs(self.pairs, frame_axis.size) if isinstance(self.pairs, str) else self.pairs
         if any(end >= frame_axis.size for _start, end in pairs):
             raise ValueError(
                 f"frame survival selected pairs need frame {max(end for _, end in pairs)} "
@@ -370,4 +401,4 @@ class FrameSurvivalProcessor:
         }
 
 
-__all__ = ["SURVIVAL_OUTPUTS", "FrameSurvivalProcessor"]
+__all__ = ["PAIR_RULES", "SURVIVAL_OUTPUTS", "FrameSurvivalProcessor"]

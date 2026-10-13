@@ -12,7 +12,7 @@
 
 - 2026-10-09重排延迟整改：有限Camera接收容量以已知总帧数为额外上界，保留Monitor预算和完整周期要求；SLM优化以实际15帧/60Hz/原质量门为基准，区分GPU执行、主机同步、上传背压与播放，不能用不同GPU理论参数替代实验机延迟实测。
 
-- Frame Survival增加可编辑配对行及Publish all，保持一个survival输出和现有pair/site归属；只发布所选行，结构、数值、validity及coverage共用同一配对规划，源缺帧继续等待。UI复用Fluent rows与原Logic贡献入口，源schema直接来自Runtime目录。
+- Frame Survival的发布配对由选择决定：全部/相邻/从首帧/到末帧按源帧数展开，Selected pairs为显式列表；保持一个survival输出和现有pair/site归属，结构、数值、validity及coverage共用同一配对规划，源缺帧继续等待。Edit为FluentTableView起始×结束矩阵（Qt原生选择：拖动矩形、Ctrl增删、表头整行整列）加预设按钮，源schema直接来自Runtime目录。
 
 - Subpulse单对象编辑恢复（2026-10-12，完成待用户试用，用户修订）：移除Subpulse绑定总表，恢复顶部选择一个Subpulse及原横向编辑区，只增加所选对象的Config file/Browse行。主卡恢复slot式Default/Config小入口，三个竖排操作保留；文件绑定不自动切换来源，主Config总开关不改变当前编辑对象。选择身份与文件/内嵌保存owner分开，切主开关保留未保存文件草稿；取消换文件保留原绑定，Save as同步所选引用。组件UI与3项presenter定向通过，正式Qt验证来源选择、Imaging/Cooling切换、Default/文件分别编辑保存及草稿保持；截图在ignored research，未使用computer-use。
 - Pulse Config交互统一（2026-10-12，已完成待用户试用，用户界面修订）：主时间线原Config文件名按钮移除，Config开关替代其位置且不增加Mode行；Subpulse闭卡仅Expand/Edit/Ungroup三按钮竖排等宽。Value Config与Subpulse Config相邻，两页绑定区优先，Subpulse逐行显示名称到来源文件的关系并提供Browse/Open file；Edit定位对应行。文件编辑置于绑定之后，不再用主卡隐藏popup承担主要绑定流程。Value/Subpulse两页统一Pulse bindings/文件编辑分区、Config状态与New file/Open file/Save用词。3项UI和3项presenter定向用例通过；正式Qt截图与操作验证主Config行、三个按钮对齐、相邻标签、Edit定位、Browse绑定、Open file独立编辑、清空与坏引用修复、保存重开；未使用computer-use。
