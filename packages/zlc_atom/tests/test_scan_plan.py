@@ -87,6 +87,17 @@ def test_scan_accepts_the_complete_document_saved_by_the_pulse_editor(
     resolved = resource.resolve(path).value
     assert resolved.scan_bindings == slotted.scan_bindings
     assert resolved.api_bindings == slotted.api_bindings
+    from zlc_pulse import extract_subpulse, group_component, set_subpulse_source, write_subpulse
+    grouped = group_component(slotted, tuple(p.period_id for p in slotted.periods), "MOT", "mot")
+    fragment_path = tmp_path / "mot.subpulse.json"
+    write_subpulse(fragment_path, extract_subpulse(grouped, "mot"))
+    grouped = set_subpulse_source(replace(grouped, config_enabled=True), "mot", "config", str(fragment_path))
+    path.write_text(json.dumps(sequence_to_tree(grouped)), encoding="utf-8")
+    fixed = resource.resolve(path).value
+    fragment_path.unlink()
+    assert fixed.components[0].source == "default"
+    assert fixed.scan_bindings == slotted.scan_bindings
+    assert hardware_scan_ports_for(fixed)
     slotted_tree["bindings"][0]["field_ref"]["period_id"] = "missing_period"
     path.write_text(json.dumps(slotted_tree), encoding="utf-8")
     with pytest.raises(ValueError, match="missing_period"):

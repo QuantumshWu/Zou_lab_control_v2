@@ -27,6 +27,7 @@ class PulseScanView(QtWidgets.QWidget):
     run_requested = QtCore.pyqtSignal()
     save_array_requested = QtCore.pyqtSignal()
     load_array_requested = QtCore.pyqtSignal()
+    clear_array_requested = QtCore.pyqtSignal()
     progress_refresh_requested = QtCore.pyqtSignal()
 
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
@@ -104,13 +105,17 @@ class PulseScanView(QtWidgets.QWidget):
         self.scan_run_button = FluentButton("Run", color=GREEN)
         self.scan_save_array_button = FluentButton("Save Array", color=YELLOW)
         self.scan_load_array_button = FluentButton("Load Array", color=ACCENT)
+        self.scan_clear_array_button = FluentButton("Clear Array", color=GREY)
+        self.scan_clear_array_button.setToolTip("Remove the current scan table; keep the Python draft")
         self.scan_load_array_button.clicked.connect(self.load_array_requested)
+        self.scan_clear_array_button.clicked.connect(self.clear_array_requested)
         self.scan_run_button.setFixedHeight(row_height())
         self.scan_save_array_button.setFixedHeight(row_height())
         self.scan_run_button.clicked.connect(lambda: self.run_requested.emit())
         self.scan_save_array_button.clicked.connect(self.save_array_requested)
         self.scan_code.textChanged.connect(self._on_code_changed)
-        for button in (self.scan_run_button, self.scan_load_array_button, self.scan_save_array_button):
+        for button in (self.scan_run_button, self.scan_load_array_button,
+                       self.scan_save_array_button, self.scan_clear_array_button):
             button.setFixedHeight(row_height())
             button.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
             code_buttons.addWidget(button, 1)
@@ -225,7 +230,8 @@ class PulseScanView(QtWidgets.QWidget):
         enabled = not bool(busy)
         for button in (self.scan_load_program_button, self.scan_column_template_button,
                        self.scan_grid_template_button, self.scan_run_button,
-                       self.scan_save_array_button, self.scan_load_array_button):
+                       self.scan_save_array_button, self.scan_load_array_button,
+                       self.scan_clear_array_button):
             button.setEnabled(enabled)
 
 

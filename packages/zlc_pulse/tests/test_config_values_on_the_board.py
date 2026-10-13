@@ -17,6 +17,10 @@ from zlc_pulse import (
     PulseTarget,
     RemotePulseStreamer,
     compile_sequence,
+    extract_subpulse,
+    group_component,
+    set_subpulse_source,
+    write_subpulse,
 )
 from zlc_pulse.device import PulseStreamer
 from zlc_pulse.model import PulseFieldRef
@@ -48,6 +52,7 @@ def _configured() -> PulseSequence:
     )
     return PulseSequence(
         name="configured",
+        config_enabled=True,
         target=target,
         time_step_ns=20,
         periods=(
@@ -169,6 +174,67 @@ def test_fire_refreshes_file_and_keeps_the_original_defaults(streamer, tmp_path,
             device.fire(run_repeats=1)
             assert device.wait_done(1.0) is not None
             assert device.applied().source.period_by_id["p1"].duration == 40
+    finally:
+        device.close()
+
+
+def test_default_skips_external_files_and_config_refreshes_subpulse_without_overwriting_defaults(
+    streamer, tmp_path,
+):
+    device, geom = streamer
+    source = group_component(_configured(), ("p0",), "Cooling", "cooling")
+    fragment = extract_subpulse(source, "cooling")
+    path = tmp_path / "cooling.subpulse.json"
+    config = tmp_path / "values.json"
+    config.write_text(json.dumps(config_values_to_tree({"probe_time": (100, "ns")})), encoding="utf-8")
+    device.load_config_file(config)
+    config.unlink()
+    source = set_subpulse_source(source, "cooling", "config", str(path))
+    default = replace(source, config_enabled=False)
+    device.open()
+    try:
+        # Neither missing file matters while the pulse's mode is Default.
+        device.load(compile_sequence(default, geom, 50e6), source=default)
+        state = device.fire(run_repeats=1)
+        assert device.wait_done(1.0) is not None
+        assert state.source is default
+        assert state.source.period_by_id["p0"].duration == 40
+        assert state.source.period_by_id["p1"].duration == 40
+
+        config.write_text(json.dumps(config_values_to_tree({"probe_time": (100, "ns")})), encoding="utf-8")
+        write_subpulse(path, replace(fragment, periods=(replace(fragment.periods[0], duration=80),)))
+        device.load(compile_sequence(source, geom, 50e6), source=source)
+        assert device.applied().source.period_by_id["p0"].duration == 80
+        assert device.applied().source.period_by_id["p1"].duration == 100
+        write_subpulse(path, replace(fragment, periods=(replace(fragment.periods[0], duration=120),)))
+        state = device.fire(run_repeats=2)
+        assert device.wait_done(1.0) is not None
+        assert state.source.period_by_id["p0"].duration == 120
+        assert state.source.components[0].source == "default"
+        assert state.source.components[0].config_path == str(path)
+        assert state.authored_source is source
+        assert source.period_by_id["p0"].duration == 40
+        assert source.components[0].source == "config"
+        assert state.program == compile_sequence(state.source, geom, 50e6)
+        # A file may introduce a slot absent from the embedded default. The
+        # existing wire table must never be reused for a changed field/unit.
+        slotted = replace(fragment, bindings=(PulseBinding(PulseFieldRef("duration", "p0"), "ns", scan=True),))
+        write_subpulse(path, slotted)
+        device.load(compile_sequence(source, geom, 50e6), source=source, rows=((2,),))
+        resident = device.applied()
+        for changed in (
+            replace(slotted, periods=(replace(slotted.periods[0], period_id="new"),),
+                    bindings=(PulseBinding(PulseFieldRef("duration", "new"), "ns", scan=True),)),
+            replace(slotted, bindings=(replace(slotted.bindings[0], unit="us"),)),
+        ):
+            write_subpulse(path, changed)
+            with pytest.raises(ValueError, match="scan fields.*prepare.*load"):
+                device.fire(run_repeats=1)
+            assert device.applied() is resident
+        # An explicit new LOAD is the preparation boundary for the new table.
+        device.load(compile_sequence(source, geom, 50e6), source=source, rows=((2,),))
+        assert device.fire(run_repeats=1).source.scan_bindings[0].unit == "µs"
+        assert device.wait_done(1.0) is not None
     finally:
         device.close()
 

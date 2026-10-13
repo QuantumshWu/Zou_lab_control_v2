@@ -6,6 +6,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import replace
 from fractions import Fraction
 import math
+from pathlib import Path
 
 from .model import (
     BINDING_API,
@@ -22,6 +23,8 @@ from .model import (
     PulseBinding,
     PulseFieldRef,
     PulseSequence,
+    _available_id,
+    replace_component,
     align_to_grid,
 )
 
@@ -358,9 +361,13 @@ def apply_config_values(
     _sequence_of(sequence)
     if not isinstance(entries, Mapping):
         raise TypeError("config values must be a mapping")
+    if not sequence.config_enabled:
+        entries = {}
     for key in entries:
         config_parameter_key(key)
     destination = sequence if current is None else _sequence_of(current)
+    if destination.config_enabled != sequence.config_enabled:
+        destination = replace(destination, config_enabled=sequence.config_enabled)
     declared = tuple(binding for binding in destination.config_bindings if not binding.scan)
     fields = []
     applied = []
@@ -387,6 +394,80 @@ def apply_config_values(
     )
 
 
+def resolve_subpulse_sources(
+    sequence: PulseSequence, *, base_directory: str | Path | None = None,
+) -> PulseSequence:
+    """Resolve enabled file sources into a playback copy, keeping authored defaults intact.
+
+    The returned components contain their actual resolved bodies. Their source is
+    Default so passing the result through preparation again cannot reread a file;
+    config_path retains the exact file used in the execution document.
+    """
+    from .codec import read_subpulse
+
+    _sequence_of(sequence)
+    if not sequence.config_enabled:
+        return sequence
+    resolved = sequence
+    for component in sequence.components:
+        if component.source != "config":
+            continue
+        if not component.config_path:
+            raise ValueError(f"Subpulse {component.name!r} has no Config file; choose a Subpulse file")
+        path = Path(component.config_path).expanduser()
+        if not path.is_absolute():
+            path = Path(base_directory or Path.cwd()) / path
+        path = path.resolve()
+        try:
+            fragment = read_subpulse(path)
+            mappings = []
+            for existing, members, source_ids, known in (
+                (set(resolved.period_by_id), component.period_ids,
+                 tuple(period.period_id for period in fragment.periods), dict(component.period_id_map)),
+                ({bracket.bracket_id for bracket in resolved.brackets}, component.bracket_ids,
+                 tuple(bracket.bracket_id for bracket in fragment.brackets), dict(component.bracket_id_map)),
+            ):
+                used = existing - set(members)
+                mapped = {}
+                for source_id in source_ids:
+                    target_id = known.get(source_id, source_id if source_id in members else "")
+                    if target_id:
+                        if target_id in used:
+                            raise ValueError(f"Subpulse source id {source_id!r} conflicts with {target_id!r}")
+                        used.add(target_id)
+                    else:
+                        target_id = _available_id(f"{component.component_id}_{source_id}", used)
+                    mapped[source_id] = target_id
+                mappings.append(mapped)
+            candidate = replace_component(
+                resolved, component.component_id, fragment,
+                period_id_map=mappings[0], bracket_id_map=mappings[1],
+            )
+            provided = {binding.field_id: binding for binding in candidate.bindings}
+            for binding in resolved.bindings:
+                if resolved.component_for_field(binding.field_ref) != component:
+                    continue
+                if not (binding.scan or binding.source == BINDING_API):
+                    continue
+                current = provided.get(binding.field_id)
+                if (current is None or (binding.scan and not current.scan)
+                        or (binding.source == BINDING_API and current.source != BINDING_API)):
+                    raise ValueError(f"referenced file no longer provides Scan/API field {binding.field_id!r}")
+                if binding.kind == FIELD_DAC and not any(
+                    step.port == binding.field_ref.port
+                    for step in candidate.period_by_id[binding.field_ref.period_id].analog_steps
+                ):
+                    raise ValueError(f"referenced file no longer sets Scan/API field {binding.field_id!r}")
+            resolved = replace(candidate, components=tuple(
+                replace(item, source="default", config_path=str(path),
+                        period_id_map=tuple(mappings[0].items()), bracket_id_map=tuple(mappings[1].items()))
+                if item.component_id == component.component_id else item for item in candidate.components
+            ))
+        except (OSError, TypeError, ValueError, KeyError) as error:
+            raise ValueError(f"Cannot resolve Subpulse {component.name!r} from {str(path)!r}: {error}") from error
+    return resolved
+
+
 def _sequence_of(sequence: PulseSequence) -> PulseSequence:
     if not isinstance(sequence, PulseSequence):
         raise TypeError("sequence must be PulseSequence")
@@ -404,6 +485,7 @@ def apply_api_values(
 ) -> tuple[PulseSequence, tuple[str, ...], tuple[str, ...]]:
     """Apply explicit API field values; omitted inputs retain their defaults."""
 
+    sequence = resolve_subpulse_sources(sequence)
     normalized = normalize_binding_values(sequence, entries)
     fields = []
     for binding in sequence.api_bindings:
@@ -420,7 +502,7 @@ def resolve_api_parameters(
 ) -> PulseSequence:
     """Bake supplied API inputs/defaults and clear only the API source flag."""
 
-    _sequence_of(sequence)
+    sequence = resolve_subpulse_sources(sequence)
     resolved_values = authored_api_values(sequence)
     if values is not None:
         resolved_values.update(normalize_binding_values(sequence, values))
@@ -479,4 +561,5 @@ __all__ = [
     "pulse_field_value",
     "replace_pulse_field",
     "resolve_api_parameters",
+    "resolve_subpulse_sources",
 ]

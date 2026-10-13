@@ -604,6 +604,10 @@ class PulseComponent:
     name: str
     period_ids: tuple[str, ...]
     bracket_ids: tuple[str, ...] = ()
+    source: str = BINDING_DEFAULT
+    config_path: str = ""
+    period_id_map: tuple[tuple[str, str], ...] = ()
+    bracket_id_map: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "component_id", _identifier(self.component_id, "component id"))
@@ -616,6 +620,17 @@ class PulseComponent:
         if len(brackets) != len(set(brackets)):
             raise ValueError("component bracket ids must be unique")
         object.__setattr__(self, "bracket_ids", brackets)
+        if self.source not in (BINDING_DEFAULT, BINDING_CONFIG):
+            raise ValueError("Subpulse source must be default or config")
+        object.__setattr__(self, "config_path", _text(self.config_path, "Subpulse Config path", empty=True))
+        for name in ("period_id_map", "bracket_id_map"):
+            mapping = tuple(tuple(_identifier(value, "Subpulse source id") for value in pair)
+                            for pair in getattr(self, name))
+            if any(len(pair) != 2 for pair in mapping):
+                raise ValueError(f"{name} must contain source/instance id pairs")
+            if len({pair[0] for pair in mapping}) != len(mapping):
+                raise ValueError(f"{name} source ids must be unique")
+            object.__setattr__(self, name, mapping)
 
 
 @dataclass(frozen=True, init=False)
@@ -630,6 +645,7 @@ class PulseSequence:
     brackets: tuple[PulseBracket, ...]
     run_repeats: int
     components: tuple[PulseComponent, ...]
+    config_enabled: bool
     _period_by_id: Mapping[str, PulsePeriod] = field(init=False, repr=False, compare=False)
     _bracket_bounds: tuple[tuple[int, int], ...] = field(init=False, repr=False, compare=False)
 
@@ -644,11 +660,14 @@ class PulseSequence:
         brackets: tuple[PulseBracket, ...] = (),
         run_repeats: int = 0,
         components: tuple[PulseComponent, ...] = (),
+        config_enabled: bool = False,
     ) -> None:
         if target is None:
             raise TypeError("PulseSequence requires a target")
         if not isinstance(target, PulseTarget):
             raise TypeError("target must be PulseTarget")
+        if not isinstance(config_enabled, bool):
+            raise TypeError("config_enabled must be boolean")
         periods = tuple(periods)
         if not periods or any(not isinstance(period, PulsePeriod) for period in periods):
             raise ValueError("periods must contain PulsePeriod values")
@@ -808,6 +827,7 @@ class PulseSequence:
             self, "_bracket_bounds", tuple(bounds[bracket.bracket_id] for bracket in ordered)
         )
         object.__setattr__(self, "run_repeats", run_repeats)
+        object.__setattr__(self, "config_enabled", config_enabled)
         object.__setattr__(self, "components", tuple(sorted(
             component_values, key=lambda component: component_bounds[component.component_id][0],
         )))
@@ -1040,10 +1060,13 @@ def _remap_subpulse(
     subpulse: Subpulse, component_id: str, used_periods: set[str], used_brackets: set[str],
     *, retained_periods: tuple[str, ...] = (), retained_brackets: tuple[str, ...] = (),
     previous_period_id: str | None = None, next_period_id: str | None = None,
+    period_id_map: Mapping[str, str] | None = None,
+    bracket_id_map: Mapping[str, str] | None = None,
 ) -> tuple[tuple[PulsePeriod, ...], tuple[PulseBinding, ...], tuple[PulseBracket, ...]]:
     period_ids = {
         period.period_id: (
-            period.period_id if period.period_id in retained_periods
+            period_id_map[period.period_id] if period_id_map is not None
+            else period.period_id if period.period_id in retained_periods
             else _available_id(f"{component_id}_{period.period_id}", used_periods)
         ) for period in subpulse.periods
     }
@@ -1053,7 +1076,8 @@ def _remap_subpulse(
     ) for period in subpulse.periods)
     bracket_ids = {
         bracket.bracket_id: (
-            bracket.bracket_id if bracket.bracket_id in retained_brackets
+            bracket_id_map[bracket.bracket_id] if bracket_id_map is not None
+            else bracket.bracket_id if bracket.bracket_id in retained_brackets
             else _available_id(f"{component_id}_{bracket.bracket_id}", used_brackets)
         ) for bracket in subpulse.brackets
     }
@@ -1105,6 +1129,10 @@ def insert_subpulse(
     component = PulseComponent(
         component_id, name, tuple(period.period_id for period in periods),
         tuple(bracket.bracket_id for bracket in brackets),
+        period_id_map=tuple((original.period_id, remapped.period_id)
+                            for original, remapped in zip(subpulse.periods, periods, strict=True)),
+        bracket_id_map=tuple((original.bracket_id, remapped.bracket_id)
+                             for original, remapped in zip(subpulse.brackets, brackets, strict=True)),
     )
     if sequence is None:
         return PulseSequence(
@@ -1148,7 +1176,11 @@ def _parent_brackets_after_splice(
     return tuple(result)
 
 
-def replace_component(sequence: PulseSequence, component_id: str, subpulse: Subpulse) -> PulseSequence:
+def replace_component(
+    sequence: PulseSequence, component_id: str, subpulse: Subpulse, *,
+    period_id_map: Mapping[str, str] | None = None,
+    bracket_id_map: Mapping[str, str] | None = None,
+) -> PulseSequence:
     """Adopt edited contents, retaining IDs of existing member fields and parent loops."""
     component = _component(sequence, component_id)
     if not isinstance(subpulse, Subpulse):
@@ -1168,6 +1200,7 @@ def replace_component(sequence: PulseSequence, component_id: str, subpulse: Subp
         retained_brackets=tuple(item.bracket_id for item in internal),
         previous_period_id=ids[start - 1] if start else None,
         next_period_id=ids[end] if end < len(ids) else None,
+        period_id_map=period_id_map, bracket_id_map=bracket_id_map,
     )
     new_bindings = {binding.field_ref: binding for binding in bindings}
     merged_bindings = []
@@ -1184,10 +1217,26 @@ def replace_component(sequence: PulseSequence, component_id: str, subpulse: Subp
         brackets=_parent_brackets_after_splice(sequence, component, periods) + brackets,
         components=tuple(
             replace(item, period_ids=tuple(period.period_id for period in periods),
-                    bracket_ids=tuple(bracket.bracket_id for bracket in brackets))
+                    bracket_ids=tuple(bracket.bracket_id for bracket in brackets),
+                    period_id_map=tuple((source, target) for source, target in item.period_id_map
+                                        if any(period.period_id == target for period in periods)),
+                    bracket_id_map=tuple((source, target) for source, target in item.bracket_id_map
+                                         if any(bracket.bracket_id == target for bracket in brackets)))
             if item == component else item for item in sequence.components
         ),
     )
+
+
+def set_subpulse_source(
+    sequence: PulseSequence, component_id: str, source: str, path: str | None = None,
+) -> PulseSequence:
+    """Choose an instance's source without replacing its editable default body."""
+    component = _component(sequence, component_id)
+    selected = replace(component, source=source,
+                       config_path=component.config_path if path is None else str(path))
+    return replace(sequence, components=tuple(
+        selected if item == component else item for item in sequence.components
+    ))
 
 
 def remove_component(sequence: PulseSequence, component_id: str) -> PulseSequence:
@@ -1233,6 +1282,7 @@ __all__ = [
     "extract_subpulse",
     "insert_subpulse",
     "replace_component",
+    "set_subpulse_source",
     "remove_component",
     "PulsePortSpec",
     "PulseSequence",

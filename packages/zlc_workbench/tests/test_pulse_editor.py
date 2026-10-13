@@ -309,6 +309,8 @@ class _EditorView:
         "config_new_requested", "config_load_requested", "config_refresh_requested",
         "config_save_requested", "config_save_as_requested", "config_unload_requested",
         "config_entries_edited", "config_binding_committed",
+        "config_mode_committed", "refresh_effective_requested",
+        "scan_array_clear_requested",
         "component_action_requested", "component_edit_requested",
         "scan_array_load_requested", "scan_source_edited",
         "scan_repeats_committed", "scan_hold_requested", "scan_step_requested",
@@ -431,6 +433,10 @@ class _EditorView:
 
     def set_config_page(self, record) -> None:
         self.config_page = record
+
+    def set_config_mode(self, enabled, busy=False, error="") -> None:
+        self.config_mode = bool(enabled)
+        self.config_error = str(error)
 
     def confirm_config_discard(self) -> bool:
         return getattr(self, "discard_config_answer", True)
@@ -1276,6 +1282,7 @@ def test_a_pulse_can_be_saved_and_opened_again(sequence, tmp_path) -> None:
             "visible_ports",
             "scan_source",
             "scan_rows",
+            "scan_fields",
             "scan_source_dirty",
             "scan_repeats",
         )
@@ -1519,6 +1526,87 @@ def test_component_instances_and_subpulse_files_share_edits_not_ownership(sequen
             assert set(added.period_ids).issubset(enclosed) is inside
         finally:
             presenter.close()
+
+
+def test_default_config_mode_projects_file_subpulse_without_replacing_defaults(sequence, tmp_path):
+    from zlc_pulse import group_component, extract_subpulse, write_subpulse, write_config_values, PulseBinding, PulseFieldRef
+    from zlc_workbench.pulse_state import read_pulse
+
+    first, second, outside = sequence.periods[:3]
+    source = group_component(sequence, (first.period_id, second.period_id), "Imaging")
+    component, = source.components
+    source = replace(source, bindings=(PulseBinding(PulseFieldRef("duration", period_id=outside.period_id),
+                                                   outside.unit, source="config", config_key="wait"),))
+    fragment = extract_subpulse(source, component.component_id)
+    changed = replace(fragment, periods=(replace(fragment.periods[0], duration=4, unit="ms"), *fragment.periods[1:]))
+    path = tmp_path / "imaging.subpulse.json"
+    write_subpulse(path, changed)
+    values = tmp_path / "values.json"
+    write_config_values(values, {"wait": (7, "ms")})
+    view = _EditorView()
+    presenter = PulseEditorPresenter(view, source)
+    try:
+        assert not presenter.sequence.config_enabled
+        assert presenter.load_config_values(str(values))
+        view.component_action_requested.emit("source", (component.component_id, "config", str(path)))
+        authored = presenter.sequence
+        assert view.schedule_view.schedule.periods[0].duration.text == str(first.duration)
+        view.config_mode_committed.emit(True)
+        assert presenter.sequence.periods == authored.periods
+        shown = view.schedule_view.schedule
+        assert shown.components[0].config_active
+        assert shown.periods[0].duration.text == "4" and shown.periods[0].readonly
+        external = next(p for p in shown.periods if p.period_id == outside.period_id)
+        assert external.duration.config_active
+        assert float(external.duration.text) == pytest.approx(0.007)
+        view.duration_committed.emit(outside.period_id, 99, outside.unit)
+        assert presenter.sequence.period_by_id[outside.period_id] == outside
+        assert view.warnings
+        view.warnings.clear()
+        added = replace(fragment.periods[0], period_id="extra", duration=2, unit="ms", name="Extra")
+        write_subpulse(path, replace(changed, periods=(*changed.periods, added)))
+        view.refresh_effective_requested.emit()
+        assert len(view.schedule_view.schedule.periods) == len(sequence.periods) + 1
+        assert presenter.sequence.periods == authored.periods
+        assert view.schedule_view.schedule.periods[0].period_id == first.period_id
+        before_bulk = presenter.sequence
+        presenter.clear_port(next(p.key for p in sequence.target.ports if p.kind == "digital"))
+        assert presenter.sequence is before_bulk and view.warnings
+        view.warnings.clear()
+        # A file may introduce Scan fields absent from the embedded default.
+        scanned = replace(changed, bindings=(PulseBinding(PulseFieldRef("duration", period_id=first.period_id),
+                                                         "ms", scan=True),))
+        write_subpulse(path, scanned)
+        view.refresh_effective_requested.emit()
+        _run_scan(view, "import numpy as np\nscan_table = np.array([[1.0], [2.0]])\n")
+        assert presenter.state.scan_fields == ((f"duration:{first.period_id}", "ms"),)
+        assert presenter._execution_request()[1]
+        write_subpulse(path, replace(scanned, bindings=(replace(scanned.bindings[0], unit="us"),)))
+        view.refresh_effective_requested.emit()
+        with pytest.raises(ValueError, match="fields or units changed"):
+            presenter._execution_request()
+        assert "fields or units changed" in view.scan_view.page.table_text
+        code = presenter.state.scan_source
+        view.scan_array_clear_requested.emit()
+        assert presenter.state.scan_rows == () and presenter.state.scan_fields == ()
+        assert presenter.state.scan_source == code and presenter.state.scan_source_dirty
+        view.config_mode_committed.emit(False)
+        assert not any(c.config_active for c in view.schedule_view.schedule.components)
+        assert len(view.schedule_view.schedule.periods) == len(sequence.periods)
+        assert not any(p.duration.config_active for p in view.schedule_view.schedule.periods)
+        path.unlink()
+        presenter.refresh()  # Default must not try to read the missing file.
+        assert not view.config_error
+        view.config_mode_committed.emit(True)
+        assert view.config_error and not any(c.config_active for c in view.schedule_view.schedule.components)
+        view.config_mode_committed.emit(False)
+        assert not view.config_error
+        saved = tmp_path / "default.pulse.json"
+        presenter.save_pulse(str(saved), present=False)
+        assert read_pulse(saved).sequence == presenter.sequence
+        assert not read_pulse(saved).sequence.config_enabled
+    finally:
+        presenter.close()
 
 
 def test_save_updates_neither_path_nor_baseline_until_the_write_succeeds(
@@ -1919,13 +2007,15 @@ def test_pulse_window_waits_for_asynchronous_retirement(
 
         board.refusing = False
         window.close()
-        _process_qt_until(application, lambda: not window.is_visible())
+        # SAFE is done; the shipped close also retires its cold render child
+        # with a 30 s timeout. The Qt response was checked separately above.
+        _process_qt_until(application, lambda: not window.is_visible(), 30.0)
     finally:
         board.refusing = False
         release.set()
         if window.is_visible():
             window.close()
-            _process_qt_until(application, lambda: not window.is_visible())
+            _process_qt_until(application, lambda: not window.is_visible(), 30.0)
 
 
 def test_formal_config_refresh_keeps_dac_codes_readable_at_small_scale(sequence, tmp_path, monkeypatch) -> None:
@@ -1976,7 +2066,7 @@ def test_formal_config_refresh_keeps_dac_codes_readable_at_small_scale(sequence,
         window._view.tabs.setCurrentWidget(window._view.config_view)
         window.config_load_requested.emit()
         _process_qt_until(app, lambda: not window.presenter._device_busy)
-        window._view.tabs.setCurrentWidget(window._view.edit_page)
+        window._view.tabs.setCurrentWidget(window._view.schedule_view)
         QtTest.QTest.qWait(20)
         assert edit.text() == "-512" and not edit.property("numericError")
         assert window.presenter.sequence == accepted
@@ -1985,7 +2075,7 @@ def test_formal_config_refresh_keeps_dac_codes_readable_at_small_scale(sequence,
         if window is not None:
             monkeypatch.setattr(window, "confirm_pulse_discard", lambda: True)
             window.close()
-            _process_qt_until(app, lambda: not window.is_visible(), 5)
+            _process_qt_until(app, lambda: not window.is_visible(), 30.0)
         set_fluent_scale(previous_scale)
 
 
@@ -2036,7 +2126,7 @@ def test_formal_stop_bypasses_blocked_preview_and_device_command(
     monkeypatch.setattr(window, "set_summary", summaries.append)
     try:
         window.page_changed.emit("Preview")
-        _process_qt_until(application, preview_started.is_set)
+        _process_qt_until(application, preview_started.is_set, 30.0)
 
         heartbeat: list[bool] = []
         QtCore.QTimer.singleShot(0, lambda: heartbeat.append(True))
@@ -2072,7 +2162,7 @@ def test_formal_stop_bypasses_blocked_preview_and_device_command(
         release_preview.set()
         if window.is_visible():
             window.close()
-            _process_qt_until(application, lambda: not window.is_visible(), 4.0)
+            _process_qt_until(application, lambda: not window.is_visible(), 30.0)
 
 
 def test_formal_pulse_preview_build_update_save_and_close_never_wait_on_qt(
@@ -2118,14 +2208,12 @@ def test_formal_pulse_preview_build_update_save_and_close_never_wait_on_qt(
         owner_turn: list[bool] = []
         QtCore.QTimer.singleShot(0, lambda: owner_turn.append(True))
         window.page_changed.emit("Preview")
-        _process_qt_until(
-            application,
-            lambda: build_started.is_set() and bool(owner_turn),
-            0.2,
-        )
+        # Qt responsiveness is independent of the real render child's boot.
+        _process_qt_until(application, lambda: bool(owner_turn), 0.2)
+        _process_qt_until(application, build_started.is_set, 30.0)
         release_build.set()
         _process_qt_until(
-            application, lambda: window.presenter._preview_host is not None, 3.0
+            application, lambda: window.presenter._preview_host is not None, 30.0
         )
         host = window.presenter._preview_host
 
@@ -2176,7 +2264,7 @@ def test_formal_pulse_preview_build_update_save_and_close_never_wait_on_qt(
         assert window.is_visible(), "the window closed before Preview save retirement"
 
         save_release.set()
-        _process_qt_until(application, lambda: not window.is_visible(), 4.0)
+        _process_qt_until(application, lambda: not window.is_visible(), 30.0)
         assert tuple(tmp_path.glob("*.png"))
     finally:
         release_build.set()
@@ -2185,7 +2273,7 @@ def test_formal_pulse_preview_build_update_save_and_close_never_wait_on_qt(
             thread.join(2.0)
         if window.is_visible():
             window.close()
-            _process_qt_until(application, lambda: not window.is_visible(), 4.0)
+            _process_qt_until(application, lambda: not window.is_visible(), 30.0)
 
 
 def test_named_pulse_loader_resolves_the_json_product_document(tmp_path) -> None:
@@ -2215,6 +2303,27 @@ def test_named_pulse_loader_resolves_the_json_product_document(tmp_path) -> None
     named, named_path = load_state(tmp_path, "ordinary.json")
     assert named == loaded
     assert Path(named_path) == target
+    from zlc_pulse import PulseBinding, PulseFieldRef, group_component, set_subpulse_source
+    from zlc_workbench.pulse_state import state_from_tree
+
+    first = loaded.sequence.periods[0]
+    binding = PulseBinding(PulseFieldRef("duration", first.period_id), first.unit, scan=True)
+    sequence = replace(loaded.sequence, bindings=(binding,))
+    static = PulseEditorState(sequence=sequence, scan_rows=((first.duration,),))
+    assert static.scan_fields == ((binding.field_id, first.unit),)
+    old_tree = state_to_tree(static)
+    del old_tree["editor"]["scan_fields"]
+    assert state_from_tree(old_tree).scan_fields == static.scan_fields
+    referenced = set_subpulse_source(group_component(sequence, (first.period_id,), "Readout", "readout"),
+                                    "readout", "config", str(tmp_path / "missing.subpulse.json"))
+    active = replace(referenced, config_enabled=True)
+    incomplete = PulseEditorState(sequence=active, scan_rows=((first.duration, 99),))
+    assert incomplete.scan_fields == ()
+    target.write_text(json.dumps(state_to_tree(incomplete)), encoding="utf-8")
+    recovered, _path = load_state(tmp_path, "ordinary")
+    assert recovered == incomplete, "opening must preserve an incomplete table without reading external files"
+    mapped = replace(incomplete, scan_fields=((binding.field_id, first.unit),))
+    assert state_from_tree(state_to_tree(mapped)) == mapped
 
 
 @pytest.mark.parametrize(
@@ -3292,9 +3401,10 @@ def test_a_bracket_repeats_at_least_the_domains_minimum(sequence, tmp_path) -> N
             presenter.set_bracket("b", start, end, 5)  # Count editing cannot delete an edge-empty span.
             current = presenter.sequence
             assert current.bracket_bounds == ((gap, gap),) and current.brackets[0].count == 5
-            with pytest.raises(ValueError, match="bracket loops at least"):
-                presenter.set_bracket("b", start, end, 0)
+            presenter.set_bracket("b", start, end, 0)
+            assert "bracket loops at least" in view.warnings[-1]
             assert presenter.sequence is current
+            view.warnings.clear()
             order = view.schedule_view.schedule.item_order
             assert order.index(("bracket", "b:end")) == order.index(("bracket", "b:start")) + 1
             assert view.warnings == [], "ordinary empty-bracket editing raised a modal warning"
@@ -3596,6 +3706,50 @@ def test_sync_brings_the_board_s_pulse_back_into_the_editor(sequence) -> None:
             "the editor shows what the board is holding, not what it had drifted to"
         )
         assert any("synced from the board" in text for text in view.done)
+    finally:
+        presenter.close()
+
+
+def test_sync_keeps_subpulse_reference_and_defaults_after_the_file_changes(sequence, tmp_path) -> None:
+    from zlc_pulse import extract_subpulse, group_component, set_subpulse_source, write_subpulse
+
+    first, second = sequence.periods[:2]
+    authored = group_component(sequence, (first.period_id, second.period_id), "Imaging", "imaging")
+    fragment = extract_subpulse(authored, "imaging")
+    path = tmp_path / "imaging.subpulse.json"
+    write_subpulse(path, replace(fragment, periods=(
+        replace(first, duration=4, unit="ms"), second,
+    )))
+    authored = set_subpulse_source(replace(authored, config_enabled=True), "imaging", "config", str(path))
+    view = _EditorView()
+    board = _Sequencer()
+    presenter = PulseEditorPresenter(view, authored, dial=lambda _m, _e: board)
+    try:
+        presenter.connect_to("virtual", "")
+        assert presenter.fire()
+        original = presenter.sequence
+        assert board.applied().source.period_by_id[first.period_id].duration == 4
+        # Even an unreadable newer file cannot participate in this comparison.
+        path.write_text("{", encoding="utf-8")
+        view.discard_pulse_answer = False
+        assert presenter.sync_from_sequencer()
+        assert presenter.sequence is original
+        assert presenter.sequence.period_by_id[first.period_id] == first
+        assert presenter.sequence.components[0].source == "config"
+        assert presenter.sequence.components[0].config_path == str(path)
+
+        write_subpulse(path, replace(fragment, periods=(
+            replace(first, duration=8, unit="ms"), second,
+            replace(first, period_id="extra", name="Extra"),
+        )))
+        assert presenter.sync_from_sequencer()
+        assert presenter.sequence is original
+        # A genuine edit outside the file-backed body still takes the usual
+        # discard decision; sharing a Subpulse path is not whole-Pulse identity.
+        presenter.insert_period(None)
+        edited = presenter.sequence
+        assert presenter.sync_from_sequencer() is False
+        assert presenter.sequence is edited
     finally:
         presenter.close()
 
@@ -4568,6 +4722,7 @@ def _bind_one_config_parameter(presenter, sequence):
     presenter.view.binding_committed.emit("duration", period, None, False, "config")
     (binding,) = presenter.sequence.config_bindings
     presenter.set_config_binding(binding.field_id, "shared_time")
+    presenter.set_config_mode(True)
     return presenter.sequence.config_bindings[0]
 
 def test_config_execution_keeps_the_authored_pulse_and_its_bindings(
@@ -4670,6 +4825,8 @@ def test_control_inspects_edits_and_compiles_loaded_config_without_firing(sequen
         config_path = str(tmp_path / "control-config.json")
         assert presenter.control_action("config.save", {"path": config_path})["accepted"]
         worker.deliver_until(lambda: not presenter.control_state()["pending"])
+        assert presenter.control_action("config.mode", {"enabled": True})["accepted"]
+        worker.deliver_until(lambda: not presenter.control_state()["pending"])
         assert presenter.control_action("config.edit", {
             "rows": [["exposure_window", default * 3, period.unit]],
         })["accepted"]
@@ -4765,7 +4922,9 @@ def test_editor_config_draft_is_independent_and_only_saved_values_execute(
     with pytest.raises(ValueError, match="unknown"):
         config_values_from_tree(tree)
     # Save consumes human-edited Config rows, not changed Pulse defaults.
+    presenter.set_config_mode(False)
     presenter.set_duration(period, value + 40, parameter.unit)
+    presenter.set_config_mode(True)
     presenter.edit_config_entries((("shared_time", str(value + 60), parameter.unit),))
     presenter.view.discard_config_answer = False
     assert not presenter.refresh_config_values()

@@ -9,6 +9,7 @@ from pathlib import Path
 from zlc_pulse import (
     PulseSequence,
     resolve_api_parameters,
+    resolve_subpulse_sources,
 )
 from zlc_pulse.codec import read_pulse_document
 from zlc_pulse.device import BoardDescription
@@ -31,7 +32,7 @@ def load_calibration_pulse_template(path: str | Path) -> PulseSequence:
     if source.suffix.lower() != ".json" or not source.is_file():
         raise ValueError("calibration pulse template must be an existing JSON file")
     sequence, _editor = read_pulse_document(source)
-    return sequence
+    return resolve_subpulse_sources(sequence, base_directory=source.parent)
 
 
 def arm_sequencer(sequencer: object, pulse: ResolvedPulse) -> None:
@@ -78,6 +79,7 @@ def resolve_pulse(
     if not isinstance(sequence, PulseSequence):
         raise TypeError("calibration pulse must be PulseSequence")
     source = Path(path).expanduser().resolve()
+    sequence = resolve_subpulse_sources(sequence, base_directory=source.parent)
     resolved = resolve_api_parameters(replace(
         sequence,
         bindings=tuple(replace(binding, scan=False) for binding in sequence.bindings),

@@ -11,10 +11,8 @@ from typing import Any
 from zlc_durable import write_readable_json
 from zlc_pulse import (
     PulseSequence,
-    scan_columns_for,
     sequence_from_tree,
     sequence_to_tree,
-    validate_scan_table,
 )
 from zlc_pulse.codec import (
     PULSE_EDITOR_DEFAULTS,
@@ -35,6 +33,7 @@ class PulseEditorState:
     visible_ports: frozenset[str] | None = PULSE_EDITOR_DEFAULTS["visible_ports"]
     scan_source: str = PULSE_EDITOR_DEFAULTS["scan_source"]
     scan_rows: tuple[tuple[float, ...], ...] = PULSE_EDITOR_DEFAULTS["scan_rows"]
+    scan_fields: tuple[tuple[str, str], ...] = PULSE_EDITOR_DEFAULTS["scan_fields"]
     scan_source_dirty: bool = PULSE_EDITOR_DEFAULTS["scan_source_dirty"]
     scan_repeats: int = PULSE_EDITOR_DEFAULTS["scan_repeats"]
 
@@ -47,6 +46,7 @@ class PulseEditorState:
             visible_ports=self.visible_ports,
             scan_source=self.scan_source,
             scan_rows=self.scan_rows,
+            scan_fields=self.scan_fields,
             scan_source_dirty=self.scan_source_dirty,
             scan_repeats=self.scan_repeats,
         )
@@ -69,6 +69,12 @@ class PulseEditorState:
             "scan_rows",
             tuple(tuple(map(float, row)) for row in self.scan_rows),
         )
+        fields = tuple(tuple(pair) for pair in self.scan_fields)
+        if self.scan_rows and not fields and self.sequence is not None and not any(
+            component.source == "config" for component in self.sequence.components
+        ):
+            fields = tuple((binding.field_id, binding.unit) for binding in self.sequence.scan_bindings)
+        object.__setattr__(self, "scan_fields", fields)
 
 
 def state_from_tree(tree: Mapping[str, Any]) -> PulseEditorState:
@@ -96,11 +102,10 @@ def editor_state_from(
         visible_ports=None if visible is None else frozenset(visible),
         scan_source=fields["scan_source"],
         scan_rows=tuple(tuple(row) for row in fields["scan_rows"]),
+        scan_fields=tuple(tuple(pair) for pair in fields["scan_fields"]),
         scan_source_dirty=fields["scan_source_dirty"],
         scan_repeats=fields["scan_repeats"],
     )
-    if candidate.scan_rows:
-        validate_scan_table(candidate.scan_rows, scan_columns_for(sequence))
     return candidate
 
 
@@ -124,6 +129,7 @@ def state_to_tree(state: PulseEditorState) -> dict[str, Any]:
         ),
         "scan_source": state.scan_source,
         "scan_rows": [list(row) for row in state.scan_rows],
+        "scan_fields": [list(pair) for pair in state.scan_fields],
         "scan_source_dirty": state.scan_source_dirty,
         "scan_repeats": state.scan_repeats,
     }

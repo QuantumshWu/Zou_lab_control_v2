@@ -146,12 +146,14 @@ class FluentScanLineEdit(FluentLineEdit):
     def _project_popup(self, *_args) -> None:
         if self._popup is None or self._field_state is None:
             return
-        _editable, scan, source, can_scan, effective, source_text, config_key, can_api = self._field_state
+        (_editable, scan, source, can_scan, effective, source_text, config_key, can_api,
+         config_active, config_enabled, default_text, binding_editable) = self._field_state
         with signals_blocked(self.scan_toggle, self.source_switch):
             self.scan_toggle.setChecked(scan)
-            self.scan_toggle.setEnabled(can_scan)
+            self.scan_toggle.setEnabled(can_scan and binding_editable)
             self.source_switch.setState(("default", "api", "config").index(source))
             self.source_switch.set_position_offered(1, can_api)
+            self.source_switch.setEnabled(binding_editable)
         named = source == "config"
         combo = self.config_name
         draft = combo.currentText() if named and combo.lineEdit().hasFocus() and combo.lineEdit().isModified() else None
@@ -162,7 +164,7 @@ class FluentScanLineEdit(FluentLineEdit):
             combo.setCurrentIndex(combo.findText(config_key) if named else -1)
             combo.setEditText((config_key if draft is None else draft) if named else "")
             combo.lineEdit().setModified(draft is not None)
-            combo.setEnabled(named)
+            combo.setEnabled(named and binding_editable)
         self.config_name.setToolTip(config_key if named else "")
         if not source_text:
             if named:
@@ -175,10 +177,14 @@ class FluentScanLineEdit(FluentLineEdit):
                 source_text = "An API caller may override this field; otherwise its Pulse default is used."
             else:
                 source_text = "Using the Pulse default."
-        for widget, value in ((self.default_value, self.text()),
-                              (self.effective_value, effective or f"{self.text()} · default")):
+        default = default_text or self.text()
+        for widget, value in ((self.default_value, default),
+                              (self.effective_value, (effective or self.text()) if config_active else
+                               effective if source != "config" and effective else f"{default} · default")):
             widget.setText(widget.fontMetrics().elidedText(value, QtCore.Qt.ElideMiddle, widget.width()))
             widget.setToolTip(value)
+        if named and not config_enabled:
+            source_text = "Default mode; the saved Config reference is not applied."
         self.source_note.setText(source_text)
         self.source_note.setToolTip(source_text)
 
@@ -203,11 +209,13 @@ class FluentScanLineEdit(FluentLineEdit):
 
     def set_field_state(self, *, editable: bool, scan: bool = False, source: str = "default",
                         can_scan: bool = True, effective_text: str = "", source_text: str = "",
-                        config_key: str = "", can_api: bool = True) -> None:
+                        config_key: str = "", can_api: bool = True,
+                        config_active: bool = False, config_enabled: bool = False,
+                        default_text: str = "", binding_editable: bool = True) -> None:
         if source not in ("default", "api", "config"):
             raise ValueError("source must be default, api or config")
         state = (bool(editable), bool(scan), source, bool(can_scan), effective_text, source_text, config_key,
-                 bool(can_api))
+                 bool(can_api), bool(config_active), bool(config_enabled), default_text, bool(binding_editable))
         if state == self._field_state:
             self._project_popup()
             return
@@ -217,15 +225,20 @@ class FluentScanLineEdit(FluentLineEdit):
         summary = " + ".join((["Scan"] if scan else []) + ([source.upper()] if source != "default" else [])) or "Default"
         self.binding_button.setToolTip(f"{self._tooltip}\n{summary}\n{source_text}".strip())
         self.binding_button.update()
-        self.setReadOnly(not editable)
-        self.setEnabled(editable)
-        if not editable:
+        self.setReadOnly(not editable or config_active)
+        self.setEnabled(editable or config_active)
+        self.binding_button.setEnabled(binding_editable and (editable or config_active))
+        if not self.binding_button.isEnabled() and self._popup is not None:
+            self._popup.hide()
+        if not editable and not config_active:
             if self._popup is not None:
                 self._popup.hide()
             style = self._base_style
-        elif source == "config":
+        elif config_active:
             style = _bound_style(CONFIG_GREEN_DARK, CONFIG_GREEN,
-                                 background=CONFIG_GREEN_TINT if effective_text else SURFACE)
+                                 background=CONFIG_GREEN_TINT)
+        elif source == "config":
+            style = _bound_style(CONFIG_GREEN_DARK, CONFIG_GREEN)
         elif source == "api":
             style = _bound_style(SURFACE if effective_text else API_VIOLET_DARK, API_VIOLET,
                                  background=API_VIOLET_DARK if effective_text else SURFACE)

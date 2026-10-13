@@ -19,7 +19,7 @@ from collections.abc import Sequence
 from fractions import Fraction
 from dataclasses import dataclass, replace
 
-from .binding import field_label, pulse_field_value, replace_pulse_field
+from .binding import field_label, pulse_field_value, replace_pulse_field, resolve_subpulse_sources
 from .model import (
     FIELD_BRACKET_COUNT,
     FIELD_DAC,
@@ -170,6 +170,7 @@ def scan_columns_for(
 ) -> tuple[ScanColumnSpec, ...]:
     """The hardware-scan columns declared by this sequence, in slot order."""
 
+    sequence = resolve_subpulse_sources(sequence)
     geometry = StreamerParams() if params is None else params
     return tuple(
         _column_for_field(
@@ -189,6 +190,7 @@ def api_parameter_columns_for(
 ) -> tuple[ScanColumnSpec, ...]:
     """The API-value columns declared by this sequence, in parameter order."""
 
+    sequence = resolve_subpulse_sources(sequence)
     geometry = StreamerParams()
     return tuple(
         _column_for_field(
@@ -233,6 +235,7 @@ def resolve_scan_point(
 
     if not isinstance(sequence, PulseSequence):
         raise TypeError("sequence must be PulseSequence")
+    sequence = resolve_subpulse_sources(sequence)
     row = (
         tuple(
             pulse_field_value(

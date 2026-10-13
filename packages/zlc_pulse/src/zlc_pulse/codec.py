@@ -14,6 +14,7 @@ devices and editors do not maintain alternative readers or writers.
 from __future__ import annotations
 
 from collections.abc import Collection, Mapping, Sequence
+from dataclasses import replace
 import math
 import os
 from pathlib import Path
@@ -62,6 +63,7 @@ PULSE_EDITOR_DEFAULTS: Mapping[str, Any] = MappingProxyType({
     "visible_ports": None,
     "scan_source": "",
     "scan_rows": (),
+    "scan_fields": (),
     "scan_source_dirty": False,
     "scan_repeats": 0,
 })
@@ -110,6 +112,7 @@ def check_pulse_editor_fields(
     scan_rows: object,
     scan_source_dirty: object,
     scan_repeats: object,
+    scan_fields: object = (),
 ) -> None:
     """The types and bounds of one editor section's fields, or the refusal.
 
@@ -137,6 +140,11 @@ def check_pulse_editor_fields(
             or any(isinstance(value, bool) or not isinstance(value, Real) for value in row)
         ):
             raise TypeError("each scan_rows row must be a sequence of numbers")
+    if (isinstance(scan_fields, (str, bytes, Mapping)) or not isinstance(scan_fields, Sequence)
+            or any(isinstance(pair, (str, bytes, Mapping)) or not isinstance(pair, Sequence)
+                   or len(pair) != 2 or any(not isinstance(value, str) or not value for value in pair)
+                   for pair in scan_fields)):
+        raise TypeError("scan_fields must contain field id/unit pairs")
     if not isinstance(scan_source_dirty, bool):
         raise TypeError("scan_source_dirty must be a boolean")
     if isinstance(scan_repeats, bool) or not isinstance(scan_repeats, int):
@@ -162,7 +170,13 @@ def read_pulse_document(
     sequence_tree, editor = split_pulse_document_tree(
         parse_pulse_tree_json(source.read_text(encoding="utf-8"))
     )
-    return sequence_from_tree(sequence_tree), editor
+    sequence = sequence_from_tree(sequence_tree)
+    sequence = replace(sequence, components=tuple(
+        replace(component, config_path=str((source.parent / component.config_path).resolve()))
+        if component.config_path and not Path(component.config_path).is_absolute() else component
+        for component in sequence.components
+    ))
+    return sequence, editor
 
 
 def _object(
@@ -260,11 +274,15 @@ def sequence_to_tree(sequence: PulseSequence) -> dict[str, Any]:
             for bracket in sequence.brackets
         ],
         "run_repeats": sequence.run_repeats,
+        "config_enabled": sequence.config_enabled,
     }
     if sequence.components:
         tree["components"] = [
             {"component_id": component.component_id, "name": component.name,
-             "period_ids": list(component.period_ids), "bracket_ids": list(component.bracket_ids)}
+             "period_ids": list(component.period_ids), "bracket_ids": list(component.bracket_ids),
+             "source": component.source, "config_path": component.config_path,
+             "period_id_map": [list(pair) for pair in component.period_id_map],
+             "bracket_id_map": [list(pair) for pair in component.bracket_id_map]}
             for component in sequence.components
         ]
     return tree
@@ -291,7 +309,7 @@ def sequence_from_tree(tree: Mapping[str, Any]) -> PulseSequence:
             "run_repeats",
         ),
         "pulse",
-        optional=("components",),
+        optional=("components", "config_enabled"),
     )
     declared = tree["format"]
     if not isinstance(declared, str):
@@ -421,14 +439,22 @@ def sequence_from_tree(tree: Mapping[str, Any]) -> PulseSequence:
         delays=delays,
         brackets=brackets,
         run_repeats=tree["run_repeats"],
+        config_enabled=tree.get("config_enabled", any(binding.source == "config" for binding in bindings)),
         components=tuple(
             PulseComponent(
                 component_id=component["component_id"], name=component["name"],
                 period_ids=tuple(_array(component["period_ids"], "component period_ids")),
                 bracket_ids=tuple(_array(component["bracket_ids"], "component bracket_ids")),
+                source=component.get("source", "default"),
+                config_path=component.get("config_path", ""),
+                period_id_map=tuple(tuple(_array(pair, "Subpulse period id pair")) for pair in
+                                    _array(component.get("period_id_map", []), "Subpulse period id map")),
+                bracket_id_map=tuple(tuple(_array(pair, "Subpulse bracket id pair")) for pair in
+                                     _array(component.get("bracket_id_map", []), "Subpulse bracket id map")),
             )
             for component in (
-                _object(item, ("component_id", "name", "period_ids", "bracket_ids"), "pulse component")
+                _object(item, ("component_id", "name", "period_ids", "bracket_ids"), "pulse component",
+                        optional=("source", "config_path", "period_id_map", "bracket_id_map"))
                 for item in _array(tree.get("components", []), "pulse components")
             )
         ),
@@ -445,6 +471,7 @@ def subpulse_to_tree(subpulse: Subpulse) -> dict[str, Any]:
     tree["format"] = SUBPULSE_TREE_FORMAT
     del tree["delays"]
     del tree["run_repeats"]
+    del tree["config_enabled"]
     return tree
 
 

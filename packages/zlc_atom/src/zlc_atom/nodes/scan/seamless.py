@@ -27,6 +27,7 @@ from zlc_pulse import (
     PulseSequence,
     prepare_scan_application,
     resolve_api_parameters,
+    resolve_subpulse_sources,
     scan_columns_for,
 )
 from zlc_atom.devices.sequencer import sequencer_archive_snapshot
@@ -86,7 +87,7 @@ class SeamlessScanMeasurement:
         if self.acquisition_logic and not callable(restart_logic):
             raise ValueError("the selected Acquisition logic needs the bench's Logic restart capability")
         self._restart_logic = restart_logic
-        self.sequence = sequence
+        self.sequence = resolve_subpulse_sources(sequence, base_directory=Path(pulse_path).parent)
         #: The file the operator chose; the pulse is named by it wherever a
         #: record names the pulse.  A document's own name is whatever it was
         #: called when it was first drawn -- "untitled", for most.

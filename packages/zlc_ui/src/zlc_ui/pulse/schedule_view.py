@@ -16,7 +16,8 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 from zlc_ui.form import FormChoice, being_edited
 from zlc_ui.fluent import (
     retire_widget,
-    ACCENT, BG, GREEN, GREY, ORANGE, RED, TEXT, YELLOW, FluentButton, FluentCheckBox,
+    ACCENT, BG, GREEN, GREY, ORANGE, RED, TEXT, YELLOW, CONFIG_GREEN, CONFIG_GREEN_DARK,
+    CONFIG_GREEN_TINT, FluentButton, FluentCheckBox, FluentSwitch,
     FluentComboBox, FluentFrame, FluentGroupBox, fluent_count_box,
     FluentLabel, FluentLineEdit, FluentScrollArea, LinkedScrollPanes,
     ElidedLabel, FluentPopup, FluentSettingsPopupAnchor,
@@ -47,11 +48,12 @@ from .models import (
 
 #: The address the pulse server prints for a client on the same machine.  One
 #: constant so the seeded field, the tooltip and any host default agree.
-from .scan_line_edit import FluentScanLineEdit
+from .scan_line_edit import FluentScanLineEdit, _BindingButton
 
 
 def _apply_field(widget: FluentScanLineEdit, field: FieldVM) -> None:
     with signals_blocked(widget):
+        widget.setReadOnly(not field.editable or field.config_active)
         widget.setProperty("pulse_field_id", field.field_id)
         widget.set_config_names(field.config_names)
         if field.validator_kind in (VALIDATOR_INT, VALIDATOR_FLOAT):
@@ -68,7 +70,9 @@ def _apply_field(widget: FluentScanLineEdit, field: FieldVM) -> None:
         widget.set_field_state(editable=field.editable, scan=field.scan, source=field.source,
                                can_scan=field.can_scan, effective_text=field.effective_text,
                                source_text=field.source_text, config_key=field.config_key,
-                               can_api=field.can_api)
+                               can_api=field.can_api, config_active=field.config_active,
+                               config_enabled=field.config_enabled, default_text=field.default_text,
+                               binding_editable=field.binding_editable)
 
 
 def _place_rows_in_order(layout: QtWidgets.QVBoxLayout, holders) -> None:
@@ -220,9 +224,22 @@ class PeriodCard(FluentGroupBox):
                 self.unit_combo.addItems([str(value) for value in choices])
             self.unit_combo.setCurrentText(period.unit)
         _apply_field(self.duration_edit, period.duration)
+        self.unit_combo.setEnabled(not period.readonly and not period.duration.config_active)
         self.name_edit.setText(period.name)
+        self.name_edit.setReadOnly(period.readonly)
         self._analog_mode_choices = tuple(analog_mode_choices)
         self._reconcile_ports(tuple(ports), period)
+        for check in self.checks.values():
+            check.setEnabled(not period.readonly)
+        for key, combo in self.bus_mode_combos.items():
+            field = next((field for port, _mode, field in period.analog if port == key), None)
+            combo.setEnabled(self.kind != PERIOD_KIND_SPACER and not period.readonly
+                             and not (field and field.config_active))
+        if period.readonly:
+            for edit in (self.duration_edit, *self.bus_value_edits.values()):
+                edit.setReadOnly(True)
+                edit.binding_button.setEnabled(False)
+        self.setProperty("readonly_content", period.readonly)
 
     def _set_analog_mode(self, combo: FluentComboBox, mode: str) -> None:
         with signals_blocked(combo):
@@ -361,6 +378,8 @@ class PeriodCard(FluentGroupBox):
         self._ports = {port.key: port for port in ports}
 
     def _commit_name(self) -> None:
+        if self._period.readonly:
+            return
         value = self.name_edit.text()
         if value == self._period.name:
             return
@@ -388,6 +407,8 @@ class PeriodCard(FluentGroupBox):
         combo = self.bus_mode_combos.get(port)
         edit = self.bus_value_edits.get(port)
         if combo is None or edit is None:
+            return
+        if not combo.isEnabled() or edit.isReadOnly():
             return
         if edit.property("numericError"):
             self.feedback_requested.emit(str(edit.property("numericError")))
@@ -577,6 +598,16 @@ class ChannelPanel(FluentGroupBox):
         self.config_status_button.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Fixed)
         self.config_status_button.clicked.connect(self.config_requested)
         add_labeled_widget(top_layout, "Config:", self.config_status_button)
+        mode_row = QtWidgets.QWidget()
+        mode_layout = QtWidgets.QHBoxLayout(mode_row)
+        mode_layout.setContentsMargins(0, 0, 0, 0)
+        mode_layout.setSpacing(px(4))
+        self.config_mode = FluentSwitch("Default")
+        self.config_refresh_button = FluentButton("Refresh", color=GREY)
+        self.config_refresh_button.setEnabled(False)
+        mode_layout.addWidget(self.config_mode)
+        mode_layout.addWidget(self.config_refresh_button)
+        add_labeled_widget(top_layout, "Mode:", mode_row)
         top_layout.addStretch(1)
         self._layout.addWidget(top)
         self._rows: dict[
@@ -656,6 +687,7 @@ class ChannelPanel(FluentGroupBox):
                 combo.clear()
                 combo.addItems(list(row.units) or [row.unit])
                 combo.setCurrentText(row.unit)
+                combo.setEnabled(not row.value.config_active and row.value.editable)
             self._rows[row.port_key] = current
         for key, (edit, _combo, _fill, _clear) in existing.items():
             holder = edit.parentWidget()
@@ -673,6 +705,8 @@ class ChannelPanel(FluentGroupBox):
             widget.setText(str(label))
 
     def _emit_delay(self, key: str, field: FluentScanLineEdit, units: FluentComboBox) -> None:
+        if field.isReadOnly():
+            return
         if field.property("numericError"):
             self.feedback_requested.emit(str(field.property("numericError")))
             return
@@ -798,6 +832,8 @@ class BracketPost(FluentGroupBox):
         self.setFixedWidth(width + 2 * px(7))
 
     def _commit_count(self) -> None:
+        if self.count_edit.isReadOnly():
+            return
         error = self.count_edit.property("numericError")
         if error:
             self.feedback_requested.emit(str(error))
@@ -872,7 +908,7 @@ class ComponentCard(FluentGroupBox):
 
     def __init__(self, component: ComponentVM, parent=None, *, mode: str = "closed",
                  card_width: int | None = None) -> None:
-        super().__init__("Component" if mode == "closed" else "Start" if mode == "start" else "End", parent, title_color=ACCENT)
+        super().__init__("Subpulse" if mode == "closed" else "Start" if mode == "start" else "End", parent, title_color=ACCENT)
         self.component_id = component.component_id
         self.mode = mode
         self.key = ("component" if mode == "closed" else f"component-{mode}", component.component_id)
@@ -899,7 +935,18 @@ class ComponentCard(FluentGroupBox):
         for label in (self.duration_label, self.total_label):
             label.setAlignment(QtCore.Qt.AlignCenter)
             label.setFixedHeight(row_height())
-            top_layout.addWidget(label)
+        top_layout.addWidget(self.duration_label)
+        value_row = QtWidgets.QWidget()
+        value_row.setFixedHeight(row_height())
+        value_layout = QtWidgets.QHBoxLayout(value_row)
+        value_layout.setContentsMargins(0, 0, 0, 0)
+        value_layout.setSpacing(0)
+        self.source_button = _BindingButton()
+        self.source_button.clicked.connect(self._toggle_source)
+        value_layout.addSpacing(self.source_button.width())
+        value_layout.addWidget(self.total_label, 1)
+        value_layout.addWidget(self.source_button)
+        top_layout.addWidget(value_row)
         # Keep the unit row's place so every name shares the Period name row.
         unit_row = QtWidgets.QWidget()
         unit_row.setFixedHeight(row_height())
@@ -927,15 +974,16 @@ class ComponentCard(FluentGroupBox):
         column.addSpacing(max(0, row_top - px(7)))
         self.more_button = FluentButton("⋯", color=GREY)
         self.more_button.setFixedSize(row_height(), row_height())
-        self.more_button.setAccessibleName("Component actions")
-        self.more_button.setToolTip("Export or ungroup this component")
+        self.more_button.setAccessibleName("Subpulse actions")
+        self.more_button.setToolTip("Export or ungroup this Subpulse")
         self.more_button.clicked.connect(self._toggle_actions)
         self.summary_label = FluentLabel("")
         self.summary_label.setAlignment(QtCore.Qt.AlignCenter)
         column.addWidget(self.summary_label)
         self.edit_button = FluentButton("Edit", color=GREY)
-        self.edit_button.setToolTip("Open this instance in the Component tab")
-        self.edit_button.clicked.connect(lambda: self.action_requested.emit("edit", self.component_id))
+        self.edit_button.setToolTip("Edit this Subpulse")
+        self.edit_button.clicked.connect(lambda: self.action_requested.emit(
+            "open_source" if self._component.config_active else "edit", self.component_id))
         actions = QtWidgets.QHBoxLayout() if mode == "closed" else QtWidgets.QVBoxLayout()
         actions.setSpacing(px(4, minimum=3))
         actions.addWidget(self.expand_button, 0, QtCore.Qt.AlignHCenter)
@@ -952,7 +1000,77 @@ class ComponentCard(FluentGroupBox):
             column.addWidget(self.more_button, 0, QtCore.Qt.AlignHCenter)
         column.addStretch(1)
         self._actions_popup = None
+        self._source_popup = None
         self.set_component(component)
+
+    def _toggle_source(self) -> None:
+        if self._source_popup is None:
+            self._source_popup = FluentPopup(self)
+            self._source_anchor = FluentSettingsPopupAnchor(self._source_popup, self.source_button)
+            layout = QtWidgets.QGridLayout(self._source_popup)
+            layout.setContentsMargins(px(10), px(10), px(10), px(10))
+            layout.setSpacing(px(6))
+            layout.addWidget(FluentLabel("Source"), 0, 0)
+            self.source_switch = FluentSwitch("Default")
+            layout.addWidget(self.source_switch, 0, 1, QtCore.Qt.AlignLeft)
+            layout.addWidget(FluentLabel("Subpulse file"), 1, 0)
+            self.source_path = FluentLineEdit()
+            self.source_path.setPlaceholderText("Choose a Subpulse file")
+            self.source_path.setFixedWidth(px(260))
+            layout.addWidget(self.source_path, 1, 1)
+            self.browse_source_button = FluentButton("Browse…", color=GREY)
+            self.open_source_button = FluentButton("Open source", color=ACCENT)
+            layout.addWidget(self.browse_source_button, 2, 0)
+            layout.addWidget(self.open_source_button, 2, 1)
+            self.source_status = FluentLabel()
+            self.source_status.setWordWrap(True)
+            self.source_status.setFixedWidth(px(350))
+            self.source_status.setFixedHeight(self.source_status.fontMetrics().lineSpacing() * 3)
+            layout.addWidget(self.source_status, 3, 0, 1, 2)
+            self.source_switch.toggled.connect(self._commit_source)
+            self.source_path.editingFinished.connect(self._commit_source)
+            self.browse_source_button.clicked.connect(lambda: self._source_action("browse_source"))
+            self.open_source_button.clicked.connect(lambda: self._source_action("open_source"))
+        self._source_anchor.toggle(self._source_popup, prepare=self._project_source,
+                                   present=self._place_source)
+
+    def _place_source(self) -> None:
+        show_fluent_popup_for_anchor(
+            self._source_popup, self.source_button, self._source_popup,
+            minimum_width=1, minimum_height=1,
+            maximum_height=self._source_popup.sizeHint().height(),
+        )
+
+    def _project_source(self) -> None:
+        if self._source_popup is None:
+            return
+        component = self._component
+        configured = component.source == "config"
+        with signals_blocked(self.source_switch, self.source_path):
+            self.source_switch.setChecked(configured)
+            self.source_switch.setText("Config" if configured else "Default")
+            self.source_path.setText(component.config_path)
+            self.source_path.setEnabled(configured)
+        self.browse_source_button.setEnabled(configured)
+        self.open_source_button.setEnabled(bool(component.config_path))
+        self.source_status.setText(component.error or (
+            "Saved source is active. Open source to edit; Refresh reloads the file."
+            if component.config_active else
+            "The embedded default is shown. Config mode applies the selected source file."
+            if configured else "The embedded default belongs to this Pulse."
+        ))
+        self.source_status.setToolTip(component.error or component.config_path)
+
+    def _commit_source(self, *_args) -> None:
+        source = "config" if self.source_switch.isChecked() else "default"
+        path = self.source_path.text().strip()
+        if (source, path) != (self._component.source, self._component.config_path):
+            self.action_requested.emit("source", (self.component_id, source, path))
+        self._project_source()
+
+    def _source_action(self, action: str) -> None:
+        self._source_popup.hide()
+        self.action_requested.emit(action, self.component_id)
 
     def _commit_name(self) -> None:
         name = self.name_edit.text().strip()
@@ -989,6 +1107,14 @@ class ComponentCard(FluentGroupBox):
 
     def set_component(self, component: ComponentVM) -> None:
         self._component = component
+        self.set_surface(fill=CONFIG_GREEN_TINT if component.config_active else None,
+                         edge=CONFIG_GREEN if component.config_active else ACCENT)
+        self.set_title_color(CONFIG_GREEN_DARK if component.config_active else ACCENT)
+        self.source_button.source = component.source
+        self.source_button.setToolTip(component.error or component.config_path or "Subpulse source: Default")
+        self.source_button.update()
+        self.edit_button.setText("Source" if component.config_active else "Edit")
+        self.edit_button.setToolTip("Open the referenced Subpulse file" if component.config_active else "Edit this Subpulse")
         self.name_edit.setText(component.name)
         self.name_edit.setToolTip(component.name)
         self.end_label.setText(component.name)
@@ -1003,6 +1129,7 @@ class ComponentCard(FluentGroupBox):
         self.summary_label.setText("\n".join(counts))
         self.summary_label.setVisible(self.mode == "closed")
         self.expand_button.setText("Expand" if self.mode == "closed" else "Collapse")
+        self._project_source()
 
 
 class PulseDragContainer(QtWidgets.QWidget):
@@ -1014,7 +1141,6 @@ class PulseDragContainer(QtWidgets.QWidget):
     bracket_count_committed = QtCore.pyqtSignal(str, object)
     bracket_binding_committed = QtCore.pyqtSignal(str, bool, str)
     config_binding_committed = QtCore.pyqtSignal(str, str)
-    selection_changed = QtCore.pyqtSignal()
     feedback_requested = QtCore.pyqtSignal(str)
 
     def __init__(self, parent=None) -> None:
@@ -1092,6 +1218,10 @@ class PulseDragContainer(QtWidgets.QWidget):
                     str(bracket.count), can_scan=False, validator_kind=VALIDATOR_INT,
                     validator_lo=minimum_bracket, validator_hi=(1 << 32) - 1,
                 ))
+                post.setProperty("readonly_content", bracket.readonly)
+                if bracket.readonly:
+                    post.count_edit.setReadOnly(True)
+                    post.count_edit.binding_button.setEnabled(False)
         self._posts = tuple(posts)
         desired = tuple(widgets[key] for key in order)
         for widget in previous:
@@ -1192,7 +1322,6 @@ class PulseDragContainer(QtWidgets.QWidget):
         return tuple(result)
 
     def show_selection(self, items=(), *, gap: int | None = None) -> None:
-        previous = self._selection
         if gap is not None and items:
             raise ValueError("select timeline items or a gap, not both")
         if gap is not None:
@@ -1201,8 +1330,6 @@ class PulseDragContainer(QtWidgets.QWidget):
             chosen = set(items)
             self._selection = tuple(self._item_key(item) for item in self.items() if self._item_key(item) in chosen)
         self._paint_selection(self.selected_items())
-        if previous != self._selection:
-            self.selection_changed.emit()
 
     def _paint_selection(self, selected) -> None:
         chosen = set(selected)
@@ -1333,6 +1460,14 @@ class PulseDragContainer(QtWidgets.QWidget):
         if key not in order or not 0 <= gap <= len(order):
             return None
         moving = self._drag_items(key)
+        moved_components = {identifier for kind, identifier in moving if kind.startswith("component")}
+        for item in self.items():
+            item_key = self._item_key(item)
+            if item_key in moving and item.property("readonly_content") and not any(
+                item_key in self._item_blocks.get(("component", identifier), ())
+                for identifier in moved_components
+            ):
+                return None
         destination = gap - sum(item in moving for item in order[:gap])
         remaining = [item for item in order if item not in moving]
         proposed = remaining[:destination] + list(moving) + remaining[destination:]
@@ -1473,7 +1608,6 @@ class PulseScheduleView(QtWidgets.QWidget):
     delay_committed = QtCore.pyqtSignal(str, object, str)
     binding_committed = QtCore.pyqtSignal(str, object, object, bool, str)
     config_binding_committed = QtCore.pyqtSignal(str, str)
-    component_selected = QtCore.pyqtSignal(str)
     insert_period_requested = QtCore.pyqtSignal(object)
     insert_spacer_requested = QtCore.pyqtSignal(object)
     reorder_items_requested = QtCore.pyqtSignal(object)
@@ -1505,7 +1639,6 @@ class PulseScheduleView(QtWidgets.QWidget):
         self._cards: dict[str, PeriodCard] = {}
         self._component_cards: dict[tuple[str, str], ComponentCard] = {}
         self._expanded_components: set[str] = set()
-        self._show_delays = False
         # Set by Add; the next schedule that brings exactly one new card is
         # what that Add produced, and the new card is picked.
         self._expect_new_card = False
@@ -1646,15 +1779,7 @@ class PulseScheduleView(QtWidgets.QWidget):
         self.save_button = FluentButton("Save Pulse*", color=YELLOW)
         self.load_button = FluentButton("Load", color=ORANGE)
         self.collapse_button = FluentButton("Collapse", color=GREY)
-        self.group_button = FluentButton("Group Component", color=ACCENT)
-        self.insert_component_button = FluentButton("Insert Subpulse…", color=ACCENT)
-        self.insert_component_button.setToolTip("Insert an independent copy at the selected position")
-        self.insert_component_button.clicked.connect(
-            lambda: self.component_action_requested.emit("insert_file", None)
-        )
-        self.delays_button = FluentButton("Delays", color=GREY)
-        self.delays_button.setToolTip("Show or hide channel delays and timing information")
-        self.delays_button.clicked.connect(self._toggle_delays)
+        self.group_button = FluentButton("Group Subpulse", color=ACCENT)
         # Three compact rows: execute; edit the timeline; save and organize.
         control_buttons = (
             (self.run_button, 0, 0, 2), (self.stop_button, 0, 2, 1), (self.sync_button, 0, 3, 1),
@@ -1736,35 +1861,6 @@ class PulseScheduleView(QtWidgets.QWidget):
         self.button_frame.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Maximum)
         layout.addWidget(self.button_frame)
 
-        if not embedded:
-            # Editing follows the timeline; running and connecting remain below
-            # it. Moving the existing controls preserves their signal paths.
-            toolbar = QtWidgets.QHBoxLayout()
-            toolbar.setSpacing(px(6))
-            for button in (self.add_button, self.spacer_button, self.bracket_button,
-                           self.group_button, self.insert_component_button, self.remove_button):
-                button.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Fixed)
-                toolbar.addWidget(button)
-            toolbar.addStretch(1)
-            toolbar.addWidget(self.delays_button)
-            toolbar.addWidget(self.collapse_button)
-            layout.insertLayout(0, toolbar)
-            self.collapse_button.setText("Channels")
-            self.collapse_button.setToolTip("Show or hide channel names")
-            control_area.setTitle("Run Pulse")
-            run_options = QtWidgets.QHBoxLayout()
-            run_options.addWidget(FluentLabel("Run repeats"))
-            self.channel_panel.run_repeats_spin.setMaximumWidth(px(110))
-            run_options.addWidget(self.channel_panel.run_repeats_spin)
-            run_options.addStretch(1)
-            run_options.addWidget(FluentLabel("Config"))
-            self.channel_panel.config_status_button.setMinimumWidth(px(100))
-            self.channel_panel.config_status_button.setMaximumWidth(px(230))
-            run_options.addWidget(self.channel_panel.config_status_button, 1)
-            control_layout.addLayout(run_options)
-            self.channel_panel_holder.hide()
-            self._settle_left_pane_width()
-
         self._wire_signals()
         if embedded:
             self.channel_panel_holder.hide()
@@ -1801,13 +1897,12 @@ class PulseScheduleView(QtWidgets.QWidget):
         self.channel_panel.binding_committed.connect(self.binding_committed)
         self.channel_panel.config_binding_committed.connect(self.config_binding_committed)
         self.drag_container.config_binding_committed.connect(self.config_binding_committed)
-        self.drag_container.selection_changed.connect(self._selection_changed)
         self.channel_panel.fill_port_requested.connect(self.fill_port_requested)
         self.channel_panel.clear_port_requested.connect(self.clear_port_requested)
         self.channel_panel.config_requested.connect(self.config_requested)
         self.channel_panel.run_repeats_committed.connect(self.run_repeats_committed)
         self.drag_container.reorder_items_requested.connect(self.reorder_items_requested)
-        self.drag_container.remove_items_requested.connect(self.remove_items_requested)
+        self.drag_container.remove_items_requested.connect(self._request_remove_items)
         self.drag_container.bracket_count_committed.connect(self._commit_bracket_count)
         self.drag_container.bracket_binding_committed.connect(
             lambda bid, scan, source: self.binding_committed.emit("bracket_count", bid, None, scan, source)
@@ -1999,22 +2094,6 @@ class PulseScheduleView(QtWidgets.QWidget):
         card.config_binding_committed.connect(self.config_binding_committed)
         card.feedback_requested.connect(self.feedback_requested)
 
-    def _selection_changed(self) -> None:
-        selected = self.drag_container.selected_items()
-        if not selected or self._schedule is None:
-            self.component_selected.emit("")
-            return
-        owners = set()
-        for kind, key in selected:
-            if kind.startswith("component"):
-                owners.add(key)
-            else:
-                owners.add(next((c.component_id for c in self._schedule.components if (
-                    kind == "period" and key in c.period_ids
-                    or kind == "bracket" and key.rpartition(":")[0] in c.bracket_ids
-                )), ""))
-        self.component_selected.emit(next(iter(owners)) if len(owners) == 1 else "")
-
     def component_insert_before(self) -> tuple[str, str] | None:
         return self._selected_before_item()
 
@@ -2035,6 +2114,8 @@ class PulseScheduleView(QtWidgets.QWidget):
             self.component_action_requested.emit(action, component_id)
 
     def _request_group(self, _checked=False) -> None:
+        if self._readonly_selection():
+            return
         selected = self.drag_container.selection_payload()
         if selected:
             self.component_action_requested.emit("group", selected)
@@ -2243,6 +2324,8 @@ class PulseScheduleView(QtWidgets.QWidget):
     def _request_insert(self, action: str) -> None:
         """Add where the selection says, and pick what was added once it arrives."""
 
+        if self._readonly_selection():
+            return
         self._expect_new_card = True
         before = self._selected_before_item()
         selected = set(self.drag_container.selected_items())
@@ -2275,8 +2358,30 @@ class PulseScheduleView(QtWidgets.QWidget):
             return following[0] if following else None
         return None
 
-    def _request_remove_items(self) -> None:
+    def _readonly_selection(self) -> bool:
+        if self._schedule is None:
+            return False
+        selected = self.drag_container.selection_payload()
+        locked = {("period", item.period_id) for item in self._schedule.periods if item.readonly}
+        locked.update(("bracket", bracket_post_key(item.bracket_id, side))
+                      for item in self._schedule.brackets if item.readonly for side in ("start", "end"))
+        gap = self.drag_container.selected_gap
+        visual = tuple(self.drag_container._item_key(item) for item in self.drag_container.items())
+        inside = gap is not None and any(
+            component.config_active and component.component_id in self._expanded_components
+            and visual.index(("component-start", component.component_id)) < gap
+            <= visual.index(("component-end", component.component_id))
+            for component in self._schedule.components
+        )
+        if locked.intersection(selected) or inside:
+            self.feedback_requested.emit("This Subpulse comes from Config. Open its source file to edit it.")
+            return True
+        return False
+
+    def _request_remove_items(self, _items=None) -> None:
         """One atomic removal request; no intermediate broken bracket state."""
+        if self._readonly_selection():
+            return
         selected = self.drag_container.selection_payload()
         if selected:
             self.remove_items_requested.emit(selected)
@@ -2289,7 +2394,7 @@ class PulseScheduleView(QtWidgets.QWidget):
         dragging periods in.  With nothing picked it frames the whole pulse.
         """
 
-        if self._schedule is None or not self._schedule.periods:
+        if self._readonly_selection() or self._schedule is None or not self._schedule.periods:
             return
         periods = self._schedule.periods
         selected = self.drag_container.selection_payload()
@@ -2408,24 +2513,16 @@ class PulseScheduleView(QtWidgets.QWidget):
     def _toggle_left_panels(self) -> None:
         visible = self.names_panel_holder.isVisible()
         self.names_panel_holder.setVisible(not visible)
-        self.channel_panel_holder.setVisible(not visible and self._show_delays)
+        self.channel_panel_holder.setVisible(not visible)
         self.left_panel_stub_holder.setVisible(visible)
-        self.collapse_button.setText("Show channels" if visible else "Channels")
+        self.collapse_button.setText("Show Left" if visible else "Collapse")
         self._settle_left_pane_width()
 
     def _show_left_panels(self) -> None:
         self.names_panel_holder.show()
-        self.channel_panel_holder.setVisible(self._show_delays)
+        self.channel_panel_holder.show()
         self.left_panel_stub_holder.hide()
-        self.collapse_button.setText("Channels")
-        self._settle_left_pane_width()
-
-    def _toggle_delays(self) -> None:
-        self._show_delays = not self._show_delays
-        self.names_panel_holder.show()
-        self.left_panel_stub_holder.hide()
-        self.channel_panel_holder.setVisible(self._show_delays)
-        self.delays_button.setText("Hide delays" if self._show_delays else "Delays")
+        self.collapse_button.setText("Collapse")
         self._settle_left_pane_width()
 
 

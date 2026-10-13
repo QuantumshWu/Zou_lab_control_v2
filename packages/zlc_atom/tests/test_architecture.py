@@ -430,6 +430,50 @@ def test_pulse_resolver_uses_the_project_json_document(
         sequencer.close()
 
 
+def test_scientific_pulse_resource_freezes_subpulse_before_api_values(tmp_path: Path) -> None:
+    import json
+    from zlc_pulse import (
+        extract_subpulse, group_component, set_subpulse_source,
+        sequence_to_tree, write_subpulse,
+    )
+
+    sequence = pulse_sequence("imaging_template.json")
+    sequence = group_component(sequence, tuple(p.period_id for p in sequence.periods), "Imaging", "imaging")
+    fragment = extract_subpulse(sequence, "imaging")
+    fragment_path = tmp_path / "imaging.subpulse.json"
+    path = tmp_path / "pulse.json"
+    sequence = set_subpulse_source(sequence, "imaging", "config", str(fragment_path))
+    resource = CALIBRATION_LOGIC_NODE.workspace_resources[0]
+    path.write_text(json.dumps(sequence_to_tree(replace(sequence, config_enabled=False))), encoding="utf-8")
+    assert resource.resolve(path).value.periods == sequence.periods
+
+    write_subpulse(fragment_path, replace(fragment, periods=tuple(
+        replace(period, duration=0.04) if period.period_id == "long_before" else period
+        for period in fragment.periods
+    )))
+    path.write_text(json.dumps(sequence_to_tree(replace(sequence, config_enabled=True))), encoding="utf-8")
+    prepared = resource.resolve(path).value
+    assert prepared.period_by_id["long_before"].duration == 0.04
+    fragment_path.unlink()
+    sequencer = VirtualPulseStreamer()
+    sequencer.open()
+    try:
+        pulse = resolve_pulse(
+            prepared, path=path, sequencer=sequencer,
+            api_values={"duration:long_before": 0.031},
+        )
+        assert pulse.sequence.period_by_id["long_before"].duration == 0.031
+        assert not pulse.sequence.api_bindings
+        arm_sequencer(sequencer, pulse)
+        for _ in range(2):
+            applied = sequencer.fire(run_repeats=1)
+            assert sequencer.wait_done(1.0) is not None
+            assert applied.source.period_by_id["long_before"].duration == 0.031
+            assert applied.source.components[0].config_path == str(fragment_path)
+    finally:
+        sequencer.close()
+
+
 def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Path) -> None:
     installation = create_installation("virtual")
     plane = _CalibrationCoveragePlane()

@@ -18,9 +18,13 @@ The public records are `ConnectionChoiceVM`, `ConnectionVM`, `FieldVM`,
 `PortRowVM`, `PeriodVM`, `BracketVM`,
 `DelayRowVM`, `ScheduleVM`, `BindingRecord`, `ScanPageRecord`, `ConfigPageRecord`,
 `TargetPortRecord`, and `TargetWidthRule`. They are frozen dataclasses and contain only strings,
-numbers, booleans, and tuples. `FieldVM.text` always shows the editable default;
-its independent `scan` and `source` fields describe the binding. `effective_text`
-and `source_text` describe a saved external override without replacing that default.
+numbers, booleans, and tuples. `FieldVM.text` shows the value in the selected
+Default/Config mode; `default_text` preserves the authored default for inspection.
+Its independent `scan` and `source` fields describe the binding. `config_active`
+marks a successfully applied value: it is green and read-only, while the binding
+button remains usable. `binding_editable=False` locks an external Subpulse's
+internal bindings. Config selection is carried by `config_mode_committed(bool)`
+and projected through `set_config_mode`; Refresh uses `refresh_effective_requested`.
 
 `ScheduleVM` carries `(document_generation, revision)`. `PulseScheduleView`
 rejects an older pair and accepts an identical pair idempotently; a different
@@ -49,16 +53,21 @@ choosing `Edge` or `Ramp` with a value creates the domain step.
 
 ## Schedule page
 
-The Edit workspace keeps the timeline beside a compact parameter panel for the
-selected Component. Selecting a component or its internal items projects that
-same instance; Expand edits its contents on the original timeline. The panel
-does not construct another schedule or keep a second document. Open/Save Pulse
-stay in the header, timeline commands sit above the timeline, and execution
-controls span the workspace below. Channel delays are available on demand.
+The Edit workspace keeps its original horizontal timeline, channel columns and
+bottom controls. Subpulses expand in place. There is no side inspector. The
+Default/Config switch lives beside the original Config controls and applies to
+the whole Pulse; switching to Default restores the embedded content.
 
-Subpulse file is a separate authoring page for an independent reusable file.
-Insert Subpulse and Duplicate create independent components at the selected
-timeline position. There is no shared-definition update behavior.
+The Subpulse page edits the selected embedded default or an explicitly opened
+source file. A card's source popup chooses Default or Config and a file path;
+it emits `source`, `browse_source` and `open_source` through the existing action
+signal. Only resolved Config sources get green cards/boundaries. Their internal
+Period/Bracket controls are read-only; opening the source file edits that file.
+The presenter retains the embedded default and displays a derived execution copy.
+
+Saved scan arrays retain ordered field IDs and units. A source update that changes
+this schema requires regeneration or an explicit Clear Array; that action keeps
+the Python draft and emits `scan_array_clear_requested` through the handle.
 
 ```python
 view = PulseScheduleView()

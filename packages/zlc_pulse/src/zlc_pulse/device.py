@@ -13,7 +13,7 @@ import time
 
 from collections.abc import Mapping
 
-from .binding import apply_config_values
+from .binding import apply_config_values, resolve_subpulse_sources
 from .compile import CompiledProgram, compile_sequence
 from .model import FIELD_DURATION, MAXIMUM_REPEAT_COUNT, PORT_DAC, PulseSequence, PulseTarget
 from .schedule import bus_action_ticks, trigger_edge_ticks
@@ -316,11 +316,21 @@ class ConfigValueHolder:
             raise TypeError("prog must be CompiledProgram")
         if authored_source is None:
             return program, compiled_source
+        if authored_source.config_enabled:
+            self._refresh_config_file()
+        resolved = resolve_subpulse_sources(authored_source)
+        if compiled_source is not None and compiled_source is not authored_source:
+            previous_fields = tuple((item.field_id, item.unit) for item in compiled_source.scan_bindings)
+            resolved_fields = tuple((item.field_id, item.unit) for item in resolved.scan_bindings)
+            if previous_fields != resolved_fields:
+                raise ValueError(
+                    "Subpulse scan fields changed; prepare and load a new scan table before Fire"
+                )
         with self._config_lock:
             filled, _applied, _unknown = apply_config_values(
-                authored_source, self._config_values, current=compiled_source,
+                resolved, self._config_values,
             )
-        if filled is compiled_source:
+        if filled == compiled_source:
             return program, compiled_source
         return compile_sequence(filled, self.describe().geometry, program.clock_hz), filled
 
@@ -465,7 +475,6 @@ class PulseStreamer(ConfigValueHolder):
         rows: Sequence[Sequence[int]] = (),
     ) -> None:
         with self._lock:
-            self._refresh_config_file()
             program, filled = self._prepare_config_program(prog, source, source)
             self._load_program(program, source=filled, authored_source=source, rows=rows)
 
@@ -557,7 +566,6 @@ class PulseStreamer(ConfigValueHolder):
 
     def fire(self, *, run_repeats: int, scan_repeats: int = 1) -> AppliedState:
         with self._lock:
-            self._refresh_config_file()
             applied = self._applied
             if applied is not None:
                 program, source = self._prepare_config_program(

@@ -351,9 +351,10 @@ def test_scan_text_is_immediate_state_intent_and_run_has_no_payload(run_qt) -> N
         """
 from PyQt5 import QtCore, QtTest
 from zlc_ui.qt import ensure_qt_app
-from zlc_ui.pulse import PulseScanView, PulseTargetView, ScanPageRecord, TargetPortRecord, TargetWidthRule
+from zlc_ui.pulse import PulseEditorView, PulseEditorHandle, PulseTargetView, ScanPageRecord, TargetPortRecord, TargetWidthRule
 app = ensure_qt_app(["pulse-pages"])
-scan = PulseScanView(); scan.set_page(ScanPageRecord(source_text="committed", source_dirty=False))
+editor = PulseEditorView(); handle = PulseEditorHandle(None, editor)
+scan = editor.scan_view; scan.set_page(ScanPageRecord(source_text="committed", source_dirty=False))
 edited = []; runs = []; scan.source_edited.connect(edited.append); scan.run_requested.connect(lambda: runs.append("run"))
 scan.scan_code.setPlainText("typing"); scan.scan_run_button.click()
 assert edited == ["typing"] and runs == ["run"]
@@ -362,6 +363,16 @@ table_changes = []
 scan.scan_table_view.textChanged.connect(lambda: table_changes.append(True))
 scan.set_page(ScanPageRecord(source_text="typing more", table_text="1 2 3", source_dirty=True))
 assert not table_changes, 'typing source replaced the unchanged scan-table document'
+clears = []
+handle.scan_array_clear_requested.connect(lambda: clears.append(True))
+scan.scan_clear_array_button.click()
+assert clears == [True]
+assert scan.scan_code.toPlainText() == "typing more" and scan.scan_table_view.toPlainText() == "1 2 3"
+scan.set_workspace_busy(True)
+scan.scan_clear_array_button.click()
+assert clears == [True] and not scan.scan_clear_array_button.isEnabled()
+scan.set_workspace_busy(False)
+assert scan.scan_clear_array_button.isEnabled()
 scan.set_repeats((1 << 32) - 1)
 assert int(scan.scan_repeats_spin.maximum()) == (1 << 32) - 1
 assert scan.scan_repeats_spin.text() == str((1 << 32) - 1)
@@ -965,7 +976,7 @@ app.quit()
     )
 
 
-def test_a_config_binding_wears_its_own_colour_and_stays_editable(run_qt) -> None:
+def test_a_config_binding_shows_readonly_effective_values_and_keeps_source_editable(run_qt) -> None:
     """Scan is independent of value source and never removes the default."""
 
     run_qt(
@@ -982,7 +993,7 @@ assert edit.binding_button.source == "config"
 assert not edit.binding_button.scan
 assert not edit.isReadOnly(), "a config number is the operator's to read and type"
 assert CONFIG_GREEN in edit.styleSheet()
-edit.set_field_state(editable=True, source="config", config_key="bias", effective_text="120 value")
+edit.set_field_state(editable=True, source="config", config_key="bias", effective_text="120 value", config_active=True, config_enabled=True, default_text="12")
 assert CONFIG_GREEN_TINT in edit.styleSheet() and CONFIG_GREEN_DARK in edit.styleSheet()
 edit.binding_button.click()
 assert edit.config_name.currentText() == "bias" and edit.config_name.isVisible()
@@ -992,8 +1003,8 @@ assert edit.isReadOnly() and not edit._popup.isVisible()
 assert CONFIG_GREEN_TINT not in edit.styleSheet()
 edit.binding_button.click()
 assert not edit._popup.isVisible(), "a held value cannot open binding authoring"
-edit.set_field_state(editable=True, source="config", config_key="bias", effective_text="120 value")
-assert edit.isEnabled() and edit.binding_button.isEnabled() and not edit.isReadOnly()
+edit.set_field_state(editable=True, source="config", config_key="bias", effective_text="120 value", config_active=True, config_enabled=True, default_text="12")
+assert edit.isEnabled() and edit.binding_button.isEnabled() and edit.isReadOnly()
 edit.binding_button.click()
 assert edit._popup.isVisible() and edit.config_name.currentText() == "bias"
 edit._popup.hide()
@@ -1125,7 +1136,7 @@ handle.set_config_page(replace(record, entries=entries_before_names))
 QtTest.QTest.mouseClick(config.save_button, QtCore.Qt.LeftButton)
 assert saves == [True]
 assert view.scan_view.scan_load_array_button.text() == "Load Array"
-view.tabs.setCurrentWidget(view.edit_page)
+view.tabs.setCurrentWidget(view.schedule_view)
 app.processEvents()
 channel = view.schedule_view.channel_panel
 button = channel.config_status_button
@@ -1420,19 +1431,21 @@ app.processEvents()
     )
 
 
-def test_edit_actions_stay_with_timeline_and_run_controls_span_workspace(run_qt) -> None:
-    """Opening parameters must not squeeze the whole-Pulse execution bar."""
+def test_the_bottom_bar_is_one_table_of_rows_across_three_cards(run_qt) -> None:
+    """Row two of Control is read beside row two of Connection and Ports.
+
+    They were three private rhythms -- two row heights and two gaps -- so the
+    fourth row of Control sat six pixels below the boxes beside it.
+    """
 
     run_qt(
         r'''
-from PyQt5 import QtCore, QtWidgets
+from PyQt5 import QtWidgets
 from zlc_ui.qt import ensure_qt_app
-from zlc_ui.pulse import PulseEditorView
+from zlc_ui.pulse import PulseScheduleView
 
 app = ensure_qt_app(["pulse-bottom-bar"])
-editor = PulseEditorView()
-view = editor.schedule_view
-editor.resize(1200, 800); editor.show()
+view = PulseScheduleView()
 view.resize(1100, 700); view.show()
 for _ in range(40):
     app.processEvents()
@@ -1440,23 +1453,40 @@ for _ in range(40):
 cards = {}
 for box in view.button_frame.findChildren(QtWidgets.QGroupBox):
     cards[box.title()] = box
-assert set(cards) == {"Run Pulse", "Connection", "Ports"}, sorted(cards)
-def top(widget):
-    return widget.mapTo(editor, QtCore.QPoint()).y()
-assert top(view.add_button) < top(view.dataset_surface) < top(view.run_button)
-assert top(view.save_button) < top(editor.tabs)
-assert not view.channel_panel_holder.isVisible()
-view.delays_button.click(); app.processEvents()
-assert view.channel_panel_holder.isVisible() and view.names_panel_holder.isVisible()
-view.delays_button.click(); app.processEvents()
-assert not view.channel_panel_holder.isVisible() and view.names_panel_holder.isVisible()
-bar_width = view.button_frame.width()
-editor.component_inspector.show(); app.processEvents()
-assert view.button_frame.width() == bar_width
-assert view.button_frame.width() > view.width()
-assert view.channel_panel.run_repeats_spin.isVisible()
-assert view.channel_panel.config_status_button.isVisible()
-editor.finish_close()
+assert set(cards) == {"Control", "Connection", "Ports"}, sorted(cards)
+
+def rows(card):
+    """The top of every row this card lays out, in the window's frame."""
+
+    found = []
+    for item in (card.layout().itemAt(i) for i in range(card.layout().count())):
+        if item.widget() is not None:
+            found.append(item.widget().mapTo(view, item.widget().rect().topLeft()).y())
+        elif item.layout() is not None:
+            inner = item.layout()
+            if isinstance(inner, QtWidgets.QGridLayout):
+                for row in range(inner.rowCount()):
+                    cell = inner.itemAtPosition(row, 0)
+                    if cell is not None and cell.widget() is not None:
+                        widget = cell.widget()
+                        found.append(widget.mapTo(view, widget.rect().topLeft()).y())
+            else:
+                first = inner.itemAt(0)
+                if first is not None and first.widget() is not None:
+                    widget = first.widget()
+                    found.append(widget.mapTo(view, widget.rect().topLeft()).y())
+    return found
+
+tops = {name: rows(card) for name, card in cards.items()}
+shortest = min(len(value) for value in tops.values())
+assert shortest >= 3, tops
+for index in range(shortest):
+    values = {name: value[index] for name, value in tops.items()}
+    assert len(set(values.values())) == 1, (
+        f"row {index + 1} is at different heights across the bar: {values}"
+    )
+
+view.close()
 app.processEvents()
 '''
     )
@@ -1730,16 +1760,17 @@ assert edit.default_value.text() == '12'
 assert edit.effective_value.text() == '12 · default'
 resting = popup.size()
 hint = popup.sizeHint()
-edit.set_field_state(editable=True, source="config", config_key="a_config_name_far_longer_than_the_switch_row")
+edit.set_field_state(editable=True, source="config", config_enabled=True, config_key="a_config_name_far_longer_than_the_switch_row")
 app.processEvents()
 assert popup.isVisible() and popup.size() == resting and popup.sizeHint() == hint, (resting, popup.size())
 assert edit.config_name.toolTip() == "a_config_name_far_longer_than_the_switch_row"
 assert edit.config_name.isEnabled() and not requested
 assert 'not supplied' in edit.source_note.text()
-edit.set_field_state(editable=True, source="config", config_key="bias", effective_text='120 value')
+edit.setText("120")
+edit.set_field_state(editable=True, source="config", config_key="bias", effective_text="120 value", config_active=True, config_enabled=True, default_text="12")
 app.processEvents()
 assert edit.config_name.currentText() == "bias" and popup.size() == resting
-assert edit.effective_value.text() == '120 value'
+assert edit.effective_value.text() == '120 value' and edit.isReadOnly()
 assert edit.default_value.text() == '12'
 combo = edit.config_name
 combo.showPopup()
@@ -1764,7 +1795,8 @@ app.processEvents()
 combo.editingFinished.emit()
 assert requested == ['saved_only', 'custom', 'bad name'], 'source projection must not commit stale text'
 assert combo.currentText() == '' and not combo.isEnabled() and popup.size() == resting
-edit.set_field_state(editable=True, source='config')
+edit.setText("12")
+edit.set_field_state(editable=True, source='config', config_enabled=True)
 assert 'unassigned' in edit.source_note.text()
 assert edit.effective_value.text() == '12 · default'
 assert combo.currentText() == '' and tuple(combo.itemText(i) for i in range(combo.count())) == ('new_file_name',)
@@ -1832,7 +1864,7 @@ assert not main._cards["p2"].is_selected(), "Shift selection must never fill an 
 QtTest.QTest.mouseClick(strip, QtCore.Qt.LeftButton, QtCore.Qt.ShiftModifier, QtCore.QPoint(1, 15))
 assert strip.selected_items() == (("period", "p1"), ("period", "p3"))
 main.group_button.click()
-assert [item for item in actions if item[0] != "context"] == [("group", (("period", "p1"), ("period", "p3")))], actions
+assert actions == [("group", (("period", "p1"), ("period", "p3")))], actions
 assert strip.selected_items() == (("period", "p1"), ("period", "p3"))
 check = main._cards["p2"].port_rows["d0"]
 level = check.isChecked()
@@ -1856,8 +1888,6 @@ card = main._component_cards[("component", "mot")]
 assert card.width() == main._cards["p3"].width()
 assert card._actions_popup is None
 card.expand_button.click(); app.processEvents()
-assert view.tabs.currentWidget() is view.edit_page
-assert ("context", "mot") in actions, actions
 assert set(main._cards) == {"p1", "p2", "p3"}
 assert main.drag_container.flat_order() == vm.item_order
 visible = tuple(strip._item_key(item) for item in strip.items())
@@ -1904,65 +1934,88 @@ assert card._actions_popup.isVisible()
 export = next(button for button in card._actions_popup.findChildren(QtWidgets.QPushButton) if button.text() == "Export Subpulse")
 export.click(); app.processEvents()
 assert not card._actions_popup.isVisible()
-assert [item for item in actions if item[0] != "context"] == [("export", "mot")], actions
+assert actions == [("export", "mot")], actions
 actions.clear()
 main.drag_container.show_selection((("component", "mot"),))
 main.remove_button.click()
 assert deletions[-1] == (("component", "mot"),), deletions
-local_periods = (replace(periods[0], duration=replace(field, field_id="duration:p1",
-                         config_names=("mot_time",))), periods[1])
-local = replace(vm, document_generation=2, periods=local_periods, components=())
+local = replace(vm, document_generation=2, periods=periods, components=())
 handle.set_component_document(local, contexts=(("mot", "MOT · current Pulse"),), context_id="mot")
-app.processEvents()
-inspector = view.component_inspector
-assert view.tabs.currentWidget() is view.edit_page and inspector.isVisible()
-assert inspector._context_id == "mot"
-assert inspector.schedule_view is None, "the inspector must not construct a second timeline"
-assert view.component_view.schedule_view is None, "selecting an instance must not populate the file editor"
-events = []
-handle.component_edit_requested.connect(lambda *args: events.append((inspector._context_id, *args)))
-duration = inspector._parameter_rows[("duration", "p1", "")][2]
-duration.setFocus(); duration.selectAll()
-QtTest.QTest.keyClicks(duration, "6")
-QtTest.QTest.keyClick(duration, QtCore.Qt.Key_Return)
-assert events[-1] == ("mot", "duration", ("p1", 6.0, "us")), events
-local = replace(local, revision=5, periods=(replace(local_periods[0],
-                duration=replace(local_periods[0].duration, text="6")), local_periods[1]))
-handle.set_component_document(local, contexts=(("mot", "MOT · current Pulse"),), context_id="mot")
-QtTest.QTest.mouseClick(duration.binding_button, QtCore.Qt.LeftButton); app.processEvents()
-QtTest.QTest.mouseClick(duration.source_switch, QtCore.Qt.LeftButton,
-                       pos=QtCore.QPoint(duration.source_switch.width() - 8, duration.source_switch.height() // 2))
-assert events[-1] == ("mot", "binding", ("duration", "p1", None, False, "config")), events
-local = replace(local, revision=6, periods=(replace(local.periods[0],
-                duration=replace(local.periods[0].duration, source="config")), local.periods[1]))
-handle.set_component_document(local, contexts=(("mot", "MOT · current Pulse"),), context_id="mot")
-duration.config_name.lineEdit().setFocus()
-QtTest.QTest.keyClicks(duration.config_name.lineEdit(), "mot_time")
-QtTest.QTest.keyClick(duration.config_name.lineEdit(), QtCore.Qt.Key_Return)
-assert events[-1] == ("mot", "config_binding", ("duration:p1", "mot_time")), events
-duration._popup.hide()
-inspector._buttons["expand"].click(); app.processEvents()
-assert view.tabs.currentWidget() is view.edit_page
-assert {"p1", "p2", "p3"} == set(main._cards)
-assert inspector._context_id == "mot" and inspector.schedule_view is None
-actions.clear()
 view.tabs.setCurrentWidget(view.component_view); app.processEvents()
-assert ("context", "") in actions, "opening a file must leave instance editing"
-handle.set_component_document(local, context_id="", path="readout.subpulse.json")
-app.processEvents()
-assert not inspector.isVisible() and view.component_view._context_id == ""
-assert view.component_view.context_combo.count() == 1
-assert view.component_view._buttons["save"].text() == "Save Subpulse"
+assert view.component_view._buttons["save"].text() == "Save Pulse"
 assert not view.component_view.schedule_view.run_button.isVisible()
 assert not view.component_view.schedule_view.names_panel.name_edit.isVisible()
 assert not view.component_view.schedule_view.names_panel._rows["d0"].isEnabled()
 assert view.component_view.schedule_view.names_panel._rows["d0"].isReadOnly()
 assert main.names_panel._rows["d0"].isEnabled()
 assert isinstance(view.component_view.schedule_view._cards["p1"], PeriodCard)
-events.clear()
+events = []
+handle.component_edit_requested.connect(lambda *args: events.append(args))
 view.component_view.schedule_view._cards["p1"].name_edit.setText("Load")
 view.component_view.schedule_view._cards["p1"].name_edit.editingFinished.emit()
-assert events == [("", "period_name", ("p1", "Load"))], events
+assert events == [("period_name", ("p1", "Load"))], events
+view.tabs.setCurrentWidget(main)
+assert not hasattr(view, "component_inspector")
+assert main.channel_panel_holder.isVisible() and main.names_panel_holder.isVisible()
+assert view.tabs.tabText(view.tabs.indexOf(view.component_view)) == "Subpulse"
+modes, refreshes = [], []
+handle.config_mode_committed.connect(modes.append)
+handle.refresh_effective_requested.connect(lambda: refreshes.append(True))
+handle.set_config_mode(False)
+main.channel_panel.config_mode.click()
+assert modes == [True]
+handle.set_config_mode(True)
+main.channel_panel.config_refresh_button.click()
+assert refreshes == [True] and modes == [True]
+card = main._component_cards[("component", "mot")]
+assert card.title() == "Subpulse"
+card.source_button.click(); app.processEvents()
+assert card._source_popup.isVisible()
+card.source_switch.click()
+assert actions[-1] == ("source", ("mot", "config", "")), actions
+configured = replace(component, source="config", config_path="cooling.subpulse.json")
+vm = replace(vm, revision=5, components=(configured,))
+handle.set_schedule(vm)
+assert card.source_switch.isChecked() and card.source_path.text() == configured.config_path
+card.browse_source_button.click()
+assert actions[-1] == ("browse_source", "mot")
+card.source_button.click()
+card.source_path.setFocus(); card.source_path.selectAll()
+QtTest.QTest.keyClicks(card.source_path, "new.subpulse.json")
+QtTest.QTest.keyClick(card.source_path, QtCore.Qt.Key_Return)
+assert actions[-1] == ("source", ("mot", "config", "new.subpulse.json"))
+assert card.source_path.text() == configured.config_path, "a rejected source path must restore the accepted reference"
+card._source_popup.hide()
+effective_periods = tuple(replace(period, readonly=True, duration=replace(
+    period.duration, config_active=True, config_enabled=True, binding_editable=False,
+    default_text=period.duration.text)) for period in periods)
+vm = replace(vm, revision=6, periods=(*effective_periods, third),
+             brackets=tuple(replace(bracket, readonly=True) for bracket in vm.brackets),
+             components=(replace(configured, config_active=True),))
+handle.set_schedule(vm)
+from zlc_ui.fluent import CONFIG_GREEN_TINT
+assert card._zlc_surface[0] == CONFIG_GREEN_TINT
+card.edit_button.click()
+assert actions[-1] == ("open_source", "mot")
+view.tabs.setCurrentWidget(main)
+card.expand_button.click(); app.processEvents()
+first = main._cards["p1"]
+assert first.duration_edit.isReadOnly() and first.duration_edit.isEnabled()
+assert not first.duration_edit.binding_button.isEnabled()
+assert not first.checks["d0"].isEnabled() and first.name_edit.isReadOnly()
+assert not first.unit_combo.isEnabled()
+assert first.bus_value_edits["a0"].isReadOnly() and not first.bus_mode_combos["a0"].isEnabled()
+blocked = []
+handle.feedback_requested.connect(blocked.append)
+strip.show_selection((("period", "p1"),))
+before = len(deletions)
+main.remove_button.click()
+QtTest.QTest.keyClick(strip, QtCore.Qt.Key_Delete)
+assert len(deletions) == before and blocked
+data.setData(strip.ITEM_MIME, QtCore.QByteArray(json.dumps(("period", "p1")).encode()))
+assert strip._proposal_at(data, len(strip.items())) is None
+data.setData(strip.ITEM_MIME, QtCore.QByteArray(json.dumps(("component-start", "mot")).encode()))
+assert strip._proposal_at(data, len(strip.items())) is not None
 view.finish_close(); view.deleteLater()
 app.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
 ''')

@@ -821,12 +821,13 @@ def test_a_stop_during_fire_preparation_keeps_that_fire_off_the_board(monkeypatc
     streamer.load(program)
     preparing, release = threading.Event(), threading.Event()
 
-    def held_preparation() -> None:
+    def held_preparation(program, authored_source, compiled_source):
         preparing.set()
         assert release.wait(5.0)
         streamer.safe()  # a reload's own SAFE, on the firing thread
+        return program, compiled_source
 
-    monkeypatch.setattr(streamer, "_refresh_config_file", held_preparation)
+    monkeypatch.setattr(streamer, "_prepare_config_program", held_preparation)
     refused: list[BaseException] = []
     stopped: list[object] = []
 

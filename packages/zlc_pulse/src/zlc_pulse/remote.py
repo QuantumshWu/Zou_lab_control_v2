@@ -1537,7 +1537,6 @@ class RemotePulseStreamer(ConfigValueHolder):
         rows=(),
     ) -> None:
         with self._io_lock:
-            self._refresh_config_file()
             program, filled = self._prepare_config_program(prog, source, source)
             self._load_program(program, source=filled, authored_source=source, rows=rows)
 
@@ -1577,7 +1576,6 @@ class RemotePulseStreamer(ConfigValueHolder):
 
     def fire(self, *, run_repeats: int, scan_repeats: int = 1) -> AppliedState:
         with self._io_lock:
-            self._refresh_config_file()
             if self._loaded_application is None:
                 self._loaded_application = self._call_locked("applied", {})
             applied = self._loaded_application

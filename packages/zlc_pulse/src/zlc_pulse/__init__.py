@@ -39,6 +39,7 @@ from .model import (
     extract_subpulse,
     insert_subpulse,
     replace_component,
+    set_subpulse_source,
     remove_component,
     PulseFieldRef,
     PERIOD_KIND_PERIOD,
@@ -64,6 +65,7 @@ from .binding import (
     convert_time,
     pulse_field_value,
     resolve_api_parameters,
+    resolve_subpulse_sources,
 )
 from .wire import load_streamer_config
 from .manifest import pulse_target_from_xdc
@@ -107,6 +109,8 @@ __all__ = [
     "extract_subpulse",
     "insert_subpulse",
     "replace_component",
+    "set_subpulse_source",
+    "resolve_subpulse_sources",
     "remove_component",
     "PERIOD_KIND_PERIOD",
     "PERIOD_KIND_SPACER",

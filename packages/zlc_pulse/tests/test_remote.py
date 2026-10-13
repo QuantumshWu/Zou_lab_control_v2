@@ -20,10 +20,13 @@ from zlc_pulse import (
     PulseSequence,
     PulseTarget,
     compile_sequence,
+    extract_subpulse,
     group_component,
     pulse_target_from_xdc,
     sequence_from_tree,
     sequence_to_tree,
+    set_subpulse_source,
+    write_subpulse,
 )
 from zlc_pulse.canonical import canonical_bytes
 from zlc_pulse import codec as pulse_codec
@@ -64,6 +67,7 @@ def _sequence(*, slotted: bool = False, configured: bool = False) -> PulseSequen
         else ()
     )
     return PulseSequence(
+        config_enabled=configured,
         target=target,
         time_step_ns=20,
         periods=(
@@ -450,6 +454,48 @@ def test_remote_replays_device_path_with_short_done_poll(monkeypatch, tmp_path) 
             assert state.rows == ((1,),)
             assert state.run_repeats == 2
             assert state.scan_repeats == 3
+            # The client resolves Subpulse files; the server accepts the exact
+            # complete source and never runs file preparation itself.
+            file_source = replace(group_component(
+                _sequence(), ("p0", "p1"), "Cooling", "cooling",
+            ), config_enabled=True)
+            fragment = extract_subpulse(file_source, "cooling")
+            fragment_path = tmp_path / "cooling.subpulse.json"
+            write_subpulse(fragment_path, replace(fragment, periods=(
+                fragment.periods[0], replace(fragment.periods[1], duration=80),
+            )))
+            file_source = set_subpulse_source(file_source, "cooling", "config", str(fragment_path))
+            def refuse_server_preparation(*args, **kwargs):
+                raise AssertionError("the server must not resolve client files")
+            monkeypatch.setattr(streamer, "_prepare_config_program", refuse_server_preparation)
+            client.load(compile_sequence(file_source, geom, 50e6), source=file_source)
+            write_subpulse(fragment_path, replace(fragment, periods=(
+                fragment.periods[0], replace(fragment.periods[1], duration=120),
+            )))
+            state = client.fire(run_repeats=1)
+            assert client.wait_done(1.0) is not None
+            assert state.source.period_by_id["p1"].duration == 120
+            assert state.authored_source is file_source
+            assert streamer.applied().source == state.source
+            # An already resolved scientific-run snapshot never reopens the file.
+            client.load(state.program, source=state.source)
+            fragment_path.unlink()
+            frozen = client.fire(run_repeats=1)
+            assert client.wait_done(1.0) is not None
+            assert frozen.source == state.source
+            from zlc_pulse import PulseBinding, PulseFieldRef
+            slotted = replace(fragment, bindings=(PulseBinding(PulseFieldRef("duration", "p0"), "ns", scan=True),))
+            write_subpulse(fragment_path, slotted)
+            client.load(compile_sequence(file_source, geom, 50e6), source=file_source, rows=((2,),))
+            resident = streamer.applied()
+            write_subpulse(fragment_path, replace(slotted, bindings=(
+                PulseBinding(PulseFieldRef("duration", "p1"), "ns", scan=True),
+            )))
+            calls.clear()
+            with pytest.raises(ValueError, match="scan fields.*prepare.*load"):
+                client.fire(run_repeats=1)
+            assert calls == [], "a changed table contract must fail before sending LOAD or FIRE"
+            assert streamer.applied() is resident
         finally:
             client.close()
 
@@ -708,11 +754,12 @@ def test_a_stop_during_remote_fire_preparation_keeps_that_fire_off_the_board(mon
         try:
             client.load(program)
 
-            def held_preparation() -> None:
+            def held_preparation(program, authored_source, compiled_source):
                 preparing.set()
                 assert release.wait(5.0)
+                return program, compiled_source
 
-            monkeypatch.setattr(client, "_refresh_config_file", held_preparation)
+            monkeypatch.setattr(client, "_prepare_config_program", held_preparation)
             refused: list[BaseException] = []
             stopped: list[object] = []
 

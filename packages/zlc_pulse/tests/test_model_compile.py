@@ -313,6 +313,7 @@ def _configured() -> PulseSequence:
     base = _sequence()
     return replace(
         base,
+        config_enabled=True,
         delays=(OutputDelay("d1", 40, "ns"),),
         bindings=(PulseBinding(PulseFieldRef('duration', 'p1'), 'ns', source='config', config_key='probe_time'), PulseBinding(PulseFieldRef('dac', 'p0', 'dac'), 'value', source='config', config_key='bias_x'), PulseBinding(PulseFieldRef('delay', port='d1'), 'ns', source='config', config_key='gate_delay')),
     )
@@ -338,6 +339,16 @@ def test_applying_a_config_set_overwrites_the_authored_numbers(monkeypatch) -> N
     ``source=`` describe the same pulse.
     """
 
+    default = replace(_configured(), config_enabled=False)
+    assert apply_config_values(default, {"probe_time": (80, "ns")})[0] is default
+    assert not _sequence().config_enabled
+    old_tree = sequence_to_tree(_configured())
+    del old_tree["config_enabled"]
+    assert sequence_from_tree(old_tree).config_enabled
+    old_tree = sequence_to_tree(_sequence())
+    del old_tree["config_enabled"]
+    assert not sequence_from_tree(old_tree).config_enabled
+    assert sequence_from_tree(sequence_to_tree(default)) == default
     sequence, applied, unknown = apply_config_values(
         _configured(),
         {
@@ -355,6 +366,7 @@ def test_applying_a_config_set_overwrites_the_authored_numbers(monkeypatch) -> N
     assert pulse_field_value(sequence, PulseFieldRef("delay", port="d1"), "ns") == 40.0
     # The declarations survive an apply; only the numbers moved.
     assert len(sequence.config_bindings) == 3
+    assert apply_config_values(default, {"probe_time": (80, "ns")}, current=sequence)[0] == default
 
     # A shared Config name may feed a different field in another Pulse.
     other = replace(
@@ -563,7 +575,7 @@ def test_scan_and_value_source_share_one_physical_field_declaration() -> None:
             sequence_from_tree(tree)
 
     from zlc_pulse import apply_api_values, resolve_scan_point
-    shared = replace(base, bindings=(
+    shared = replace(base, config_enabled=True, bindings=(
         PulseBinding(duration, "ns", scan=True, source="config", config_key="timing"),
         PulseBinding(PulseFieldRef("duration", "p1"), "ns", source="config", config_key="timing"),
         PulseBinding(PulseFieldRef("duration", "p2"), "ns", source="config"),
@@ -593,7 +605,7 @@ def test_scan_and_value_source_share_one_physical_field_declaration() -> None:
     repeats = PulseFieldRef("bracket_count", bracket_id="repeat")
     bracketed = replace(base, brackets=(PulseBracket("repeat", "p0", "p1", 2),))
     for source in ("api", "config"):
-        bound = replace(bracketed, bindings=(PulseBinding(
+        bound = replace(bracketed, config_enabled=True, bindings=(PulseBinding(
             repeats, "count", source=source,
             config_key="shared_repeat" if source == "config" else "",
         ),))
@@ -729,7 +741,7 @@ def test_subpulse_instances_have_independent_fields_and_shared_config_names() ->
     ))
     fragment = Subpulse("Cooling", source.target, source.time_step_ns, source.periods, source.bindings)
     once = insert_subpulse(None, fragment)
-    twice = insert_subpulse(once, fragment)
+    twice = replace(insert_subpulse(once, fragment), config_enabled=True)
     first, second = twice.components
     assert set(first.period_ids).isdisjoint(second.period_ids)
     assert [item.name for item in twice.components] == ["Cooling", "Cooling (2)"]
@@ -823,6 +835,7 @@ def test_component_and_non_executable_subpulse_files_roundtrip(tmp_path) -> None
     from zlc_pulse import (
         extract_subpulse, group_component, insert_subpulse, read_pulse_document,
         read_subpulse, subpulse_from_tree, subpulse_to_tree, write_subpulse,
+        apply_api_values, resolve_subpulse_sources, set_subpulse_source,
     )
 
     authored = group_component(
@@ -849,3 +862,50 @@ def test_component_and_non_executable_subpulse_files_roundtrip(tmp_path) -> None
     assert len({bracket.bracket_id for bracket in twice.brackets}) == 2
     assert twice.bracket_bounds == ((0, 2), (2, 4))
     assert sequence_from_tree(sequence_to_tree(twice)) == twice
+    api_fragment = replace(fragment, bindings=(
+        PulseBinding(PulseFieldRef("duration", "p0"), "ns", source="api"),
+        PulseBinding(PulseFieldRef("bracket_count", bracket_id="inner"), "count", source="api"),
+    ))
+    write_subpulse(path, api_fragment)
+    defaults = insert_subpulse(insert_subpulse(None, api_fragment), api_fragment)
+    first, second = defaults.components
+    referenced = set_subpulse_source(defaults, first.component_id, "config", path.name)
+    assert resolve_subpulse_sources(referenced, base_directory=tmp_path) is referenced
+    assert referenced.periods == defaults.periods
+    active = replace(referenced, config_enabled=True)
+    pulse_path = tmp_path / "experiment.json"
+    import json
+    pulse_path.write_text(json.dumps(sequence_to_tree(active)), encoding="utf-8")
+    active = read_pulse_document(pulse_path)[0]
+    assert active.components[0].config_path == str(path)
+    assert sequence_from_tree(sequence_to_tree(active)) == active
+    changed = replace(api_fragment, periods=(replace(api_fragment.periods[0], duration=80),
+                                            *api_fragment.periods[1:]))
+    write_subpulse(path, changed)
+    effective = resolve_subpulse_sources(active)
+    assert effective.period_by_id[first.period_ids[0]].duration == 80
+    assert active.period_by_id[first.period_ids[0]].duration == 20
+    assert effective.period_by_id[second.period_ids[0]].duration == 20
+    assert effective.components[0].period_ids == first.period_ids
+    assert effective.components[0].bracket_ids == first.bracket_ids
+    assert effective.components[0].source == "default"
+    assert resolve_subpulse_sources(effective) is effective
+    api_field = f"duration:{first.period_ids[0]}"
+    applied = apply_api_values(active, {api_field: (100, "ns")})[0]
+    assert applied.period_by_id[first.period_ids[0]].duration == 100
+    assert resolve_api_parameters(active, {api_field: 120}).period_by_id[first.period_ids[0]].duration == 120
+    changed = replace(changed, periods=changed.periods + (replace(changed.periods[-1], period_id="extra"),))
+    write_subpulse(path, changed)
+    expanded = resolve_subpulse_sources(active)
+    assert expanded.components[0].period_ids[:2] == first.period_ids
+    assert expanded.periods == resolve_subpulse_sources(active).periods
+    write_subpulse(path, replace(changed, bindings=()))
+    with np.testing.assert_raises_regex(ValueError, "Scan/API field"):
+        resolve_subpulse_sources(active)
+    write_subpulse(path, replace(changed, time_step_ns=10))
+    with np.testing.assert_raises_regex(ValueError, "time step"):
+        resolve_subpulse_sources(active)
+    path.unlink()
+    assert resolve_subpulse_sources(replace(active, config_enabled=False)).periods == defaults.periods
+    with np.testing.assert_raises_regex(ValueError, "Cannot resolve Subpulse.*cooling.json"):
+        resolve_subpulse_sources(active)

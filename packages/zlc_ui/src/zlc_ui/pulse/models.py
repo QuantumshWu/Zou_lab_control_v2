@@ -107,6 +107,10 @@ class FieldVM:
     allow_any: bool = True
     field_id: str = ""
     config_names: tuple[str, ...] = ()
+    config_active: bool = False
+    config_enabled: bool = False
+    default_text: str = ""
+    binding_editable: bool = True
 
     def __post_init__(self) -> None:
         if self.validator_kind not in VALIDATOR_KINDS:
@@ -139,6 +143,7 @@ class PeriodVM:
     digital: tuple[tuple[str, bool], ...] = ()
     analog: tuple[tuple[str, str, FieldVM], ...] = ()
     kind: str = PERIOD_KIND_PERIOD
+    readonly: bool = False
 
     def __post_init__(self) -> None:
         if self.kind not in PERIOD_KINDS:
@@ -156,6 +161,7 @@ class BracketVM:
     ordinal: int = 1
     color: str = ""
     count_field: FieldVM | None = None
+    readonly: bool = False
 
 
 @dataclass(frozen=True)
@@ -169,6 +175,10 @@ class ComponentVM:
     bracket_count: int = 0
     bracket_ids: tuple[str, ...] = ()
     spacer_count: int = 0
+    source: str = "default"
+    config_path: str = ""
+    config_active: bool = False
+    error: str = ""
 
 
 @dataclass(frozen=True)

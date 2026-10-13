@@ -26,6 +26,8 @@ from pathlib import Path
 
 from PyQt5 import QtCore
 
+from zlc_ui.fluent import signals_blocked
+
 from .editor_view import PulseEditorView
 from .models import ConfigPageRecord, ConnectionVM, ScheduleVM
 
@@ -43,6 +45,8 @@ class PulseEditorHandle(QtCore.QObject):
     clear_all_requested = QtCore.pyqtSignal()
     save_requested = QtCore.pyqtSignal()
     load_requested = QtCore.pyqtSignal()
+    config_mode_committed = QtCore.pyqtSignal(bool)
+    refresh_effective_requested = QtCore.pyqtSignal()
     config_new_requested = QtCore.pyqtSignal()
     config_load_requested = QtCore.pyqtSignal()
     config_refresh_requested = QtCore.pyqtSignal()
@@ -85,6 +89,7 @@ class PulseEditorHandle(QtCore.QObject):
 
     # -- the scan --------------------------------------------------------
     scan_array_load_requested = QtCore.pyqtSignal()
+    scan_array_clear_requested = QtCore.pyqtSignal()
     scan_source_edited = QtCore.pyqtSignal(str)
     scan_repeats_committed = QtCore.pyqtSignal(int)
     scan_hold_requested = QtCore.pyqtSignal()
@@ -134,15 +139,12 @@ class PulseEditorHandle(QtCore.QObject):
             getattr(schedule, name).connect(getattr(self, name))
         schedule.run_requested.connect(self.fire_requested)
         schedule.component_action_requested.connect(self._component_action)
-        schedule.component_selected.connect(self._component_selected)
         schedule.config_binding_committed.connect(self.config_binding_committed)
+        schedule.channel_panel.config_mode.toggled.connect(self.config_mode_committed)
+        schedule.channel_panel.config_refresh_button.clicked.connect(self.refresh_effective_requested)
         component.action_requested.connect(self._component_action)
         component.edit_requested.connect(self.component_edit_requested)
         component.feedback_requested.connect(self.feedback_requested)
-        view.component_inspector.action_requested.connect(self._component_action)
-        view.component_inspector.edit_requested.connect(self.component_edit_requested)
-        view.component_inspector.feedback_requested.connect(self.feedback_requested)
-        view.tabs.currentChanged.connect(self._authoring_page_changed)
         scan.repeats_committed.connect(self.scan_repeats_committed)
         scan.hold_requested.connect(self.scan_hold_requested)
         scan.step_requested.connect(self.scan_step_requested)
@@ -152,6 +154,7 @@ class PulseEditorHandle(QtCore.QObject):
         scan.run_requested.connect(self.scan_run_requested)
         scan.save_array_requested.connect(self.scan_array_save_requested)
         scan.load_array_requested.connect(self.scan_array_load_requested)
+        scan.clear_array_requested.connect(self.scan_array_clear_requested)
         scan.progress_refresh_requested.connect(self.scan_progress_refresh_requested)
         for name in ("new_requested", "load_requested", "refresh_requested", "save_requested",
                      "save_as_requested", "unload_requested", "entries_edited", "binding_committed"):
@@ -274,30 +277,19 @@ class PulseEditorHandle(QtCore.QObject):
         button.setToolTip(record.active_path or "No active Config file; Pulse defaults are used.")
 
     def _component_action(self, action: str, payload: object) -> None:
-        if action == "expand":
-            self._view.schedule_view._component_action(action, payload)
-            return
-        if action in {"edit", "context"} and payload:
-            self._view.tabs.setCurrentWidget(self._view.edit_page)
-            schedule = self._view.schedule_view
-            key = ("component-start" if str(payload) in schedule._expanded_components else "component", str(payload))
-            schedule.drag_container.show_selection((key,))
-            self._view.component_inspector.show()
+        if action in {"edit", "open_source"}:
+            self._view.tabs.setCurrentWidget(self._view.component_view)
         self.component_action_requested.emit(action, payload)
 
-    def _component_selected(self, component_id: str) -> None:
-        self._view.component_inspector.setVisible(bool(component_id))
-        if component_id != self._view.component_inspector._context_id:
-            self.component_action_requested.emit("context", component_id)
-
-    def _authoring_page_changed(self, _index: int) -> None:
-        if self._view.tabs.currentWidget() is self._view.component_view:
-            self.component_action_requested.emit("context", "")
-        elif self._view.tabs.currentWidget() is self._view.edit_page:
-            self._view.schedule_view._selection_changed()
-
-    def component_insert_before(self) -> tuple[str, str] | None:
-        return self._view.schedule_view.component_insert_before()
+    def set_config_mode(self, enabled: bool, busy: bool = False, error: str = "") -> None:
+        panel = self._view.schedule_view.channel_panel
+        with signals_blocked(panel.config_mode):
+            panel.config_mode.setChecked(enabled)
+            panel.config_mode.setText("Config" if enabled else "Default")
+        panel.config_mode.setEnabled(not busy)
+        panel.config_refresh_button.setEnabled(not busy and enabled)
+        panel.config_mode.setToolTip(error or "Default uses authored content; Config uses saved sources")
+        panel.config_refresh_button.setToolTip(error or "Reload saved Config values and Subpulse sources")
 
     def set_component_document(
         self,
@@ -311,19 +303,16 @@ class PulseEditorHandle(QtCore.QObject):
         config_names: tuple[str, ...] = (),
         busy: bool = False,
     ) -> None:
-        if not context_id:
-            self._view.component_view.set_document(
-                schedule, context_id="", path=path,
-                dirty=dirty, bindings=bindings, config_names=config_names, busy=busy,
-            )
-        self._view.component_inspector.set_document(
+        self._view.component_view.set_document(
             schedule, contexts=contexts, context_id=context_id, path=path,
             dirty=dirty, bindings=bindings, config_names=config_names, busy=busy,
         )
-        self._view.component_inspector.setVisible(bool(context_id))
+
+    def component_insert_before(self) -> tuple[str, str] | None:
+        return self._view.schedule_view.component_insert_before()
 
     def focus_component_name(self, component_id: str) -> None:
-        self._view.tabs.setCurrentWidget(self._view.edit_page)
+        self._view.tabs.setCurrentWidget(self._view.schedule_view)
         self._view.schedule_view.focus_component_name(component_id)
 
     def confirm_component_discard(self) -> bool:

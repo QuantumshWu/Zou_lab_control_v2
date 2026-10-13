@@ -37,6 +37,7 @@ from zlc_pulse import (
     api_parameter_columns_for,
     scan_columns_for,
     normalize_binding_values,
+    resolve_subpulse_sources,
 )
 from zlc_pulse.codec import read_pulse_document
 
@@ -498,7 +499,7 @@ def bind_plan(
 
 def _template_sequence(path: str | Path) -> PulseSequence:
     sequence, _editor = read_pulse_document(path)
-    return sequence
+    return resolve_subpulse_sources(sequence, base_directory=Path(path).parent)
 
 
 
