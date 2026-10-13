@@ -351,7 +351,7 @@ class PanelEditorView(QtWidgets.QWidget):
         # age and the producer summary, which DO change every shot, are
         # applied by the half below and are excluded for that reason.
         volatile = ("stale", "frozen_snapshot", "data_advanced",
-                    "source_status", "producer_node_id", "producer_projection")
+                    "source_status", "snapshot_error", "producer_node_id", "producer_projection")
         structure = {
             key: value for key, value in incoming.items() if key not in volatile
         }
@@ -446,7 +446,7 @@ class PanelEditorView(QtWidgets.QWidget):
         aged = bool(self._projection.get("data_advanced") or self._projection.get("source_status"))
         self.snapshot_label.setText(self._snapshot_text(self._projection, stale=stale))
         # Written when it CHANGES: two values, a re-parse and a repolish.
-        colour = ORANGE if stale or aged else GREY
+        colour = ORANGE if stale or aged or self._projection.get("snapshot_error") else GREY
         if colour != self._snapshot_colour:
             self._snapshot_colour = colour
             self.snapshot_label.setStyleSheet(
@@ -629,6 +629,8 @@ class PanelEditorView(QtWidgets.QWidget):
             pieces.append("Live data advanced; Refresh to update; Save keeps this snapshot")
         else:
             pieces.append("frozen and ready to save")
+        if projection.get("snapshot_error"):
+            pieces.append(f"Refresh failed: {projection['snapshot_error']}; Save keeps this snapshot")
         return " · ".join(pieces)
 
 

@@ -2095,6 +2095,12 @@ def future_public_probe(self, note: str, outcome: dict | None = None):
         assert editor_gate['pending'], 'Refresh never reached the editor'
         release_editor_gate()
         return {'released':True}
+    if note == 'fail-editor':
+        assert editor_gate['pending'], 'Refresh never reached the editor'
+        pending, editor_gate['pending'] = editor_gate['pending'], []
+        for _args, _kwargs, answer in pending:
+            answer.set_exception(RuntimeError('Rejected snapshot update'))
+        return {'failed':True}
     if note == 'request-review':
         binding = flow.console_presenter.logic[outcome['node_id']]
         host = binding.host
@@ -2298,6 +2304,14 @@ async def client():
                 assert stopped["accepted"]
                 done = await waiting
                 assert done["reached"] and done["observation"]["terminal"] and done["still_current"]
+                assert done['observation']['phase'] == 'cancelled'
+                after_cancel = await call('lab_batch', {'calls':[
+                    {'tool':'lab_wait','arguments':{'node_id':node,'generation':generation,'timeout_seconds':0}},
+                    {'tool':'lab_action','arguments':{'action':'logic.add','arguments':{'api_name':'derive','node_id':'must_not_start_after_cancel'}}},
+                ]})
+                assert not after_cancel['completed'] and after_cancel['stopped_at'] == 0
+                assert after_cancel['results'][0]['result']['reached'], 'Cancelled really is terminal, but not successful'
+                assert not (await call('lab_state', {'node_id':'must_not_start_after_cancel'}))['console']['logic']
                 panel = await call('lab_action', {'action':'panel.add', 'arguments':{'kind':'image'}})
                 panel_id = panel['panel_id']
                 configured = await call('lab_action', {'action':'panel.update', 'arguments':{'panel_id':panel_id,
@@ -2332,6 +2346,20 @@ async def client():
                 assert pending['matched']
                 assert pending['result']['console']['panels'][0]['frozen_ref']['stream_generation']['value'] == old['result']['generation']
                 assert not saving.done() and not (Path(WORKSPACE)/'data/pending-refresh.npz').exists()
+                await call('lab_call', {'handle':'devices','method':'future_public_probe','arguments':{'note':'fail-editor'}})
+                failed = await saving
+                assert not failed['accepted'] and not failed['saved'] and 'Rejected snapshot update' in failed['error']
+                assert not (Path(WORKSPACE)/'data/pending-refresh.npz').exists()
+                retained = await call('lab_save', {'panel_id':panel_id,'path':'data/retained-old.png'})
+                assert retained['accepted'], retained
+                assert (await call('lab_wait_for', {'tool_name':'lab_state','arguments':{'panel_id':panel_id},
+                    'path':['console','panels',0,'saving'],'equals':False,'timeout_seconds':20}))['matched']
+                old_archive = await call('lab_artifact', {'path':'data/retained-old.npz','limit':64000})
+                assert old_archive['datasets']['data']['ref']['stream_generation'] == old['result']['generation']
+                saving = asyncio.create_task(call('lab_save', {'panel_id':panel_id,'path':'data/pending-refresh.png','refresh':True}))
+                retry_pending = await call('lab_wait_for', {'tool_name':'lab_state','arguments':{'panel_id':panel_id},
+                    'path':['console','panels',0,'configuration_pending'],'equals':True,'timeout_seconds':10})
+                assert retry_pending['matched'] and retry_pending['result']['console']['panels'][0]['snapshot_error'] == ''
                 await call('lab_call', {'handle':'devices','method':'future_public_probe','arguments':{'note':'release-editor'}})
                 assert (await saving)['accepted']
                 assert (await call('lab_wait_for', {'tool_name':'lab_state','arguments':{'panel_id':panel_id},
@@ -2429,6 +2457,10 @@ async def client():
                         assert not {"lab_handles", "lab_api", "lab_call", "lab_intent"} & offered
                         forbidden = await operator.call_tool("lab_call", {"handle":"devices", "method":"snapshot", "arguments":{}})
                         assert forbidden.is_error and "developer" in str(forbidden.content)
+                        forbidden_batch = await operator.call_tool('lab_batch', {'calls':[
+                            {'tool':'lab_call','arguments':{'handle':'devices','method':'snapshot','arguments':{}}},
+                        ]})
+                        assert forbidden_batch.is_error and 'developer' in str(forbidden_batch.content)
                         read_help = await operator.call_tool("lab_guide", {"topic":"lifetime"})
                         assert not read_help.is_error and "Frame Survival" in read_help.structured_content["content"]
                 connection_path.unlink()

@@ -410,6 +410,8 @@ class PanelBinding:
     #: Refresh waits for the next surface the live port actually accepts.
     #: Until then Edit/Save keep the previous accepted snapshot.
     refresh_requested: bool = False
+    #: Last failed Frozen mount/update, not an error in the retained old data.
+    snapshot_error: str = ""
     #: Panel Edit owns a second, frozen plotting surface.  It is deliberately
     #: not the live monitor host and therefore has no PlotPanelPort.
     editor_host: Any = None
@@ -1581,6 +1583,7 @@ class ConsolePresenter:
             self._advance_panel_editor_host(binding, frozen)
         else:
             binding.frozen_data = frozen
+            binding.snapshot_error = ""
 
     def _panel_frozen_data(
         self,
@@ -1725,6 +1728,7 @@ class ConsolePresenter:
                     ),
                 )
             except Exception as error:
+                binding.snapshot_error = _error_text(error)
                 self._report(
                     f"cannot refresh {binding.state.title} plot editor: "
                     f"{_error_text(error)}",
@@ -2825,6 +2829,8 @@ class ConsolePresenter:
                     # the very field that would fix it).  The editor stays
                     # open, the refusal is reported, and every accepted
                     # state change offers the mount again.
+                    binding.snapshot_error = _error_text(error)
+                    self._refresh_panel_snapshot_status(binding)
                     self._report(
                         f"cannot mount {binding.state.title} plot editor: "
                         f"{_error_text(error)}",
@@ -3287,6 +3293,7 @@ class ConsolePresenter:
             self._restore_producer_draft(binding.panel_id)
             binding.parameter_surface = self._unbound_panel_parameters(candidate)
             binding.frozen_data = None
+            binding.snapshot_error = ""
             self._publish_panel_state(binding)
             self._refresh_console_projection()
             return True
@@ -4229,6 +4236,8 @@ class ConsolePresenter:
                                         frozen=candidate_frozen,
                                     )
                                 except Exception as error:
+                                    binding.snapshot_error = _error_text(error)
+                                    self._refresh_panel_snapshot_status(binding)
                                     self._report(
                                         f"cannot update {binding.state.title} "
                                         f"plot editor: {_error_text(error)}",
@@ -4236,6 +4245,7 @@ class ConsolePresenter:
                                     )
                             else:
                                 binding.frozen_data = candidate_frozen
+                                binding.snapshot_error = ""
             editor_entry = binding.editor_configuration
             if editor_entry is not None:
                 (
@@ -4306,6 +4316,7 @@ class ConsolePresenter:
                     binding.editor_selections = selections
                     record_moved = binding.frozen_data is not accepted_frozen
                     binding.frozen_data = accepted_frozen
+                    binding.snapshot_error = ""
                     self._accept_panel_display_state(
                         binding,
                         editor_host,
@@ -4348,6 +4359,8 @@ class ConsolePresenter:
                 except Exception as error:
                     if editor_host is not binding.editor_host:
                         self._retire_plot_host(editor_host)
+                    binding.snapshot_error = _error_text(error)
+                    self._refresh_panel_snapshot_status(binding)
                     self._report(
                         f"cannot update {binding.state.title} plot editor: "
                         f"{_error_text(error)}",
@@ -4390,6 +4403,7 @@ class ConsolePresenter:
             "stale": bool(binding.frozen_configuration_incompatible),
             "data_advanced": bool(binding.frozen_data_advanced),
             "source_status": source_status,
+            "snapshot_error": binding.snapshot_error,
         }
 
     def _refresh_panel_snapshot_status(self, binding: PanelBinding) -> None:
@@ -4674,6 +4688,8 @@ class ConsolePresenter:
         try:
             self._replace_panel_editor_host(binding)
         except Exception as error:
+            binding.snapshot_error = _error_text(error)
+            self._refresh_panel_snapshot_status(binding)
             self._report(
                 f"cannot mount {binding.state.title} plot editor: "
                 f"{_error_text(error)}",
@@ -4913,6 +4929,8 @@ class ConsolePresenter:
         binding = self.panels.get(str(panel_id))
         if binding is None:
             return False
+        binding.snapshot_error = ""
+        self._refresh_panel_snapshot_status(binding)
         front = self.session.signal_plane.freeze()
         publication = front.publication(binding.state.signal)
         surface = binding.accepted_surface
@@ -4921,8 +4939,9 @@ class ConsolePresenter:
         if surface is None and publication is None:
             # Nothing has ever been drawn and nothing is published: the
             # only honest refusal.
+            binding.snapshot_error = f"{binding.state.signal} has not published yet"
             self._report(
-                f"{binding.state.signal} has not published yet",
+                binding.snapshot_error,
                 severity="warning",
             )
             return False
@@ -4979,21 +4998,22 @@ class ConsolePresenter:
             and describes_current
             and not already_frozen
         ):
-            frozen = self._panel_frozen_data(
-                binding,
-                publication=shown_publication,
-                plot_input=shown_input,
-                event_records=surface.event_records,
-                target=binding.state,
-                description=surface.description,
-            )
             binding.refresh_requested = False
             try:
+                frozen = self._panel_frozen_data(
+                    binding,
+                    publication=shown_publication,
+                    plot_input=shown_input,
+                    event_records=surface.event_records,
+                    target=binding.state,
+                    description=surface.description,
+                )
                 if accepted is not None and accepted.plot_input is shown_input:
                     # The same pixels Edit already shows, under a
                     # re-stamped target: the record moves and Edit's
                     # gestures rebind to it; no new picture travels.
                     binding.frozen_data = frozen
+                    binding.snapshot_error = ""
                     if binding.editor_host is not None:
                         self._refresh_panel_editor_selection(binding)
                 else:
@@ -5002,11 +5022,14 @@ class ConsolePresenter:
                     # never the other way round.
                     self._freeze_panel(binding, frozen)
             except Exception as error:
+                binding.snapshot_error = _error_text(error)
+                self._refresh_panel_snapshot_status(binding)
                 self._report(
                     f"cannot mount {binding.state.title} plot "
                     f"editor: {_error_text(error)}",
                     severity="error",
                 )
+                return False
             if binding.editor_open:
                 self.refresh_panel_editor(panel_id)
         if not newer_pending:

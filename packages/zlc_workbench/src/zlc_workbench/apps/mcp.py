@@ -56,6 +56,10 @@ def _step_succeeded(result):
     if (any(result.get(key) is False for key in
             ("accepted", "matched", "reached", "still_current")) or result.get("error")):
         return False
+    observation = result.get("observation")
+    # Terminal was reached after Stop, but the experiment did not finish.
+    if isinstance(observation, dict) and observation.get("phase") == "cancelled":
+        return False
     # Generic owner calls and field-condition waits wrap the original result.
     return _step_succeeded(result["result"]) if "result" in result else True
 
@@ -729,6 +733,10 @@ def start_server(flow, *, host="127.0.0.1", port: int, token: str, allow_control
                     if not _step_succeeded(settled):
                         return dict(accepted=False, saved=False,
                                     error="Refresh has not completed; no Figure was saved", state=settled["result"])
+                error = settled["result"]["console"]["panels"][0]["snapshot_error"]
+                if error:
+                    return dict(accepted=False, saved=False, error=f"Refresh failed; no Figure was saved: {error}",
+                                state=settled["result"])
             result = await lab_action("panel.save", {"panel_id": panel_id, "selected": path})
             if _step_succeeded(result) and layout_path is not None:
                 result["layout"] = await lab_action("layout.save", {"path": layout_path})
@@ -930,7 +938,7 @@ def start_server(flow, *, host="127.0.0.1", port: int, token: str, allow_control
             result. Only earlier completed steps; no expressions/conditions/loops or automatic retries.
             Include explicit waits for asynchronous work. Stops on an error/refusal/unmet expectation; previous
             effects remain and are never rolled back or replayed. No nested batches. At most 16 calls, 30 s total.
-            Refusal, error, unmet wait or retired generation always stops the list; expect adds conditions,
+            Refusal, error, unmet wait, cancelled run or retired generation stops the list; expect adds conditions,
             never overrides those failures. No implicit retries or interpretation of scientific data.
             The caller must not batch steps that require interpreting new scientific data or human decisions.
             """
@@ -1201,7 +1209,11 @@ async def _stdio(workspace: Path, *, tool_profile="operator") -> None:
 
     async def call_tool(ctx, params):
         try:
-            if tool_profile != "developer" and params.name in _DEVELOPER_TOOLS:
+            hidden_batch = params.name == "lab_batch" and any(
+                isinstance(call, dict) and call.get("tool") in _DEVELOPER_TOOLS
+                for call in (params.arguments or {}).get("calls", ())
+            )
+            if tool_profile != "developer" and (params.name in _DEVELOPER_TOOLS or hidden_batch):
                 raise ValueError("Reflection is a developer fallback. Use native operator tools or explicitly connect with --tools developer.")
             if params.name == "lab_connections":
                 result = {"workspace": str(workspace), "connections": [item for item, _ in await available()]}
