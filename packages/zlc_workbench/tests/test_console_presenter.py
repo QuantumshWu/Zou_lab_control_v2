@@ -1515,6 +1515,18 @@ def test_arming_a_fit_from_setting_reaches_the_panels_pixels(
         if field["key"] == "expression"
     )
     assert expression["value"] == "missing=1"
+    summary = presenter.control_results(binding.panel_id).result(timeout=10)
+    assert summary["status"] == "current" and summary["source_is_latest"]
+    assert summary["fit_matches_display"]
+    public = presenter.control_catalog(panel_id=binding.panel_id)["panel"]
+    assert "producer_projection" not in public
+    assert all("cycle_choices" not in field for field in public["parameter_surface"]["semantic"])
+    # The old picture's fit still matches its pixels after a new source run,
+    # but it must not be advertised as a current result of that new run.
+    _one_shot(session)
+    summary = presenter.control_results(binding.panel_id).result(timeout=10)
+    assert summary["status"] == "lagging" and not summary["source_is_latest"]
+    assert summary["fit_matches_display"]
 
 
 def test_a_two_population_fit_offers_its_evidence_threshold_in_setting(
@@ -4139,6 +4151,10 @@ def test_a_board_names_its_panels_and_a_load_respells_every_reference_to_them() 
     assert restored_logic.draft.device_keys == {}
     assert restored_logic.draft.artifact_inputs == {"calibration_path": "chosen.json"}
     assert restored_logic.auto_preview is True
+    saved["size"] = "1x1"
+    with pytest.raises(LayoutError, match="unknown panel preset"):
+        LayoutDocument.from_tree(tree)
+    saved.pop("size")
     saved["display"]["show_grid"] = "invalid boolean"
     with pytest.raises(LayoutError):
         LayoutDocument.from_tree(tree)

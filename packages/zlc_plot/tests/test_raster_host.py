@@ -793,6 +793,12 @@ def test_host_facet_live_fit_promotes_one_batch_front_and_future(grouped_histogr
         result = operation.value
         assert [(domain, axis.size) for domain, axis in result.sample_axes] == expected_axes
         assert len(result.results) == (4 if grouped_histogram else 2)
+        summary = host.fit_summary(limit=1).result(timeout=10).value
+        assert summary["total_rows"] == len(result.results)
+        assert summary["source_revision"] == result.source_revision
+        assert summary["next_offset"] == 1
+        assert summary["rows"][0]["success"] == bool(result.results[0].success)
+        assert host.front is operation.front, "Reading fit parameters must not redraw"
         for encode, decode in (
             (_wire_fit_summary, _restore_fit_summary),
             (_wire_complete_fit_result, _restore_complete_fit_result),

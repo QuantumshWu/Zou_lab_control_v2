@@ -78,7 +78,8 @@ def _run_script(
     environment = _subprocess_environment()
     environment.update(dict(overrides or {}))
     return subprocess.run(
-        [sys.executable, "-c", _BOOTSTRAP + script],
+        [sys.executable, "-c", "import sys; exec(compile(sys.stdin.read(), '<string>', 'exec'))"],
+        input=_BOOTSTRAP + script,
         capture_output=True,
         text=True,
         env=environment,
@@ -2042,9 +2043,10 @@ def test_mcp_uses_current_virtual_session_and_keeps_stop_available(workspace):
     pytest.importorskip("mcp")
     write_ordinary_pulse(workspace)
     result = _run_script(r'''
-import asyncio, base64, socket, time
-from threading import Event
-from concurrent.futures import ThreadPoolExecutor
+import asyncio, base64, json, socket, time
+from pathlib import Path
+from threading import Event, Thread
+from concurrent.futures import ThreadPoolExecutor, Future
 import httpx2
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
@@ -2058,8 +2060,68 @@ with socket.socket() as held:
     port = held.getsockname()[1]
 url = f"http://127.0.0.1:{port}/mcp"
 close_mcp = start_server(flow, port=port, token="virtual-test")
-def future_public_probe(self, note: str):
-    return {"note": note}
+close_readonly = start_server(flow, port=0, token="read-test", allow_control=False)
+unicode_text = 'Site review: \u5ba1\u6838 \u03bcs \U0001f9ea\n'
+(Path(WORKSPACE) / 'labels.txt').write_bytes(unicode_text.encode('utf-8'))
+editor_gate = {}
+attention = {}
+def release_editor_gate():
+    if not editor_gate:
+        return
+    editor_gate['host'].update_data = editor_gate['original']
+    pending = editor_gate.pop('pending', [])
+    for args, kwargs, answer in pending:
+        actual = editor_gate['original'](*args, **kwargs)
+        def finish(done, answer=answer):
+            try:
+                answer.set_result(done.result())
+            except BaseException as error:
+                answer.set_exception(error)
+        actual.add_done_callback(finish)
+    editor_gate.clear()
+def future_public_probe(self, note: str, outcome: dict | None = None):
+    if note == 'hold-editor':
+        panel = flow.console_presenter.panels[outcome['panel_id']]
+        editor = panel.editor_host
+        assert editor is not None and panel.editor_configuration is None
+        editor_gate.update(host=editor, original=editor.update_data, pending=[])
+        def hold(*args, **kwargs):
+            answer = Future()
+            editor_gate['pending'].append((args, kwargs, answer))
+            return answer
+        editor.update_data = hold
+        return {'generation':panel.frozen_data.snapshot.ref.stream_generation.value}
+    if note == 'release-editor':
+        assert editor_gate['pending'], 'Refresh never reached the editor'
+        release_editor_gate()
+        return {'released':True}
+    if note == 'request-review':
+        binding = flow.console_presenter.logic[outcome['node_id']]
+        host = binding.host
+        def request():
+            try:
+                host._request_operator_input('point-selection', title='Wait observation probe',
+                    message='Test scientific review', payload={'point_ids':['a']})
+            finally:
+                attention['done'].set()
+        attention.update(host=host, done=Event())
+        thread = Thread(target=request, daemon=True)
+        attention['thread'] = thread
+        thread.start()
+        deadline = time.monotonic() + 1
+        while host.operator_request is None and time.monotonic() < deadline:
+            time.sleep(.001)
+        request = host.operator_request
+        assert request is not None
+        # The protocol test supplies the real Host request without rerunning
+        # Calibration science. Its actual modal actions have their Qt test.
+        binding.operator_request_id = request.request_id
+        return {'request_id':request.request_id}
+    if note == 'finish-review':
+        host = attention['host']
+        host.submit_operator_input(host.operator_request.request_id, {'excluded_point_ids':[]})
+        return {'submitted':True}
+    return {"note": note, **(outcome or {})}
 type(flow.devices.presenter).future_public_probe = future_public_probe
 block_owner, owner_blocked = Event(), Event()
 
@@ -2077,11 +2139,43 @@ async def client():
                     assert result.structured_content is not None
                     return result.structured_content
                 assert not (await call("lab_state"))["session_open"]
+                guide = await call("lab_guide")
+                assert "lifetime" in guide["topics"] and "lab_results" in guide["content"]
+                cold = await call("lab_catalog")
+                assert all(row["description"] for row in cold["logic"])
+                assert next(row for row in cold["logic"] if row["api_name"] == "seamless_scan")["estimate_available"]
+                assert "exponential_decay" in {model["model_id"] for model in cold["plot"]["fit_models"]}
+                assert "facet_grid" in cold["panel_kinds"]
+                occupancy = (await call("lab_guide", {"topic":"node:occupancy"}))["logic"][0]
+                assert occupancy["artifact_inputs"][0]["relative_to"] == str(flow.space.data)
+                assert "do not prepend" in occupancy["artifact_inputs"][0]["path_rule"]
+                assert not (await call("lab_state"))["session_open"], "Discovery must not initialize hardware"
+                parts, offset = [], 0
+                while True:
+                    page_result = await c.call_tool("lab_artifact", {"path":"labels.txt", "offset":offset, "limit":7})
+                    assert not page_result.is_error, page_result.content
+                    page = json.loads(page_result.content[0].text)
+                    assert '\ufffd' not in page['text'] and len(page['text'].encode('utf-8')) <= 7
+                    parts.append(page['text'])
+                    assert page['next_offset'] > offset
+                    offset = page['next_offset']
+                    if offset == page['total_bytes']:
+                        break
+                assert ''.join(parts) == unicode_text
                 assert "devices" in await call("lab_handles")
                 methods = (await call("lab_api", {"handle":"devices"}))["methods"]
                 assert "load" in methods and "future_public_probe" in methods
                 probe = await call("lab_call", {"handle":"devices", "method":"future_public_probe", "arguments":{"note":"no MCP registration"}})
                 assert probe["result"] == {"note":"no MCP registration"}
+                retired = await call("lab_batch", {"calls":[
+                    {"tool":"lab_call", "arguments":{"handle":"devices", "method":"future_public_probe",
+                      "arguments":{"note":"retired run", "outcome":{"reached":True,"still_current":False}}},
+                      "expect":{"result":{"note":"retired run","reached":True,"still_current":False}}},
+                    {"tool":"lab_intent", "arguments":{"handle":"devices", "intent":"role_committed",
+                      "arguments":["camera","Must not execute"]}},
+                ]})
+                assert not retired["completed"] and retired["stopped_at"] == 0
+                assert next(d for d in (await call("lab_state"))["devices"] if d["instance_id"] == "camera")["role"] != "Must not execute"
                 await call("lab_intent", {"handle":"devices", "intent":"role_committed", "arguments":["camera","Camera QA"]})
                 assert next(d for d in (await call("lab_state"))["devices"] if d["instance_id"] == "camera")["role"] == "Camera QA"
                 saved = await call("lab_call", {"handle":"devices", "method":"save_as", "arguments":{"path":"apparatus-api.json"}})
@@ -2147,16 +2241,55 @@ async def client():
                 assert added["accepted"]
                 revision = added["state"]["logic"][0]["draft_revision"]
                 await asyncio.sleep(.03)  # The real editor's queued normalization has run.
-                started = await call("lab_action", {"action":"logic.start", "arguments":{"node_id":node},
-                                                     "expected_draft_revision":revision})
+                started_batch = await call("lab_batch", {"calls":[
+                    {"tool":"lab_action", "arguments":{"action":"logic.start", "arguments":{"node_id":node},
+                     "expected_draft_revision":revision}},
+                    {"tool":"lab_wait", "arguments":{"node_id":{"$result":[0,"node_id"]},
+                     "generation":{"$result":[0,"state","logic",0,"generation"]},
+                     "until":"ready", "timeout_seconds":10}},
+                ]})
+                assert started_batch['completed'], started_batch
+                started = started_batch['results'][0]['result']
                 assert started["accepted"]
-                for _ in range(100):
-                    rows = (await call("lab_state", {"node_id":node}))["console"]["logic"]
-                    if rows[0]["ready"]:
-                        break
-                    await asyncio.sleep(.01)
+                rows = started_batch['results'][1]['result']['state']['console']['logic']
                 generation = rows[0]["generation"]
                 assert rows[0]["ready"]
+                request = await call('lab_call', {'handle':'devices','method':'future_public_probe',
+                    'arguments':{'note':'request-review','outcome':{'node_id':node}}})
+                before = time.monotonic()
+                attention_result = await call('lab_wait', {'node_id':node,'generation':generation,'timeout_seconds':30})
+                assert time.monotonic()-before < 2, 'An operator request must release the waiting agent'
+                assert not attention_result['reached'] and attention_result['still_current']
+                waiting_row = attention_result['state']['console']['logic'][0]
+                assert waiting_row['operator_request']['request_id'] == request['result']['request_id']
+                assert waiting_row['requires_review'] and not waiting_row['requires_human']
+                await call('lab_call', {'handle':'devices','method':'future_public_probe','arguments':{'note':'finish-review'}})
+                assert await asyncio.to_thread(attention['done'].wait, 2)
+                invalid_reference = await call('lab_batch', {'calls':[
+                    {'tool':'lab_action', 'arguments':{'action':'logic.stop', 'arguments':{'node_id':{'$result':[1,'node_id']}}}},
+                    {'tool':'lab_state', 'arguments':{}},
+                ]})
+                assert not invalid_reference['completed'] and invalid_reference['stopped_at'] == 0
+                assert 'earlier completed step' in invalid_reference['results'][0]['error']
+                bad_review = await c.call_tool('lab_review_points', {'node_id':node, 'generation':'old', 'request_id':'old'})
+                assert bad_review.is_error and 'run changed' in str(bad_review.content)
+                # An explicit expectation can only add conditions; it must
+                # never hide the unmet terminal wait and allow the next write.
+                blocked = await call("lab_batch", {"calls":[
+                    {"tool":"lab_wait", "arguments":{"node_id":node,"generation":generation,
+                      "until":"terminal","timeout_seconds":0}, "expect":{"still_current":True}},
+                    {"tool":"lab_action", "arguments":{"action":"logic.stop","arguments":{"node_id":node}}},
+                ]})
+                assert not blocked["completed"] and blocked["stopped_at"] == 0
+                assert not blocked["results"][0]["result"]["reached"]
+                assert (await call("lab_state", {"node_id":node}))["console"]["logic"][0]["observation"]["running"]
+                fired = await call('lab_pulse', {'action':'fire', 'device_id':'sequencer'})
+                assert fired['accepted'], fired
+                settled_pulse = await call('lab_batch', {'calls':[
+                    {'tool':'lab_wait_for', 'arguments':{'tool_name':'lab_pulse_state', 'arguments':{'device_id':'sequencer'},
+                     'path':['pending'], 'equals':False, 'timeout_seconds':10}},
+                ]})
+                assert settled_pulse['completed'], settled_pulse
                 refused = await call("lab_action", {"action":"logic.stop", "arguments":{"node_id":node}, "expected_generation":"old"})
                 assert not refused["accepted"] and "run changed" in refused["error"]
                 waiting = asyncio.create_task(call("lab_wait", {"node_id":node,"generation":generation,"timeout_seconds":5}))
@@ -2165,6 +2298,64 @@ async def client():
                 assert stopped["accepted"]
                 done = await waiting
                 assert done["reached"] and done["observation"]["terminal"] and done["still_current"]
+                panel = await call('lab_action', {'action':'panel.add', 'arguments':{'kind':'image'}})
+                panel_id = panel['panel_id']
+                configured = await call('lab_action', {'action':'panel.update', 'arguments':{'panel_id':panel_id,
+                    'patch':{'signal':'@logic/'+node+'/frames', 'title':'\u5ba1\u6838 frame'}}})
+                assert configured['accepted']
+                await call('lab_action', {'action':'view.monitor', 'arguments':{}})
+                shown = await call('lab_wait_for', {'tool_name':'lab_state', 'arguments':{'panel_id':panel_id},
+                    'path':['console','panels',0,'presented'], 'equals':True, 'timeout_seconds':15})
+                assert shown['matched'], shown
+                assert (await call('lab_action', {'action':'panel.edit','arguments':{'panel_id':panel_id}}))['accepted']
+                assert (await call('lab_wait_for', {'tool_name':'lab_state','arguments':{'panel_id':panel_id},
+                    'path':['console','panels',0,'configuration_pending'],'equals':False,'timeout_seconds':15}))['matched']
+                old = await call('lab_call', {'handle':'devices','method':'future_public_probe',
+                    'arguments':{'note':'hold-editor','outcome':{'panel_id':panel_id}}})
+                await call('lab_action', {'action':'view.monitor','arguments':{}})
+                again = await call('lab_batch', {'calls':[
+                    {'tool':'lab_action','arguments':{'action':'logic.start','arguments':{'node_id':node}}},
+                    {'tool':'lab_wait','arguments':{'node_id':node,'generation':{'$result':[0,'state','logic',0,'generation']},'until':'ready','timeout_seconds':10}},
+                    {'tool':'lab_pulse','arguments':{'action':'fire','device_id':'sequencer'}},
+                    {'tool':'lab_wait_for','arguments':{'tool_name':'lab_pulse_state','arguments':{'device_id':'sequencer'},'path':['pending'],'equals':False,'timeout_seconds':10}},
+                    {'tool':'lab_action','arguments':{'action':'logic.stop','arguments':{'node_id':node}}},
+                ]})
+                assert again['completed'], again
+                newest = again['results'][0]['result']['state']['logic'][0]['generation']
+                assert newest != old['result']['generation']
+                latest = await call('lab_wait_for', {'tool_name':'lab_state','arguments':{'panel_id':panel_id},
+                    'path':['console','panels',0,'dataset_ref','stream_generation','value'],'equals':newest,'timeout_seconds':15})
+                assert latest['matched'], latest
+                saving = asyncio.create_task(call('lab_save', {'panel_id':panel_id,'path':'data/pending-refresh.png','refresh':True}))
+                pending = await call('lab_wait_for', {'tool_name':'lab_state','arguments':{'panel_id':panel_id},
+                    'path':['console','panels',0,'configuration_pending'],'equals':True,'timeout_seconds':10})
+                assert pending['matched']
+                assert pending['result']['console']['panels'][0]['frozen_ref']['stream_generation']['value'] == old['result']['generation']
+                assert not saving.done() and not (Path(WORKSPACE)/'data/pending-refresh.npz').exists()
+                await call('lab_call', {'handle':'devices','method':'future_public_probe','arguments':{'note':'release-editor'}})
+                assert (await saving)['accepted']
+                assert (await call('lab_wait_for', {'tool_name':'lab_state','arguments':{'panel_id':panel_id},
+                    'path':['console','panels',0,'saving'],'equals':False,'timeout_seconds':20}))['matched']
+                archive = await call('lab_artifact', {'path':'data/pending-refresh.npz','limit':64000})
+                assert archive['datasets']['data']['ref']['stream_generation'] == newest
+                saved = await call('lab_save', {'panel_id':panel_id,'path':'data/mcp-frame.png','refresh':True,
+                                              'layout_path':'data/mcp-layout.json'})
+                assert saved['accepted'] and saved['layout']['accepted'], saved
+                saved_state = await call('lab_wait_for', {'tool_name':'lab_state','arguments':{'panel_id':panel_id},
+                    'path':['console','panels',0,'saving'],'equals':False,'timeout_seconds':20})
+                assert saved_state['matched']
+                page = await call('lab_artifact', {'path':'data/mcp-frame.npz','limit':127})
+                assert page['format'] == 'zlc.figure' and len(page['text'].encode('utf-8')) <= 127
+                chunks = [page['text']]
+                while page['next_offset'] < page['total_bytes']:
+                    page = await call('lab_artifact', {'path':'data/mcp-frame.npz','offset':page['next_offset'],'limit':1024})
+                    assert '\ufffd' not in page['text'] and len(page['text'].encode('utf-8')) <= 1024
+                    chunks.append(page['text'])
+                archive = json.loads(''.join(chunks))
+                assert archive['datasets'] and archive['sections']
+                assert (Path(WORKSPACE)/'data/mcp-frame.png').is_file()
+                assert (Path(WORKSPACE)/'data/mcp-layout.json').is_file()
+                assert (await call('lab_results', {'panel_id':panel_id}))['status'] == 'not_enabled'
                 derived = await call("lab_action", {"action":"logic.add", "arguments":{
                     "api_name":"derive", "source_signal":"@logic/"+node+"/frames",
                     "values":{"expressions":[{"name":"mean", "code":"a.frames.mean('spatial-y')"}]}}})
@@ -2182,8 +2373,7 @@ async def client():
                 assert "No publication" in str(invalid.content)
                 # The standard stdio connector discovers this exact live GUI;
                 # it does not create or initialize another experiment.
-                import json, os, sys
-                from pathlib import Path
+                import os, sys
                 from mcp import StdioServerParameters
                 from mcp.client.stdio import stdio_client
                 folder = Path(WORKSPACE) / ".mcp"
@@ -2202,7 +2392,7 @@ async def client():
                         " count_path.write_text(str(count+1))\n"
                         " return await original(self)\n"
                         "ClientSession.initialize=counted\n"
-                        "from zlc_workbench.apps.mcp import main\nmain(['--workspace'," + repr(WORKSPACE) + "])")
+                        "from zlc_workbench.apps.mcp import main\nmain(['--workspace'," + repr(WORKSPACE) + ", '--tools', 'developer'])")
                 async with stdio_client(StdioServerParameters(command=sys.executable, args=["-c",code], env=dict(os.environ))) as (sr, sw):
                     async with ClientSession(sr, sw) as forwarded:
                         await forwarded.initialize()
@@ -2230,7 +2420,27 @@ async def client():
                         remote_done = await waiting_remote
                         assert not remote_done.is_error and remote_done.structured_content["reached"]
                         assert int(count_path.read_text()) == connection_count
+                operator_code = code.replace(", '--tools', 'developer'", "")
+                async with stdio_client(StdioServerParameters(command=sys.executable, args=["-c",operator_code], env=dict(os.environ))) as (sr, sw):
+                    async with ClientSession(sr, sw) as operator:
+                        await operator.initialize()
+                        offered = {t.name for t in (await operator.list_tools()).tools}
+                        assert {"lab_guide", "lab_catalog", "lab_devices", "lab_results", "lab_recipes"} <= offered
+                        assert not {"lab_handles", "lab_api", "lab_call", "lab_intent"} & offered
+                        forbidden = await operator.call_tool("lab_call", {"handle":"devices", "method":"snapshot", "arguments":{}})
+                        assert forbidden.is_error and "developer" in str(forbidden.content)
+                        read_help = await operator.call_tool("lab_guide", {"topic":"lifetime"})
+                        assert not read_help.is_error and "Frame Survival" in read_help.structured_content["content"]
                 connection_path.unlink()
+                async with httpx2.AsyncClient(headers={'Authorization':'Bearer read-test'},timeout=10.) as ro_http:
+                    async with streamable_http_client(close_readonly.connection_info['url'],http_client=ro_http) as (rr,rw,*_):
+                        async with ClientSession(rr,rw) as readonly:
+                            await readonly.initialize()
+                            tools = {item.name for item in (await readonly.list_tools()).tools}
+                            assert {'lab_state','lab_guide','lab_catalog','lab_artifact','lab_results'} <= tools
+                            assert not {'lab_save','lab_review_points','lab_batch','lab_action','lab_initialize'} & tools
+                            refused_write = await readonly.call_tool('lab_save',{'panel_id':panel_id,'path':'data/refused.png'})
+                            assert refused_write.is_error and not (Path(WORKSPACE)/'data/refused.png').exists()
                 # A frozen owner must not execute an old queued write after
                 # the client was explicitly told it timed out/cancelled.
                 block_owner.set()
@@ -2244,7 +2454,7 @@ async def client():
 pool = ThreadPoolExecutor(max_workers=1)
 future = pool.submit(lambda: asyncio.run(client()))
 try:
-    deadline = time.monotonic() + 40
+    deadline = time.monotonic() + 75
     while not future.done() and time.monotonic() < deadline:
         if block_owner.is_set():
             block_owner.clear()
@@ -2255,7 +2465,9 @@ try:
     future.result(timeout=1)
     print("MCP_ROUNDTRIP_PASS")
 finally:
+    release_editor_gate()
     close_mcp()
+    close_readonly()
     deadline = time.monotonic() + 20
     while not flow.close() and time.monotonic() < deadline:
         app.processEvents()
@@ -2264,7 +2476,10 @@ finally:
     while not close_mcp() and time.monotonic() < deadline:
         app.processEvents()
         time.sleep(.005)
+    while not close_readonly() and time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(.005)
     pool.shutdown(wait=True)
-'''.replace("WORKSPACE", repr(str(workspace))), cwd=workspace, timeout=75)
+'''.replace("WORKSPACE", repr(str(workspace))), cwd=workspace, timeout=110)
     assert result.returncode == 0, result.stdout + result.stderr
     assert "MCP_ROUNDTRIP_PASS" in result.stdout

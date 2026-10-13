@@ -33,6 +33,7 @@ from zlc_atom.nodes.scan import (
     SEAMLESS_PULSE_RESOURCE,
     SeamlessScanMeasurement,
     ScanPlan,
+    estimate_scan_time,
     api_scan_ports_for,
     bind_plan,
     hardware_scan_ports_for,
@@ -187,10 +188,47 @@ def _editor_factory(parent=None):
     return ScanPlanEditor(parent)
 
 
+def _estimate_run(values, devices, resources):
+    """Preview this Scan's current saved inputs on a worker, never Load/Fire."""
+
+    resource = resources.get("pulse_template")
+    if resource is None:
+        return {"status": "unknown", "reason": "Choose a resolvable Pulse template first."}
+    # Estimation is an explicit file boundary, like Start/Refresh, not a poll.
+    # Reuse the same resource resolver, including its Subpulse resolution.
+    current = SEAMLESS_PULSE_RESOURCE.resolve(resource.path)
+    plan = plan_from_authored(values.get("plan", ""))
+    sequencer = devices.get("sequencer")
+    board = None if sequencer is None else sequencer.describe()
+    config = (
+        sequencer.preview_config_values()
+        if sequencer is not None and current.value.config_enabled else {}
+    )
+    result = estimate_scan_time(
+        current.value, plan,
+        geometry=None if board is None else board.geometry,
+        clock_hz=None if board is None else board.clock_hz,
+        config_values=config,
+        api_values=values.get("api_values", ""),
+        repeats=values.get("repeats", 1),
+        shots_per_point=values.get("shots_per_point", 1),
+    )
+    result["pulse_path"] = str(current.path)
+    result["config_source"] = "" if sequencer is None else sequencer.config_source
+    return result
+
+
 LOGIC_NODE = LogicNodeDescriptor(
     "seamless_scan",
     NodeKind.MEASUREMENT,
     SEAMLESS_SCAN_SCHEMA,
+    description=(
+        "Collect a selected signal, including processor or fit-parameter outputs, over "
+        "Pulse scan slots, device parameters and/or manual axes. Publishes scan with "
+        "the original cell data and explicit scan/repeat coordinates for native "
+        "Curve/Image/Facet plots and fitting. This measurement starts the selected "
+        "acquisition logic, waits for ready and owns Pulse Fire throughout the scan."
+    ),
     acquisition_input="acquisition_logic",
     input_specs=(DatasetInputSpec("signal", None, "exact"),),
     outputs=(SCAN_OUTPUT,),
@@ -202,6 +240,7 @@ LOGIC_NODE = LogicNodeDescriptor(
         DeviceRequirement("sequencer.streamer", "sequencer", ("program",)),
     ),
     build=_build,
+    estimate_run=_estimate_run,
     # A region drawn on this scan's own plot is a statement about
     # what to sweep next, in the axes the picture is drawn in.
     selection_mappings=SCAN_PLAN_SELECTIONS,

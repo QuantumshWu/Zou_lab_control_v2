@@ -294,6 +294,20 @@ class ConfigValueHolder:
         with self._config_lock:
             return dict(self._config_values)
 
+    def preview_config_values(self) -> dict[str, tuple[float, str]]:
+        """Read the next execution's saved values without changing applied state.
+
+        Only the explicitly bound file is a source. An informational label
+        supplied with in-memory values is never interpreted as a filename.
+        """
+
+        from .codec import read_config_values
+
+        with self._config_lock:
+            if self._config_file is not None:
+                return read_config_values(self._config_file)
+            return dict(self._config_values)
+
     def compile_pulse(
         self,
         sequence: PulseSequence,

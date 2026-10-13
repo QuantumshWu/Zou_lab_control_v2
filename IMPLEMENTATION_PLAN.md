@@ -459,6 +459,7 @@
 
 ### 2.5 Device Control与settings provenance
 
+- 当前目标（实施中，未验收）：原生MCP客户端配置/连接诊断；必填插件用途及无Init静态目录；`lab_guide`帮助；原生Layout寿命配方与有限配置/启动组合；Scan owner时间估算；原生Fit/Figure结果读取；公共等待失败、拒绝原因和路径规则修复；长运行观察不要求模型逐次维持；仅提供MCP工具的独立代理完成寿命、Calibration及SLM操作链。完成证据必须包括真实协议/正式GUI组合、原生Figure保存重开、来源一致性、Stop/错误与无重复Fire；虚拟验收不代替硬件物理效果。所有测试/研究输出留ignored research，最终合并master前逐项审计，不能以工具单测代替完整工作流。
 - 2026-10-13 实验交接SOP补入实际workspace说明必读入口，以及SLM Send确认、完整触发周期、同代采集和数据ref、固定Pattern位置比较。Pulse的running只是board.firing缓存，不能当有限播放生命周期完成；execution_snapshot直接公开既有`_finite_run`的`completion_pending`，没有新状态或额外通信，既有有限完成用例通过。旧calibration-10/11无raw，不能断言唯一硬件根因；未改相机/FPGA协议或加入重试。
 - 2026-10-13 MCP延迟修复：选定端点复用ClientSession/HTTP连接与SDK schema/validator缓存，保持并发Stop；Devices摘要不复制后删除参数，snapshot调用不重复返回同一状态。实际Qt/虚拟设备/STDIO暖态状态约50–60→10–18 ms、Load约57–68→15–20 ms（小样本同探针，非硬件上限），首次进程/SDK冷启动仍存在。通用lab_batch/lab_wait_for经SDK原工具注册执行调用方给定操作/条件，没有内置设备或实验步骤；曾提出的Load→Init→等待特判已完全撤掉，未合入。标准准备顺序只更新EXPERIMENT_CONTEXT模板与通用使用指引。现有HTTP/STDIO用例验证会话不重复初始化、wait与Stop并发、组合停止/超时/禁止用写操作等待及正常退出；Devices2项通过。证据留ignored research，测试窗口/进程关闭，未触碰真实设备。
 

@@ -102,6 +102,9 @@ def test_fire_refreshes_file_and_keeps_the_original_defaults(streamer, tmp_path,
     write({"probe_time": (80, "ns")})
     device.load_config_file(path)
     write({"probe_time": (100, "ns")})
+    assert device.preview_config_values() == {"probe_time": (100.0, "ns")}
+    assert device.config_values() == {"probe_time": (80.0, "ns")}, "preview does not change held/applied Config"
+    assert device.applied() is None, "preview never loads a program"
     source, program = device.compile_pulse(_configured(), geom, 50e6)
     assert device.config_values() == {"probe_time": (80.0, "ns")}
     counts = {"compile": 0, "load": 0, "fire": 0}
@@ -159,6 +162,7 @@ def test_fire_refreshes_file_and_keeps_the_original_defaults(streamer, tmp_path,
             assert counts == before
         # Explicit in-memory data unbinds the file; its label is not a path.
         device.load_config_values({"probe_time": (120, "ns")}, source=str(path))
+        assert device.preview_config_values() == {"probe_time": (120.0, "ns")}, "a source label is not a file binding"
         device.fire(run_repeats=1)
         assert device.wait_done(1.0) is not None
         assert device.applied().source.period_by_id["p1"].duration == 120
@@ -299,7 +303,7 @@ def test_the_set_survives_a_close_and_reopen(streamer):
         device.close()
 
 
-def test_the_remote_client_holds_its_own_set_and_compiles_without_io() -> None:
+def test_the_remote_client_holds_its_own_set_and_compiles_without_io(tmp_path) -> None:
     from zlc_pulse.remote import REMOTE_METHODS
 
     assert REMOTE_METHODS == (
@@ -317,6 +321,13 @@ def test_the_remote_client_holds_its_own_set_and_compiles_without_io() -> None:
     client.load_config_values({"probe_time": (100, "ns")}, source="today.json")
     assert client.config_values() == {"probe_time": (100.0, "ns")}
     assert client.config_source == "today.json"
+    assert client.preview_config_values() == {"probe_time": (100.0, "ns")}
+    path = tmp_path / "current.json"
+    path.write_text(json.dumps(config_values_to_tree({"probe_time": (80, "ns")})), encoding="utf-8")
+    client.load_config_file(path)
+    path.write_text(json.dumps(config_values_to_tree({"probe_time": (140, "ns")})), encoding="utf-8")
+    assert client.preview_config_values() == {"probe_time": (140.0, "ns")}
+    assert client.config_values() == {"probe_time": (80.0, "ns")}
 
     filled, program = client.compile_pulse(sequence, geom, 50e6)
     assert filled is sequence

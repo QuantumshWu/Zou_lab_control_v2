@@ -37,6 +37,61 @@ from .panel_catalog import task_console_panel_kind
 from .panel_state import PanelState
 
 
+def experiment_recipes(workspace: Path) -> dict[str, Path]:
+    """Discover native Layout recipes, with explicit workspace overrides."""
+    from importlib.resources import files
+
+    bundled = Path(str(files("zlc_workbench").joinpath("recipes")))
+    found = {path.name.removesuffix(".recipe.json"): path
+             for path in sorted(bundled.glob("*.recipe.json"))}
+    found.update({path.name.removesuffix(".recipe.json"): path
+                  for path in sorted((Path(workspace) / "recipes").glob("*.recipe.json"))})
+    return found
+
+
+def read_experiment_recipe(workspace: Path, name: str, parameters=None):
+    """Resolve declared native field bindings; no devices or run lifecycle."""
+    paths = experiment_recipes(workspace)
+    if name not in paths:
+        raise ValueError(f"Unknown recipe {name!r}; available: {', '.join(paths)}")
+    path = paths[name]
+    recipe = strict_json_loads(path.read_text(encoding="utf-8"), f"recipe {name}")
+    required = {"format", "name", "title", "description", "layout", "parameters",
+                "followers", "entry_node", "result_panels", "requirements", "completion", "save"}
+    if set(recipe) != required or recipe["format"] != "zlc.experiment-recipe" or recipe["name"] != name:
+        raise ValueError("Recipe must use the current zlc.experiment-recipe grammar and matching name")
+    layout_path = (path.parent / recipe["layout"]).resolve()
+    if not layout_path.is_relative_to(path.parent.resolve()):
+        raise ValueError("Recipe Layout must be beside or beneath its recipe file")
+    layout = strict_json_loads(layout_path.read_text(encoding="utf-8"), f"recipe layout {layout_path.name}")
+    defaults = {}
+    supplied = {} if parameters is None else dict(parameters)
+    unknown = set(supplied) - set(recipe["parameters"])
+    if unknown:
+        raise ValueError(f"Unknown recipe parameters: {sorted(unknown)}")
+    missing = []
+    for key, binding in recipe["parameters"].items():
+        parts = binding["path"]
+        if not isinstance(parts, list) or len(parts) < 3 or parts[0] not in {"logic", "panels"}:
+            raise ValueError(f"Recipe parameter {key!r} needs a native Layout field path")
+        target = layout
+        for component in parts[:-1]:
+            target = target[component]
+        defaults[key] = target[parts[-1]]
+        if key in supplied:
+            target[parts[-1]] = supplied[key]
+        elif parameters is not None and binding.get("required"):
+            missing.append(key)
+    if missing:
+        raise ValueError(f"Recipe requires explicit parameters: {', '.join(missing)}")
+    document = LayoutDocument.from_tree(layout)
+    ids = {entry.node_id for entry in document.logic}
+    if (recipe["entry_node"] not in ids or not set(recipe["followers"]).issubset(ids)
+            or not set(recipe["result_panels"]).issubset(document.panel_ids)):
+        raise ValueError("Recipe entry/follower/result references must exist in its native Layout")
+    return recipe, document, defaults
+
+
 LAYOUT_FORMAT = "zlc.console-board"
 
 #: How a panel's identity is spelled.  The console mints one from its

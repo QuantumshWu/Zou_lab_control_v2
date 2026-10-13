@@ -16,6 +16,7 @@ completion, Stop or failure through the existing cleanup path.
 from __future__ import annotations
 
 import itertools
+import math
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
@@ -25,6 +26,8 @@ from zlc_data.units import DEFAULT_UNITS, figure_padded
 
 from zlc_pulse import (
     PulseSequence,
+    apply_config_values,
+    compile_sequence,
     prepare_scan_application,
     resolve_api_parameters,
     resolve_subpulse_sources,
@@ -40,7 +43,12 @@ from .plan import (
     PULSE_PARAM_FAMILY,
     ScanPlan,
     ScanPort,
+    api_overrides_from_authored,
+    api_scan_ports_for,
+    apply_api_overrides,
+    bind_plan,
     device_port_parts,
+    hardware_scan_ports_for,
     port_label,
     split_outer_axes,
 )
@@ -59,6 +67,137 @@ _SOURCE_GRACE_SECONDS = 5.0
 #: How often an idle wait for the source asks the board whether it is done;
 #: a remote board answers each ask over its own connection.
 _BOARD_POLL_SECONDS = 0.5
+
+
+def estimate_scan_time(
+    sequence: PulseSequence,
+    plan: ScanPlan,
+    *,
+    geometry: object = None,
+    clock_hz: float | None = None,
+    config_values: Mapping[str, tuple[float, str]] | None = None,
+    api_values: object = "",
+    repeats: int = 1,
+    shots_per_point: int = 1,
+) -> dict[str, object]:
+    """Project Scan's workload and scheduled Pulse time, without device/file I/O.
+
+    Supply the resolved Pulse resource (Subpulse files already resolved), the
+    board's geometry/clock, and current saved Config values; ``None`` means
+    unknown, while ``{}`` means no overrides. Values are a snapshot: a later
+    Config edit changes the run. This is not wall-clock ETA or a claim that
+    acquisition/processing has completed. Scan replaces the Pulse's authored
+    Run/Scan repeats, including an authored infinite count, with its finite
+    shots-per-point/full-sweep counts.
+
+    Cartesian board rows are additive in compiled duration slots, so sum each
+    column without constructing the full table. Manual/device axes only
+    multiply the workload. Only API timing combinations require compilation;
+    an unusually large combination returns unknown instead of blocking the UI.
+    """
+
+    if not isinstance(sequence, PulseSequence) or not isinstance(plan, ScanPlan):
+        raise TypeError("estimate_scan_time requires a PulseSequence and ScanPlan")
+    for name, value in (("repeats", repeats), ("shots_per_point", shots_per_point)):
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ValueError(f"{name} must be a positive integer")
+    outer_axes, board_axes = split_outer_axes(plan)
+    outer_count = math.prod(len(axis.values) for axis in outer_axes)
+    result = {
+        "status": "unknown",
+        "points_per_sweep": plan.point_count,
+        "full_sweeps": repeats,
+        "shots_per_point": shots_per_point,
+        "shots_per_sweep": plan.point_count * shots_per_point,
+        "total_shots": plan.point_count * shots_per_point * repeats,
+        "fire_count": outer_count * repeats if outer_axes else 1,
+        "first_sweep_pulse_seconds": None,
+        "total_pulse_seconds": None,
+        "first_sweep_output_delay_bound_seconds": None,
+        "total_output_delay_bound_seconds": None,
+        "excluded_overheads": [
+            "acquisition preparation and readout", "device writes and communication",
+            "compilation/upload", "processing/fit/publication", "manual confirmation",
+        ],
+        "assumptions": [
+            "Resolved Pulse and supplied Config values remain unchanged until/during execution.",
+            "Pulse seconds include Bracket, shots per point and full sweeps; not wall-clock ETA.",
+            "Output delay is an additional per-Fire upper bound, not a measured settling time.",
+        ],
+    }
+    if sequence.config_enabled and any(part.source == "config" for part in sequence.components):
+        raise ValueError("resolve Subpulse sources before estimating a Scan")
+    if geometry is None or clock_hz is None:
+        result["reason"] = "Board geometry and clock are not known."
+        return result
+    sequence = apply_api_overrides(sequence, api_overrides_from_authored(api_values))
+    pulse_axes = tuple(axis for axis in plan.axes if axis.port.startswith((API_PARAM_FAMILY, PULSE_PARAM_FAMILY)))
+    ports = bind_plan(ScanPlan(pulse_axes), (
+        *hardware_scan_ports_for(sequence), *api_scan_ports_for(sequence),
+    )) if pulse_axes else ()
+    planned = {axis.port[len(PULSE_PARAM_FAMILY):] for axis in board_axes}
+    sequence = replace(sequence, bindings=tuple(
+        replace(binding, scan=binding.field_id in planned) for binding in sequence.bindings
+    ))
+    if config_values is None and sequence.config_enabled and any(
+        not binding.scan for binding in sequence.config_bindings
+    ):
+        result["reason"] = "Current saved Config values have not been supplied."
+        return result
+    by_port = {port.port: port for port in ports}
+    api_axes = tuple(axis for axis in outer_axes if axis.port.startswith(API_PARAM_FAMILY))
+    timing_fields = {binding.field_id for binding in sequence.api_bindings if binding.kind != "dac"}
+    timing_axes = tuple(axis for axis in api_axes if axis.port[len(API_PARAM_FAMILY):] in timing_fields)
+    timing_count = math.prod(len(axis.values) for axis in timing_axes)
+    if timing_count > 256:
+        result["reason"] = f"{timing_count} API timing combinations exceed the 256-program preview budget."
+        return result
+    fixed_api = {
+        axis.port[len(API_PARAM_FAMILY):]: axis.native_value(by_port[axis.port], axis.values[0])
+        for axis in api_axes
+    }
+    columns = scan_columns_for(sequence, params=geometry)
+    axes_by_field = {axis.port[len(PULSE_PARAM_FAMILY):]: axis for axis in board_axes}
+    values_by_slot = []
+    for column in columns:
+        axis = axes_by_field[column.name]
+        rows = tuple((axis.native_value(by_port[axis.port], value),) for value in axis.values)
+        one_column = replace(sequence, bindings=tuple(
+            replace(binding, scan=binding.field_id == column.name) for binding in sequence.bindings
+        ))
+        _effective, wire = prepare_scan_application(one_column, rows, params=geometry)
+        values_by_slot.append(tuple(row[0] for row in wire))
+    first_row = tuple(values[0] for values in values_by_slot)
+    board_count = math.prod(len(values) for values in values_by_slot)
+    sweep_ticks = delay_ticks = 0
+    for point in itertools.product(*(axis.values for axis in timing_axes)):
+        inputs = dict(fixed_api)
+        inputs.update({axis.port[len(API_PARAM_FAMILY):]: axis.native_value(by_port[axis.port], value)
+                       for axis, value in zip(timing_axes, point, strict=True)})
+        streamed = resolve_api_parameters(sequence, inputs)
+        filled, _applied, _unknown = apply_config_values(streamed, config_values or {})
+        program = compile_sequence(filled, geometry, clock_hz)
+        base_ticks = program.frame_ticks(first_row)
+        table_ticks = base_ticks * board_count
+        for index, values in enumerate(values_by_slot):
+            if program.slot_kinds[index] != "duration":
+                continue
+            delta = sum(program.frame_ticks(first_row[:index] + (value,) + first_row[index + 1:]) - base_ticks
+                        for value in values)
+            table_ticks += delta * (board_count // len(values))
+        sweep_ticks += table_ticks
+        delay_ticks += max((*program.channel_delays, *(item.delay_ticks for item in program.bus_delays)), default=0)
+    multiplier = outer_count // timing_count
+    sweep_seconds = sweep_ticks * multiplier * shots_per_point / clock_hz
+    delay_seconds = delay_ticks * multiplier / clock_hz
+    result.update(
+        status="estimated",
+        first_sweep_pulse_seconds=sweep_seconds,
+        total_pulse_seconds=sweep_seconds * repeats,
+        first_sweep_output_delay_bound_seconds=delay_seconds,
+        total_output_delay_bound_seconds=delay_seconds * (repeats if outer_axes else 1),
+    )
+    return result
 
 
 class SeamlessScanMeasurement:
@@ -687,4 +826,4 @@ class SeamlessScanMeasurement:
         }
 
 
-__all__ = ["SeamlessScanMeasurement"]
+__all__ = ["SeamlessScanMeasurement", "estimate_scan_time"]

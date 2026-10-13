@@ -25,6 +25,13 @@ SLM_REARRANGEMENT_RECORDING_SCHEMA = AuthoringSchema(tuple(
 LOGIC_NODE = replace(
     _REARRANGEMENT_NODE,
     api_name="slm_rearrangement_recording",
+    description=(
+        "Record an authored multi-image Pulse around camera-guided SLM rearrangement "
+        "using a Calibration and Science Context. Start rearrangement after the first "
+        "imaging frame while later Pulse triggers continue, saving the captured images "
+        "and a viewing GIF for transport diagnosis; this Task owns camera preparation "
+        "and Pulse Fire."
+    ),
     authoring_schema=SLM_REARRANGEMENT_RECORDING_SCHEMA,
     build=partial(_build, schema=SLM_REARRANGEMENT_RECORDING_SCHEMA),
     ui_contributions=(partial(_rearrangement_editor_factory, schema=SLM_REARRANGEMENT_RECORDING_SCHEMA),),

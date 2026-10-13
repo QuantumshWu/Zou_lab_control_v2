@@ -122,6 +122,76 @@ def test_plan_rows_nest_outer_first_and_round_trip() -> None:
     assert ScanPlan.from_tree(plan.to_tree()) == plan
 
 
+def test_scan_time_projection_uses_the_played_pulse_without_expanding_repeats() -> None:
+    from zlc_atom.nodes.scan import estimate_scan_time
+    from zlc_pulse import (
+        OutputDelay, PulseBinding, PulseBracket, PulseFieldRef,
+        apply_config_values, compile_sequence, load_streamer_config,
+        prepare_scan_application, resolve_api_parameters,
+    )
+    from zlc_pulse.schedule import run_duration_seconds
+
+    sequence = pulse_sequence("mot_field_template.json")
+    sequence = replace(
+        sequence, config_enabled=True,
+        brackets=(PulseBracket("load_loop", "load", "load", 1),),
+        delays=(OutputDelay("da_bias_x", -300, "ms"),),
+        bindings=(*sequence.bindings,
+            PulseBinding(PulseFieldRef("duration", "load"), "ms", scan=True),
+            PulseBinding(PulseFieldRef("duration", "image"), "ms", source="api"),
+            PulseBinding(PulseFieldRef("duration", "rest"), "ms", source="config", config_key="rest"),
+            PulseBinding(PulseFieldRef("bracket_count", bracket_id="load_loop"), "count", source="api"),
+        ),
+    )
+    plan = ScanPlan((
+        ScanAxis("manual:power", (1.0, 2.0)),
+        ScanAxis("device:rf:frequency", (500.0, 501.0, 502.0), "MHz"),
+        ScanAxis("api:bracket_count:load_loop", (1.0, 3.0), "count"),
+        ScanAxis("pulse:param:duration:load", (0.010000001, 0.02), "s"),
+    ))
+    settings = load_streamer_config()
+    inputs = dict(geometry=settings["params"], clock_hz=settings["clock_hz"],
+                  config_values={"rest": (7.0, "ms")}, api_values="duration:image = 40",
+                  repeats=2, shots_per_point=3)
+    estimate = estimate_scan_time(sequence, plan, **inputs)
+    expected = 0.0
+    for count in (1, 3):
+        resolved = resolve_api_parameters(sequence, {
+            "duration:image": 40, "bracket_count:load_loop": count,
+        })
+        filled, _, _ = apply_config_values(resolved, inputs["config_values"])
+        program = compile_sequence(filled, inputs["geometry"], inputs["clock_hz"])
+        _, wire = prepare_scan_application(filled, ((10.000001,), (20.0,)), params=inputs["geometry"])
+        expected += run_duration_seconds(program, wire, run_repeats=3)
+    assert estimate["status"] == "estimated"
+    assert estimate["points_per_sweep"] == 24
+    assert estimate["total_shots"] == 144
+    assert estimate["fire_count"] == 24
+    assert estimate["first_sweep_pulse_seconds"] == pytest.approx(expected * 6)
+    assert estimate["total_pulse_seconds"] == pytest.approx(expected * 12)
+    assert estimate["total_output_delay_bound_seconds"] == pytest.approx(24 * .3)
+    assert sequence.run_repeats == 0, "the authored infinite Pulse count is not the finite Scan count"
+    assert sequence.periods[-1].duration == 5, "Config projection never edits the source"
+    assert estimate_scan_time(sequence, plan, **(inputs | {"config_values": None}))["status"] == "unknown"
+    assert estimate_scan_time(sequence, plan)["total_pulse_seconds"] is None
+    board_only = estimate_scan_time(sequence, ScanPlan((plan.axes[-1],)), **inputs)
+    assert board_only["fire_count"] == 1
+    # No intermediate DONE does not make the first sweep's delayed physical
+    # outputs instantaneous; one Fire drains its output delay only once overall.
+    assert board_only["first_sweep_output_delay_bound_seconds"] == pytest.approx(.3)
+    assert board_only["total_output_delay_bound_seconds"] == pytest.approx(.3)
+
+    # A billion physical shots only multiply the timing result; no rows/shots
+    # are materialized. Purely host-advanced plans do not need a dummy table.
+    fixed = pulse_sequence("mot_field_template.json")
+    host_only = ScanPlan((ScanAxis("manual:power", (1.0, 2.0)),))
+    huge = estimate_scan_time(fixed, host_only, **(inputs | {"repeats": 10**9, "shots_per_point": 10**9, "api_values": ""}))
+    assert huge["total_shots"] == 2 * 10**18
+    assert huge["total_pulse_seconds"] == pytest.approx(.125 * 2 * 10**18)
+    capped = ScanPlan((ScanAxis("api:bracket_count:load_loop", tuple(range(1, 258)), "count"),))
+    assert "preview budget" in estimate_scan_time(sequence, capped, **inputs)["reason"]
+
+
 def test_binding_refuses_unknown_ports_and_out_of_range_values() -> None:
     from zlc_atom.nodes.scan.plan import ScanPort
     from zlc_data.units import DEFAULT_UNITS

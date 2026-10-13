@@ -1302,6 +1302,86 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 if projected._fit_model_units_compatible(model)
             )
 
+    def fit_summary(self, *, offset: int = 0, limit: int = 256) -> dict[str, object]:
+        """Read a bounded table from the accepted native fit, without solving.
+
+        ``coordinates`` follow ``sample_axes``; the numeric/validity arrays
+        follow ``parameter_names``. Rows keep the scientific ordering. Fixed parameters
+        have values but no estimated uncertainty; failed cells keep their real
+        diagnostic instead of being silently removed from the table.
+        """
+
+        if type(offset) is not int or offset < 0:
+            raise ValueError("offset must be a non-negative integer")
+        if type(limit) is not int or not 1 <= limit <= 4096:
+            raise ValueError("limit must be an integer from 1 to 4096")
+        with self._lock:
+            self._assert_open()
+            accepted = self._accepted_fit
+            request = self._live_fit_request
+            data_generation = self.data_generation
+            data_revision = self.data_revision
+            status = self.fit_status
+            configuration = self._fit_configuration()
+        if accepted is None:
+            return {
+                "status": "not_enabled" if request is None else "pending",
+                "model_id": None if request is None else request.model.model_id,
+                "rows": [], "total_rows": 0, "offset": offset, "next_offset": None,
+                "data_generation": data_generation, "data_revision": data_revision,
+            }
+        result = accepted.result
+        is_batch = isinstance(result, FacetFitBatchResult)
+        outcomes = result.results if is_batch else (result,)
+        axes = result.sample_axes if is_batch else ()
+        stop = min(len(outcomes), offset + limit)
+        rows = []
+        for index in range(offset, stop):
+            outcome = outcomes[index]
+            positions = np.unravel_index(index, tuple(axis.size for _, axis in axes)) if axes else ()
+            coordinates = []
+            for (domain, axis), position in zip(axes, positions, strict=True):
+                value = axis.coordinate_at(int(position))
+                if isinstance(value, np.generic):
+                    value = value.item()
+                coordinates.append(value)
+            values, errors, validities, error_validities, fixed_parameters = [], [], [], [], []
+            for parameter_index, name in enumerate(result.parameter_names):
+                valid = outcome is not None and bool(outcome.success)
+                value = None if outcome is None else float(outcome.parameter_values[parameter_index])
+                fixed = name in configuration.get("fixed", {}) if outcome is None else name in outcome.fixed_parameter_names
+                error_valid = bool(valid and outcome.parameter_error_validity[name])
+                error = float(outcome.standard_errors[parameter_index]) if error_valid else None
+                values.append(value if value is not None and np.isfinite(value) else None)
+                validities.append(valid and value is not None and bool(np.isfinite(value)))
+                errors.append(error)
+                error_validities.append(error_valid)
+                if fixed:
+                    fixed_parameters.append(name)
+            message = result.failure_messages[index] if outcome is None else outcome.message
+            chi_square = None if outcome is None else float(outcome.reduced_chi_square)
+            rows.append({
+                "index": index, "coordinates": coordinates,
+                "success": outcome is not None and bool(outcome.success),
+                "message": message, "values": values, "standard_errors": errors,
+                "valid": validities, "error_valid": error_validities,
+                "fixed_parameters": fixed_parameters,
+                "covariance_valid": outcome is not None and bool(outcome.covariance_valid),
+                "reduced_chi_square": chi_square if chi_square is not None and np.isfinite(chi_square) else None,
+            })
+        return {
+            "status": status, "model_id": result.model.model_id,
+            "source_generation": accepted.source_generation,
+            "source_revision": result.source_revision, "batch_revision": result.batch_revision,
+            "data_generation": data_generation, "data_revision": data_revision,
+            "parameter_names": list(result.parameter_names),
+            "parameter_units": [result.parameter_units.get(name, "") for name in result.parameter_names],
+            "sample_axes": [{"domain": domain, "axis_id": str(axis.axis_id),
+                             "name": axis.name, "unit": axis.unit} for domain, axis in axes],
+            "rows": rows, "total_rows": len(outcomes), "offset": offset,
+            "next_offset": stop if stop < len(outcomes) else None,
+        }
+
     def _resolve_fit_model(self, model: str | FitModelSpec) -> FitModelSpec:
         resolved = self._fit_engine.registry.get(model) if isinstance(model, str) else model
         if not isinstance(resolved, FitModelSpec):

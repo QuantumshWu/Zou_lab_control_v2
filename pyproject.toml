@@ -124,6 +124,7 @@ include = ["zou_lab_control", "zlc_*"]
 namespaces = false
 
 [tool.setuptools.package-data]
+zlc_workbench = ["guides/*.md", "recipes/*.json"]
 "zlc_atom.devices.slm.hamamatsu_x15213" = ["profiles/*.json"]
 zlc_plot = ["assets/*.ttf", "py.typed"]
 zlc_ui = ["assets/*.ico"]

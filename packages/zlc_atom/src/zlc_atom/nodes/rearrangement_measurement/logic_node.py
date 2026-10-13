@@ -53,6 +53,13 @@ def _build(*, camera, camera_key, slm, slm_key, signal_plane, calibration, scien
 
 LOGIC_NODE = LogicNodeDescriptor("rearrangement_measurement", NodeKind.MEASUREMENT,
     REARRANGEMENT_MEASUREMENT_SCHEMA, reports_ready=True,
+    description=(
+        "Acquire camera cycles, classify their first frame with a Calibration and "
+        "rearrange the occupied atoms using the selected SLM Science Context and target. "
+        "Restore the initial Context after the last frame; publish only ordinary camera "
+        "frames, compatible with Occupancy and Frame Survival. The caller supplies "
+        "Pulse triggers; this measurement does not Fire."
+    ),
     outputs=(CAMERA_FRAMES_OUTPUT,), node_previews=(NodePreviewSpec(CAMERA_FRAMES_OUTPUT, "facet_grid"),),
     input_specs=(
         ArtifactInputSpec("calibration_path", "Calibration", CALIBRATION_ARTIFACT_CODEC, argument_name="calibration"),

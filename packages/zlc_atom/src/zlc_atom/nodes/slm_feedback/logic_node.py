@@ -203,6 +203,13 @@ LOGIC_NODE = LogicNodeDescriptor(
     "slm_feedback",
     NodeKind.TASK,
     SLM_FEEDBACK_SCHEMA,
+    description=(
+        "Adjust a saved SLM Science Context's target weights using camera readout or "
+        "an external fitted-frequency signal to improve the selected per-site "
+        "uniformity measure. Publishes candidate phase and convergence/site histories "
+        "and saves the best measured Context; camera mode owns acquisition and Fire, "
+        "while frequency mode requests the selected finite acquisition logic."
+    ),
     input_specs=(
         DatasetInputSpec("frequency", FIT_PARAMETER_CONTRACT, "latest", enabled_when=_EXTERNAL_MODE),
         ArtifactInputSpec(

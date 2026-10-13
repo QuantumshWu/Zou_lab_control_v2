@@ -56,6 +56,12 @@ LOGIC_NODE = LogicNodeDescriptor(
     "waveform_measurement",
     NodeKind.MEASUREMENT,
     WAVEFORM_MEASUREMENT_SCHEMA,
+    description=(
+        "Acquire every buffered record from a waveform source, retaining its samples "
+        "and declared time coordinates for Rolling/Curve plots and fitting. Outputs "
+        "are dynamic: one signal per quantity declared by the selected source "
+        "(for example scope voltage or IMU acceleration), not a fixed output list."
+    ),
     reports_ready=True,
     # What it publishes is what its instrument carries: four quantities off
     # an IMU packet, one voltage off a scope.  The run freezes every knob

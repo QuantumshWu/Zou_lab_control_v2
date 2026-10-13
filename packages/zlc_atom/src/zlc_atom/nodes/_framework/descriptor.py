@@ -385,6 +385,8 @@ class LogicNodeDescriptor:
     api_name: str
     kind: NodeKind
     authoring_schema: AuthoringSchema
+    #: Plugin-owned purpose and input/output semantics, shared by UI and MCP.
+    description: str = field(kw_only=True)
     input_specs: tuple[DatasetInputSpec | ArtifactInputSpec, ...] = ()
     outputs: tuple[DatasetOutputDeclaration, ...] = ()
     #: For a node whose outputs are named by what it is asked to compute or
@@ -434,6 +436,13 @@ class LogicNodeDescriptor:
     #: the resource rather than being copied into the draft once.
     resolve_defaults: (
         Callable[[Mapping[str, object], Mapping[str, object]], Mapping[str, object]]
+        | None
+    ) = None
+    #: Optional plugin-owned read-only budget projection over frozen authoring,
+    #: resolved devices and workspace resources. Called on the device worker,
+    #: never while constructing a node or running an acquisition.
+    estimate_run: (
+        Callable[[Mapping[str, object], Mapping[str, object], Mapping[str, object]], Mapping[str, object]]
         | None
     ) = None
     #: Optional text authoring field naming a readiness-reporting Logic instance.
@@ -501,6 +510,9 @@ class LogicNodeDescriptor:
     def __post_init__(self) -> None:
         if not self.api_name or not isinstance(self.kind, NodeKind):
             raise ValueError("logic node requires api_name and a valid kind")
+        if not isinstance(self.description, str) or not self.description.strip():
+            raise ValueError("logic node requires a non-empty description of its purpose")
+        object.__setattr__(self, "description", self.description.strip())
         if not isinstance(self.authoring_schema, AuthoringSchema):
             raise TypeError("authoring_schema must be AuthoringSchema")
         if not isinstance(self.acquisition_input, str):
@@ -539,6 +551,8 @@ class LogicNodeDescriptor:
             raise TypeError("resolve_field_availability must be callable or None")
         if self.resolve_defaults is not None and not callable(self.resolve_defaults):
             raise TypeError("resolve_defaults must be callable or None")
+        if self.estimate_run is not None and not callable(self.estimate_run):
+            raise TypeError("estimate_run must be callable or None")
         if any(not isinstance(value, ArtifactOutputSpec) for value in artifact_outputs):
             raise TypeError("artifact_outputs must contain ArtifactOutputSpec values")
         if any(not isinstance(value, DeviceRequirement) for value in requirements):

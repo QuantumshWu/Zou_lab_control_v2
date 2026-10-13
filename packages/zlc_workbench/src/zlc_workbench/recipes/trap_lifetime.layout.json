@@ -1,0 +1,87 @@
+{
+  "format": "zlc.console-board",
+  "logic": [
+    {
+      "node_id": "camera_measurement",
+      "api_name": "camera_measurement",
+      "values": {
+        "exposure_seconds": null,
+        "roi_x": null,
+        "roi_y": null,
+        "roi_width": null,
+        "roi_height": null,
+        "repeat": 0,
+        "frames_per_cycle": 2,
+        "photoelectrons": true
+      },
+      "source_signal": "",
+      "device_keys": {"camera": ""},
+      "artifact_inputs": {},
+      "auto_preview": false
+    },
+    {
+      "node_id": "occupancy",
+      "api_name": "occupancy",
+      "values": {"model_kind": "default"},
+      "source_signal": "@logic/camera_measurement/frames",
+      "device_keys": {},
+      "artifact_inputs": {"calibration_path": ""},
+      "auto_preview": false
+    },
+    {
+      "node_id": "frame_survival",
+      "api_name": "frame_survival",
+      "values": {
+        "publish_all": false,
+        "pairs": [{"start": 0, "end": 1}]
+      },
+      "source_signal": "@logic/occupancy/occupied",
+      "device_keys": {},
+      "artifact_inputs": {},
+      "auto_preview": false
+    },
+    {
+      "node_id": "seamless_scan",
+      "api_name": "seamless_scan",
+      "values": {
+        "pulse_template": "",
+        "plan": "",
+        "acquisition_logic": "camera_measurement",
+        "api_values": "",
+        "repeats": 20,
+        "shots_per_point": 1
+      },
+      "source_signal": "@logic/frame_survival/survival",
+      "device_keys": {"sequencer": ""},
+      "artifact_inputs": {},
+      "auto_preview": false
+    }
+  ],
+  "panels": [
+    {
+      "panel_id": "panel-1",
+      "signal": "@logic/seamless_scan/scan",
+      "kind": "facet_grid",
+      "cell_kind": "curve",
+      "size": "2x2",
+      "interval_ms": 400,
+      "title": "Conditional survival by site",
+      "semantic": {
+        "fate:repeat:scan.repeat": "reduce",
+        "fate:repeat:pulse.run": "reduce",
+        "fate:point:frame_survival.pair": ["scope-value", 0],
+        "fate:cell_data:calibration.site": "facet",
+        "reduction": "mean"
+      },
+      "display": {"facet_fit_parameter": "decay_time"},
+      "interaction": {"series_lock": null},
+      "fit": {"model": "exponential_decay", "fit_all_facets": true, "fixed": {}},
+      "overlay_signal": "",
+      "published_outputs": {"amplitude": true, "offset": true, "decay_time": true},
+      "selector": {},
+      "crosshair": {},
+      "classifier_thresholds": [],
+      "focused_cell": null
+    }
+  ]
+}

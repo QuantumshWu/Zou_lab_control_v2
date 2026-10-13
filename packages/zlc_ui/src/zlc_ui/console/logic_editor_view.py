@@ -179,6 +179,7 @@ class LogicEditorView(QtWidgets.QWidget):
 
         self._projection = incoming
         self.title_label.setText(str(incoming.get("api_name") or self.node_id))
+        self.title_label.setToolTip(str(incoming.get("description") or ""))
         kind = str(incoming.get("kind") or "logic")
         self.kind_label.setText(f"({kind})")
         managed_fields = self._reconcile_contributions(incoming)

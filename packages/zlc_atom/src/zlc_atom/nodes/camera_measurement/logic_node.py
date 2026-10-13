@@ -58,6 +58,12 @@ LOGIC_NODE = LogicNodeDescriptor(
     "camera_measurement",
     NodeKind.MEASUREMENT,
     CAMERA_MEASUREMENT_SCHEMA,
+    description=(
+        "Acquire complete camera cycles and publish frames with repeat, frame and "
+        "pixel coordinates for Image/Facet plots or Occupancy. Start arms the camera "
+        "and reports ready; the external trigger source or experiment owner supplies "
+        "the triggers, not this measurement."
+    ),
     reports_ready=True,
     # One output whatever the cycle size: the frames live on the dataset's
     # READOUT_EVENT axis, so the signal vocabulary no longer changes with

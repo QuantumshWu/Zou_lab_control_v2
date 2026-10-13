@@ -224,6 +224,11 @@ class SequencerDevice:
     def config_values(self) -> dict[str, tuple[float, str]]:
         return self.streamer.config_values()
 
+    def preview_config_values(self) -> dict[str, tuple[float, str]]:
+        """Read saved Config inputs for a non-mutating execution preview."""
+
+        return self.streamer.preview_config_values()
+
     def load_config_file(self, path: str) -> None:
         self.streamer.load_config_file(path)
 

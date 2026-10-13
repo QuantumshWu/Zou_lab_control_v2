@@ -188,20 +188,18 @@ def test_virtual_apparatus_installs_one_canonical_slm_phase_device() -> None:
 
 
 def test_logic_discovery_is_derived_from_leaf_modules() -> None:
+    from dataclasses import replace
+
     descriptors = discover_logic_nodes()
     leaf_count = len(tuple((Path(__file__).parents[1] / "src" / "zlc_atom" / "nodes").rglob("logic_node.py")))
     assert len(descriptors) == leaf_count
-    assert tuple(item.api_name for item in descriptors) == (
-        "calibration",
-        "camera_measurement",
-        "derive",
-        "frame_survival",
-        "occupancy",
-        "seamless_scan",
-        "slm_feedback",
-        "slm_rearrangement",
-        "waveform_measurement",
-    )
+    assert descriptors
+    for descriptor in descriptors:
+        # Every present and future leaf owns its purpose, not an MCP allowlist.
+        assert descriptor.description.strip()
+        assert descriptor.description != descriptor.api_name
+        with pytest.raises(ValueError, match="non-empty description"):
+            replace(descriptor, description=" \n ")
     assert all(
         isinstance(output, DatasetOutputDeclaration)
         for descriptor in descriptors
@@ -222,7 +220,7 @@ def test_logic_discovery_is_derived_from_leaf_modules() -> None:
         for descriptor in descriptors
         for input_spec in descriptor.input_specs
         if hasattr(input_spec, "delivery")
-    } == {"exact"}
+    } == {"exact", "latest"}
 
 
 def test_task_preview_policy_and_typed_output_reference_are_explicit() -> None:
@@ -233,13 +231,18 @@ def test_task_preview_policy_and_typed_output_reference_are_explicit() -> None:
         NodePreviewSpec,
     )
 
+    with pytest.raises(TypeError, match="description"):
+        LogicNodeDescriptor("undocumented", NodeKind.TASK, AuthoringSchema(), node_previews=())
+
     with pytest.raises(ValueError, match="explicitly declare node_previews"):
-        LogicNodeDescriptor("silent", NodeKind.TASK, AuthoringSchema())
+        LogicNodeDescriptor("silent", NodeKind.TASK, AuthoringSchema(),
+                            description="Exercise the required Task preview declaration.")
 
     explicit_none = LogicNodeDescriptor(
         "artifact-only",
         NodeKind.TASK,
         AuthoringSchema(),
+        description="Publish a saved artifact without a Dataset preview.",
         node_previews=(),
     )
     assert explicit_none.node_previews == ()
@@ -251,6 +254,7 @@ def test_task_preview_policy_and_typed_output_reference_are_explicit() -> None:
         "camera-task",
         NodeKind.TASK,
         AuthoringSchema(),
+        description="Publish camera frames with an occupied overlay preview.",
         outputs=(output, overlay),
         node_previews=(own_preview,),
     )
@@ -268,6 +272,7 @@ def test_task_preview_policy_and_typed_output_reference_are_explicit() -> None:
             "copied-output",
             NodeKind.TASK,
             AuthoringSchema(),
+            description="Exercise rejection of copied output declarations.",
             outputs=(output,),
             node_previews=(NodePreviewSpec(copied_declaration, "image"),),
         )
@@ -277,6 +282,7 @@ def test_task_preview_policy_and_typed_output_reference_are_explicit() -> None:
             "copied-overlay",
             NodeKind.TASK,
             AuthoringSchema(),
+            description="Exercise rejection of copied overlay declarations.",
             outputs=(output, overlay),
             node_previews=(
                 NodePreviewSpec(output, "image", overlay=copied_overlay),
@@ -296,6 +302,7 @@ def test_task_preview_policy_and_typed_output_reference_are_explicit() -> None:
         "feedback",
         NodeKind.TASK,
         AuthoringSchema(),
+        description="Display a companion camera's frames and occupied overlay.",
         node_previews=(companion_preview,),
     )
     assert companion_task.node_previews[0].producer == "camera"
@@ -351,6 +358,7 @@ def test_logic_build_namespace_rejects_authored_resolved_or_reserved_collisions(
             "bad-device-override",
             NodeKind.MEASUREMENT,
             AuthoringSchema((AuthoringField("camera", "text", "Camera"),)),
+            description="Exercise rejection of authored device argument collisions.",
             device_requirements=(
                 DeviceRequirement("camera.adapter", "camera"),
             ),
@@ -362,6 +370,7 @@ def test_logic_build_namespace_rejects_authored_resolved_or_reserved_collisions(
             AuthoringSchema(
                 (AuthoringField("signal_plane", "text", "Signal plane"),)
             ),
+            description="Exercise rejection of authored Runtime argument collisions.",
         )
 
 

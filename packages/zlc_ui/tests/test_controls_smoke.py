@@ -50,6 +50,61 @@ def verify_real_dialog_and_accept():
 QtCore.QTimer.singleShot(0, verify_real_dialog_and_accept)
 assert view.exec_(parent, title='Review detected sites') == FluentDialogWindow.Accepted
 parent.close()
+
+# The machine action changes the same view and clicks its normal Continue;
+# it never submits a second answer or leaves the modal behind.
+from zlc_ui.console import TaskConsoleHandle, TaskConsoleView
+class Surface(QtWidgets.QWidget):
+    toggle_requested = QtCore.pyqtSignal(str)
+    selection_requested = QtCore.pyqtSignal(tuple)
+    def __init__(self):
+        super().__init__()
+        self.states = []
+        self.closed = 0
+    def set_state(self, excluded, selected):
+        self.states.append((excluded, selected))
+    def close_adapter(self):
+        self.closed += 1
+shell = TaskConsoleView()
+handle = TaskConsoleHandle(None, shell)
+shell.show()
+surface = Surface()
+def apply_current_review():
+    state = handle.point_review_state('review-1')
+    assert state['points'][1] == dict(id='site-b', label='2', x=7., y=5., excluded=False, selected=False)
+    for identity, excluded in [('old-review', ('site-b',)), ('review-1', ('unknown',)), ('review-1', ('site-a', 'site-b'))]:
+        try:
+            handle.apply_point_review(identity, excluded)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('Invalid review confirmation accepted')
+    assert handle.apply_point_review('review-1', ('site-b',)) == ('site-b',)
+    try:
+        handle.apply_point_review('review-1', ())
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('Duplicate review confirmation accepted')
+QtCore.QTimer.singleShot(0, apply_current_review)
+assert handle.review_points(surface, (('site-a','1',2.,3.),('site-b','2',7.,5.)), title='API review', request_id='review-1') == ('site-b',)
+assert surface.states[-1] == (('site-b',), ()) and surface.closed == 1
+assert QtWidgets.QApplication.activeModalWidget() is None
+surface = Surface()
+def stop_current_review():
+    assert not handle.cancel_point_review('old-request')
+    assert handle.cancel_point_review('review-2')
+    assert not handle.cancel_point_review('review-2')
+    try:
+        handle.apply_point_review('review-2', ())
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('Stopped review accepted a late response')
+QtCore.QTimer.singleShot(0, stop_current_review)
+assert handle.review_points(surface, (('site-a','1',2.,3.),), title='Stop review', request_id='review-2') is None
+assert surface.closed == 1 and QtWidgets.QApplication.activeModalWidget() is None
+shell.close()
 """
     )
 

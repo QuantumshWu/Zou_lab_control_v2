@@ -1387,6 +1387,14 @@ class RasterPlotHost:
             _mode=_DispatchMode.CONTROL,
         )
 
+    def fit_summary(self, *, offset: int = 0, limit: int = 256) -> Future:
+        """Read native parameter results on the existing render worker."""
+
+        return self._dispatch_session(
+            lambda: self._require_session().fit_summary(offset=offset, limit=limit),
+            _mode=_DispatchMode.CONTROL,
+        )
+
     def describe_semantics(self) -> Future[RasterOperation[object]]:
         """Return the registry-derived semantic edit domain."""
 

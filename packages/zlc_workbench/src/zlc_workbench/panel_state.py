@@ -923,7 +923,7 @@ class PanelState:
             title=text("title"),
             kind=kind,
             cell_kind=cell_kind,
-            size=text("size"),
+            size=DEFAULTS.layout.validate_preset(text("size")),
             interval_ms=interval,
             semantic=mapping("semantic"),
             display=display,

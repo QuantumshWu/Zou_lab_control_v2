@@ -390,6 +390,12 @@ LOGIC_NODE = LogicNodeDescriptor(
     "calibration",
     NodeKind.TASK,
     CALIBRATION_SCHEMA,
+    description=(
+        "Acquire long-reference/readout/long-reference camera cycles using the selected "
+        "Pulse, detect and optionally review sites, then calibrate per-site readout "
+        "classification. Saves a Calibration artifact for Occupancy plus native "
+        "diagnostic Figures; this Task owns camera preparation and Pulse Fire."
+    ),
     outputs=(CAPTURE_PREVIEW_DECLARATION,),
     # Long reference, short readout, long reference: three frames whose whole
     # point is to be compared with each other, so they are faceted rather than

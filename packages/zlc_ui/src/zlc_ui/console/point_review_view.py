@@ -67,6 +67,7 @@ class PointReviewView(FluentFrame):
             QtWidgets.QSizePolicy.Ignored,
             QtWidgets.QSizePolicy.Ignored,
         )
+        self._points = rows
         self._point_ids = point_ids
         self._point_set = set(point_ids)
         self._initial_excluded = set(excluded)
@@ -198,6 +199,18 @@ class PointReviewView(FluentFrame):
         return tuple(
             point_id for point_id in self._point_ids if point_id in self._selected
         )
+
+    def review_state(self) -> dict[str, object]:
+        """The original point rows and current checks shown by this view."""
+
+        return {
+            "points": [{"id": point_id, "label": label, "x": x, "y": y,
+                        "excluded": point_id in self._excluded,
+                        "selected": point_id in self._selected}
+                       for point_id, label, x, y in self._points],
+            "excluded_ids": list(self.excluded_ids),
+            "selected_ids": list(self.selected_ids),
+        }
 
     def set_state(
         self,

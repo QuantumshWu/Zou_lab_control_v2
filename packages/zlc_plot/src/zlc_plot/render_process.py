@@ -826,7 +826,7 @@ _REMOTE_METHODS = frozenset(
         "set_y_limits", "reset_y_limits", "set_color_limits",
         "reset_color_limits", "set_x_limits", "set_view_limits", "set_size",
         "set_device_pixel_ratio", "set_axis_unit", "set_value_unit",
-        "set_time_unit", "save", "clear_fit", "fit_models", "selectors",
+        "set_time_unit", "save", "clear_fit", "fit_models", "fit_summary", "selectors",
         "selector_state", "selector_data", "remove_selector",
         "set_selector_value", "set_area_selector", "set_x_selector",
         "set_threshold_selector", "set_crosshair_selector", "fit",

@@ -249,6 +249,13 @@ LOGIC_NODE = LogicNodeDescriptor(
     "slm_rearrangement",
     NodeKind.TASK,
     SLM_REARRANGEMENT_SCHEMA,
+    description=(
+        "Use a Calibration, SLM Science Context and authored Pulse to image occupancy, "
+        "plan collision-constrained atom transport to a grid or saved target, play GPU "
+        "phase maps and image the result. This Task owns camera preparation and Pulse "
+        "Fire, publishing before/after images, occupancy and phase diagnostics and "
+        "saving the native rearrangement artifacts."
+    ),
     input_specs=(
         ArtifactInputSpec("calibration_path", "Calibration", CALIBRATION_ARTIFACT_CODEC,
                           argument_name="calibration"),

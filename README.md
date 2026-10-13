@@ -88,6 +88,22 @@ python -m pip install -c constraints.txt -e .
 
 Configure an AI client's STDIO MCP connection once: command is the experiment's
 Python executable, arguments are `-m zou_lab_control mcp --workspace <absolute workspace>`.
+Using that same Python, generate the exact configuration for this machine:
+
+```powershell
+python -m zou_lab_control mcp --workspace D:\GitHub\Zou_lab_control_v2\workspace --client-config codex
+python -m zou_lab_control mcp --workspace D:\GitHub\Zou_lab_control_v2\workspace --client-config claude
+```
+
+Replace the workspace with your absolute path. Paste the Codex output into its
+`config.toml`, or the Claude Code output into the project's `.mcp.json` (merge the
+`zlc` entry if other servers already exist). Nothing edits global configuration
+or copies experiment credentials. Restart/reconnect the AI client, then ask it
+to call `lab_connections`, `lab_health` and `lab_guide("overview")`; seeing a
+listening port alone is not successful native integration. The normal operator
+tool set is the default; append `--tools developer` to the server arguments only
+when owner-API reflection is wanted for development.
+
 The connector discovers the current experiment endpoint and credential; it does
 not start devices. It can be opened before the experiment: use `lab_connect`
 after launching the GUI. If multiple windows share the workspace, use
@@ -102,8 +118,9 @@ of a running server. The connector authenticates and checks process/workspace
 identity before selecting an endpoint. These local credentials are ignored by
 Git and are not exposed as experiment artifacts. The service binds only
 loopback and rejects browser-origin requests.
-Use a client tool/HTTP timeout of at least 40 seconds when using `lab_wait`
-(its bounded wait is at most 30 seconds); do not turn transport timeouts into
+Use a client tool timeout longer than the requested `lab_wait`/`lab_wait_for`
+observation (up to 1800 seconds); generated Codex configuration uses 1860 seconds.
+The persistent connector adjusts its request timeout for the chosen wait; do not turn transport timeouts into
 automatic write retries. Keep the client connection/session for repeated use.
 Add **`--mcp-read-only`** when observation without control is wanted, or
 `--no-mcp` to disable the listener. `--check` does not start MCP. A listener

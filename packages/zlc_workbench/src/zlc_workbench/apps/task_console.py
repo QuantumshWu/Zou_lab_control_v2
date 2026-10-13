@@ -269,6 +269,7 @@ def build_console(session, *, window_ratio=None, request_close=None, run_device_
         return view.review_points(
             surface,
             points,
+            request_id=request.request_id,
             title=request.title,
             message=request.message,
             confirm_label=str(
@@ -672,7 +673,8 @@ class ExperimentGuiFlow:
         state = presenter.control_state() if reply is None else reply["state"]
         return {
             "device": str(key),
-            "accepted": action == "open" if reply is None else reply["accepted"],
+            **({"accepted": action == "open" if reply is None else reply["accepted"]}
+               if action != "inspect" else {}),
             "error": None if reply is None else reply["error"],
             "dispatch_pending": bool(state["pending"]),
             "status": control.status_snapshot(),

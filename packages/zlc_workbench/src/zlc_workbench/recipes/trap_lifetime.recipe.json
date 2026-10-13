@@ -1,0 +1,77 @@
+{
+  "format": "zlc.experiment-recipe",
+  "name": "trap_lifetime",
+  "title": "Per-site trap lifetime",
+  "description": "Camera → Occupancy → Frame Survival → Seamless Scan → native per-site Exponential fit. Mean reduces repeats using each site's valid earlier-occupied trials; the panel publishes amplitude, offset and decay_time with uncertainty. This recipe selects no physical Pulse, Calibration or hardware on your behalf.",
+  "layout": "trap_lifetime.layout.json",
+  "parameters": {
+    "camera": {
+      "path": ["logic", 0, "device_keys", "camera"],
+      "required": true,
+      "description": "Existing installed camera device ID; use the device catalog, not its display Role."
+    },
+    "sequencer": {
+      "path": ["logic", 3, "device_keys", "sequencer"],
+      "required": true,
+      "description": "Existing installed sequencer device ID. Seamless Scan owns acquisition preparation and Fire."
+    },
+    "pulse_path": {
+      "path": ["logic", 3, "values", "pulse_template"],
+      "required": true,
+      "description": "Pulse filename relative to workspace/pulses, or an absolute path. Use a user-verified lifetime Pulse with the selected imaging frames and a hold-time Scan/API field."
+    },
+    "calibration_path": {
+      "path": ["logic", 1, "artifact_inputs", "calibration_path"],
+      "required": true,
+      "description": "Existing Calibration JSON relative to workspace/data, or an absolute path. It must match the camera/readout; this recipe does not recalibrate."
+    },
+    "scan_plan": {
+      "path": ["logic", 3, "values", "plan"],
+      "required": true,
+      "description": "Native Scan Plan JSON text with one chosen hold-time axis: {\"axes\":[{\"port\":\"pulse:param:<actual duration field_id>\",\"values\":[...],\"unit\":\"ms\"}]}. Values are explicit points, not [start,stop,count]. Read the chosen Pulse catalog for the real field ID; api:<field_id> is also supported. The sole scan axis becomes X automatically."
+    },
+    "repeats": {
+      "path": ["logic", 3, "values", "repeats"],
+      "description": "Complete sweeps. With one shot per point, each sweep supplies an early full curve while later sweeps improve its statistics."
+    },
+    "shots_per_point": {
+      "path": ["logic", 3, "values", "shots_per_point"],
+      "description": "Consecutive shots before advancing one point. Increasing this delays the first complete curve."
+    },
+    "api_values": {
+      "path": ["logic", 3, "values", "api_values"],
+      "description": "Optional fixed Pulse API overrides in native authoring text, one field_id = value per line."
+    },
+    "exposure_seconds": {
+      "path": ["logic", 0, "values", "exposure_seconds"],
+      "description": "Camera exposure in seconds. Null preserves its current setting; choose a setting compatible with the user's imaging and Calibration."
+    },
+    "frames_per_cycle": {
+      "path": ["logic", 0, "values", "frames_per_cycle"],
+      "description": "All camera trigger frames in one Pulse cycle, including frames not selected for survival."
+    },
+    "start_frame": {
+      "path": ["logic", 2, "values", "pairs", 0, "start"],
+      "description": "Zero-based earlier imaging frame conditioning on occupied sites."
+    },
+    "end_frame": {
+      "path": ["logic", 2, "values", "pairs", 0, "end"],
+      "description": "Zero-based later imaging frame; must follow start_frame within the cycle."
+    },
+    "fit_fixed": {
+      "path": ["panels", 0, "fit", "fixed"],
+      "description": "Native fixed parameter mapping, e.g. {\"offset\":0} only if the operator chooses a zero floor; absent means all parameters remain free."
+    }
+  },
+  "followers": ["occupancy", "frame_survival"],
+  "entry_node": "seamless_scan",
+  "result_panels": ["panel-1"],
+  "requirements": [
+    "Read the workspace EXPERIMENT_CONTEXT.md and check current device/SLM preparation; the recipe does not Init or Send an SLM phase.",
+    "Use the user's verified imaging/hold Pulse and count all its trigger frames. Confirm the chosen camera, exposure and Calibration are compatible.",
+    "Choose one hold-duration Scan/API axis with enough distinct points to constrain an Exponential fit; no physical field is guessed.",
+    "Camera ROI is preserved. Verify it includes the full calibrated array before starting."
+  ],
+  "completion": "Observe the returned Seamless Scan generation. A complete first sweep supplies a full curve, not guaranteed valid fits: low loading or insufficient data remain explicitly invalid. Formal completion is that same generation done without error, followed by native fit results tied to its data publication. Never manually Fire in parallel.",
+  "save": "Save the result panel through the native Figure action, returning its NPZ and preview paths plus the Layout. Read the published native decay_time values, uncertainties, site coordinates and validity; do not export raw data to re-fit outside the framework."
+}

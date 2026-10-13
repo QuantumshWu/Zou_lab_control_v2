@@ -120,10 +120,106 @@ from .selection import (
 )
 from .topology import format_signal_shape, project_signals, signal_label, signal_output_name
 
-__all__ = ["ConsolePresenter", "PanelBinding", "PanelState"]
+__all__ = ["ConsolePresenter", "PanelBinding", "PanelState", "control_capabilities"]
 
 
 _UNCHANGED = object()
+
+
+def control_capabilities(
+    catalog: LogicCatalog, workspace: object, *, api_name: str | None = None,
+    details: bool = False,
+) -> dict[str, Any]:
+    """Describe installed software without a Session, device Init or plot host.
+
+    Bound choices belong to the live editor; these are the same declarations
+    before an apparatus exists, not a second AI-specific capability registry.
+    """
+
+    from .authoring_form import project_artifact_inputs, project_logic_schema
+    from zlc_plot._kinds import HANDLERS
+    from zlc_plot.fit import builtin_fit_models
+    from zlc_plot.specs import Reduction
+
+    root = Path(workspace.root)
+    descriptors = tuple(catalog.by_name.values())
+    if api_name is not None:
+        descriptor = catalog.get(api_name)
+        if descriptor is None:
+            raise KeyError(f"unknown logic plugin {api_name!r}")
+        descriptors = (descriptor,)
+    logic = []
+    for descriptor in descriptors:
+        row = {
+            "api_name": descriptor.api_name,
+            "kind": descriptor.kind.value,
+            "description": descriptor.description,
+            "dataset_inputs": _control_plain(dataset_inputs(descriptor)),
+            "outputs": _control_plain(descriptor.outputs),
+            "dynamic_outputs": descriptor.declare_outputs is not None,
+            "artifact_outputs": _control_plain(descriptor.artifact_outputs),
+            "reports_ready": descriptor.reports_ready,
+            "estimate_available": descriptor.estimate_run is not None,
+        }
+        if api_name is not None:
+            artifact_specs = artifact_input_specs(descriptor)
+            artifact_form = project_artifact_inputs(
+                artifact_specs, base_dir=str(workspace.data),
+            )
+            row.update({
+                "fields": _control_plain(descriptor.authoring_schema.fields),
+                "form_spec": _control_plain(project_logic_schema(
+                    descriptor, workspace_root=str(root),
+                )),
+                "artifact_inputs": [
+                    {"name": spec.name, "label": spec.label,
+                     "contract_id": spec.contract_id, "required": spec.required,
+                     "per_frame": spec.per_frame, "relative_to": field.base_dir,
+                     "file_filter": field.file_filter,
+                     "path_rule": "relative to this directory, or absolute; do not prepend the directory twice"}
+                    for spec, field in zip(artifact_specs, artifact_form.fields, strict=True)
+                ],
+                "device_requirements": _control_plain(descriptor.device_requirements),
+                "workspace_resources": [
+                    {"field_name": spec.field_name, "directory": spec.directory,
+                     "relative_to": str(root / spec.directory),
+                     "path_rule": "relative to this directory, or absolute; do not prepend the directory twice",
+                     "contract_id": spec.contract_id, "suffixes": list(spec.suffixes)}
+                    for spec in descriptor.workspace_resources
+                ],
+                "acquisition_input": descriptor.acquisition_input,
+                "acquisition_completion": descriptor.acquisition_completion,
+            })
+        logic.append(row)
+    result = {
+        "logic": logic,
+        "panel_kinds": [kind.value for kind in TASK_CONSOLE_PANEL_KINDS],
+        "panel_sizes": list(DEFAULTS.layout.size_names),
+    }
+    if api_name is None:
+        offered = set(TASK_CONSOLE_PANEL_KINDS)
+        result["plot"] = {
+            "availability": "Software capabilities; bound axis choices and compatible fit models come from lab_catalog(panel_id=...).",
+            "kinds": [
+                {"kind": handler.kind.value, "label": handler.display_name,
+                 "semantic_fields": list(handler.semantic_fields),
+                 "fit_target": handler.fit_target}
+                for handler in HANDLERS if handler.kind in offered
+            ],
+            "facet_cell_kinds": [kind.value for kind in GRID_CELL_KINDS],
+            "axis_roles": list(ROLE_FATES),
+            "reductions": [item.value for item in Reduction],
+            "fit_models": [
+                {"model_id": model.model_id, "label": model.display_name,
+                 "targets": [target.value for target in model.targets],
+                 "headline": model.headline,
+                 **({"formula": model.formula, "parameters": _control_plain(model.parameters)} if details else {})}
+                for model in builtin_fit_models()
+            ],
+            "fit_results": "Native fits retain facet/group coordinates, errors and validity. Enabled parameter outputs publish Runtime signals; control_results reports their actual names without refitting.",
+            "save": "Save figure writes a native zlc.figure NPZ plus preview image; FigureViewer reopens its typed data, plot recipe and lineage.",
+        }
+    return result
 
 
 def _refused_expression(binding: "PanelBinding") -> str:
@@ -7026,7 +7122,7 @@ class ConsolePresenter:
             elif pending is not None:
                 phase = "queued"
             elif request is not None:
-                phase = "requires_human"
+                phase = "requires_review" if request.kind == "point-selection" else "requires_human"
             elif binding.following and (host is None or (host.terminal and not observed.error)):
                 phase = "waiting_for_source"
             finalization = binding.finalization
@@ -7049,7 +7145,8 @@ class ConsolePresenter:
                     "generation": None if pending.host.generation is None else pending.host.generation.value,
                 },
                 "operator_request": _control_plain(request),
-                "requires_human": request is not None,
+                "requires_human": request is not None and request.kind != "point-selection",
+                "requires_review": request is not None and request.kind == "point-selection",
                 "run_directory": None if host is None or host.run_directory is None else str(host.run_directory),
                 "artifacts": [] if host is None else _control_plain(host.artifacts),
                 "published_signals": [] if host is None else list(host.published_signals()),
@@ -7111,7 +7208,7 @@ class ConsolePresenter:
 
     def control_catalog(
         self, *, api_name: str | None = None, node_id: str | None = None,
-        panel_id: str | None = None,
+        panel_id: str | None = None, details: bool = False,
     ) -> dict[str, Any]:
         """List names cheaply; request one plugin or editor for full metadata."""
 
@@ -7122,48 +7219,11 @@ class ConsolePresenter:
             if api_name is not None and api_name != binding.descriptor.api_name:
                 raise ValueError("api_name does not match the selected logic node")
             api_name = binding.descriptor.api_name
-        if api_name is not None:
-            descriptor = self.catalog.get(api_name)
-            if descriptor is None:
-                raise KeyError(f"unknown logic plugin {api_name!r}")
-            descriptors = (descriptor,)
-        else:
-            descriptors = ()
-        catalog = []
-        if api_name is None and panel_id is None:
-            catalog = [
-                {"api_name": descriptor.api_name, "kind": descriptor.kind.value,
-                 "outputs": [item.name for item in descriptor.outputs],
-                 "reports_ready": descriptor.reports_ready}
-                for descriptor in self.catalog.by_name.values()
-            ]
-        for descriptor in descriptors:
-            catalog.append({
-                "api_name": descriptor.api_name,
-                "kind": descriptor.kind.value,
-                "fields": _control_plain(descriptor.authoring_schema.fields),
-                "dataset_inputs": _control_plain(dataset_inputs(descriptor)),
-                "artifact_inputs": [
-                    {"name": item.name, "label": item.label, "contract_id": item.contract_id,
-                     "required": item.required, "per_frame": item.per_frame}
-                    for item in artifact_input_specs(descriptor)
-                ],
-                "outputs": _control_plain(descriptor.outputs),
-                "dynamic_outputs": descriptor.declare_outputs is not None,
-                "artifact_outputs": _control_plain(descriptor.artifact_outputs),
-                "device_requirements": _control_plain(descriptor.device_requirements),
-                "workspace_resources": [
-                    {"field_name": item.field_name, "directory": item.directory,
-                     "relative_to": str(self.session.workspace.root / item.directory),
-                     "path_rule": "relative to this directory, or absolute; do not prepend the directory twice",
-                     "contract_id": item.contract_id, "suffixes": list(item.suffixes)}
-                    for item in descriptor.workspace_resources
-                ],
-                "reports_ready": descriptor.reports_ready,
-                "acquisition_input": descriptor.acquisition_input,
-                "acquisition_completion": descriptor.acquisition_completion,
-            })
-        result = {"logic": catalog, "panel_kinds": list(self._panel_kinds), "panel_sizes": list(self._sizes)}
+        result = (
+            {"logic": [], "panel_kinds": list(self._panel_kinds), "panel_sizes": list(self._sizes)}
+            if panel_id is not None and api_name is None
+            else control_capabilities(self.catalog, self.session.workspace, api_name=api_name, details=details)
+        )
         if node_id is not None:
             projection = self.logic_editor_projection(node_id)
             if projection is None:
@@ -7181,9 +7241,151 @@ class ConsolePresenter:
                 raise KeyError(f"unknown panel {panel_id!r}")
             result["panel"] = _control_plain({
                 key: value for key, value in projection.items()
-                if key not in {"frozen_snapshot", "frozen_publication"}
+                if key not in {"frozen_snapshot", "frozen_publication", "producer_projection"}
             })
+            surface = projection["parameter_surface"]
+            for group in ("semantic", "display", "fit"):
+                fields = []
+                for field in surface.get(group, ()):
+                    public = {
+                        key: value for key, value in field.items()
+                        if key not in {"cycle_choices", "cycle_label", "co_edited_with"}
+                        and (key == "value" or value is not None and value != "" and value != ())
+                    }
+                    cycle = field.get("cycle_choices")
+                    if cycle is not None:
+                        public["scope"] = {
+                            "count": len(cycle),
+                            "choices": [(label, value) for value, label in cycle[:32]],
+                            "truncated": len(cycle) > 32,
+                        }
+                    fields.append(_control_plain(public))
+                result["panel"]["parameter_surface"][group] = fields
+            result["panel"]["scope_note"] = (
+                "Scope choices are [label, value] pairs from the real axis. "
+                "For further coordinates use lab_signal(dataset=true); producer details use lab_catalog(node_id=producer_node_id)."
+            )
         return result
+
+    def control_estimate(self, node_id: str) -> Future:
+        """Estimate the current authored draft through its plugin, off the GUI thread.
+
+        The result names the captured draft revision, not a promise about an
+        already running or subsequently edited run. No node is built or started.
+        """
+
+        binding = self.logic.get(node_id)
+        if binding is None:
+            raise KeyError(f"unknown logic node {node_id!r}")
+        answer: Future = Future()
+        base = {"node_id": node_id, "draft_revision": binding.draft_revision, "basis": "draft"}
+        hook = binding.descriptor.estimate_run
+        resolved = binding.finalization
+        if hook is None or resolved is None or not callable(self._run_device_read):
+            reason = ("This plugin does not declare a run estimate." if hook is None else
+                      "Validate the draft first." if resolved is None else
+                      "The Console device worker is unavailable.")
+            answer.set_result({**base, "status": "unknown", "reason": reason})
+            return answer
+        values = _control_plain(resolved.values)
+        devices, resources = dict(resolved.devices), dict(resolved.resources)
+        installation = self.session.installation
+
+        def work():
+            if not answer.set_running_or_notify_cancel():
+                return None
+            if self.session.installation is not installation or self._closing:
+                return {**base, "status": "unknown", "reason": "The device session changed or is closing."}
+            return {**base, **dict(hook(values, devices, resources))}
+
+        def finished(result):
+            if not answer.done():
+                answer.set_result(result)
+
+        def failed(error):
+            if not answer.done():
+                answer.set_exception(error)
+
+        self._run_device_read(work, finished, failed)
+        return answer
+
+    def control_results(
+        self, panel_id: str, *, offset: int = 0, limit: int = 256,
+    ) -> Future:
+        """Read the Monitor's native fit table asynchronously, never refit.
+
+        The Future is completed by the existing render worker. Callers must
+        await it outside the GUI thread; this command does not export raw
+        observations or cause a new render. Saved figures are read separately
+        through their native archive reader.
+        """
+
+        binding = self.panels.get(panel_id)
+        if binding is None:
+            raise KeyError(f"unknown panel {panel_id!r}")
+        answer: Future = Future()
+        surface = binding.accepted_surface
+        base = {
+            "panel_id": panel_id,
+            "signal": binding.state.signal if surface is None else surface.target.signal,
+            "requested_signal": binding.state.signal,
+            "requested_fit": _control_plain(binding.state.fit),
+            "configuration_pending": binding.configuration is not None,
+            "panel_error": binding.reported_condition or binding.vacancy or binding.unapplied_display,
+        }
+        host, port = binding.host, binding.port
+        if host is None:
+            answer.set_result({
+                **base, "status": "pending" if binding.state.fit.get("model") else "not_enabled",
+                "rows": [], "total_rows": 0, "offset": offset, "next_offset": None,
+                "published_signals": [],
+            })
+            return answer
+        plane = self.session.signal_plane
+        pending = host.fit_summary(offset=offset, limit=limit)
+
+        def completed(done: Future) -> None:
+            if not answer.set_running_or_notify_cancel():
+                return
+            try:
+                table = dict(done.result().value)
+                publication = None if port is None else port.publication_for_identity(
+                    table.get("source_generation"), table.get("source_revision"),
+                )
+                current_source = plane.latest_publication(base["signal"]) if base["signal"] else None
+                source_is_latest = None if publication is None else (
+                    current_source is not None and publication.event_ref == current_source.event_ref
+                )
+                fit_matches_display = table.get("status") == "current"
+                if fit_matches_display and source_is_latest is False:
+                    table["status"] = "lagging"
+                names = set(table.get("parameter_names", ()))
+                signals = []
+                for description in plane.describe_signals():
+                    parts = split_signal_key(description.name)
+                    if parts is None or parts[0] != panel_id or parts[1] not in names:
+                        continue
+                    published = plane.latest_publication(description.name)
+                    signals.append({
+                        "name": description.name, "parameter": parts[1],
+                        "live": description.live,
+                        "publication": _control_plain(None if published is None else published.event_ref),
+                        "source_matches_fit": None if publication is None or published is None else (
+                            publication.event_ref in published.direct_parent_refs
+                        ),
+                    })
+                answer.set_result({
+                    **base, **table,
+                    "source_publication": _control_plain(None if publication is None else publication.event_ref),
+                    "fit_matches_display": fit_matches_display,
+                    "source_is_latest": source_is_latest,
+                    "published_signals": signals,
+                })
+            except Exception as error:
+                answer.set_exception(error)
+
+        pending.add_done_callback(completed)
+        return answer
 
     def control_action(
         self, action: str, arguments: Mapping[str, Any] | None = None, *,
@@ -7294,7 +7496,7 @@ class ConsolePresenter:
             if action in {"logic.start", "logic.stop"}:
                 status = next(item["status"] for item in state["logic"] if item["node_id"] == node_id)
         if not accepted and error is None:
-            messages = [item["message"] for item in state["reports"] if item["severity"] in {"warning", "error"}]
+            messages = [item["message"] for item in state["reports"] if item["severity"] in {"warning", "error", "task"}]
             error = messages[-1] if messages else "The requested action was not accepted"
         return {"action": action, "accepted": accepted, "status": status,
                 "node_id": node_id or None, "panel_id": panel_id or None,
@@ -7556,6 +7758,35 @@ class ConsolePresenter:
         tracked = self._auto_task_previews.pop(binding.node_id, set())
         for panel_id in tracked:
             self._remove_panel_now(panel_id)
+
+    def control_review_points(
+        self, node_id: str, generation: str, request_id: str,
+        excluded_ids: Sequence[str] | None = None,
+    ) -> dict[str, object]:
+        """Inspect or confirm scientific point selection using the open normal UI.
+
+        Physical manual-axis requests cannot be answered here. Acceptance only
+        closes the review; the same modal caller submits the one Task response.
+        Omit excluded_ids to read original point coordinates and current checks.
+        """
+
+        binding = self.logic.get(node_id)
+        host = None if binding is None else binding.host
+        if host is None or host.generation is None or host.generation.value != generation:
+            raise ValueError("Logic run changed; inspect the current generation before reviewing")
+        request = host.operator_request
+        if request is None or request.request_id != request_id:
+            raise ValueError("Operator request changed; inspect the current request before reviewing")
+        if request.kind != "point-selection":
+            raise ValueError("Only scientific point selection is supported; physical requests require the human")
+        if excluded_ids is None:
+            return {"node_id": node_id, "generation": generation, "request_id": request_id,
+                    **self.view.point_review_state(request_id)}
+        if isinstance(excluded_ids, (str, bytes)) or any(not isinstance(item, str) for item in excluded_ids):
+            raise TypeError("excluded_ids must be a list of point identity strings")
+        excluded = self.view.apply_point_review(request_id, tuple(excluded_ids))
+        return {"accepted": True, "node_id": node_id, "generation": generation,
+                "request_id": request_id, "excluded_ids": list(excluded)}
 
     def _operator_point_review(
         self, binding: LogicBinding, request: OperatorInputRequest
@@ -7992,6 +8223,7 @@ class ConsolePresenter:
         return {
             "node_id": binding.node_id,
             "api_name": str(binding.descriptor.api_name),
+            "description": binding.descriptor.description,
             "kind": str(
                 getattr(binding.descriptor.kind, "value", binding.descriptor.kind)
             ),
@@ -8339,7 +8571,14 @@ class ConsolePresenter:
         self._discard_pending(binding)
         host = binding.host
         if host is not None and host.running:
-            host.cancel("the operator pressed Stop")
+            request = host.operator_request
+            cancel_review = getattr(self.view, "cancel_point_review", None)
+            cancelled_review = bool(
+                request is not None and request.kind == "point-selection"
+                and callable(cancel_review) and cancel_review(request.request_id)
+            )
+            if not cancelled_review:
+                host.cancel("the operator pressed Stop")
         if self._active_task_id == binding.node_id and (
             host is None or not host.running
         ):

@@ -135,6 +135,7 @@ class TaskConsoleHandle(QtCore.QObject):
         self._panel_default_size = ""
         self._grid_cell_kinds: tuple[str, ...] = ()
         self._task_takeover = False
+        self._point_review: tuple[str, PointReviewView] | None = None
         for name in (
             "add_panel_requested", "add_logic_requested", "pause_toggled",
             "selectors_toggled", "save_layout_requested",
@@ -326,6 +327,7 @@ class TaskConsoleHandle(QtCore.QObject):
         message: str = "",
         confirm_label: str = "Continue",
         initial_excluded=(),
+        request_id: str = "",
     ) -> tuple[str, ...] | None:
         """Run the complete Fluent point-review view around one plot QWidget."""
 
@@ -345,6 +347,7 @@ class TaskConsoleHandle(QtCore.QObject):
         review.state_changed.connect(surface.set_state)
         surface.set_state(review.excluded_ids, review.selected_ids)
         parent = self._window if self._window is not None else self._view
+        self._point_review = (str(request_id), review)
         try:
             result = review.exec_(parent, title=str(title))
             return (
@@ -353,7 +356,46 @@ class TaskConsoleHandle(QtCore.QObject):
                 else None
             )
         finally:
+            self._point_review = None
             surface.close_adapter()
+
+    def point_review_state(self, request_id: str) -> dict[str, object]:
+        """Inspect the original rows and checks of this exact open review."""
+
+        current = self._point_review
+        if current is None or current[0] != request_id or not current[1].isVisible():
+            raise ValueError("This point review is no longer open; inspect the current request")
+        return current[1].review_state()
+
+    def apply_point_review(self, request_id: str, excluded_ids: tuple[str, ...]) -> tuple[str, ...]:
+        """Apply a scientific selection through the currently open review UI.
+
+        This clicks the same Continue button; the existing modal caller alone
+        delivers its result to the Task. It cannot answer a physical knob prompt.
+        """
+
+        current = self._point_review
+        if current is None or current[0] != request_id or not current[1].isVisible():
+            raise ValueError("This point review is no longer open; inspect the current request")
+        review = current[1]
+        review.set_state(excluded_ids, ())
+        review.state_changed.emit(review.excluded_ids, review.selected_ids)
+        if not review.confirm_button.isEnabled():
+            raise ValueError("At least one point must remain in the review")
+        excluded = review.excluded_ids
+        self._point_review = None
+        review.confirm_button.click()
+        return excluded
+
+    def cancel_point_review(self, request_id: str) -> bool:
+        """Press the current review's normal Stop button, if it is open."""
+
+        current = self._point_review
+        if current is None or current[0] != request_id or not current[1].isVisible():
+            return False
+        self._point_review = None
+        current[1].stop_button.click()
+        return True
 
     def manual_axis_setting(self, *, title: str, message: str) -> bool:
         """Stand aside while a hand moves a knob; False when it declines."""

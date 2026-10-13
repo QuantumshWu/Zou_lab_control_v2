@@ -129,6 +129,12 @@ LOGIC_NODE = LogicNodeDescriptor(
     "derive",
     NodeKind.PROCESSOR,
     DERIVE_SCHEMA,
+    description=(
+        "Transform one producer's synchronized signal bundle with authored Python/NumPy "
+        "expressions and named-axis selection, masking or reduction. Outputs are dynamic: "
+        "each named code row declares a signal, preserving explicit axes and validity "
+        "for downstream processors, plots and scans."
+    ),
     input_specs=(DatasetInputSpec("a", None, "exact", select_bundle=True),),
     declare_outputs=_draft_outputs,
     ui_contributions=(_editor_factory,),

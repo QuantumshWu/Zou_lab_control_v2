@@ -28,19 +28,81 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp_types import CallToolResult, ImageContent, TextContent, ToolAnnotations
 
 
+_DEVELOPER_TOOLS = frozenset({"lab_handles", "lab_api", "lab_call", "lab_intent"})
+
 _OPERATOR_INSTRUCTIONS = (
-    "Operate the current experiment, never a second device session. For routine, already-authorized operations "
-    "with known arguments, call directly; do not repeatedly plan, list tools, rediscover signatures or read back "
-    "the same returned state. Query lab_api only for an unknown method. Read workspace EXPERIMENT_CONTEXT.md "
-    "for this apparatus's procedure; do not invent missing physical settings. "
-    "Combine only already-decided steps with lab_batch; use explicit expected results and lab_wait_for for "
-    "a known read-only state condition. These tools do not choose an experiment procedure or infer readiness. "
-    "Follow the workspace guide for preparation and resource choices. Reuse returned state and use lab_wait "
-    "for asynchronous runs instead of model-driven rapid polling. "
-    "Shortcuts are not a capability limit: lab_handles/lab_api/lab_call reach the live public APIs. "
-    "Acceptance is not completion or physical safety. Inspect errors, generation and data validity. "
-    "Never replay an uncertain Start/Fire/Apply. Physical manual requests still require the human."
+    "ZLC is a complete experiment application: device control, Pulse timing, Camera/Waveform acquisition, "
+    "Calibration, Occupancy, Frame Survival, Derive, Seamless Scan, SLM rearrangement, live Plot/Facet/Fit, "
+    "and reopenable Figure archives. Begin with lab_guide('overview') and lab_catalog(); neither requires Init. "
+    "Use lab_guide(topic) for recommended native workflows, lab_recipes for saved Layout recipes, and the "
+    "actual workspace EXPERIMENT_CONTEXT.md for apparatus-specific settings. Frame Survival already computes "
+    "conditional survival; native panels already pool repeats, facet by site, fit Exponential and publish "
+    "fit parameters. Use lab_results to read those results, not external statistics or plotting scripts. "
+    "Configure the native pipeline and fit before Start so results update during acquisition; distinguish "
+    "the first usable result from completing the whole plan. Use lab_estimate for Scan's timing projection. "
+    "Save through lab_save for matching image + scientific Figure NPZ, readable with lab_artifact. "
+    "Reuse returned state, exact generations and known signatures; batch already-decided steps without "
+    "intervening reasoning. Ready/Fire belongs to the selected execution node when it already manages it. "
+    "Acceptance is not completion: inspect the original owner error/ready/terminal facts. Never replay an "
+    "uncertain Start/Fire/Apply; manual physical requests still require the human. Developer fallback APIs "
+    "are offered only with the developer tool profile, using the same owners, not another session."
 )
+
+
+def _step_succeeded(result):
+    """The shared action/wait outcome, independent of additional expectations."""
+    if not isinstance(result, dict):
+        return result is not False
+    if (any(result.get(key) is False for key in
+            ("accepted", "matched", "reached", "still_current")) or result.get("error")):
+        return False
+    # Generic owner calls and field-condition waits wrap the original result.
+    return _step_succeeded(result["result"]) if "result" in result else True
+
+
+def guide_document(topic="overview"):
+    """Read the shipped operator guide without a device session."""
+    from importlib.resources import files
+
+    source = files("zlc_workbench").joinpath("guides/mcp.md").read_text(encoding="utf-8")
+    sections = {}
+    for section in source.split("\n## ")[1:]:
+        name, _, body = section.partition("\n")
+        sections[name.strip()] = body.strip()
+    if topic not in sections:
+        raise ValueError(f"Unknown guide topic {topic!r}; choose {', '.join(sections)} or node:<api_name>")
+    return dict(topic=topic, content=sections[topic], topics=list(sections),
+                source="zlc_workbench/guides/mcp.md")
+
+
+def _utf8_page(raw: bytes, offset: int, limit: int):
+    """Never split a multi-byte label across the returned continuation offset."""
+    text = raw[:limit].decode("utf-8", errors="ignore")
+    consumed = len(text.encode("utf-8"))
+    if raw and not consumed:
+        raise ValueError("limit is too small for the next UTF-8 character")
+    return text, offset + consumed
+
+
+def _batch_arguments(value, completed):
+    """Bind an earlier returned JSON field; no expressions, branches or retries."""
+    if isinstance(value, dict):
+        if set(value) == {"$result"}:
+            path = value["$result"]
+            if (not isinstance(path, list) or not path or type(path[0]) is not int
+                    or not 0 <= path[0] < len(completed)):
+                raise ValueError("$result must name an earlier completed step and its JSON field path")
+            result = completed[path[0]]["result"]
+            try:
+                for key in path[1:]:
+                    result = result[key]
+            except (KeyError, IndexError, TypeError):
+                raise ValueError(f"Earlier result does not contain {path!r}; inspect it without replaying writes") from None
+            return result
+        return {key: _batch_arguments(item, completed) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_batch_arguments(item, completed) for item in value]
+    return value
 
 
 def start_server(flow, *, host="127.0.0.1", port: int, token: str, allow_control=True):
@@ -169,11 +231,32 @@ def start_server(flow, *, host="127.0.0.1", port: int, token: str, allow_control
 
     @tool(annotations=read)
     async def lab_catalog(api_name: str | None = None, node_id: str | None = None,
-                           panel_id: str | None = None) -> dict[str, object]:
-        """Compact available-node index by default. Supply api_name for one full parameter schema, or node_id/panel_id
-        for that current editor's units, choices and parameters. Requires an initialized Session.
+                           panel_id: str | None = None, details: bool = False) -> dict[str, object]:
+        """Discover native acquisition, processing, scan, plot and fit capabilities BEFORE Init.
+        Defaults to concise purposes/input/output summaries. api_name gives a node's full schema;
+        node_id/panel_id gives current bound units, choices, source and editor parameters (needs a Session).
+        details=True includes full static fit formulas/parameter definitions. Static support is distinct
+        from compatibility with a live source. See lab_guide for workflows.
         """
-        return await owner(lambda: presenter().control_catalog(api_name=api_name,node_id=node_id, panel_id=panel_id))
+        if node_id is None and panel_id is None:
+            def describe():
+                from ..logic import LogicCatalog
+                from ..console import control_capabilities
+                return control_capabilities(LogicCatalog(), flow.space, api_name=api_name, details=details)
+            return await asyncio.to_thread(describe)
+        return await owner(lambda: presenter().control_catalog(api_name=api_name,node_id=node_id,
+                                                               panel_id=panel_id, details=details))
+
+    @tool(annotations=read)
+    async def lab_guide(topic: str = "overview") -> dict[str, object]:
+        """Learn native capabilities and workflows without reading source or initializing devices.
+        Start with overview; topics: setup, acquisition, pulse, slm, processing, scan, plot, fit,
+        files, recipes, lifetime, errors. node:<api_name> reads that installed node's purpose/schema.
+        This is read-only help; it does not initialize, fire, fit or save anything.
+        """
+        if topic.startswith("node:"):
+            return await lab_catalog(api_name=topic[5:])
+        return await asyncio.to_thread(guide_document, topic)
 
     @tool(annotations=read)
     async def lab_screenshot(window: Literal["console", "devices"] = "console",
@@ -192,9 +275,13 @@ def start_server(flow, *, host="127.0.0.1", port: int, token: str, allow_control
     @tool(annotations=read)
     async def lab_wait(node_id: str, generation: str, until: Literal["ready", "terminal"] = "terminal",
                        timeout_seconds: float = 10.) -> dict[str, object]:
-        """Wait for one exact run, without blocking Stop or the GUI. Timeout does not stop or restart it."""
-        if not 0 <= timeout_seconds <= 30:
-            raise ValueError("timeout_seconds must be between 0 and 30")
+        """Observe one exact run for up to 1800 s without repeated model turns; Stop/GUI stay available.
+        Uses existing Runtime events, not device polling. Timeout only ends observation, never restarts
+        the run. An operator request returns early with reached=False and the real request in state.
+        The client tool timeout should exceed timeout_seconds by at least 10 seconds.
+        """
+        if not 0 <= timeout_seconds <= 1800:
+            raise ValueError("timeout_seconds must be between 0 and 1800")
         def current():
             binding = presenter().logic[node_id]
             host = binding.host
@@ -203,10 +290,21 @@ def start_server(flow, *, host="127.0.0.1", port: int, token: str, allow_control
             return host
         selected = await owner(current)
         wait = selected.wait_ready if until == "ready" else selected.wait_terminal
-        reached = await asyncio.to_thread(wait, timeout_seconds)
+        deadline = monotonic() + timeout_seconds
+        reached = False
+        while True:
+            # Observe the original Host, not hardware. A review must release
+            # this tool call so the operator can answer it before completion.
+            if selected.operator_request is not None:
+                break
+            reached = await asyncio.to_thread(wait, min(.25, max(0., deadline-monotonic())))
+            if reached or monotonic() >= deadline:
+                break
         def outcome():
             binding = presenter().logic.get(node_id)
-            return dict(observation=_control_plain(selected.observation),
+            observation = _control_plain(selected.observation)
+            return dict(observation=observation,
+                        error=observation.get("error") if observation.get("phase") == "failed" else None,
                         still_current=binding is not None and binding.host is selected,
                         state=state(node_id=node_id))
         result = await owner(outcome)
@@ -283,6 +381,47 @@ def start_server(flow, *, host="127.0.0.1", port: int, token: str, allow_control
         return await asyncio.to_thread(read_data)
 
     @tool(annotations=read)
+    async def lab_results(panel_id: str, offset: int = 0, limit: int = 256) -> dict[str, object]:
+        """Read native fit rows: coordinates, units, sigma, fixed/valid flags and exact source refs.
+        Enable the panel's native fit first; reads never solve/re-fit or redraw. For per-site lifetime,
+        read decay_time from the native Exponential Facet fit. status='current' means a fit matching
+        the display (not 'ready'); source_is_latest shows whether newer source data exists. status='lagging'
+        can still contain usable earlier rows; row.success/valid determine individual fit validity.
+        Actual published output signal names are returned; do not guess them from parameter symbols.
+        """
+        future = await owner(lambda: presenter().control_results(panel_id, offset=offset, limit=limit))
+        return await asyncio.wrap_future(future)
+
+    @tool(annotations=read)
+    async def lab_estimate(node_id: str) -> dict[str, object]:
+        """Read the selected node's native workload/time projection without Start/Fire/Load.
+        Scan distinguishes full sweeps, shots per point, first-sweep and total scheduled Pulse time.
+        Unknown device/config facts and unestimated hardware/operator overhead remain explicit.
+        """
+        future = await owner(lambda: presenter().control_estimate(node_id))
+        return await asyncio.wrap_future(future)
+
+    @tool(annotations=read)
+    async def lab_recipes(name: str | None = None) -> dict[str, object]:
+        """Discover verified native Layout recipes and their input bindings before initializing devices.
+        Select a name for required resources, native-field defaults, start owner, result panels and
+        completion/save guidance. Workspace recipes override bundled examples. This never starts a run.
+        """
+        def describe():
+            from ..console_layout import experiment_recipes, read_experiment_recipe
+            names = [name] if name is not None else list(experiment_recipes(flow.space.root))
+            recipes = []
+            for selected in names:
+                recipe, document, defaults = read_experiment_recipe(flow.space.root, selected)
+                if name is None:
+                    recipes.append({key: recipe[key] for key in ("name", "title", "description", "requirements")})
+                else:
+                    recipes.append(dict(recipe, defaults=defaults, layout=document.to_tree(),
+                                        note="Defaults are read from the Layout; required parameters must be explicit."))
+            return {"recipes": recipes}
+        return await asyncio.to_thread(describe)
+
+    @tool(annotations=read)
     async def lab_files(directory: str = ".", offset: int = 0, limit: int = 100) -> dict[str, object]:
         """Discover workspace files/directories without GUI file dialogs. Paths returned are workspace-relative.
         Node resource fields may instead resolve relative to their declared resource directory; consult lab_catalog.
@@ -306,13 +445,54 @@ def start_server(flow, *, host="127.0.0.1", port: int, token: str, allow_control
         return await asyncio.to_thread(listing)
 
     @tool(annotations=read)
-    async def lab_artifact(path: str, offset: int = 0, limit: int = 16000) -> CallToolResult:
-        """Read a workspace report or preview PNG/JPEG. Binary scientific files remain files, not giant JSON arrays."""
+    async def lab_artifact(path: str, offset: int = 0, limit: int = 16000,
+                           section: str | None = None) -> CallToolResult:
+        """Read text/preview or a validated native Figure NPZ summary through the existing reader.
+        NPZ returns dataset shapes/units/refs and bounded recipe/fit/lineage metadata; section selects
+        one exact saved section from section_names. Numeric arrays stay in the native Figure.
+        """
         selected = workspace_path(path)
         if offset < 0 or not 1 <= limit <= 64000:
             raise ValueError("Use a nonnegative byte offset and a limit of 1..64000")
         def read_file():
             size = selected.stat().st_size
+            if selected.suffix.lower() == ".npz":
+                from zlc_data.figure_archive import read_archive
+                from zlc_data.codec import dataset_revision_ref_to_tree, dataset_schema_to_tree
+                info, arrays, datasets = read_archive(selected)
+                def compact(value, depth=0):
+                    if isinstance(value, dict):
+                        if depth >= 8:
+                            return {"keys": list(value)}
+                        return {key: compact(item, depth+1) for key, item in value.items()}
+                    if isinstance(value, list) and len(value) > 40:
+                        return {"count": len(value), "first": [compact(item, depth+1) for item in value[:8]]}
+                    if isinstance(value, list):
+                        return [compact(item, depth+1) for item in value]
+                    return value
+                sections = info["sections"]
+                if section is not None:
+                    if section not in sections:
+                        raise ValueError(f"Unknown Figure section {section!r}; available: {', '.join(sections)}")
+                    sections = {section: sections[section]}
+                result = dict(path=str(selected), format=info["schema"], name=info["name"],
+                    section_names=list(info["sections"]), sections=compact(sections),
+                    datasets={key: {"shape": list(snapshot.block.values.shape),
+                                   "dtype": str(snapshot.block.values.dtype),
+                                   "schema": compact(dataset_schema_to_tree(snapshot.block.schema)),
+                                   "ref": dataset_revision_ref_to_tree(snapshot.ref)}
+                              for key, snapshot in datasets.items()},
+                    array_members={key: {"shape": list(value.shape), "dtype": str(value.dtype)}
+                                   for key, value in arrays.items()})
+                encoded = json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+                if offset or len(encoded) > limit:
+                    page, end = _utf8_page(encoded[offset:], offset, limit)
+                    result = dict(path=str(selected), format=info["schema"], name=info["name"],
+                                  section_names=list(info["sections"]), offset=offset, next_offset=end,
+                                  total_bytes=len(encoded), text=page,
+                                  note="Paged native Figure metadata JSON, not numeric image samples.")
+                return CallToolResult(content=[TextContent(type="text", text=json.dumps(result, ensure_ascii=False, separators=(",", ":")))],
+                                      structured_content=result)
             if selected.suffix.lower() in {".png", ".jpg", ".jpeg"}:
                 if size > 16*1024*1024:
                     raise ValueError("Preview exceeds 16 MiB; use the current window screenshot")
@@ -325,9 +505,10 @@ def start_server(flow, *, host="127.0.0.1", port: int, token: str, allow_control
             with selected.open("rb") as stream:
                 stream.seek(offset)
                 raw = stream.read(limit)
+            page, next_offset = _utf8_page(raw, offset, limit)
             return CallToolResult(content=[TextContent(type="text", text=json.dumps(dict(
-                path=str(selected), offset=offset, next_offset=offset+len(raw), total_bytes=size,
-                text=raw.decode("utf-8", errors="replace")), ensure_ascii=False))])
+                path=str(selected), offset=offset, next_offset=next_offset, total_bytes=size,
+                text=page), ensure_ascii=False))])
         return await asyncio.to_thread(read_file)
 
     @tool(annotations=read)
@@ -442,6 +623,18 @@ def start_server(flow, *, host="127.0.0.1", port: int, token: str, allow_control
 
     if allow_control:
         @tool()
+        async def lab_review_points(node_id: str, generation: str, request_id: str,
+                                    excluded_ids: list[str] | None = None) -> dict[str, object]:
+            """Inspect or confirm the current scientific site-selection review in its original GUI.
+            Omit excluded_ids to read the point coordinates, labels and current checks. Supply the complete
+            list of excluded point IDs (empty keeps all) to press the normal Continue button. Use the exact
+            generation/request_id from lab_state; stale or duplicate responses are rejected. This cannot
+            answer physical manual-axis requests. logic.stop uses the original review's Stop path.
+            """
+            return await owner(lambda: presenter().control_review_points(
+                node_id, generation, request_id, excluded_ids))
+
+        @tool()
         async def lab_call(handle: str, method: str, arguments: dict[str, object],
                            expected_revision: int | None = None, include_state: bool = True) -> dict[str, object]:
             """Call a public method on the actual GUI/business owner; use lab_api only if its signature is unknown.
@@ -515,6 +708,131 @@ def start_server(flow, *, host="127.0.0.1", port: int, token: str, allow_control
             return await owner(submit)
 
         @tool()
+        async def lab_save(panel_id: str, path: str, refresh: bool = False,
+                           layout_path: str | None = None) -> dict[str, object]:
+            """Save a native Panel Figure (image plus NPZ), optionally also its reusable Layout.
+            path is a workspace .png/.pdf/.svg destination. Saves the existing Frozen snapshot, exactly
+            like Edit→Save. refresh=True explicitly freezes current data first; false never silently
+            replaces an existing frozen view. To save the latest accepted results, use refresh=True;
+            this updates the save snapshot, not a workaround to restart live fitting.
+            Submission is asynchronous: read panel.saving and owner
+            reports/errors afterward, then lab_artifact on the resulting NPZ. No external renderer.
+            """
+            if refresh:
+                refreshed = await lab_action("panel.refresh", {"panel_id": panel_id})
+                if not _step_succeeded(refreshed):
+                    return refreshed
+                deadline = monotonic() + 30.
+                for field in ("refresh_pending", "configuration_pending"):
+                    settled = await lab_wait_for("lab_state", {"panel_id": panel_id},
+                        ["console", "panels", 0, field], False, max(0., deadline - monotonic()))
+                    if not _step_succeeded(settled):
+                        return dict(accepted=False, saved=False,
+                                    error="Refresh has not completed; no Figure was saved", state=settled["result"])
+            result = await lab_action("panel.save", {"panel_id": panel_id, "selected": path})
+            if _step_succeeded(result) and layout_path is not None:
+                result["layout"] = await lab_action("layout.save", {"path": layout_path})
+                if not _step_succeeded(result["layout"]):
+                    result["error"] = "The Figure save was submitted, but Layout save failed; inspect layout.error"
+                    result["accepted"] = False
+            return result
+
+        @tool()
+        async def lab_devices(action: Literal["inspect", "load", "save"],
+                              path: str | None = None) -> dict[str, object]:
+            """Inspect or load/save the native apparatus draft without initializing hardware.
+            Load requires an existing workspace apparatus JSON. Save uses the Devices codec.
+            This never implicitly initializes devices or shuts down a Session; use lab_initialize.
+            """
+            selected = None if path is None else workspace_path(path)
+            if action == "load" and (selected is None or not selected.is_file()):
+                raise ValueError("Load requires an existing apparatus JSON file in this workspace")
+            def command():
+                if flow.devices is None:
+                    raise RuntimeError("Devices window is unavailable")
+                manager = flow.devices.presenter
+                if action == "inspect":
+                    return state()
+                if manager.device_operation_active:
+                    return dict(accepted=False, error="Device operation is still pending", state=state())
+                result = manager.load(selected) if action == "load" else manager.save(selected, present=False)
+                return dict(accepted=bool(result), result=_control_plain(result), state=state(),
+                            error=None if result else "Devices rejected the file operation; inspect device_status")
+            return await owner(command)
+
+        @tool()
+        async def lab_run_recipe(name: str, parameters: dict[str, object],
+                                 start: bool = True) -> dict[str, object]:
+            """Apply a native Layout recipe; start its existing follower processors and one entry node.
+            No independent recipe run exists: returned node_id/generation are the original Runtime run.
+            start=False only prepares and validates. Existing active Logic is never stopped implicitly;
+            no automatic Init, Calibration, SLM Send, retries or per-shot Fire. Read lab_recipes(name) first.
+            A partial failure leaves already applied authoring/actions visible; inspect state, do not replay.
+            """
+            from ..console_layout import read_experiment_recipe
+
+            recipe, document, _defaults = await asyncio.to_thread(
+                read_experiment_recipe, flow.space.root, name, parameters)
+            def prepare():
+                control = presenter()
+                before = set(control.panels)
+                followers = tuple(recipe["followers"])
+                if len(set(followers)) != len(followers) or recipe["entry_node"] in followers:
+                    raise ValueError("A recipe starts each follower once, separately from its entry node")
+                declared = {entry.node_id: entry for entry in document.logic}
+                for node in followers:
+                    if control.catalog.get(declared[node].api_name).kind.value != "processor":
+                        raise ValueError("Recipe followers must be standing processors, not device executions")
+                accepted = control.apply_layout(document, stop_running=False)
+                return dict(accepted=bool(accepted), previous_panels=before)
+            prepared = await owner(prepare)
+            if not prepared["accepted"]:
+                return dict(accepted=False, started=False, error="Layout was refused; inspect the existing owner reports",
+                            state=await owner(state))
+            settled = await lab_wait_for("lab_state", {}, ["console", "layout_pending"], False, 30.)
+            if not _step_succeeded(settled):
+                return dict(accepted=True, started=False, error="Layout replacement is not complete; inspect state without reloading",
+                            state=settled["result"])
+            def validate():
+                control = presenter()
+                ids = [key for key in control.panels if key not in prepared["previous_panels"]]
+                if len(ids) != len(document.panel_ids):
+                    raise RuntimeError("Recipe panel mapping changed during preparation; inspect the current board")
+                panel_map = dict(zip(document.panel_ids, ids, strict=True))
+                checks = [control.control_action("logic.validate", {"node_id": key})
+                          for key in (*recipe["followers"], recipe["entry_node"])]
+                revisions = {key: control.logic[key].draft_revision
+                             for key in (*recipe["followers"], recipe["entry_node"])}
+                return panel_map, checks, revisions
+            panel_map, checks, revisions = await owner(validate)
+            result = dict(recipe=name, prepared=True, started=False,
+                          node_id=recipe["entry_node"],
+                          result_panels=[panel_map[key] for key in recipe["result_panels"]],
+                          validation=[{key: value for key, value in check.items() if key != "state"}
+                                      for check in checks],
+                          completion=recipe["completion"], save=recipe["save"])
+            if not all(_step_succeeded(check) for check in checks):
+                return dict(result, accepted=False, error="Recipe inputs are not valid; inspect validation reasons")
+            result["estimate"] = await lab_estimate(recipe["entry_node"])
+            if not start:
+                return dict(result, accepted=True)
+            started = []
+            for node_id in (*recipe["followers"], recipe["entry_node"]):
+                def submit():
+                    control = presenter()
+                    return control.control_action("logic.start", {"node_id": node_id},
+                        expected_draft_revision=revisions[node_id])
+                response = await owner(submit)
+                started.append({key: value for key, value in response.items() if key != "state"})
+                if not _step_succeeded(response):
+                    return dict(result, accepted=False, actions=started,
+                                state=response.get("state"),
+                                error="A native Start was refused; earlier actions remain, do not replay the recipe")
+            entry = next(row for row in response["state"]["logic"] if row["node_id"] == recipe["entry_node"])
+            return dict(result, accepted=True, started=True, generation=entry.get("generation"),
+                        status=entry["status"], actions=started)
+
+        @tool()
         async def lab_initialize() -> dict[str, object]:
             """Initialize the apparatus currently authored in Devices. Never toggles an existing session off.
             This opens actual devices. Acceptance is not completion or experiment readiness.
@@ -582,8 +900,8 @@ def start_server(flow, *, host="127.0.0.1", port: int, token: str, allow_control
         Uses the same SDK tool dispatch, never writes/retries an action; timeout only ends observation.
         Returns matched/timed_out and the last result. Other requests, including Stop, remain available.
         """
-        if not 0 <= timeout_seconds <= 30 or tool_name == "lab_wait_for":
-            raise ValueError("Use timeout_seconds 0..30 and a non-wait read-only tool")
+        if not 0 <= timeout_seconds <= 1800 or tool_name in {"lab_wait_for", "lab_wait"}:
+            raise ValueError("Use timeout_seconds 0..1800 and a non-wait read-only tool")
         descriptor = next((item for item in await mcp.list_tools() if item.name == tool_name), None)
         if descriptor is None or descriptor.annotations is None or not descriptor.annotations.read_only_hint:
             raise ValueError("Waiting requires an existing read-only tool")
@@ -608,9 +926,12 @@ def start_server(flow, *, host="127.0.0.1", port: int, token: str, allow_control
             """Execute a supplied ordered list of already-decided tool calls without intervening model turns.
             Each item: tool, arguments, optional expect (exact top-level result fields). Uses the official SDK's
             existing registered tools and validation, not a separate action registry or experiment workflow.
+            An argument {"$result":[0,"state","logic",0,"generation"]} reads that JSON field from step0's
+            result. Only earlier completed steps; no expressions/conditions/loops or automatic retries.
             Include explicit waits for asynchronous work. Stops on an error/refusal/unmet expectation; previous
             effects remain and are never rolled back or replayed. No nested batches. At most 16 calls, 30 s total.
-            Without expect, accepted=false, result=false, matched=false or a nonempty error stops the list.
+            Refusal, error, unmet wait or retired generation always stops the list; expect adds conditions,
+            never overrides those failures. No implicit retries or interpretation of scientific data.
             The caller must not batch steps that require interpreting new scientific data or human decisions.
             """
             if not 1 <= len(calls) <= 16:
@@ -625,18 +946,16 @@ def start_server(flow, *, host="127.0.0.1", port: int, token: str, allow_control
             deadline = monotonic() + 30.
             for index, item in enumerate(calls):
                 try:
-                    response = await asyncio.wait_for(mcp.call_tool(item["tool"], item["arguments"]),
+                    arguments = _batch_arguments(item["arguments"], results)
+                    response = await asyncio.wait_for(mcp.call_tool(item["tool"], arguments),
                                                       timeout=max(0., deadline-monotonic()))
                     result = response.structured_content
                     if result is None:
                         result = response.model_dump(mode="json")
-                    ok = not response.is_error
+                    ok = not response.is_error and _step_succeeded(result)
                     if isinstance(result, dict):
                         if item.get("expect"):
                             ok = ok and all(key in result and result[key] == value for key, value in item["expect"].items())
-                        else:
-                            ok = ok and not (result.get("accepted") is False or result.get("result") is False
-                                             or result.get("matched") is False or bool(result.get("error")))
                     elif item.get("expect"):
                         ok = False
                     results.append(dict(tool=item["tool"], result=result, completed=ok))
@@ -715,7 +1034,7 @@ def start_server(flow, *, host="127.0.0.1", port: int, token: str, allow_control
     return close
 
 
-async def _stdio(workspace: Path) -> None:
+async def _stdio(workspace: Path, *, tool_profile="operator") -> None:
     """Connect an AI client to an existing experiment; never launch devices."""
     import anyio
     import httpx2
@@ -749,7 +1068,8 @@ async def _stdio(workspace: Path) -> None:
         # AnyIO's transport/session contexts must enter and exit in this same
         # task. Only the transport and SDK schema caches persist, not lab state.
         try:
-            async with httpx2.AsyncClient(headers={"Authorization": "Bearer " + record["token"]}, timeout=timeout) as http:
+            async with httpx2.AsyncClient(headers={"Authorization": "Bearer " + record["token"]},
+                                          timeout=httpx2.Timeout(timeout, read=None)) as http:
                 async with streamable_http_client(record["url"], http_client=http) as (read, write, *_):
                     async with ClientSession(read, write) as client:
                         await client.initialize()
@@ -797,6 +1117,8 @@ async def _stdio(workspace: Path) -> None:
             # failed response can mean the operation already started.
             if name is None:
                 return await current[0].list_tools(params=params)
+            if name in {"lab_wait", "lab_wait_for"}:
+                timeout = max(timeout, float((arguments or {}).get("timeout_seconds", 30)) + 10.)
             return await current[0].call_tool(name, arguments or {}, read_timeout_seconds=timeout)
         finally:
             if persistent:
@@ -871,12 +1193,16 @@ async def _stdio(workspace: Path) -> None:
             if selected is None:
                 await connect()
             reply = await remote(selected, params=params)
-            return ListToolsResult(tools=[*connection_tools, *reply.tools], next_cursor=reply.next_cursor)
+            offered = [item for item in reply.tools
+                       if tool_profile == "developer" or item.name not in _DEVELOPER_TOOLS]
+            return ListToolsResult(tools=[*connection_tools, *offered], next_cursor=reply.next_cursor)
         except Exception:
             return ListToolsResult(tools=connection_tools)
 
     async def call_tool(ctx, params):
         try:
+            if tool_profile != "developer" and params.name in _DEVELOPER_TOOLS:
+                raise ValueError("Reflection is a developer fallback. Use native operator tools or explicitly connect with --tools developer.")
             if params.name == "lab_connections":
                 result = {"workspace": str(workspace), "connections": [item for item, _ in await available()]}
             elif params.name == "lab_connect":
@@ -895,7 +1221,10 @@ async def _stdio(workspace: Path) -> None:
     server = Server("ZLC current experiment", on_list_tools=list_tools, on_call_tool=call_tool,
                     instructions=_OPERATOR_INSTRUCTIONS + " If no experiment is "
                     "running yet, keep this connection and use lab_connect after starting experiment.bat. "
-                    "Use lab_handles/lab_api/lab_call for public APIs missing from the shortcuts. Never replay an uncertain write.")
+                    + (" Developer profile includes lab_handles/lab_api/lab_call for diagnosis."
+                       if tool_profile == "developer" else
+                       " Operator profile exposes native actions; start with lab_guide, not reflection.") +
+                    " Never replay an uncertain write.")
     try:
         async with stdio_server() as (read, write):
             await server.run(read, write, server.create_initialization_options(NotificationOptions(tools_changed=True)))
@@ -904,13 +1233,46 @@ async def _stdio(workspace: Path) -> None:
             await close_connection(connection)
 
 
+def client_config(workspace: Path, client: str, *, tool_profile: str = "operator") -> str:
+    """Print a native client connection using this experiment's interpreter."""
+    import sys
+    import zou_lab_control
+
+    command = str(Path(sys.executable).resolve())
+    args = ["-m", "zou_lab_control", "mcp", "--workspace", str(workspace.resolve())]
+    if tool_profile != "operator":
+        args.extend(("--tools", tool_profile))
+    # An editable checkout can launch experiment.bat without being installed in
+    # site-packages. A client starts elsewhere: name this same product explicitly.
+    environment = {"PYTHONPATH": str(Path(zou_lab_control.__file__).resolve().parent.parent)}
+    if client == "claude":
+        return json.dumps({"mcpServers": {"zlc": {"type": "stdio", "command": command,
+                                                   "args": args, "env": environment}}}, indent=2, ensure_ascii=False)
+    if client != "codex":
+        raise ValueError("client must be codex or claude")
+    return ("[mcp_servers.zlc]\n"
+            f"command = {json.dumps(command, ensure_ascii=False)}\n"
+            f"args = {json.dumps(args, ensure_ascii=False)}\n"
+            "required = true\nstartup_timeout_sec = 30\ntool_timeout_sec = 1860\n"
+            'default_tools_approval_mode = "approve"\n'
+            "[mcp_servers.zlc.env]\n"
+            f"PYTHONPATH = {json.dumps(environment['PYTHONPATH'], ensure_ascii=False)}\n")
+
+
 def main(argv=None) -> int:
     import argparse
 
     parser = argparse.ArgumentParser(description="Connect an MCP client to an already-running experiment.")
     parser.add_argument("--workspace", type=Path, required=True)
+    parser.add_argument("--tools", choices=("operator", "developer"), default="operator",
+                        help="Operator tools by default; developer also exposes owner API reflection.")
+    parser.add_argument("--client-config", choices=("codex", "claude"),
+                        help="Print native client configuration, without changing any client settings.")
     arguments = parser.parse_args(argv)
-    asyncio.run(_stdio(arguments.workspace))
+    if arguments.client_config:
+        print(client_config(arguments.workspace, arguments.client_config, tool_profile=arguments.tools))
+        return 0
+    asyncio.run(_stdio(arguments.workspace, tool_profile=arguments.tools))
     return 0
 
 

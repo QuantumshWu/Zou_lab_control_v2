@@ -173,6 +173,19 @@ def test_facet_result_publishes_mixed_success_and_explicit_error_validity(factor
         result = session.fit("gaussian_offset", live=True)
         assert isinstance(result, FacetFitBatchResult)
         assert np.array_equal(result.success, [False, True])
+        summary = session.fit_summary(limit=1)
+        assert summary["status"] == "current" and summary["total_rows"] == 2
+        assert summary["next_offset"] == 1 and summary["source_revision"] == result.source_revision
+        failed = summary["rows"][0]
+        assert not failed["success"] and "forced facet cell failure" in failed["message"]
+        assert not any(failed["valid"])
+        good_summary = session.fit_summary(offset=1)
+        good = good_summary["rows"][0]
+        assert good["coordinates"][0] == 1.0
+        assert good_summary["sample_axes"][0]["unit"] == unit
+        for index, name in enumerate(result.parameter_names):
+            assert good["values"][index] == result.results[1].parameter_values[index]
+            assert good["standard_errors"][index] == result.results[1].standard_errors[index]
         assert result.sample_axes[0][1].unit == unit
         np.testing.assert_array_equal(result.sample_axes[0][1].coordinate_values(), [0.0, 1.0])
         for name in result.parameter_names:
@@ -192,6 +205,14 @@ def test_facet_result_publishes_mixed_success_and_explicit_error_validity(factor
         inset = session._defaults.style.render.axes_text_inset_fraction
         assert diagnostic.get_position() == (inset, 1.0 - inset)
         assert "headline=" not in cell.get_title()
+        session.fit("gaussian_offset", live=True, bounds={"offset": (0.2, 0.2)})
+        summary = session.fit_summary()
+        fixed = summary["rows"][1]
+        offset = summary["parameter_names"].index("offset")
+        assert fixed["values"][offset] == 0.2 and "offset" in fixed["fixed_parameters"]
+        assert fixed["standard_errors"][offset] is None and not fixed["error_valid"][offset]
+        session.clear_fit()
+        assert session.fit_summary()["status"] == "not_enabled"
     finally:
         session.close()
 

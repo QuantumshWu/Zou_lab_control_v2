@@ -10,7 +10,7 @@ from .dataset import (
     scan_dataset_schema,
     scan_repeat_domain,
 )
-from .seamless import MANUAL_AXIS_REQUEST, SeamlessScanMeasurement
+from .seamless import MANUAL_AXIS_REQUEST, SeamlessScanMeasurement, estimate_scan_time
 from .plan import (
     SCAN_PLAN_SELECTIONS,
     API_PARAM_FAMILY,
@@ -58,6 +58,7 @@ __all__ = [
     "ScanPlan",
     "ScanPort",
     "SeamlessScanMeasurement",
+    "estimate_scan_time",
     "bind_plan",
     "host_advanced_port",
     "api_scan_ports_for",

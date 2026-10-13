@@ -128,6 +128,46 @@ def test_the_node_types_offered_are_the_ones_that_exist(bench_presenter) -> None
     assert "camera_measurement" in offered
 
 
+def test_scan_estimate_uses_the_read_worker_without_starting_a_node(session, monkeypatch) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import get_ident
+
+    caller = get_ident()
+    reads = []
+    describe = session.sequencer.describe
+    def observed_description():
+        reads.append(get_ident())
+        return describe()
+
+    with ThreadPoolExecutor(max_workers=1) as worker:
+        def run(work, finished, failed):
+            pending = worker.submit(work)
+            def deliver(done):
+                try:
+                    result = done.result()
+                except Exception as error:
+                    failed(error)
+                else:
+                    finished(result)
+            pending.add_done_callback(deliver)
+        with _console_over(session, run_device_read=run) as control:
+            node_id = control.add_logic("seamless_scan")
+            control.update_logic_draft(node_id, values={
+                "pulse_template": PULSE_NAME + ".json",
+                "plan": json.dumps({"axes": [{"port": "manual:power", "values": [1, 2]}]}),
+                "repeats": 3, "shots_per_point": 2,
+            })
+            monkeypatch.setattr(session.sequencer, "describe", observed_description)
+            before = session.sequencer.applied()
+            answer = control.control_estimate(node_id).result(timeout=10)
+            assert answer["status"] == "estimated" and answer["total_shots"] == 12, answer
+            assert reads and all(thread != caller for thread in reads)
+            assert answer["total_pulse_seconds"] == pytest.approx(3 * answer["first_sweep_pulse_seconds"])
+            assert answer["draft_revision"] == control.logic[node_id].draft_revision
+            assert control.logic[node_id].host is None and control.logic[node_id].node is None
+            assert session.sequencer.applied() is before
+
+
 def test_adding_a_node_creates_only_a_stopped_draft_and_opens_edit(bench_presenter) -> None:
     """Add is authoring, so it cannot build or acquire before Start.
 
@@ -183,7 +223,20 @@ def test_adding_a_node_creates_only_a_stopped_draft_and_opens_edit(bench_present
     assert [item["api_name"] for item in catalog["logic"]] == ["camera_measurement"]
     listing = presenter.control_catalog()
     assert {item["api_name"] for item in listing["logic"]} == set(presenter.catalog.by_name)
-    assert all(set(item) == {"api_name", "kind", "outputs", "reports_ready"} for item in listing["logic"])
+    assert all(item["description"] and "dynamic_outputs" in item and "dataset_inputs" in item for item in listing["logic"])
+    assert projection["description"] == presenter.catalog.get("camera_measurement").description
+    from zlc_workbench.console import control_capabilities
+    cold = control_capabilities(presenter.catalog, presenter.session.workspace)
+    assert cold == listing
+    assert "exponential_decay" in {model["model_id"] for model in cold["plot"]["fit_models"]}
+    assert "facet_grid" in cold["panel_kinds"]
+    assert all("parameters" not in model for model in cold["plot"]["fit_models"])
+    detailed = control_capabilities(presenter.catalog, presenter.session.workspace, details=True)
+    assert all(model["parameters"] for model in detailed["plot"]["fit_models"])
+    occupancy = control_capabilities(presenter.catalog, presenter.session.workspace, api_name="occupancy")
+    artifact = occupancy["logic"][0]["artifact_inputs"][0]
+    assert artifact["relative_to"] == str(presenter.session.workspace.data)
+    assert "do not prepend" in artifact["path_rule"]
     assert presenter.control_catalog(api_name="camera_measurement")["logic"][0]["fields"]
     presenter.add_logic("camera_measurement", node_id="other_camera")
     selected = presenter.control_state(node_id=node_id)
@@ -513,6 +566,7 @@ def test_named_device_options_and_build_resolution_use_compatible_instances() ->
     external_mode = ("mode", ("external",))
     conditional = LogicNodeDescriptor(
         "conditional", NodeKind.MEASUREMENT,
+        description="Acquire in camera mode or follow an external signal in external mode.",
         authoring_schema=AuthoringSchema((
             AuthoringField("mode", "str", "Mode", "camera"),
             AuthoringField("pulse", "resource", "Pulse", "", required=True, enabled_when=camera_mode),
@@ -588,6 +642,7 @@ def _claim_descriptor(
         # before the device-use behavior under test is reached.
         NodeKind.MEASUREMENT,
         AuthoringSchema(),
+        description="Hold selected device claims until cancelled.",
         device_requirements=tuple(
             DeviceRequirement(
                 token,
@@ -971,10 +1026,13 @@ def test_task_acquisition_waits_for_its_own_scan_and_stops_nested_ready_source(p
 
     acquisition = AuthoringSchema((AuthoringField("acquisition_logic", "str", "Acquisition", ""),))
     camera = LogicNodeDescriptor("ready_source", NodeKind.MEASUREMENT, AuthoringSchema(),
+        description="Report camera readiness and hold until cancelled.",
         build=camera_build, reports_ready=True)
     scan = LogicNodeDescriptor("finite_scan", NodeKind.MEASUREMENT, acquisition,
+        description="Acquire from the selected ready source and publish a finite scan.",
         build=scan_build, acquisition_input="acquisition_logic", outputs=(declaration,))
     task = LogicNodeDescriptor("feedback", NodeKind.TASK, acquisition, build=task_build,
+        description="Acquire two complete finite scans for feedback.",
         acquisition_input="acquisition_logic", acquisition_completion="terminal", node_previews=(),
         input_specs=(DatasetInputSpec("signal", "test.scan", "exact"),))
     presenter.catalog = LogicCatalog((camera, scan, task))
@@ -1069,6 +1127,7 @@ def test_saved_artifact_paths_are_visible_and_seed_matching_input_drafts(
         "artifact_task",
         NodeKind.TASK,
         AuthoringSchema(),
+        description="Produce a calibration artifact without a live preview.",
         artifact_outputs=(
             ArtifactOutputSpec("artifact_path", "calibration.readout"),
         ),
@@ -1079,6 +1138,7 @@ def test_saved_artifact_paths_are_visible_and_seed_matching_input_drafts(
         "artifact_consumer",
         NodeKind.PROCESSOR,
         AuthoringSchema(),
+        description="Consume camera frames with a saved calibration artifact.",
         input_specs=(
             DatasetInputSpec("frames", "camera.frames", "exact"),
             ArtifactInputSpec(
@@ -1366,6 +1426,7 @@ def test_make_host_hands_the_descriptor_contract_to_its_node_host() -> None:
             api_name,
             kind,
             AuthoringSchema(),
+            description="Declare authored or static outputs from the selected source.",
             input_specs=(input_spec,),
             build=lambda **_values: object(),
             **declared,
@@ -1595,6 +1656,7 @@ def test_artifact_contract_resolves_once_and_passes_exact_typed_value(
         "artifact_consumer",
         NodeKind.TASK,
         AuthoringSchema((AuthoringField("pulse_template", "resource", "Pulse", "", required=True),)),
+        description="Prepare a saved artifact and Pulse resource for a finite run.",
         input_specs=(
             ArtifactInputSpec(
                 "artifact_path",

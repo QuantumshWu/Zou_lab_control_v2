@@ -76,6 +76,12 @@ LOGIC_NODE = LogicNodeDescriptor(
     "occupancy",
     NodeKind.PROCESSOR,
     OCCUPANCY_SCHEMA,
+    description=(
+        "Read camera image data using a saved Calibration and publish per-site counts, "
+        "occupied verdicts and frame_judged diagnostics while preserving frame and scan "
+        "axes. Use occupied for loading-rate plots, camera overlays or Frame Survival; "
+        "the processor follows the source and resumes when compatible data returns."
+    ),
     input_specs=(
         DatasetInputSpec("frames", None, "exact"),
         # Every frame reads with the calibration named here unless a frame

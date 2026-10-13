@@ -85,6 +85,7 @@ def test_a_frame_key_on_an_artifact_that_is_not_per_frame_is_refused(workspace) 
         "plain_consumer",
         NodeKind.TASK,
         AuthoringSchema(()),
+        description="Consume a single saved calibration artifact, not per-frame overrides.",
         node_previews=(),
         input_specs=(
             ArtifactInputSpec(
