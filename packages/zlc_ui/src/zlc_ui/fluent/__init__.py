@@ -29,7 +29,7 @@ for _name in (
     "FluentUnitPicker", "fluent_unit_picker", "unit_choice_tree",
     "FluentSwitch", "FluentTriSwitch", "fluent_switch_width", "fluent_spinbox_stylesheet", "FluentSpinBox", "FluentInputDialog", "FluentCardDialog",
     "FluentCodeEdit", "FluentDoubleSpinBox", "fluent_count_box", "fluent_integer_box", "FluentCheckBox", "FluentScrollArea",
-    "FluentPageBody", "FluentTableView",
+    "FluentPageBody", "FluentTableView", "FluentSelectionGrid", "FluentSegmentedButtons",
     "LinkedScrollPanes", "apply_fluent_scrollbars", "FluentWindow", "FluentDialogWindow",
     "bind_body_close", "launch_fluent_window",
     "open_fluent_window",

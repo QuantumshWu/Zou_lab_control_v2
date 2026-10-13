@@ -53,35 +53,23 @@ def _build(*, source_signal: str, **values: object) -> FrameSurvivalProcessor:
 
 
 def _editor_factory(parent=None):
-    from PyQt5 import QtCore, QtGui, QtWidgets
+    from PyQt5 import QtCore, QtWidgets
     from zlc_data import READOUT_EVENT
-    from zlc_ui.fluent import ACCENT, ACCENT_TINT, BG, GRAPHITE, TEXT, FluentButton, FluentLabel, FluentTableView
+    from zlc_ui.fluent import (
+        FluentLabel, FluentSegmentedButtons, FluentSelectionGrid, muted_note_label,
+    )
     from .processor import PAIR_RULES, _rule_pairs
 
     labels = {choice.value: choice.label for choice in _SELECTIONS}
-
-    class PairMatrix(QtGui.QStandardItemModel):
-        """Pair labels to select, never cells to write: the table's paste and
-        clear gestures must not rename a pair."""
-
-        def setData(self, index, value, role=QtCore.Qt.EditRole):  # noqa: N802 - Qt API
-            return False
-
-        def clear_indices(self, cells):
-            return None
-
-        def set_block_data(self, row, column, cells):
-            return None
-
     short = {"all": "All", "consecutive": "Consecutive", "from_first": "From first", "to_last": "To last"}
 
     class SurvivalForm(QtWidgets.QWidget):
-        """Mark pairs on a start × end matrix, or pick a named selection.
+        """Mark pairs on a start x end grid, or pick a named selection.
 
-        The matrix is an ordinary table selection: a click selects one pair,
-        a drag selects a rectangle, Ctrl adds or removes, and a row or column
-        header selects every pair from or to that frame.  Marking anything
-        makes the selection explicit; a preset button returns to a rule.
+        The grid takes the ordinary table gestures: a click selects one pair,
+        a drag a rectangle, Ctrl adds or removes, a row or column header every
+        pair from or to that frame.  Marking anything makes the selection
+        explicit; a preset returns to a rule.
         """
 
         draft_changed = QtCore.pyqtSignal(object)
@@ -92,68 +80,33 @@ def _editor_factory(parent=None):
             layout = QtWidgets.QVBoxLayout(self)
             layout.setContentsMargins(0, 0, 0, 0)
             header = QtWidgets.QHBoxLayout()
-            self.presets = {}
-            for rule in PAIR_RULES:
-                button = FluentButton(short[rule], color=GRAPHITE)
-                button.clicked.connect(lambda _checked=False, rule=rule: self.draft_changed.emit(
-                    {"values": {"selection": rule, "pairs": ()}}))
-                header.addWidget(button)
-                self.presets[rule] = button
+            self.presets = FluentSegmentedButtons(tuple((rule, short[rule]) for rule in PAIR_RULES), self)
+            self.presets.activated.connect(lambda rule: self.draft_changed.emit(
+                {"values": {"selection": rule, "pairs": ()}}))
+            header.addWidget(self.presets)
             header.addStretch(1)
-            self.summary = FluentLabel("")
+            self.summary = muted_note_label("")
             header.addWidget(self.summary)
             layout.addLayout(header)
-            self.model = PairMatrix(self)
-            self.table = FluentTableView(self)
-            self.table.setModel(self.model)
-            self.table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
-            self.table.set_content_rows_limit(16)
-            # The pairs fill the editor's width rather than leaving it to blank margin.
-            self.table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Stretch)
-            # The selection IS the published set, so it stays visible when the
-            # table does not have focus; a backward cell reads as no cell at all.
-            self.table.setStyleSheet(self.table.styleSheet() + (
-                f"QTableView::item:selected {{ background: {ACCENT_TINT}; color: {TEXT}; }}"
-                f"QTableView::item:disabled, QTableView::item:disabled:hover {{ background: {BG}; }}"))
-            layout.addWidget(self.table)
+            self.table = FluentSelectionGrid(self)
+            self.table.selection_edited.connect(self._marked)
+            layout.addWidget(self.table, 0, QtCore.Qt.AlignLeft)
             self.note = FluentLabel("")
             self.note.setWordWrap(True)
             layout.addWidget(self.note)
             self._frames = None
-            self._reconciling = False
-            self.table.selectionModel().selectionChanged.connect(self._marked)
 
-        def _marked(self, *_args):
-            if self._reconciling or self._frames is None:
+        @property
+        def model(self):
+            return self.table.model()
+
+        def _marked(self, cells):
+            if self._frames is None:
                 return
-            pairs = sorted((index.row(), index.column() + 1) for index in self.table.selectedIndexes())
             self.draft_changed.emit({"values": {
                 "selection": "custom",
-                "pairs": tuple({"start": start, "end": end} for start, end in pairs),
+                "pairs": tuple({"start": row, "end": column + 1} for row, column in cells),
             }})
-
-        def _rebuild(self, frames):
-            self._reconciling = True
-            try:
-                self.model.clear()
-                self._frames = frames
-                if frames is None:
-                    return
-                count = len(frames)
-                self.model.setRowCount(count - 1)
-                self.model.setColumnCount(count - 1)
-                self.model.setVerticalHeaderLabels([f"{frames[start]} →" for start in range(count - 1)])
-                self.model.setHorizontalHeaderLabels([f"→ {frames[end]}" for end in range(1, count)])
-                for start in range(count - 1):
-                    for end in range(1, count):
-                        forward = end > start
-                        item = QtGui.QStandardItem(f"{frames[start]}→{frames[end]}" if forward else "")
-                        item.setTextAlignment(QtCore.Qt.AlignCenter)
-                        item.setFlags(QtCore.Qt.ItemIsEnabled | QtCore.Qt.ItemIsSelectable
-                                      if forward else QtCore.Qt.NoItemFlags)
-                        self.model.setItem(start, end - 1, item)
-            finally:
-                self._reconciling = False
 
         def update_projection(self, projection):
             values = projection["form_values"]
@@ -165,12 +118,18 @@ def _editor_factory(parent=None):
                 value if isinstance(value, str) else f"{value:g}"
                 for value in (axis.coordinate_at(code) for code in range(axis.size)))
             if frames != self._frames:
-                self._rebuild(frames)
+                self._frames = frames
+                count = 0 if frames is None else len(frames)
+                self.table.set_grid(
+                    tuple(f"{frames[start]} →" for start in range(count - 1)),
+                    tuple(f"→ {frames[end]}" for end in range(1, count)),
+                    {(start, end - 1): f"{frames[start]}→{frames[end]}"
+                     for start in range(count - 1) for end in range(start + 1, count)},
+                )
             selection = values["selection"]
             explicit = tuple((row["start"], row["end"]) for row in values["pairs"]
                              if row["start"] is not None and row["end"] is not None)
-            for rule, button in self.presets.items():
-                button.set_color(ACCENT if rule == selection else GRAPHITE)
+            self.presets.set_current(selection)
             self.table.setEnabled(frames is not None)
             if frames is None:
                 self.summary.setText(labels[selection])
@@ -180,17 +139,9 @@ def _editor_factory(parent=None):
             wanted = (_rule_pairs(selection, count) if selection != "custom"
                       else tuple(pair for pair in explicit if pair[1] < count))
             absent = () if selection != "custom" else tuple(pair for pair in explicit if pair[1] >= count)
-            marked = {(index.row(), index.column() + 1) for index in self.table.selectedIndexes()}
-            if marked != set(wanted):
-                chosen = QtCore.QItemSelection()
-                for start, end in wanted:
-                    index = self.model.index(start, end - 1)
-                    chosen.select(index, index)
-                self._reconciling = True
-                try:
-                    self.table.selectionModel().select(chosen, QtCore.QItemSelectionModel.ClearAndSelect)
-                finally:
-                    self._reconciling = False
+            cells = tuple(sorted((start, end - 1) for start, end in wanted))
+            if self.table.selected_cells() != cells:
+                self.table.set_selected(cells)
             self.summary.setText(f"{labels[selection]} · {len(wanted)} of {count * (count - 1) // 2} pairs")
             self.note.setText("" if not absent else "Not in this source: " + ", ".join(
                 f"{start}-{end}" for start, end in absent))

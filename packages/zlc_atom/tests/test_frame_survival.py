@@ -277,7 +277,7 @@ def test_pair_matrix_selects_like_a_table_and_writes_the_draft() -> None:
         QtTest.QTest.keyClick(form.table, QtCore.Qt.Key_Delete)
         assert form.model.index(0, 1).data() == "0→2"
         # A preset returns to a rule and clears the explicit pairs.
-        form.presets["from_first"].click()
+        form.presets.button("from_first").click()
         assert drafts[-1] == {"values": {"selection": "from_first", "pairs": ()}}
         # Pairs the source no longer carries are named, not dropped silently.
         drafts.clear()

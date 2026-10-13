@@ -6062,6 +6062,10 @@ class FluentTableView(QtWidgets.QTableView):
                 padding: {scaled_px(3, minimum=2)}px {scaled_px(6, minimum=4)}px;
                 border: none;
             }}
+            QTableView::item:selected {{
+                background: {ACCENT_TINT};
+                color: {TEXT};
+            }}
             QTableView::item:hover:!selected {{
                 background: {ACCENT_TINT};
                 color: {TEXT};
@@ -6302,6 +6306,228 @@ class FluentTableView(QtWidgets.QTableView):
         finally:
             retire_widget(menu)
         event.accept()
+
+
+class _SelectionGridModel(QtCore.QAbstractTableModel):
+    """Read-only labels; only cells given a label can be selected."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._rows: tuple[str, ...] = ()
+        self._columns: tuple[str, ...] = ()
+        self._cells: dict[tuple[int, int], str] = {}
+
+    def reset(self, rows, columns, cells) -> None:
+        self.beginResetModel()
+        self._rows, self._columns, self._cells = tuple(rows), tuple(columns), dict(cells)
+        self.endResetModel()
+
+    def rowCount(self, parent=QtCore.QModelIndex()) -> int:  # noqa: N802 - Qt API
+        return 0 if parent.isValid() else len(self._rows)
+
+    def columnCount(self, parent=QtCore.QModelIndex()) -> int:  # noqa: N802 - Qt API
+        return 0 if parent.isValid() else len(self._columns)
+
+    def data(self, index, role=QtCore.Qt.DisplayRole):
+        if role in (QtCore.Qt.DisplayRole, QtCore.Qt.ToolTipRole):
+            return self._cells.get((index.row(), index.column()))
+        return None
+
+    def headerData(self, section, orientation, role=QtCore.Qt.DisplayRole):  # noqa: N802 - Qt API
+        if role != QtCore.Qt.DisplayRole:
+            return None
+        labels = self._columns if orientation == QtCore.Qt.Horizontal else self._rows
+        return labels[section] if 0 <= section < len(labels) else None
+
+    def flags(self, index):
+        if (index.row(), index.column()) in self._cells:
+            return QtCore.Qt.ItemIsEnabled | QtCore.Qt.ItemIsSelectable
+        return QtCore.Qt.NoItemFlags
+
+
+class _SelectionGridDelegate(QtWidgets.QStyledItemDelegate):
+    """A cell is a small card: blank until chosen, named once it is."""
+
+    def paint(self, painter, option, index) -> None:
+        if not index.flags() & QtCore.Qt.ItemIsSelectable:
+            return
+        selected = bool(option.state & QtWidgets.QStyle.State_Selected)
+        hovered = bool(option.state & QtWidgets.QStyle.State_MouseOver)
+        inset = scaled_px(2, minimum=1)
+        rect = QtCore.QRectF(option.rect).adjusted(inset, inset, -inset, -inset)
+        painter.save()
+        painter.setRenderHint(QtGui.QPainter.Antialiasing)
+        edge = SELECTION_EDGE if selected else ACCENT if hovered else DIVIDER
+        painter.setPen(QtGui.QPen(QtGui.QColor(edge), scaled_px(1, minimum=1)))
+        painter.setBrush(QtGui.QColor(ACCENT_TINT if selected else SURFACE))
+        painter.drawRoundedRect(rect, _radius(), _radius())
+        if selected or hovered:
+            painter.setPen(QtGui.QColor(HOVER if selected else PLACEHOLDER))
+            painter.drawText(rect, QtCore.Qt.AlignCenter, str(index.data() or ""))
+        painter.restore()
+
+
+class FluentSelectionGrid(QtWidgets.QTableView):
+    """A grid of choices whose selection IS the state, not a table of values.
+
+    Selection is the ordinary Qt table gesture -- a click picks one cell, a
+    drag a rectangle, Ctrl adds or removes, a row or column header takes the
+    whole line -- so nothing new is learned.  What differs from
+    :class:`FluentTableView` is the reading: an unchosen cell is blank, a
+    chosen one is a named card, cells without a label are no cells at all,
+    and the grid is exactly as large as its cells.  ``selection_edited``
+    carries the chosen ``(row, column)`` cells after an operator's change;
+    :meth:`set_selected` and :meth:`set_grid` never emit it.
+    """
+
+    selection_edited = QtCore.pyqtSignal(object)
+
+    def __init__(self, parent=None, *, cell_width: int = 52, cell_height: int = 34):
+        super().__init__(parent)
+        self._cell_width = cell_width
+        self._grid_model = _SelectionGridModel(self)
+        self.setModel(self._grid_model)
+        self.setItemDelegate(_SelectionGridDelegate(self))
+        self.setShowGrid(False)
+        self.setFrameShape(QtWidgets.QFrame.NoFrame)
+        self.setCornerButtonEnabled(False)
+        self.setWordWrap(False)
+        self.setMouseTracking(True)
+        self.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
+        self.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectItems)
+        self.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        self.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
+        for header, size in ((self.horizontalHeader(), cell_width), (self.verticalHeader(), cell_height)):
+            header.setSectionResizeMode(QtWidgets.QHeaderView.Fixed)
+            header.setDefaultSectionSize(scaled_px(size))
+            header.setHighlightSections(False)
+            header.setSectionsMovable(False)
+        self.verticalHeader().setDefaultAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+        self.setStyleSheet(
+            f"""
+            QTableView {{
+                background: transparent;
+                border: none;
+                outline: none;
+                font: {fluent_font_size()}pt "{FONT}";
+            }}
+            QHeaderView {{ background: transparent; }}
+            QTableCornerButton::section {{ background: transparent; border: none; }}
+            QHeaderView::section {{
+                background: transparent;
+                color: {GREY};
+                border: none;
+                padding: 0px {scaled_px(6, minimum=4)}px;
+                font: {fluent_font_size()}pt "{FONT}";
+            }}
+            QHeaderView::section:hover {{ color: {TEXT}; }}
+            """
+        )
+        self._programmatic = False
+        self.selectionModel().selectionChanged.connect(self._selection_changed)
+
+    def set_grid(self, rows: Sequence[str], columns: Sequence[str],
+                 cells: "dict[tuple[int, int], str]") -> None:
+        """Header labels, and the label of every selectable ``(row, column)``."""
+
+        self._programmatic = True
+        try:
+            self._grid_model.reset(rows, columns, cells)
+        finally:
+            self._programmatic = False
+        # Wide enough for the longest label: a frame may be named, not numbered.
+        font = QtGui.QFont(FONT)
+        font.setPointSize(fluent_font_size())
+        metrics = QtGui.QFontMetrics(font)
+        widest = max((metrics.horizontalAdvance(str(label)) for label in cells.values()), default=0)
+        self.horizontalHeader().setDefaultSectionSize(
+            max(scaled_px(self._cell_width), widest + 2 * scaled_px(10, minimum=6)))
+        self.updateGeometry()
+
+    def set_selected(self, cells) -> None:
+        chosen = QtCore.QItemSelection()
+        for row, column in cells:
+            index = self._grid_model.index(row, column)
+            if index.isValid() and index.flags() & QtCore.Qt.ItemIsSelectable:
+                chosen.select(index, index)
+        self._programmatic = True
+        try:
+            self.selectionModel().select(chosen, QtCore.QItemSelectionModel.ClearAndSelect)
+        finally:
+            self._programmatic = False
+
+    def selected_cells(self) -> tuple[tuple[int, int], ...]:
+        return tuple(sorted((index.row(), index.column()) for index in self.selectedIndexes()))
+
+    def _selection_changed(self, *_args) -> None:
+        if not self._programmatic:
+            self.selection_edited.emit(self.selected_cells())
+
+    def sizeHint(self) -> QtCore.QSize:  # noqa: N802 - Qt API
+        horizontal, vertical = self.horizontalHeader(), self.verticalHeader()
+        return QtCore.QSize(
+            vertical.sizeHint().width() + horizontal.length() + 2 * self.frameWidth(),
+            horizontal.sizeHint().height() + vertical.length() + 2 * self.frameWidth(),
+        )
+
+    def minimumSizeHint(self) -> QtCore.QSize:  # noqa: N802 - Qt API
+        return self.sizeHint()
+
+
+class FluentSegmentedButtons(QtWidgets.QWidget):
+    """One of a few named choices, the current one marked like a selection.
+
+    ``activated`` carries the value an operator clicked; :meth:`set_current`
+    marks a value (or none) without emitting it.
+    """
+
+    activated = QtCore.pyqtSignal(object)
+
+    def __init__(self, choices: Sequence[tuple[object, str]], parent=None):
+        super().__init__(parent)
+        layout = QtWidgets.QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(scaled_px(6, minimum=4))
+        self._buttons: dict[object, QtWidgets.QPushButton] = {}
+        for value, label in choices:
+            button = QtWidgets.QPushButton(label, self)
+            button.setCursor(QtCore.Qt.PointingHandCursor)
+            button.setProperty("current", False)
+            button.clicked.connect(lambda _checked=False, value=value: self.activated.emit(value))
+            layout.addWidget(button)
+            self._buttons[value] = button
+        self.setStyleSheet(
+            f"""
+            QPushButton {{
+                background: {SURFACE};
+                color: {TEXT};
+                border: 1px solid {DIVIDER};
+                border-radius: {_radius()}px;
+                padding: {scaled_px(3, minimum=2)}px {scaled_px(10, minimum=6)}px;
+                font: {fluent_font_size()}pt "{FONT}";
+            }}
+            QPushButton:hover {{ border-color: {ACCENT}; }}
+            QPushButton[current="true"] {{
+                background: {ACCENT_TINT};
+                border-color: {SELECTION_EDGE};
+                color: {HOVER};
+            }}
+            QPushButton:disabled {{ color: {PLACEHOLDER}; }}
+            """
+        )
+
+    def button(self, value) -> QtWidgets.QPushButton:
+        return self._buttons[value]
+
+    def set_current(self, value) -> None:
+        for choice, button in self._buttons.items():
+            current = choice == value
+            if button.property("current") != current:
+                button.setProperty("current", current)
+                button.style().unpolish(button)
+                button.style().polish(button)
 
 
 class LinkedScrollPanes(QtWidgets.QWidget):
