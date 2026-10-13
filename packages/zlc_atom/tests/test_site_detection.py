@@ -265,6 +265,28 @@ def test_a_place_that_cannot_be_measured_is_not_published() -> None:
 def test_average_peak_identity_preserves_close_lattices_without_duplicates() -> None:
     """Keep each admitted identity and locate its own pixel-integrated core."""
     from scipy.special import erf
+    from zlc_atom.nodes.calibration.calibration import _Admission, _RunEvidence, _candidate_peaks
+
+    # Bench regression: a genuine weak local peak has a stronger neighbour's
+    # skirt two pixels away. That skirt must not replace eight-neighbour identity.
+    average = np.zeros((15, 15))
+    average[7, 3:8] = (12.0, 11.0, 8.178, 1.5, 2.611)
+    significance = np.zeros_like(average)
+    significance[7, 3] = 20.0
+    evidence = _RunEvidence(
+        change_hits=np.zeros(average.shape, dtype=np.int64),
+        max_change_z=np.zeros_like(average), total_change=np.zeros_like(average),
+        total_response=average, total_image=average, transitions=99, background_sigma=4.0,
+    )
+    for changing in (False, True):
+        significance[7, 7] = 5.0 if changing else 7.224
+        evidence.max_change_z[7, 7] = 7.224 if changing else 0.0
+        evidence.total_change[7, 7] = 10.0 if changing else 0.0
+        ranked, _ = _candidate_peaks(
+            evidence, _Admission(average, 2, 6.0, significance, 6.0),
+            spot_sigma=1.0, change_window=5, measurement_radius=2,
+        )
+        assert {tuple(point) for point in ranked} == {(7, 3), (7, 7)}
 
     def lattice(pitch: float) -> tuple[np.ndarray, list[tuple[float, float]]]:
         rng = np.random.default_rng(11)

@@ -1914,7 +1914,7 @@ def _candidate_peaks(
     admission: _Admission,
     *,
     spot_sigma: float,
-    peak_window: int,
+    change_window: int,
     measurement_radius: int,
 ) -> tuple[list, np.ndarray]:
     """Every place admitted by frame-change or average-image evidence.
@@ -1953,10 +1953,10 @@ def _candidate_peaks(
     # noise-flat across a neighbourhood the rings keep above the cut.  A
     # change that only ever grows away from a place is somebody else's.
     total_change = evidence.total_change
-    outer, inner = peak_window ** 2, (peak_window - 2) ** 2
+    outer, inner = change_window ** 2, (change_window - 2) ** 2
     ring = (
-        outer * ndimage.uniform_filter(total_change, size=peak_window, mode="nearest")
-        - inner * ndimage.uniform_filter(total_change, size=peak_window - 2, mode="nearest")
+        outer * ndimage.uniform_filter(total_change, size=change_window, mode="nearest")
+        - inner * ndimage.uniform_filter(total_change, size=change_window - 2, mode="nearest")
     ) / float(outer - inner)
     change_peak = total_change >= ring
     nearby_hits = ndimage.maximum_filter(
@@ -1980,9 +1980,9 @@ def _candidate_peaks(
     # binomial bar; a site visible in only one frame uses the family-wise
     # single-change bar over every pixel and transition.  The average path has
     # its authored/global sigma bar for steady or highly loaded sites.
-    persistent = average == ndimage.maximum_filter(
-        average, size=peak_window, mode="nearest"
-    )
+    # Identity is a peak relative to its eight immediate neighbours. The
+    # wider change-evidence ring must not let a bright neighbour's skirt veto it.
+    persistent = average == ndimage.maximum_filter(average, size=3, mode="nearest")
     # A CHANGE IS NOT A DIRECTION: ``magnitude`` is an absolute value on
     # purpose, an atom leaving being as much evidence as one arriving, and a
     # site whose one loaded frame is under its neighbours' band-pass dark
@@ -1990,7 +1990,9 @@ def _candidate_peaks(
     # These two statistics and the average are the whole admission; any
     # further bar on what a changing place must look like is an operator's
     # call in the detected-site review, not the detector's.
-    changed = persistent & (
+    # Neighbourhood lookup tolerates a one-pixel shift of temporal evidence,
+    # but the candidate itself must not be a hollow borrowing a neighbour's bump.
+    changed = persistent & change_peak & (
         (nearby_hits >= required) | (nearby_change_z >= single_change_cut)
     )
     averaged = persistent & (average_z >= average_cut)
@@ -2110,10 +2112,10 @@ def detect_sites(
         raise ValueError("spot_sigma must be positive and finite")
     if detection_sigma <= 0 or not np.isfinite(detection_sigma):
         raise ValueError("detection_sigma must be positive and finite")
-    # The scale over which one spot contributes one local maximum: its full
-    # width at half maximum, 2.355 sigma, rounded up to an odd pixel count.
-    # Distinct maxima outside each other's half-window remain distinct sites.
-    peak_window = max(3, 2 * int(np.ceil(1.1775 * spot_sigma)) + 1)
+    # The frame-change evidence ring uses the spot's full width at half
+    # maximum (2.355 sigma), rounded up to an odd window. It does not set
+    # the neighbourhood used to identify average-image local peaks.
+    change_window = max(3, 2 * int(np.ceil(1.1775 * spot_sigma)) + 1)
     # How near in y two sites must be to be READ as one row of the array.
     # Ordering only: it decides the order site ids are handed out in, never
     # which places are sites.
@@ -2129,7 +2131,7 @@ def detect_sites(
         evidence,
         admission,
         spot_sigma=spot_sigma,
-        peak_window=peak_window,
+        change_window=change_window,
         measurement_radius=int(measurement_radius),
     )
     selected, centers_list = _place_candidates(
