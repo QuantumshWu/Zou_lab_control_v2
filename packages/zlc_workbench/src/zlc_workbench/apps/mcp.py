@@ -28,6 +28,21 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp_types import CallToolResult, ImageContent, TextContent, ToolAnnotations
 
 
+_OPERATOR_INSTRUCTIONS = (
+    "Operate the current experiment, never a second device session. For routine, already-authorized operations "
+    "with known arguments, call directly; do not repeatedly plan, list tools, rediscover signatures or read back "
+    "the same returned state. Query lab_api only for an unknown method. Read workspace EXPERIMENT_CONTEXT.md "
+    "for this apparatus's procedure; do not invent missing physical settings. "
+    "Combine only already-decided steps with lab_batch; use explicit expected results and lab_wait_for for "
+    "a known read-only state condition. These tools do not choose an experiment procedure or infer readiness. "
+    "Follow the workspace guide for preparation and resource choices. Reuse returned state and use lab_wait "
+    "for asynchronous runs instead of model-driven rapid polling. "
+    "Shortcuts are not a capability limit: lab_handles/lab_api/lab_call reach the live public APIs. "
+    "Acceptance is not completion or physical safety. Inspect errors, generation and data validity. "
+    "Never replay an uncertain Start/Fire/Apply. Physical manual requests still require the human."
+)
+
+
 def start_server(flow, *, host="127.0.0.1", port: int, token: str, allow_control=True):
     """Serve one local experiment endpoint; return its nonblocking close.
 
@@ -116,15 +131,8 @@ def start_server(flow, *, host="127.0.0.1", port: int, token: str, allow_control
             raise ValueError("MCP connection credentials are not experiment artifacts")
         return selected
 
-    mcp = MCPServer("ZLC experiment", log_level="WARNING", instructions=(
-        "Operate the currently open experiment, not another device session. Start with lab_state and lab_catalog. "
-        "Shortcut tools are not the capability limit: use lab_handles, lab_api and lab_call for the live owners' "
-        "public Python APIs. Read signatures/docs first; use explicit paths and asynchronous request_* methods. "
-        "Draft edits are not applied runs. Start acceptance is not ready or completion; use exact generation in lab_wait. "
-        "Inspect errors and data validity; do not infer success from screenshots alone. "
-        "Manual physical actions require the human operator. Never automatically retry Start, Fire or device Apply "
-        "after an uncertain outcome. This is trusted experiment access, not a sandbox: "
-        "plugin expressions retain their normal semantics. No direct shell tool is offered."))
+    mcp = MCPServer("ZLC experiment", log_level="WARNING", instructions=_OPERATOR_INSTRUCTIONS +
+                    " This is trusted experiment access, not a sandbox; plugin expressions retain their normal semantics.")
     read = ToolAnnotations(read_only_hint=True, destructive_hint=False, open_world_hint=False)
 
     def tool(*, annotations=None):
@@ -382,7 +390,7 @@ def start_server(flow, *, host="127.0.0.1", port: int, token: str, allow_control
 
     def handle_snapshot(handle, target):
         for name in ("control_state", "snapshot", "execution_snapshot"):
-            if name in public_methods(target):
+            if inspect.isfunction(getattr(type(target), name, None)):
                 return _control_plain(getattr(target, name)())
         return state() if handle == "experiment" else None
 
@@ -435,13 +443,15 @@ def start_server(flow, *, host="127.0.0.1", port: int, token: str, allow_control
     if allow_control:
         @tool()
         async def lab_call(handle: str, method: str, arguments: dict[str, object],
-                           expected_revision: int | None = None) -> dict[str, object]:
-            """Call a public method on the actual GUI/business owner; discover it with lab_api first.
+                           expected_revision: int | None = None, include_state: bool = True) -> dict[str, object]:
+            """Call a public method on the actual GUI/business owner; use lab_api only if its signature is unknown.
             This also reaches new public application methods with no MCP-specific tool changes. Explicit path
             arguments resolve inside this workspace; present=False is supplied when the method supports it.
             Prefer asynchronous request_* APIs, not blocking hardware calls. Returns the method's real result
             and available owner state, NOT a blanket success acknowledgement. None may mean only submission;
             check pending/error/terminal state afterward. Never replay an uncertain write.
+            Set include_state=False when only the result is needed. Calls that already return the owner's
+            snapshot do not append a duplicate state; use result instead.
             """
             values = dict(arguments)
             if any(name.startswith("_") for name in values):
@@ -461,8 +471,10 @@ def start_server(flow, *, host="127.0.0.1", port: int, token: str, allow_control
                         raise ValueError("Owner revision changed or is unavailable; inspect state before editing")
                 dispatcher = getattr(target, "invoke_public", None)
                 result = dispatcher(method, values) if callable(dispatcher) else selected(**values)
-                return dict(handle=handle, method=method, result=_control_plain(result),
-                            state=handle_snapshot(handle, target))
+                reply = dict(handle=handle, method=method, result=_control_plain(result))
+                if include_state and method not in {"control_state", "snapshot", "execution_snapshot"}:
+                    reply["state"] = handle_snapshot(handle, target)
+                return reply
             return await owner(invoke)
 
         @tool()
@@ -505,7 +517,7 @@ def start_server(flow, *, host="127.0.0.1", port: int, token: str, allow_control
         @tool()
         async def lab_initialize() -> dict[str, object]:
             """Initialize the apparatus currently authored in Devices. Never toggles an existing session off.
-            This opens actual devices; inspect lab_state first. Acceptance is not completion.
+            This opens actual devices. Acceptance is not completion or experiment readiness.
             """
             def initialize():
                 if flow.session is not None:
@@ -524,7 +536,7 @@ def start_server(flow, *, host="127.0.0.1", port: int, token: str, allow_control
                                             "view.monitor", "view.logic", "layout.save", "layout.load"],
                              arguments: dict[str, object], expected_draft_revision: int | None = None,
                              expected_generation: str | None = None) -> dict[str, object]:
-            """Use the normal experiment action. See lab_catalog first. logic.add: api_name, optional values,
+            """Use the normal experiment action. Consult lab_catalog only for unknown fields. logic.add: api_name, optional values,
             source_signal, device_keys, artifact_inputs. Node edits: node_id plus values,
             source_signal, device_keys, artifact_inputs. Start/Stop: node_id. Panel add: kind; update: panel_id,patch.
             view.monitor/view.logic take empty arguments and navigate directly, without pixel clicks.
@@ -561,6 +573,82 @@ def start_server(flow, *, host="127.0.0.1", port: int, token: str, allow_control
             """
             selected = None if path is None else str(workspace_path(path))
             return await owner(lambda: flow.control_pulse(action, device_id, path=selected))
+
+    @tool(annotations=read)
+    async def lab_wait_for(tool_name: str, arguments: dict[str, object], path: list[str | int],
+                           equals: object, timeout_seconds: float = 30) -> dict[str, object]:
+        """Wait for an explicit JSON field of an existing read-only tool to equal a supplied value.
+        No experiment stages or readiness rules are inferred. path is a list of object keys/list indices.
+        Uses the same SDK tool dispatch, never writes/retries an action; timeout only ends observation.
+        Returns matched/timed_out and the last result. Other requests, including Stop, remain available.
+        """
+        if not 0 <= timeout_seconds <= 30 or tool_name == "lab_wait_for":
+            raise ValueError("Use timeout_seconds 0..30 and a non-wait read-only tool")
+        descriptor = next((item for item in await mcp.list_tools() if item.name == tool_name), None)
+        if descriptor is None or descriptor.annotations is None or not descriptor.annotations.read_only_hint:
+            raise ValueError("Waiting requires an existing read-only tool")
+        deadline = monotonic() + timeout_seconds
+        while True:
+            response = await mcp.call_tool(tool_name, arguments)
+            if response.is_error:
+                raise ValueError(str(response.content))
+            result = response.structured_content
+            value = result
+            for key in path:
+                value = value[key]
+            if value == equals:
+                return dict(matched=True, timed_out=False, result=result)
+            if monotonic() >= deadline:
+                return dict(matched=False, timed_out=True, result=result)
+            await asyncio.sleep(min(.02, max(0, deadline-monotonic())))
+
+    if allow_control:
+        @tool()
+        async def lab_batch(calls: list[dict[str, object]]) -> dict[str, object]:
+            """Execute a supplied ordered list of already-decided tool calls without intervening model turns.
+            Each item: tool, arguments, optional expect (exact top-level result fields). Uses the official SDK's
+            existing registered tools and validation, not a separate action registry or experiment workflow.
+            Include explicit waits for asynchronous work. Stops on an error/refusal/unmet expectation; previous
+            effects remain and are never rolled back or replayed. No nested batches. At most 16 calls, 30 s total.
+            Without expect, accepted=false, result=false, matched=false or a nonempty error stops the list.
+            The caller must not batch steps that require interpreting new scientific data or human decisions.
+            """
+            if not 1 <= len(calls) <= 16:
+                raise ValueError("Supply 1..16 tool calls")
+            names = {item.name for item in await mcp.list_tools()}
+            for item in calls:
+                if (set(item) - {"tool", "arguments", "expect"} or item.get("tool") not in names
+                        or item.get("tool") == "lab_batch" or not isinstance(item.get("arguments"), dict)
+                        or not isinstance(item.get("expect", {}), dict)):
+                    raise ValueError("Each call needs an existing non-batch tool, arguments, and optional expect object")
+            results = []
+            deadline = monotonic() + 30.
+            for index, item in enumerate(calls):
+                try:
+                    response = await asyncio.wait_for(mcp.call_tool(item["tool"], item["arguments"]),
+                                                      timeout=max(0., deadline-monotonic()))
+                    result = response.structured_content
+                    if result is None:
+                        result = response.model_dump(mode="json")
+                    ok = not response.is_error
+                    if isinstance(result, dict):
+                        if item.get("expect"):
+                            ok = ok and all(key in result and result[key] == value for key, value in item["expect"].items())
+                        else:
+                            ok = ok and not (result.get("accepted") is False or result.get("result") is False
+                                             or result.get("matched") is False or bool(result.get("error")))
+                    elif item.get("expect"):
+                        ok = False
+                    results.append(dict(tool=item["tool"], result=result, completed=ok))
+                except Exception as error:
+                    ok = False
+                    note = ("Batch deadline expired; the last operation may have started. Inspect state before any retry."
+                            if isinstance(error, TimeoutError) else _error_text(error))
+                    results.append(dict(tool=item["tool"], error=note, completed=False))
+                if not ok:
+                    return dict(completed=False, stopped_at=index, results=results,
+                                note="Earlier effects remain. Inspect the result; do not replay the entire batch.")
+            return dict(completed=True, results=results)
 
     application = mcp.streamable_http_app(host=host, stateless_http=True, json_response=True,
                                          max_request_body_size=1024*1024)
@@ -629,6 +717,7 @@ def start_server(flow, *, host="127.0.0.1", port: int, token: str, allow_control
 
 async def _stdio(workspace: Path) -> None:
     """Connect an AI client to an existing experiment; never launch devices."""
+    import anyio
     import httpx2
     from urllib.parse import urlsplit
     from mcp import ClientSession
@@ -640,6 +729,9 @@ async def _stdio(workspace: Path) -> None:
     workspace = workspace.resolve()
     directory = workspace / ".mcp"
     selected = None
+    connection = None
+    forwarding = 0
+    switching = False
 
     def records():
         for path in sorted(directory.glob("connection-*.json")):
@@ -653,23 +745,80 @@ async def _stdio(workspace: Path) -> None:
             except (OSError, ValueError, KeyError, TypeError):
                 continue
 
+    async def hold_connection(record, ready, closed, timeout):
+        # AnyIO's transport/session contexts must enter and exit in this same
+        # task. Only the transport and SDK schema caches persist, not lab state.
+        try:
+            async with httpx2.AsyncClient(headers={"Authorization": "Bearer " + record["token"]}, timeout=timeout) as http:
+                async with streamable_http_client(record["url"], http_client=http) as (read, write, *_):
+                    async with ClientSession(read, write) as client:
+                        await client.initialize()
+                        if not ready.done():
+                            ready.set_result(client)
+                        await closed.wait()
+        except BaseException as error:
+            if not ready.done():
+                ready.set_exception(error)
+            raise
+
+    async def open_connection(record, timeout=40):
+        ready = asyncio.get_running_loop().create_future()
+        closed = asyncio.Event()
+        task = asyncio.create_task(hold_connection(record, ready, closed, timeout))
+        try:
+            return await ready, closed, task
+        except BaseException:
+            task.cancel()
+            with anyio.CancelScope(shield=True):
+                await asyncio.gather(task, return_exceptions=True)
+            raise
+
+    async def close_connection(current):
+        current[1].set()
+        with anyio.CancelScope(shield=True):
+            results = await asyncio.gather(current[2], return_exceptions=True)
+        if isinstance(results[0], Exception):
+            logging.getLogger(__name__).warning("MCP connection closed with error: %s", results[0])
+
     async def remote(record, name=None, arguments=None, params=None, timeout=40):
-        # A transport session only, never an ExperimentSession. No retry of a
-        # tool call: a failed response can mean the operation already started.
-        async with httpx2.AsyncClient(headers={"Authorization": "Bearer " + record["token"]}, timeout=timeout) as http:
-            async with streamable_http_client(record["url"], http_client=http) as (read, write, *_):
-                async with ClientSession(read, write) as client:
-                    await client.initialize()
-                    if name is None:
-                        return await client.list_tools(params=params)
-                    return await client.call_tool(name, arguments or {}, read_timeout_seconds=timeout)
+        nonlocal forwarding
+        persistent = record == selected
+        if persistent:
+            if switching:
+                raise RuntimeError("Experiment connection is changing; wait for lab_connect before issuing another operation")
+            if connection is None or connection[2].done():
+                raise RuntimeError("Experiment connection is closed; use lab_connect to reconnect, then inspect its state")
+            current = connection
+            forwarding += 1
+        else:
+            current = await open_connection(record, timeout)
+        try:
+            # No request lock: a long wait must not block Stop. No retry: a
+            # failed response can mean the operation already started.
+            if name is None:
+                return await current[0].list_tools(params=params)
+            return await current[0].call_tool(name, arguments or {}, read_timeout_seconds=timeout)
+        finally:
+            if persistent:
+                forwarding -= 1
+            else:
+                await close_connection(current)
 
     async def available():
         async def check(filename, record):
             item = {k: v for k, v in record.items() if k != "token"}
             item["connection"] = filename
             try:
-                reply = await remote(record, "lab_health", timeout=3)
+                if record == selected and connection is not None and connection[2].done():
+                    # Explicit discovery may inspect a disconnected endpoint,
+                    # but never replays the operation that lost its response.
+                    probe = await open_connection(record, timeout=3)
+                    try:
+                        reply = await probe[0].call_tool("lab_health", {}, read_timeout_seconds=3)
+                    finally:
+                        await close_connection(probe)
+                else:
+                    reply = await remote(record, "lab_health", timeout=3)
                 health = reply.structured_content or {}
                 item["live"] = (not reply.is_error and health.get("service") == "running"
                                 and health.get("pid") == record["pid"]
@@ -680,14 +829,34 @@ async def _stdio(workspace: Path) -> None:
         return await asyncio.gather(*(check(name, record) for name, record in records()))
 
     async def connect(filename=None):
-        nonlocal selected
+        nonlocal selected, connection, switching
+        if switching:
+            raise RuntimeError("Experiment connection is already changing; wait for lab_connect to finish")
         candidates = [(item, record) for item, record in await available()
                       if item["live"] and (filename is None or item["connection"] == filename)]
         if len(candidates) != 1:
             raise RuntimeError("No unique live experiment. Start experiment.bat, then use lab_connections and "
                                "lab_connect(connection=<filename>) to choose the intended window.")
-        item, selected = candidates[0]
-        return item
+        item, record = candidates[0]
+        if switching:
+            raise RuntimeError("Experiment connection is already changing; wait for lab_connect to finish")
+        if record == selected and connection is not None and not connection[2].done():
+            return item
+        if forwarding:
+            raise RuntimeError("Cannot change experiment while requests are in flight; wait for them to finish or Stop the current experiment first")
+        switching = True
+        try:
+            replacement = await open_connection(record)
+            try:
+                if connection is not None:
+                    await close_connection(connection)
+            except BaseException:
+                await close_connection(replacement)
+                raise
+            selected, connection = record, replacement
+            return item
+        finally:
+            switching = False
 
     read_hint = ToolAnnotations(read_only_hint=True, destructive_hint=False, open_world_hint=False)
     connection_tools = [
@@ -724,11 +893,15 @@ async def _stdio(workspace: Path) -> None:
                 f"{error}. No operation was replayed; inspect the experiment before retrying a write.")])
 
     server = Server("ZLC current experiment", on_list_tools=list_tools, on_call_tool=call_tool,
-                    instructions="Connect to the existing experiment, not a new device session. If no experiment is "
+                    instructions=_OPERATOR_INSTRUCTIONS + " If no experiment is "
                     "running yet, keep this connection and use lab_connect after starting experiment.bat. "
                     "Use lab_handles/lab_api/lab_call for public APIs missing from the shortcuts. Never replay an uncertain write.")
-    async with stdio_server() as (read, write):
-        await server.run(read, write, server.create_initialization_options(NotificationOptions(tools_changed=True)))
+    try:
+        async with stdio_server() as (read, write):
+            await server.run(read, write, server.create_initialization_options(NotificationOptions(tools_changed=True)))
+    finally:
+        if connection is not None:
+            await close_connection(connection)
 
 
 def main(argv=None) -> int:

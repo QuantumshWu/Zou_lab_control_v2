@@ -455,6 +455,8 @@
 
 ### 2.5 Device Control与settings provenance
 
+- 2026-10-13 MCP延迟修复：选定端点复用ClientSession/HTTP连接与SDK schema/validator缓存，保持并发Stop；Devices摘要不复制后删除参数，snapshot调用不重复返回同一状态。实际Qt/虚拟设备/STDIO暖态状态约50–60→10–18 ms、Load约57–68→15–20 ms（小样本同探针，非硬件上限），首次进程/SDK冷启动仍存在。通用lab_batch/lab_wait_for经SDK原工具注册执行调用方给定操作/条件，没有内置设备或实验步骤；曾提出的Load→Init→等待特判已完全撤掉，未合入。标准准备顺序只更新EXPERIMENT_CONTEXT模板与通用使用指引。现有HTTP/STDIO用例验证会话不重复初始化、wait与Stop并发、组合停止/超时/禁止用写操作等待及正常退出；Devices2项通过。证据留ignored research，测试窗口/进程关闭，未触碰真实设备。
+
 - 2026-10-13 MCP接入收口：普通experiment启动默认本机control，--no-mcp/--mcp-read-only显式覆盖，--check不启动；SDK进入正常依赖。每listener独立本机凭据，默认端口占用自动分配，显式冲突不关闭GUI；退出只清理自家记录。zlc mcp --workspace使用官方SDK代理当前listener，启动前无GUI时仍可连接后选择，多个窗口明确选择，不启动另一Session或重放操作。lab_handles/lab_api/lab_call动态发现原owner公开API，lab_intent发现真实GUI Handle意图；快捷工具不再是能力上限。Devices补显式Load/Save/参数提交、纯状态和原schema投影；Pulse公共调用统一非模态，Scan文件IO/Hold/Step沿原worker。7项Devices、Pulse原4项及扩展2项、真实启动/端口/退出清理用例通过；真实HTTP/Qt与STDIO端到端通过，并验证新增公开方法无需MCP注册、Devices保存加载、GUI intent、私有方法拒绝和原Stop/超时语义。以下初版记录中的optional/显式启动描述已被本条取代。只使用虚拟设备，测试进程退出，无硬件操作。
 
 - 实验 MCP：可选 `.[mcp]` 与 `experiment --mcp-port` 薄接入当前 ExperimentGuiFlow/Console，启用后默认允许操作，仅 `--mcp-read-only` 限制为只读；loopback/token/Origin 边界，复用 schema、设备占用、Start/Stop、精确发布身份、Pulse异步按钮路径和公共截图。状态默认摘要、目录按节点取schema，动作只回相关行，数据页保留三domain坐标/validity/sigma；SDK隐藏的错误通过同一工具错误边界返回具体原因。真实协议测试覆盖认证/异步Stop/错误文本及GUI卡住后超时排队命令不会延后执行。独立agent仅通过MCP完成Virtual相机三帧采集、10ms曝光及ROI变更后重启、精确像素坐标读取、Monitor截图、Figure PNG+NPZ保存及停止；暖态状态/目录中位13–14ms，SDK客户端首次tool另有约1–1.6s开销，不冒充硬实时上界。测试窗口/服务已退出，研究文件不入Git，未触碰真实设备。

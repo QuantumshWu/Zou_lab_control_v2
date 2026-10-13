@@ -2091,7 +2091,23 @@ async def client():
                 assert loaded["result"] is True and not loaded["state"]["dirty"]
                 private = await c.call_tool("lab_call", {"handle":"devices", "method":"_show", "arguments":{}})
                 assert private.is_error
-                assert (await call("lab_initialize"))["accepted"]
+                initialized = await call("lab_batch", {"calls":[
+                    {"tool":"lab_call", "arguments":{"handle":"devices", "method":"load", "arguments":{"path":"apparatus-api.json"}}, "expect":{"result":True}},
+                    {"tool":"lab_initialize", "arguments":{}, "expect":{"accepted":True}},
+                    {"tool":"lab_wait_for", "arguments":{"tool_name":"lab_state", "arguments":{}, "path":["session_open"], "equals":True, "timeout_seconds":10}, "expect":{"matched":True}},
+                ]})
+                assert initialized["completed"]
+                assert initialized["results"][-1]["result"]["result"]["session_open"]
+                halted = await call("lab_batch", {"calls":[
+                    {"tool":"lab_initialize", "arguments":{}},
+                    {"tool":"lab_call", "arguments":{"handle":"devices", "method":"remove_device", "arguments":{"instance_id":"camera"}}},
+                ]})
+                assert not halted["completed"] and halted["stopped_at"] == 0 and len(halted["results"]) == 1
+                assert any(d["instance_id"] == "camera" for d in (await call("lab_state"))["devices"])
+                timeout = await call("lab_wait_for", {"tool_name":"lab_health", "arguments":{}, "path":["service"], "equals":"closed", "timeout_seconds":0})
+                assert timeout["timed_out"] and not timeout["matched"]
+                refused_wait = await c.call_tool("lab_wait_for", {"tool_name":"lab_initialize", "arguments":{}, "path":["accepted"], "equals":True, "timeout_seconds":0})
+                assert refused_wait.is_error and "read-only" in str(refused_wait.content)
                 for _ in range(100):
                     state = await call("lab_state")
                     if state["session_open"]:
@@ -2175,15 +2191,45 @@ async def client():
                 connection = dict(close_mcp.connection_info, token="virtual-test", control_enabled=True)
                 connection_path = folder / "connection-test.json"
                 connection_path.write_text(json.dumps(connection), encoding="utf-8")
-                code = ("import sys, zou_lab_control, zlc_workbench; "
-                        "print(zou_lab_control.__file__, zlc_workbench.__file__, file=sys.stderr); "
-                        "from zlc_workbench.apps.mcp import main; main(['--workspace'," + repr(WORKSPACE) + "])")
+                count_path = Path(WORKSPACE) / "connector-initializations.txt"
+                code = ("import sys, zou_lab_control, zlc_workbench\n"
+                        "print(zou_lab_control.__file__, zlc_workbench.__file__, file=sys.stderr)\n"
+                        "from pathlib import Path\nfrom mcp import ClientSession\n"
+                        "count_path=Path(" + repr(str(count_path)) + ")\n"
+                        "original=ClientSession.initialize\n"
+                        "async def counted(self):\n"
+                        " count=int(count_path.read_text()) if count_path.exists() else 0\n"
+                        " count_path.write_text(str(count+1))\n"
+                        " return await original(self)\n"
+                        "ClientSession.initialize=counted\n"
+                        "from zlc_workbench.apps.mcp import main\nmain(['--workspace'," + repr(WORKSPACE) + "])")
                 async with stdio_client(StdioServerParameters(command=sys.executable, args=["-c",code], env=dict(os.environ))) as (sr, sw):
                     async with ClientSession(sr, sw) as forwarded:
                         await forwarded.initialize()
                         assert "lab_call" in {t.name for t in (await forwarded.list_tools()).tools}
+                        connection_count = int(count_path.read_text())
                         via_stdio = await forwarded.call_tool("lab_call", {"handle":"devices", "method":"snapshot", "arguments":{}})
                         assert not via_stdio.is_error and via_stdio.structured_content["result"]["loaded"]
+                        assert "state" not in via_stdio.structured_content  # No duplicate snapshot.
+                        await forwarded.call_tool("lab_state", {})
+                        assert int(count_path.read_text()) == connection_count
+                        restarted = await forwarded.call_tool("lab_action", {"action":"logic.start", "arguments":{"node_id":node}})
+                        assert not restarted.is_error and restarted.structured_content["accepted"]
+                        for _ in range(100):
+                            current = await forwarded.call_tool("lab_state", {"node_id":node})
+                            current = current.structured_content["console"]["logic"][0]
+                            if current["ready"]:
+                                break
+                            await asyncio.sleep(.01)
+                        waiting_remote = asyncio.create_task(forwarded.call_tool("lab_wait", {"node_id":node,
+                            "generation":current["generation"], "timeout_seconds":5}))
+                        await asyncio.sleep(.03)
+                        stopped_remote = await forwarded.call_tool("lab_action", {"action":"logic.stop", "arguments":{"node_id":node},
+                            "expected_generation":current["generation"]})
+                        assert not stopped_remote.is_error and stopped_remote.structured_content["accepted"]
+                        remote_done = await waiting_remote
+                        assert not remote_done.is_error and remote_done.structured_content["reached"]
+                        assert int(count_path.read_text()) == connection_count
                 connection_path.unlink()
                 # A frozen owner must not execute an old queued write after
                 # the client was explicitly told it timed out/cancelled.

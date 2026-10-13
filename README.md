@@ -113,6 +113,28 @@ retain their ordinary capabilities. Hardware limits, ownership and normal
 manual confirmations still apply. The MCP client does not get an independent
 device owner or permission to bypass them.
 
+The STDIO connector retains its selected HTTP/MCP session and SDK validation
+cache. Normal calls do not reconnect or fetch the tool directory again. Requests
+remain concurrent (a wait does not block Stop); changing the selected window is
+refused while requests are in flight. Failed operations are never replayed.
+
+For known, authorized routine actions, call directly and reuse returned state;
+do not rediscover the same signatures after every command. `lab_batch` submits
+an explicit ordered list of existing tools using the SDK's same validation and
+dispatch. Each entry has `tool`, `arguments`, and optionally `expect` for exact
+top-level result fields. It stops on errors, refusals or unmet expectations;
+earlier effects remain, so never replay an entire partially completed list.
+Use `lab_wait_for` to observe a caller-specified JSON path/value through an
+existing read-only tool, or `lab_wait` for an exact Logic generation. There is
+no built-in Load/Init/SLM procedure or inferred physical readiness in these tools.
+Do not batch steps needing new scientific interpretation or human decisions.
+
+Keep the apparatus-specific procedure in `workspace/EXPERIMENT_CONTEXT.md`.
+The template includes the SLM phase-loading/Send check after Init; these are
+operator instructions, not hidden automatic device operations. MCP instructions
+reduce unnecessary model turns but cannot control the AI client's reasoning
+budget or guarantee that a model follows every instruction.
+
 - `lab_handles` discovers the current application owners and opened Controls.
   `lab_api(handle)` lists their public methods and actual GUI intents;
   `lab_api(handle, method)` reads that method's real signature and documentation.
@@ -121,6 +143,8 @@ device owner or permission to bypass them.
   list. For example, `handle="devices", method="load", arguments={"path":"apparatus.json"}`
   loads the same apparatus draft as the GUI. It does not initialize devices.
   Use `snapshot` and `describe_type` to inspect the Devices draft and schema.
+  A snapshot result is no longer duplicated in an automatic `state` field;
+  other calls can use `include_state=False` when no extra state is needed.
   Private attributes, raw drivers and QObject internals are not exposed.
 - `lab_intent` is a fallback for existing public GUI Handle signals, discovered
   from the actual handle rather than another command registry. It can open

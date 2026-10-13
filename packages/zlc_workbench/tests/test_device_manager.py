@@ -385,6 +385,12 @@ def test_save_and_reopen_preserve_devices_and_root_simulation(manager, tmp_path,
     snapshot = manager.snapshot(details=True)
     assert snapshot["draft"][0]["parameters"]["exposure_seconds"] == 0.03
     assert snapshot["loaded"] == [] and snapshot["dirty"]
+    summary = manager.snapshot()
+    assert summary["draft"] == [
+        {key: value for key, value in item.items() if key != "parameters"}
+        for item in snapshot["draft"]
+    ]
+    assert "simulation" not in summary
     schema = manager.describe_type("camera.virtual")
     assert {item["name"] for item in schema["fields"]} == set(original_parameters)
     json.dumps(snapshot, allow_nan=False)
@@ -669,6 +675,7 @@ def test_init_holds_the_exact_session_until_explicit_shutdown(tmp_path, caplog) 
     state = manager.snapshot(details=True)
     assert state["draft"][0]["role"] == "camera_edited"
     assert state["loaded"][0]["role"] == "camera"
+    assert state["loaded"][0]["parameters"] == initial.devices[0].to_dict()["parameters"]
     assert state["lifecycle"]["text"] == view.lifecycle[0]
     manager.set_role("camera", "camera")
     assert view.lifecycle[:3] == ("Shutdown devices", True, True)

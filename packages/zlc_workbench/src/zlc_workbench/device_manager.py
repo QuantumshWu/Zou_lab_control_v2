@@ -410,14 +410,19 @@ class DeviceManagerPresenter:
         failures = {} if session is None else session.installation.failures
         with self._scan_lock:
             scanning = sorted(self._scan_pending)
-        draft = [item.to_dict() for item in self.devices]
+        draft = [
+            item.to_dict() if details else {
+                "instance_id": item.instance_id, "role": item.role, "type_id": item.type_id,
+            }
+            for item in self.devices
+        ]
         accepted = [
-            item.to_dict() for item in (() if self._active_config is None else self._active_config.devices)
+            item.to_dict() if details else {
+                "instance_id": item.instance_id, "role": item.role, "type_id": item.type_id,
+            }
+            for item in (() if self._active_config is None else self._active_config.devices)
             if item.instance_id in loaded
         ]
-        if not details:
-            for item in (*draft, *accepted):
-                item.pop("parameters")
         result = {
             "path": str(self.path), "dirty": not self.saved, "path_unread": self._path_unread,
             "draft": draft, "loaded": accepted, "busy": self.device_operation_active,
