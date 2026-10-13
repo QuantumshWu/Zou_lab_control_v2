@@ -396,7 +396,8 @@ Node new chunk
 
 ## 6. UI与Lifecycle
 
-- 实验 AI 的 MCP 是可选、显式开启的本机接入，不是第二个实验执行器。它只连接当前 `ExperimentGuiFlow` 的 Session/Console；参数目录来自现有 descriptor，修改、Start/Stop、Panel 与保存走原 owner 准入和异步完成。请求在线程间交给 Qt owner，不从网络线程操作 Qt，不另开设备或绕过 DeviceUse。启用 MCP 后默认允许 AI 操作，仅显式 `--mcp-read-only` 才限制为只读；loopback 服务还须验证本次配置的 token，拒绝浏览器跨源访问。协议沿官方 MCP SDK，不自造 JSON-RPC。
+- 实验 AI 的 MCP 随普通 experiment 启动默认提供本机接入及操作能力，`--no-mcp`显式关闭、`--mcp-read-only`显式限制只读，`--check`不启动服务。它不是第二个实验执行器，只连接当前`ExperimentGuiFlow`的Session/Console；请求交给原Qt owner，执行继续走原设备占用和worker。MCP SDK是正常安装依赖，不在启动时临时pip。每个实际监听实例写出自己的本机连接信息/凭据，AI可在实验启动之后连接；默认端口占用可分配空闲端口，显式端口冲突清楚报告且不关闭实验。服务仍限loopback、验证token、拒绝浏览器跨源访问；协议沿官方MCP SDK。
+- MCP通用handle发现/描述/调用直接指向当前流程和原业务owner，不维护另一份每功能白名单作为能力上限：公开API的签名/文档直接来自对象，GUI intent来自现有Handle信号；不递归暴露底层driver或任意Qt内部方法，不增加第二设备会话。常用快捷工具只是便捷入口。文件操作的公开API接受显式路径，交互提示与异步错误由原owner提供机器可读结果；缺少快捷工具时先使用同一公开API，必要时用实际GUI，不把缺MCP动作当作系统没有能力。连接器可以代理当前MCP传输，但不得启动/重放实验或伪造设备成功。
 - MCP 同时提供结构化状态、精确 generation/publication 身份、当前错误、有限条近期状态、数据切片和按需当前窗口 PNG；大数组不混入状态轮询。截图沿公共窗口捕获，不重建 Plot，不读取其它应用。提交/等待/ready/terminal、Stop 请求/停止完成、软件确认/物理安全必须区分。等待超时不重发副作用，尚未执行的 owner 请求超时后取消；已开始但未得到结果时明确 outcome unknown 并要求查状态。人工物理操作请求只呈现，不由 AI 冒充完成。MCP 断连不重启或接管实验，禁用/退出停止接纳新请求，不改变原实验关闭流程。
 - Pulse/SLM 的结构化操作直接由现有 Editor owner 提供 `control_catalog/control_state/control_action`，MCP 仅路由；目录读取实际字段/身份，不另造时序、光学、文件格式或硬件通道。Pulse区分当前草稿、已加载Config、异步编译预览与设备确认；修改TTL/DAC/delay/绑定/bracket/重复沿原编辑数学，文件路径操作共用原读写。SLM沿原Target/Pattern/Context、solver与command worker处理，状态读取不求解、不Send。预期错误可非模态返回，GUI的原交互仍保留；机器默认不丢未保存Pulse/Config草稿，显式discard才替换。设备无效Desired投影失败必须恢复原有效草稿并显示拒绝，不能留下旧Applied成功状态。
 - Pulse的机器操作与GUI共用编辑准入，不能绕过有效Config字段或文件Subpulse的只读语义去暗改默认值。Subpulse选择、来源、文件读写及编辑沿原owner执行，显式路径与discard替代机器路径中的文件选择/确认弹窗；状态区分内嵌默认、显示的有效内容和独立文件草稿，读状态不重新解析文件。Pulse、Config和Subpulse实际草稿/编辑上下文变化推进现有editor revision，dirty仍由原稿件与保存内容比较；未保存Config改变不冒充已加载Config变化，外部文件内容需通过显式刷新/验证核实。

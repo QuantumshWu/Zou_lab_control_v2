@@ -47,7 +47,11 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--mcp-port", type=int, default=None,
-        help="serve this GUI session's MCP endpoint on localhost; requires ZLC_MCP_TOKEN",
+        help="local MCP port (default 18864, or an available port if occupied; 0 chooses an available port)",
+    )
+    parser.add_argument(
+        "--no-mcp", action="store_true",
+        help="disable this window's normally available local AI connection",
     )
     parser.add_argument(
         "--mcp-read-only", action="store_true",
@@ -1945,24 +1949,10 @@ def _open_saved_figure(
 def main(argv: list[str] | None = None) -> int:
     parser = _parser()
     arguments = parser.parse_args(argv)
-    if arguments.mcp_read_only and arguments.mcp_port is None:
-        parser.error("--mcp-read-only requires --mcp-port")
-    token = os.environ.get("ZLC_MCP_TOKEN", "")
-    if arguments.mcp_port is not None:
-        if arguments.check:
-            parser.error("--mcp-port requires the running GUI, not --check")
-        if not 1 <= arguments.mcp_port <= 65535:
-            parser.error("--mcp-port must be between 1 and 65535")
-        if not token.strip():
-            parser.error("set ZLC_MCP_TOKEN before enabling MCP")
-        try:
-            from mcp.server import MCPServer  # noqa: F401 -- require the installed optional SDK API
-        except ImportError as error:
-            print(
-                'error: MCP requires python -m pip install -e ".[mcp]"; '
-                f"{error}", file=sys.stderr,
-            )
-            return 2
+    if arguments.mcp_port is not None and not 0 <= arguments.mcp_port <= 65535:
+        parser.error("--mcp-port must be between 0 and 65535")
+    if arguments.no_mcp and (arguments.mcp_port is not None or arguments.mcp_read_only):
+        parser.error("--no-mcp cannot be combined with other MCP options")
 
     from zlc_ui import ensure_qt_app
 
@@ -2026,26 +2016,64 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     print(f"workspace: {flow.space.root}")
     close_mcp = None
-    try:
-        if arguments.mcp_port is not None:
-            try:
-                from .mcp import start_server
+    connection_path = None
 
-                close_mcp = start_server(
-                    flow, host="127.0.0.1", port=arguments.mcp_port,
-                    token=token, allow_control=not arguments.mcp_read_only,
-                )
-            except (ImportError, OSError, RuntimeError) as error:
-                print(f"error: MCP could not start: {error}", file=sys.stderr)
-                return 2
-            application.aboutToQuit.connect(close_mcp)
-            print(
-                f"MCP: http://127.0.0.1:{arguments.mcp_port}/mcp "
-                f"({'read only' if arguments.mcp_read_only else 'control enabled'})",
-                flush=True,
-            )
-        return int(application.exec_())
-    finally:
+    def stop_mcp():
+        nonlocal connection_path
         if close_mcp is not None:
             close_mcp()
+        if connection_path is not None:
+            try:
+                connection_path.unlink(missing_ok=True)
+            except OSError as error:
+                print(f"warning: could not remove stopped MCP connection file: {error}", file=sys.stderr)
+            connection_path = None
+
+    try:
+        if not arguments.no_mcp:
+            try:
+                import errno
+                import secrets
+                from zlc_durable import write_readable_json
+                from .mcp import start_server
+
+                token = os.environ.get("ZLC_MCP_TOKEN", "").strip() or secrets.token_urlsafe(32)
+                port = 18864 if arguments.mcp_port is None else arguments.mcp_port
+                try:
+                    close_mcp = start_server(
+                        flow, host="127.0.0.1", port=port,
+                        token=token, allow_control=not arguments.mcp_read_only,
+                    )
+                except OSError as error:
+                    if arguments.mcp_port is not None or not (
+                        error.errno == errno.EADDRINUSE or getattr(error, "winerror", None) == 10048
+                    ):
+                        raise
+                    close_mcp = start_server(
+                        flow, host="127.0.0.1", port=0,
+                        token=token, allow_control=not arguments.mcp_read_only,
+                    )
+                connection = dict(close_mcp.connection_info)
+                connection.update(token=token, control_enabled=not arguments.mcp_read_only)
+                directory = flow.space.root / ".mcp"
+                directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+                connection_path = directory / f"connection-{connection['pid']}-{connection['port']}.json"
+                write_readable_json(connection_path, connection)
+            except (ImportError, OSError, RuntimeError) as error:
+                stop_mcp()
+                close_mcp = None
+                message = f"MCP could not start: {error}. The experiment GUI remains available."
+                print(f"warning: {message}", file=sys.stderr)
+                flow.devices.show_status(message, "warning")
+            else:
+                application.aboutToQuit.connect(stop_mcp)
+                print(
+                    f"MCP: {connection['url']} "
+                    f"({'read only' if arguments.mcp_read_only else 'control enabled'})\n"
+                    f"MCP connection file (local credential): {connection_path}",
+                    flush=True,
+                )
+        return int(application.exec_())
+    finally:
+        stop_mcp()
         flow.close()

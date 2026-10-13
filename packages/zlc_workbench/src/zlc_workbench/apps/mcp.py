@@ -1,6 +1,6 @@
-"""Optional MCP transport over the current experiment, never a device owner.
+"""MCP transport over the current experiment, never a device owner.
 
-Enabled by ``zlc task_console --mcp-port PORT [--mcp-read-only]``. The official
+Enabled by the ordinary experiment launcher unless ``--no-mcp``. The official
 SDK owns the protocol. Short intents/projections run on the existing Qt owner;
 scientific materialization and protocol waits do not run on that owner.
 """
@@ -12,7 +12,9 @@ import base64
 from concurrent.futures import Future
 from functools import wraps
 import json
+import inspect
 import logging
+import os
 from pathlib import Path
 from queue import Empty, Queue
 import secrets
@@ -27,7 +29,7 @@ from mcp_types import CallToolResult, ImageContent, TextContent, ToolAnnotations
 
 
 def start_server(flow, *, host="127.0.0.1", port: int, token: str, allow_control=True):
-    """Serve one explicitly enabled local endpoint; return its nonblocking close.
+    """Serve one local experiment endpoint; return its nonblocking close.
 
     The flow outlives this adapter. Disconnecting a client neither stops nor
     repeats a run. Closing admission cancels requests that have not started;
@@ -39,7 +41,7 @@ def start_server(flow, *, host="127.0.0.1", port: int, token: str, allow_control
     from ..board import attach_qt_owner_turn
     from ..console import _control_plain, _error_text
 
-    if host != "127.0.0.1" or not 1 <= port <= 65535 or not token:
+    if host != "127.0.0.1" or not 0 <= port <= 65535 or not token:
         raise ValueError("MCP requires a loopback port and a nonempty ZLC_MCP_TOKEN")
     inbox = Queue(maxsize=32)
     closed = Event()
@@ -110,10 +112,14 @@ def start_server(flow, *, host="127.0.0.1", port: int, token: str, allow_control
         selected = (selected if selected.is_absolute() else root / selected).resolve()
         if not selected.is_relative_to(root):
             raise ValueError("MCP file access is limited to this experiment workspace")
+        if selected.is_relative_to(root / ".mcp"):
+            raise ValueError("MCP connection credentials are not experiment artifacts")
         return selected
 
     mcp = MCPServer("ZLC experiment", log_level="WARNING", instructions=(
         "Operate the currently open experiment, not another device session. Start with lab_state and lab_catalog. "
+        "Shortcut tools are not the capability limit: use lab_handles, lab_api and lab_call for the live owners' "
+        "public Python APIs. Read signatures/docs first; use explicit paths and asynchronous request_* methods. "
         "Draft edits are not applied runs. Start acceptance is not ready or completion; use exact generation in lab_wait. "
         "Inspect errors and data validity; do not infer success from screenshots alone. "
         "Manual physical actions require the human operator. Never automatically retry Start, Fire or device Apply "
@@ -140,7 +146,8 @@ def start_server(flow, *, host="127.0.0.1", port: int, token: str, allow_control
     async def lab_health() -> dict[str, object]:
         """Protocol health, also available when the GUI owner is unresponsive. Not hardware readiness."""
         last = last_owner_reply[0]
-        return dict(service="closing" if closed.is_set() else "running",
+        return dict(service="closing" if closed.is_set() else "running", pid=os.getpid(),
+                    workspace=str(flow.space.root.resolve()),
                     seconds_since_owner_response=None if last is None else monotonic()-last,
                     queued_owner_requests=inbox.qsize(), control_enabled=bool(allow_control))
 
@@ -279,7 +286,8 @@ def start_server(flow, *, host="127.0.0.1", port: int, token: str, allow_control
             entries = sorted(selected.iterdir(), key=lambda item: item.name.casefold())
             result = []
             for entry in entries[offset:offset+limit]:
-                if not entry.resolve().is_relative_to(flow.space.root.resolve()):
+                if (not entry.resolve().is_relative_to(flow.space.root.resolve())
+                        or entry.resolve().is_relative_to(flow.space.root.resolve() / ".mcp")):
                     continue
                 stat = entry.stat()
                 result.append(dict(path=entry.relative_to(flow.space.root).as_posix(),
@@ -330,6 +338,88 @@ def start_server(flow, *, host="127.0.0.1", port: int, token: str, allow_control
             raise RuntimeError("Open this device Control with lab_device_action first")
         return getattr(control, "presenter", control)
 
+    def live_handles():
+        # Resolve the existing objects each time; no second ownership registry.
+        result = {"experiment": (flow, None)}
+        if flow.devices is not None:
+            result["devices"] = (flow.devices.presenter, flow.devices)
+        if flow.console_presenter is not None:
+            result["console"] = (flow.console_presenter, flow.console)
+        for key, control in flow.device_controls.items():
+            target = getattr(control, "presenter", None)
+            if target is None and callable(getattr(control, "control_action", None)):
+                target = control
+            result[f"control:{key}"] = (target, getattr(target, "view", control))
+        return result
+
+    def public_methods(target):
+        # Only Python APIs declared by these application owners, not QObject
+        # internals, attributes, drivers, or arbitrary object traversal.
+        return {
+            name: getattr(target, name)
+            for cls in reversed(type(target).__mro__) if target is not None
+            for name, member in vars(cls).items()
+            if not name.startswith("_") and inspect.isfunction(member)
+            and name != "invoke_public"
+        }
+
+    def view_intents(view):
+        from PyQt5 import QtCore
+
+        if view is None or not isinstance(view, QtCore.QObject):
+            return {}
+        meta = view.metaObject()
+        result = {}
+        for index in range(QtCore.QObject.staticMetaObject.methodCount(), meta.methodCount()):
+            method = meta.method(index)
+            name = bytes(method.name()).decode()
+            if method.methodType() == QtCore.QMetaMethod.Signal and name.endswith(
+                ("_requested", "_committed", "_toggled", "_changed", "_edited", "_selected", "_picked")
+            ):
+                result[name] = {"signature": bytes(method.methodSignature()).decode(),
+                                "argument_types": [bytes(t).decode() for t in method.parameterTypes()]}
+        return result
+
+    def handle_snapshot(handle, target):
+        for name in ("control_state", "snapshot", "execution_snapshot"):
+            if name in public_methods(target):
+                return _control_plain(getattr(target, name)())
+        return state() if handle == "experiment" else None
+
+    @tool(annotations=read)
+    async def lab_handles() -> dict[str, object]:
+        """Discover the live experiment/Devices/Console/open Control handles. No new session is opened.
+        These are the actual application owners, not a second per-feature MCP action registry.
+        """
+        return await owner(lambda: {key: {"type": None if obj is None else type(obj).__name__,
+                                         "api_methods": len(public_methods(obj)),
+                                         "gui_intents": len(view_intents(view))}
+                                    for key, (obj, view) in live_handles().items()})
+
+    @tool(annotations=read)
+    async def lab_api(handle: str, method: str | None = None) -> dict[str, object]:
+        """Discover public API signatures/docstrings directly from a live owner, plus its real GUI intents.
+        Start with handle='devices'; its load/save/describe_type APIs work before Init. With no method this is
+        a compact method index; request a named method for arguments/docs. Parameters/schema come from the
+        application, not a separate MCP whitelist. Private attributes, raw drivers and Qt internals are not APIs.
+        """
+        def describe():
+            target, view = live_handles()[handle]
+            methods = public_methods(target)
+            if method is None:
+                return dict(handle=handle, methods=sorted(methods), gui_intents=view_intents(view),
+                            note="Use lab_call with explicit arguments; GUI intents may open dialogs. Prefer request_* asynchronous execution APIs.")
+            selected = methods[method]
+            signature = inspect.signature(selected)
+            return dict(handle=handle, method=method, signature=str(signature),
+                        doc=inspect.getdoc(selected) or "", parameters=[
+                            dict(name=p.name, kind=p.kind.name, required=p.default is inspect.Parameter.empty,
+                                 default=None if p.default is inspect.Parameter.empty else _control_plain(p.default),
+                                 annotation=None if p.annotation is inspect.Parameter.empty else str(p.annotation))
+                            for p in signature.parameters.values() if not p.name.startswith("_")
+                        ])
+        return await owner(describe)
+
     @tool(annotations=read)
     async def lab_editor_catalog(device_id: str) -> dict[str, object]:
         """Discover an opened Pulse/SLM editor's actions, IDs, units and parameter choices from its actual owner."""
@@ -343,6 +433,55 @@ def start_server(flow, *, host="127.0.0.1", port: int, token: str, allow_control
         return await owner(lambda: editor(device_id).control_state(details=details))
 
     if allow_control:
+        @tool()
+        async def lab_call(handle: str, method: str, arguments: dict[str, object],
+                           expected_revision: int | None = None) -> dict[str, object]:
+            """Call a public method on the actual GUI/business owner; discover it with lab_api first.
+            This also reaches new public application methods with no MCP-specific tool changes. Explicit path
+            arguments resolve inside this workspace; present=False is supplied when the method supports it.
+            Prefer asynchronous request_* APIs, not blocking hardware calls. Returns the method's real result
+            and available owner state, NOT a blanket success acknowledgement. None may mean only submission;
+            check pending/error/terminal state afterward. Never replay an uncertain write.
+            """
+            values = dict(arguments)
+            if any(name.startswith("_") for name in values):
+                raise ValueError("Private parameters are not part of the public API")
+            if "path" in values and values["path"] not in (None, ""):
+                values["path"] = str(workspace_path(str(values["path"])))
+            def invoke():
+                target, _view = live_handles()[handle]
+                selected = public_methods(target)[method]
+                signature = inspect.signature(selected)
+                if "present" in signature.parameters:
+                    values["present"] = False
+                signature.bind(**values)
+                if expected_revision is not None:
+                    current = handle_snapshot(handle, target)
+                    if not isinstance(current, dict) or current.get("revision") != expected_revision:
+                        raise ValueError("Owner revision changed or is unavailable; inspect state before editing")
+                dispatcher = getattr(target, "invoke_public", None)
+                result = dispatcher(method, values) if callable(dispatcher) else selected(**values)
+                return dict(handle=handle, method=method, result=_control_plain(result),
+                            state=handle_snapshot(handle, target))
+            return await owner(invoke)
+
+        @tool()
+        async def lab_intent(handle: str, intent: str, arguments: list[object]) -> dict[str, object]:
+            """Fallback: emit an existing public GUI Handle intent on the Qt owner, as the human UI does.
+            Discover actual signals/signatures through lab_api. This can open ordinary dialogs; prefer lab_call
+            with explicit path/value arguments. It is not arbitrary QWidget manipulation or Python execution.
+            Dispatch is not successful completion: inspect owner state/errors or the actual UI afterward.
+            """
+            def emit():
+                target, view = live_handles()[handle]
+                description = view_intents(view)[intent]
+                if len(arguments) != len(description["argument_types"]):
+                    raise ValueError(f"{intent} expects {len(description['argument_types'])} arguments")
+                getattr(view, intent).emit(*arguments)
+                return dict(dispatched=True, handle=handle, intent=intent,
+                            state=handle_snapshot(handle, target))
+            return await owner(emit)
+
         @tool()
         async def lab_editor_action(device_id: str, action: str, arguments: dict[str, object],
                                     expected_revision: int | None = None) -> dict[str, object]:
@@ -446,6 +585,7 @@ def start_server(flow, *, host="127.0.0.1", port: int, token: str, allow_control
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
         listener.bind((host, port))
+        port = int(listener.getsockname()[1])
         listener.listen(32)
         listener.setblocking(False)
         server = uvicorn.Server(uvicorn.Config(authorized, host=host, port=port,
@@ -482,4 +622,124 @@ def start_server(flow, *, host="127.0.0.1", port: int, token: str, allow_control
             future.cancel()
         return not thread.is_alive()
 
+    close.connection_info = {"url": f"http://{host}:{port}/mcp", "port": port,
+                             "workspace": str(flow.space.root.resolve()), "pid": os.getpid()}
     return close
+
+
+async def _stdio(workspace: Path) -> None:
+    """Connect an AI client to an existing experiment; never launch devices."""
+    import httpx2
+    from urllib.parse import urlsplit
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamable_http_client
+    from mcp.server import Server, NotificationOptions
+    from mcp.server.stdio import stdio_server
+    from mcp_types import Tool, ListToolsResult
+
+    workspace = workspace.resolve()
+    directory = workspace / ".mcp"
+    selected = None
+
+    def records():
+        for path in sorted(directory.glob("connection-*.json")):
+            try:
+                record = json.loads(path.read_text(encoding="utf-8"))
+                url = urlsplit(record["url"])
+                if (url.scheme != "http" or url.hostname != "127.0.0.1" or url.path != "/mcp"
+                        or Path(record["workspace"]).resolve() != workspace):
+                    continue
+                yield path.name, record
+            except (OSError, ValueError, KeyError, TypeError):
+                continue
+
+    async def remote(record, name=None, arguments=None, params=None, timeout=40):
+        # A transport session only, never an ExperimentSession. No retry of a
+        # tool call: a failed response can mean the operation already started.
+        async with httpx2.AsyncClient(headers={"Authorization": "Bearer " + record["token"]}, timeout=timeout) as http:
+            async with streamable_http_client(record["url"], http_client=http) as (read, write, *_):
+                async with ClientSession(read, write) as client:
+                    await client.initialize()
+                    if name is None:
+                        return await client.list_tools(params=params)
+                    return await client.call_tool(name, arguments or {}, read_timeout_seconds=timeout)
+
+    async def available():
+        async def check(filename, record):
+            item = {k: v for k, v in record.items() if k != "token"}
+            item["connection"] = filename
+            try:
+                reply = await remote(record, "lab_health", timeout=3)
+                health = reply.structured_content or {}
+                item["live"] = (not reply.is_error and health.get("service") == "running"
+                                and health.get("pid") == record["pid"]
+                                and Path(health.get("workspace", "")).resolve() == workspace)
+            except Exception as error:
+                item.update(live=False, error=str(error))
+            return item, record
+        return await asyncio.gather(*(check(name, record) for name, record in records()))
+
+    async def connect(filename=None):
+        nonlocal selected
+        candidates = [(item, record) for item, record in await available()
+                      if item["live"] and (filename is None or item["connection"] == filename)]
+        if len(candidates) != 1:
+            raise RuntimeError("No unique live experiment. Start experiment.bat, then use lab_connections and "
+                               "lab_connect(connection=<filename>) to choose the intended window.")
+        item, selected = candidates[0]
+        return item
+
+    read_hint = ToolAnnotations(read_only_hint=True, destructive_hint=False, open_world_hint=False)
+    connection_tools = [
+        Tool(name="lab_connections", description="List this workspace's local experiment endpoints and verify which are live. Never exposes credentials or starts hardware.",
+             input_schema={"type": "object", "properties": {}, "additionalProperties": False}, annotations=read_hint),
+        Tool(name="lab_connect", description="Attach this AI connection to one running experiment. With multiple windows choose the connection filename from lab_connections; no experiment is started or replayed.",
+             input_schema={"type": "object", "properties": {"connection": {"type": "string"}}, "additionalProperties": False}),
+    ]
+
+    async def list_tools(ctx, params):
+        try:
+            if selected is None:
+                await connect()
+            reply = await remote(selected, params=params)
+            return ListToolsResult(tools=[*connection_tools, *reply.tools], next_cursor=reply.next_cursor)
+        except Exception:
+            return ListToolsResult(tools=connection_tools)
+
+    async def call_tool(ctx, params):
+        try:
+            if params.name == "lab_connections":
+                result = {"workspace": str(workspace), "connections": [item for item, _ in await available()]}
+            elif params.name == "lab_connect":
+                result = await connect((params.arguments or {}).get("connection"))
+                await ctx.session.send_tool_list_changed()
+            else:
+                if selected is None:
+                    await connect()
+                return await remote(selected, params.name, params.arguments)
+            return CallToolResult(content=[TextContent(type="text", text=json.dumps(result, ensure_ascii=False))],
+                                  structured_content=result)
+        except Exception as error:
+            return CallToolResult(is_error=True, content=[TextContent(type="text", text=
+                f"{error}. No operation was replayed; inspect the experiment before retrying a write.")])
+
+    server = Server("ZLC current experiment", on_list_tools=list_tools, on_call_tool=call_tool,
+                    instructions="Connect to the existing experiment, not a new device session. If no experiment is "
+                    "running yet, keep this connection and use lab_connect after starting experiment.bat. "
+                    "Use lab_handles/lab_api/lab_call for public APIs missing from the shortcuts. Never replay an uncertain write.")
+    async with stdio_server() as (read, write):
+        await server.run(read, write, server.create_initialization_options(NotificationOptions(tools_changed=True)))
+
+
+def main(argv=None) -> int:
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Connect an MCP client to an already-running experiment.")
+    parser.add_argument("--workspace", type=Path, required=True)
+    arguments = parser.parse_args(argv)
+    asyncio.run(_stdio(arguments.workspace))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

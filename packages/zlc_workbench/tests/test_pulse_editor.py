@@ -3296,6 +3296,57 @@ def test_a_loaded_scan_file_is_checked_the_way_a_generated_one_is(presenter, tmp
         assert presenter.load_scan_array() is True, presenter.view.warnings
         assert presenter._state.scan_rows == authored
 
+    # The public API uses the same file/table owner and its existing workers,
+    # without the view's picker or a message dialog after the call returned.
+    worker, view = _DeviceWorker(), _EditorView()
+    api = PulseEditorPresenter(view, presenter.sequence, run_device_work=worker,
+                               run_safe_work=_run_preview_immediately, run_preview_work=worker)
+    view.ask_open_path = lambda *_args: pytest.fail("machine API opened a file picker")
+    view.show_warning = lambda text: pytest.fail(f"machine API opened a warning: {text}")
+    view.show_done = lambda text: pytest.fail(f"machine API opened a confirmation: {text}")
+    try:
+        assert api.invoke_public("load_scan_array", {"path": str(flat)}) is True
+        assert api.control_state()["pending"]
+        worker.deliver_until(lambda: not api.control_state()["pending"])
+        assert api.state.scan_rows == authored
+        destination = tmp_path / "explicit.npy"
+        assert api.invoke_public("save_scan_array", {"path": str(destination)}) is True
+        worker.deliver_until(lambda: not api.control_state()["pending"])
+        np.testing.assert_array_equal(np.load(destination), authored)
+        assert str(destination) in api.control_state()["scan"]["progress"]
+
+        program = tmp_path / "scan.py"
+        program.write_text("import numpy as np\nscan_table = np.array([[0.007], [0.008]])\n", encoding="utf-8")
+        assert api.invoke_public("load_scan_program", {"path": str(program)}) is True
+        worker.deliver_until(lambda: not api.control_state()["pending"])
+        assert api.invoke_public("run_scan_program", {}) is True
+        assert api.control_state()["scan"]["pending"]
+        worker.deliver_until(lambda: not api.control_state()["scan"]["pending"])
+        assert api.state.scan_rows == ((.007,), (.008,))
+        kept = api.state.scan_rows
+        api.invoke_public("edit_scan_source", {"source": "raise ValueError('bad API sweep')"})
+        assert api.invoke_public("run_scan_program", {}) is True
+        worker.deliver_until(lambda: not api.control_state()["scan"]["pending"])
+        assert "bad API sweep" in api.last_warning and api.state.scan_rows == kept
+        assert api.invoke_public("load_scan_array", {"path": str(tmp_path / "absent.npy")}) is True
+        worker.deliver_until(lambda: not api.control_state()["pending"])
+        assert "cannot read" in api.last_warning and api.state.scan_rows == kept
+        assert api.invoke_public("load_scan_array", {}) is False
+        assert api.invoke_public("ask_for_pulse", {}) is False
+
+        # A normal setter has no presentation flag: the invocation scope
+        # suppresses its existing warning and restores ordinary GUI messages.
+        before = api.sequence
+        args = {"period_id": before.periods[0].period_id, "value": "bad", "unit": "ms"}
+        api.invoke_public("set_duration", args)
+        assert api.sequence is before and api.last_warning
+        warnings = []
+        view.show_warning = warnings.append
+        api.set_duration(**args)
+        assert warnings, "ordinary GUI warning presentation was not restored"
+    finally:
+        api.close()
+
 
 def test_connecting_opens_a_pulse_and_names_which_board_answered() -> None:
     """The two halves of "I connected and cannot tell what happened".
@@ -4678,7 +4729,8 @@ def test_connect_hold_step_and_sync_run_on_the_device_worker(sequence) -> None:
         # refreshes nothing that would have rewritten it.
         assert view.summary.endswith("period(s)"), view.summary
 
-        view.scan_step_requested.emit(1)
+        assert presenter.invoke_public("step_scan_point", {"delta": 1}) is True
+        assert presenter._device_busy is True
         worker.deliver_until(lambda: not presenter._device_busy)
         assert presenter._held_point == 2
         assert board.events[-3:] == ["safe", "load", "fire forever"]

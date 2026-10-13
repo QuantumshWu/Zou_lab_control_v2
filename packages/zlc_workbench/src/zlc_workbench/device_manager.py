@@ -21,13 +21,14 @@ a temporary build-and-release test.
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Callable, Sequence
-from dataclasses import replace
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import asdict, replace
 from pathlib import Path
 from threading import Lock, Thread
 import logging
 import socket
 import time
+from typing import Any
 
 from zlc_atom.authoring import is_tunable
 from zlc_atom.install.configuration import (
@@ -259,6 +260,7 @@ class DeviceManagerPresenter:
         self._server_log = _server_log_buffer()
         self._active_config: InstallationConfig | None = None
         self._refresh_pending = False
+        self._last_status = {"text": "", "severity": "idle"}
         self._confirm_overwrite = confirm_overwrite
         self._connect()
         self.load(_use_initial=True)
@@ -395,6 +397,62 @@ class DeviceManagerPresenter:
 
         return bool(self.busy or self._refresh_pending)
 
+    def snapshot(self, *, details: bool = False) -> dict[str, Any]:
+        """Read the current apparatus draft, loaded devices and pending/error facts.
+
+        This performs no discovery or device I/O. Details includes the draft
+        and accepted loaded parameters; describe_type provides one Init schema.
+        Loading/editing the draft does not initialize or alter loaded devices.
+        """
+
+        session = self._active_session
+        loaded = {} if session is None else session.installation.devices
+        failures = {} if session is None else session.installation.failures
+        with self._scan_lock:
+            scanning = sorted(self._scan_pending)
+        draft = [item.to_dict() for item in self.devices]
+        accepted = [
+            item.to_dict() for item in (() if self._active_config is None else self._active_config.devices)
+            if item.instance_id in loaded
+        ]
+        if not details:
+            for item in (*draft, *accepted):
+                item.pop("parameters")
+        result = {
+            "path": str(self.path), "dirty": not self.saved, "path_unread": self._path_unread,
+            "draft": draft, "loaded": accepted, "busy": self.device_operation_active,
+            "closed": self._closed, "refresh_pending": self._refresh_pending,
+            "lifecycle": self._lifecycle_projection(), "scanning": scanning,
+            "discovered": [item.to_dict() for item in self.discovered],
+            "remoted": sorted(self._remoted),
+            "failures": {key: _one_line(error) for key, error in failures.items()},
+            "status": dict(self._last_status),
+            "error": self._last_status["text"] if self._last_status["severity"] == "error" else None,
+            "available_types": [
+                {"type_id": item.type_id, "domain": item.domain, "addable": item.addable}
+                for item in self.catalog.available
+            ],
+            "unavailable_types": [
+                {"family": item.family, "reason": item.reason} for item in self._unavailable
+            ],
+            "templates": list(installation_template_names()),
+        }
+        if details:
+            result["simulation"] = InstallationConfig((), simulation=self.simulation).to_dict()["simulation"]
+        return result
+
+    def describe_type(self, type_id: str) -> dict[str, Any]:
+        """Read one discovered device's Init fields, defaults, units and choices."""
+
+        descriptor = self.types[str(type_id)]
+        return {
+            "type_id": descriptor.type_id, "domain": descriptor.domain,
+            "addable": descriptor.addable, "capabilities": list(descriptor.capabilities),
+            "discoverable": descriptor.discover is not None,
+            "has_custom_control": descriptor.control_factory is not None,
+            "fields": [asdict(item) for item in descriptor.authoring_schema.fields],
+        }
+
     def new_from_template(self, name: str) -> bool:
         """Replace the local draft from a domain-owned installation template."""
 
@@ -408,7 +466,20 @@ class DeviceManagerPresenter:
         self._touch(f"new {name} apparatus draft")
         return True
 
-    def load_from_dialog(self) -> bool:
+    def load_from_dialog(
+        self, path: str | Path | None = None, *, present: bool = True,
+    ) -> bool:
+        """Load an explicit apparatus path, or choose it interactively.
+
+        With present=False an explicit path is required; no dialog is opened.
+        Like load(), this replaces only the apparatus draft, not live devices.
+        """
+
+        if path is not None:
+            return self.load(path)
+        if not present:
+            self._report("provide an apparatus path to load without a dialog", severity="warning")
+            return False
         ask = getattr(self.view, "ask_open_path", None)
         if not callable(ask):
             self._report("this window cannot choose an apparatus file", severity="warning")
@@ -591,6 +662,8 @@ class DeviceManagerPresenter:
 
 
     def add_discovered(self, instance_id: str) -> str:
+        """Copy one already-discovered device into the draft; no device is opened."""
+
         candidate = next(
             (item for item in self.discovered if item.instance_id == str(instance_id)),
             None,
@@ -608,6 +681,8 @@ class DeviceManagerPresenter:
         return candidate.instance_id
 
     def remove_device(self, instance_id: str) -> bool:
+        """Remove a draft row; Apply device changes separately reconciles live devices."""
+
         before = len(self.devices)
         self.devices = [
             item for item in self.devices if item.instance_id != str(instance_id)
@@ -659,13 +734,16 @@ class DeviceManagerPresenter:
             ),
         )
 
-    def commit_parameters(self, instance_id: str, _field: str = "") -> bool:
-        """Take what is in the form, in the types the device declared.
+    def commit_parameters(
+        self, instance_id: str, _field: str = "", *, values: Mapping[str, Any] | None = None,
+    ) -> bool:
+        """Patch explicit Init values, or take the GUI form, using the device schema.
 
         Whole-form rather than per-field: the schema validates a device's
         settings together -- an exposure that is legal alone can be illegal
         beside a readout speed -- so a half-applied form is not a state worth
-        being able to reach.
+        being able to reach. Explicit values merge into the current draft;
+        omitted values reads the form. This does not write to a loaded device.
         """
 
         current = self._device(instance_id)
@@ -676,7 +754,8 @@ class DeviceManagerPresenter:
             # The form edits a DRAFT; a still-empty required field must not
             # veto committing the fields that ARE filled.
             frozen = schema.draft_values(
-                dict(self.view.read_values(str(instance_id)))
+                dict(self.view.read_values(str(instance_id))) if values is None else
+                {**current.parameters, **values}
             )
         except Exception as error:
             self._report(f"{current.role}: {error}", severity="warning")
@@ -1353,20 +1432,25 @@ class DeviceManagerPresenter:
 
     # ------------------------------------------------------------------ saving
 
-    def save(self) -> str:
+    def save(self, path: str | Path | None = None, *, present: bool = True) -> str:
         """Write one structurally exact, plain-data apparatus document.
 
         InstallationConfig owns the file grammar: duplicate roles and values
         JSON cannot preserve are refused here.  Simulation semantics stay with
         the single world resolver and are checked by Init before device
         factories run; Workbench does not carry a second copy of that grammar.
+        An explicit path selects a Save As destination. present=False performs
+        no dialogs/confirmation callbacks; an unread existing target still
+        requires an explicit destination. Returns the written path or "".
         """
 
+        if path is not None:
+            return self.save_as(path, present=present)
         if self._path_unread and self.path.exists():
             # A draft over a rig file it was not read from (a --template, or
             # a file that failed to read): the operator names where it goes,
             # and the dialog asks before replacing anything.
-            return self.save_as()
+            return self.save_as(present=present)
         try:
             config = InstallationConfig(
                 tuple(self.devices), simulation=self.simulation
@@ -1376,6 +1460,7 @@ class DeviceManagerPresenter:
             return ""
         if (
             self.path.exists()
+            and present
             and self._confirm_overwrite is not None
             and not self._confirm_overwrite(str(self.path))
         ):
@@ -1395,20 +1480,28 @@ class DeviceManagerPresenter:
         self._report(f"saved {len(self.devices)} device(s) to {written.name}", severity="task")
         return str(written)
 
-    def save_as(self) -> str:
-        """Choose another plain apparatus JSON and make it the editing target."""
+    def save_as(self, path: str | Path | None = None, *, present: bool = True) -> str:
+        """Save to an explicit path, or choose a destination interactively.
 
-        ask = getattr(self.view, "ask_save_path", None)
-        if not callable(ask):
-            self._report("this window cannot choose where to save", severity="warning")
-            return ""
-        chosen = ask(
-            "Save apparatus as",
-            # The file being edited, name and all: "save as" starts from what
-            # you have, and an empty name box makes every save begin by typing.
-            str(self.path),
-            "Apparatus (*.json);;All files (*)",
-        )
+        present=False requires a path and never invokes the file picker or
+        overwrite callback. A failed save keeps the prior editing target.
+        """
+
+        chosen = path
+        if chosen is None:
+            if not present:
+                self._report("provide an explicit apparatus save path", severity="warning")
+                return ""
+            ask = getattr(self.view, "ask_save_path", None)
+            if not callable(ask):
+                self._report("this window cannot choose where to save", severity="warning")
+                return ""
+            chosen = ask(
+                "Save apparatus as",
+                # The file being edited, name and all: save as starts there.
+                str(self.path),
+                "Apparatus (*.json);;All files (*)",
+            )
         if not chosen:
             return ""
         target = Path(chosen)
@@ -1419,7 +1512,7 @@ class DeviceManagerPresenter:
         # The operator named this file, and the dialog asked before
         # replacing it.
         self._path_unread = False
-        written = self.save()
+        written = self.save(present=present)
         if not written:
             self.path, self._path_unread = previous
             self._show()
@@ -1564,10 +1657,13 @@ class DeviceManagerPresenter:
                 for item in self.discovered
             )
         )
+        self.view.set_lifecycle(**self._lifecycle_projection())
+
+    def _lifecycle_projection(self) -> dict[str, Any]:
         active = self._active_session is not None
         reconcile = active and self._active_differs()
-        self.view.set_lifecycle(
-            (
+        return dict(
+            text=(
                 "Refresh device views"
                 if self._refresh_pending
                 else "Apply device changes"
@@ -1627,6 +1723,7 @@ class DeviceManagerPresenter:
         idle, warning, task, error.
         """
 
+        self._last_status = {"text": str(text), "severity": str(severity)}
         self.view.show_status(str(text), str(severity))
 
     def close(self) -> bool:

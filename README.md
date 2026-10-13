@@ -73,31 +73,61 @@ bin\migrate_units.bat          one-shot rewrite of saved pulses to one unit
                                spelling (originals kept beside them)
 ```
 
-### Optional AI / MCP access
+### AI / MCP access
 
-MCP attaches to this same experiment window and Session; it never opens a
-second hardware connection. Install the optional transport with the **same
-Python used by the experiment**, then start it explicitly:
+Ordinary `bin/experiment.bat` starts local MCP control automatically. AI can
+connect later without restarting the experiment or adding launch flags.
+MCP attaches to this same window and Session; it never opens another hardware
+connection. MCP is a normal installation dependency; when updating an older
+installation, update using the **same Python used by the experiment**:
 
 ```powershell
-python -m pip install -c constraints.txt -e ".[mcp]"
-$env:ZLC_MCP_TOKEN = "replace-with-a-long-random-secret"
-.\bin\experiment.bat --mcp-port 18864
+python -m pip install -c constraints.txt -e .
+.\bin\experiment.bat
 ```
 
-Connect a Streamable HTTP MCP client to `http://127.0.0.1:18864/mcp`, with
-`Authorization: Bearer <the same secret>`. The service binds only loopback and
-rejects browser-origin requests. Do not put the secret in a tracked file.
+Configure an AI client's STDIO MCP connection once: command is the experiment's
+Python executable, arguments are `-m zou_lab_control mcp --workspace <absolute workspace>`.
+The connector discovers the current experiment endpoint and credential; it does
+not start devices. It can be opened before the experiment: use `lab_connect`
+after launching the GUI. If multiple windows share the workspace, use
+`lab_connections` and select the intended connection filename explicitly.
+
+Direct Streamable HTTP clients can instead use the URL and token in the local
+`workspace/.mcp/connection-<pid>-<port>.json` file. Default port is 18864, with an
+available port allocated if occupied. An explicit `--mcp-port` is never silently
+changed. Each listener has its own generated credential unless `ZLC_MCP_TOKEN`
+is set; normal exit removes its connection file. Old crash files are not proof
+of a running server. The connector authenticates and checks process/workspace
+identity before selecting an endpoint. These local credentials are ignored by
+Git and are not exposed as experiment artifacts. The service binds only
+loopback and rejects browser-origin requests.
 Use a client tool/HTTP timeout of at least 40 seconds when using `lab_wait`
 (its bounded wait is at most 30 seconds); do not turn transport timeouts into
 automatic write retries. Keep the client connection/session for repeated use.
-With no flag there is no listener or MCP dependency loaded. The command above
-allows AI to operate the experiment by default; add **`--mcp-read-only`** only
-when observation without control is wanted. This is
+Add **`--mcp-read-only`** when observation without control is wanted, or
+`--no-mcp` to disable the listener. `--check` does not start MCP. A listener
+startup failure is reported without closing the human experiment GUI. This is
 trusted experiment access, not a Python sandbox: existing plugin expressions
 retain their ordinary capabilities. Hardware limits, ownership and normal
 manual confirmations still apply. The MCP client does not get an independent
 device owner or permission to bypass them.
+
+- `lab_handles` discovers the current application owners and opened Controls.
+  `lab_api(handle)` lists their public methods and actual GUI intents;
+  `lab_api(handle, method)` reads that method's real signature and documentation.
+  `lab_call(handle, method, arguments)` invokes it on the existing Qt owner.
+  New public owner methods are discoverable without adding another MCP action
+  list. For example, `handle="devices", method="load", arguments={"path":"apparatus.json"}`
+  loads the same apparatus draft as the GUI. It does not initialize devices.
+  Use `snapshot` and `describe_type` to inspect the Devices draft and schema.
+  Private attributes, raw drivers and QObject internals are not exposed.
+- `lab_intent` is a fallback for existing public GUI Handle signals, discovered
+  from the actual handle rather than another command registry. It can open
+  normal dialogs, so prefer public methods accepting explicit paths/values.
+  A missing shortcut is not a missing application capability: use these APIs
+  first, or the real GUI when necessary. The following tools are convenient
+  shortcuts, not an exhaustive permission or feature list.
 
 - `lab_state`: one compact overview of current nodes, signals, panels, errors
   and readiness. Use `node_id`/`panel_id` for focused follow-ups,

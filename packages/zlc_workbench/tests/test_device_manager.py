@@ -344,7 +344,7 @@ def test_a_frame_shape_is_edited_as_one_fact(manager) -> None:
     assert manager.devices[0].parameters["frame_shape_yx"] == (64, 96)
 
 
-def test_save_and_reopen_preserve_devices_and_root_simulation(manager, tmp_path) -> None:
+def test_save_and_reopen_preserve_devices_and_root_simulation(manager, tmp_path, monkeypatch) -> None:
     """Device forms and the hand-edited root mapping survive one save/reopen."""
 
     manager.view.device_add_requested.emit("camera.virtual")
@@ -370,6 +370,42 @@ def test_save_and_reopen_preserve_devices_and_root_simulation(manager, tmp_path)
     assert reopened_manager.close()
     # Plain data, readable without any zlc_ package.
     assert json.loads(written.read_text(encoding="utf-8"))["format"] == "zlc.installation"
+
+    def no_dialog_or_form_read(*_args):
+        raise AssertionError("the explicit API must not ask the GUI")
+
+    monkeypatch.setattr(manager.view, "read_values", no_dialog_or_form_read)
+    monkeypatch.setattr(manager.view, "ask_open_path", no_dialog_or_form_read, raising=False)
+    monkeypatch.setattr(manager.view, "ask_save_path", no_dialog_or_form_read, raising=False)
+    monkeypatch.setattr(manager, "_confirm_overwrite", no_dialog_or_form_read)
+    assert manager.commit_parameters("camera", values={"exposure_seconds": 0.03})
+    original_parameters = manager.devices[0].to_dict()["parameters"]
+    assert not manager.commit_parameters("camera", values={"exposure_seconds": -1})
+    assert manager.devices[0].to_dict()["parameters"] == original_parameters
+    snapshot = manager.snapshot(details=True)
+    assert snapshot["draft"][0]["parameters"]["exposure_seconds"] == 0.03
+    assert snapshot["loaded"] == [] and snapshot["dirty"]
+    schema = manager.describe_type("camera.virtual")
+    assert {item["name"] for item in schema["fields"]} == set(original_parameters)
+    json.dumps(snapshot, allow_nan=False)
+    json.dumps(schema, allow_nan=False)
+
+    copied = tmp_path / "selected-apparatus.json"
+    assert manager.save_as(copied.with_suffix(""), present=False) == str(copied)
+    assert manager.save(present=False) == str(copied), "save must not call overwrite confirmation"
+    assert manager.load_from_dialog(written, present=False)
+    assert manager.devices[0].parameters["exposure_seconds"] != 0.03
+    assert not manager.load_from_dialog(present=False)
+    assert not manager.save_as(present=False)
+    assert manager.path == written
+    assert manager.save(copied, present=False) == str(copied)
+    # Refused Save As cannot leave the next ordinary Save aimed at its target.
+    manager.set_role("sequencer", "camera")
+    rejected = tmp_path / "invalid-apparatus.json"
+    assert manager.save_as(rejected, present=False) == ""
+    assert manager.path == copied and not rejected.exists()
+    assert "duplicate device role" in manager.snapshot()["error"]
+    assert len(manager.snapshot()["draft"]) == 2, "an incomplete draft stays inspectable"
 
 
 def test_an_edited_value_comes_back_in_the_type_its_device_declared() -> None:
@@ -487,6 +523,8 @@ def test_installation_missing_required_fields_is_reported(tmp_path) -> None:
     presenter.add_device("camera.virtual")
     assert presenter.save() == ""
     assert "where to save" in view.status[-1][1]
+    assert presenter.save(present=False) == ""
+    assert "explicit apparatus save path" in presenter.snapshot()["status"]["text"]
     assert path.read_text(encoding="utf-8") == before
     del presenter
 
@@ -619,12 +657,19 @@ def test_init_holds_the_exact_session_until_explicit_shutdown(tmp_path, caplog) 
     assert candidates == [initial]
     assert manager._active_session is session
     assert initialized == [session]
+    assert manager.snapshot()["loaded"] == [
+        {"instance_id": "camera", "role": "camera", "type_id": "camera.virtual"}
+    ]
     assert shut_down == [], "Init must retain the session for both experiment windows"
     assert view.lifecycle[:3] == ("Shutdown devices", True, True)
 
     manager.set_role("camera", "camera_edited")
     assert view.lifecycle[:3] == ("Apply device changes", True, True)
     assert view.lifecycle[4] is True
+    state = manager.snapshot(details=True)
+    assert state["draft"][0]["role"] == "camera_edited"
+    assert state["loaded"][0]["role"] == "camera"
+    assert state["lifecycle"]["text"] == view.lifecycle[0]
     manager.set_role("camera", "camera")
     assert view.lifecycle[:3] == ("Shutdown devices", True, True)
 
@@ -632,11 +677,13 @@ def test_init_holds_the_exact_session_until_explicit_shutdown(tmp_path, caplog) 
     assert manager._active_session is session
     assert shut_down == []
     assert "device handle refused release" in view.status[-1][1]
+    assert "device handle refused release" in manager.snapshot()["error"]
     assert any(record.exc_info and isinstance(record.exc_info[1], BaseExceptionGroup)
                for record in caplog.records)
     manager.toggle_lifecycle()
     assert manager._active_session is None
     assert shut_down == [session]
+    assert manager.snapshot()["loaded"] == [] and manager.snapshot()["error"] is None
     assert view.lifecycle[:3] == ("Init devices", True, False)
 
     manager.shutdown_active()

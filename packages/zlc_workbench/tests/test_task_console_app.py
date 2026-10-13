@@ -745,6 +745,95 @@ def test_a_missing_apparatus_says_how_to_start_anyway(workspace) -> None:
     completed = _run(workspace, "--check")
     assert completed.returncode == 2
     assert "template='virtual'" in completed.stderr
+    assert not (workspace / ".mcp").exists()
+
+
+def test_main_publishes_only_its_live_mcp_connection_and_keeps_gui_on_conflict(workspace) -> None:
+    """The normal launcher is connectable without flags or an environment token."""
+
+    script = r'''
+import errno, json, os, socket, threading, time, traceback
+from pathlib import Path
+from PyQt5 import QtCore
+from zlc_ui import ensure_qt_app
+from zlc_workbench.apps import task_console as app_module
+application = ensure_qt_app([])
+space = Path(WORKSPACE)
+original_create = app_module.create_experiment_flow
+errors = []
+seen = []
+scenario = ""
+
+def create(**kwargs):
+    flow = original_create(**kwargs)
+    def inspect_and_close():
+        try:
+            assert flow.devices.is_visible()
+            assert flow.session is None, "MCP startup must not initialize hardware"
+            files = list((space / ".mcp").glob("connection-*.json"))
+            if scenario in {"default", "read-only"}:
+                assert len(files) == 1, files
+                info = json.loads(files[0].read_text(encoding="utf-8"))
+                assert info["pid"] == os.getpid()
+                assert Path(info["workspace"]) == space
+                assert info["url"] == f"http://127.0.0.1:{info['port']}/mcp"
+                assert info["control_enabled"] is (scenario == "default")
+                assert len(info["token"]) >= 32
+                if scenario == "default":
+                    assert info["token"] == "mcp-launch-credential-not-for-log"
+                    assert info["port"] != 18864
+                with socket.create_connection(("127.0.0.1", info["port"]), timeout=2):
+                    pass
+                seen.append(info)
+            else:
+                assert files == [], files
+        except BaseException:
+            errors.append(traceback.format_exc())
+        finally:
+            assert flow.close()
+            application.quit()
+    QtCore.QTimer.singleShot(0, inspect_and_close)
+    return flow
+
+app_module.create_experiment_flow = create
+reserved = socket.socket()
+reserved.bind(("127.0.0.1", 0)); reserved.listen()
+default_busy = socket.socket()
+try:
+    default_busy.bind(("127.0.0.1", 18864)); default_busy.listen()
+except OSError as error:
+    default_busy.close()
+    if error.errno != errno.EADDRINUSE and getattr(error, "winerror", None) != 10048:
+        raise
+try:
+    for scenario, extra in (
+        ("default", []),
+        ("read-only", ["--mcp-read-only", "--mcp-port", "0"]),
+        ("disabled", ["--no-mcp"]),
+        ("conflict", ["--mcp-port", str(reserved.getsockname()[1])]),
+    ):
+        if scenario == "default":
+            os.environ["ZLC_MCP_TOKEN"] = "mcp-launch-credential-not-for-log"
+        else:
+            os.environ.pop("ZLC_MCP_TOKEN", None)
+        assert app_module.main(["--workspace", str(space), "--template", "virtual", *extra]) == 0
+        assert not list((space / ".mcp").glob("connection-*.json"))
+        deadline = time.monotonic() + 3
+        while any(t.name == "zlc-mcp" for t in threading.enumerate()) and time.monotonic() < deadline:
+            application.processEvents(); time.sleep(.01)
+        assert not any(t.name == "zlc-mcp" for t in threading.enumerate())
+        assert not errors, "\n".join(errors)
+    assert seen[0]["token"] != seen[1]["token"]
+    print("normal MCP startup/readonly/disabled/conflict/cleanup passed")
+finally:
+    reserved.close(); default_busy.close()
+'''.replace("WORKSPACE", repr(str(workspace)))
+    completed = _run_script(script, timeout=90)
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert "normal MCP startup/readonly/disabled/conflict/cleanup passed" in completed.stdout
+    assert "MCP could not start" in completed.stderr
+    assert "The experiment GUI remains available" in completed.stderr
+    assert "mcp-launch-credential-not-for-log" not in completed.stdout + completed.stderr
 
 def test_the_figure_viewer_starts_without_an_archive() -> None:
     completed = _run_app("figure_viewer", ["--check"])
@@ -1969,6 +2058,9 @@ with socket.socket() as held:
     port = held.getsockname()[1]
 url = f"http://127.0.0.1:{port}/mcp"
 close_mcp = start_server(flow, port=port, token="virtual-test")
+def future_public_probe(self, note: str):
+    return {"note": note}
+type(flow.devices.presenter).future_public_probe = future_public_probe
 block_owner, owner_blocked = Event(), Event()
 
 async def client():
@@ -1985,6 +2077,20 @@ async def client():
                     assert result.structured_content is not None
                     return result.structured_content
                 assert not (await call("lab_state"))["session_open"]
+                assert "devices" in await call("lab_handles")
+                methods = (await call("lab_api", {"handle":"devices"}))["methods"]
+                assert "load" in methods and "future_public_probe" in methods
+                probe = await call("lab_call", {"handle":"devices", "method":"future_public_probe", "arguments":{"note":"no MCP registration"}})
+                assert probe["result"] == {"note":"no MCP registration"}
+                await call("lab_intent", {"handle":"devices", "intent":"role_committed", "arguments":["camera","Camera QA"]})
+                assert next(d for d in (await call("lab_state"))["devices"] if d["instance_id"] == "camera")["role"] == "Camera QA"
+                saved = await call("lab_call", {"handle":"devices", "method":"save_as", "arguments":{"path":"apparatus-api.json"}})
+                assert saved["result"]
+                await call("lab_call", {"handle":"devices", "method":"remove_device", "arguments":{"instance_id":"slm"}})
+                loaded = await call("lab_call", {"handle":"devices", "method":"load", "arguments":{"path":"apparatus-api.json"}})
+                assert loaded["result"] is True and not loaded["state"]["dirty"]
+                private = await c.call_tool("lab_call", {"handle":"devices", "method":"_show", "arguments":{}})
+                assert private.is_error
                 assert (await call("lab_initialize"))["accepted"]
                 for _ in range(100):
                     state = await call("lab_state")
@@ -2058,6 +2164,27 @@ async def client():
                 invalid = await c.call_tool("lab_signal", {"signal":"missing"})
                 assert invalid.is_error
                 assert "No publication" in str(invalid.content)
+                # The standard stdio connector discovers this exact live GUI;
+                # it does not create or initialize another experiment.
+                import json, os, sys
+                from pathlib import Path
+                from mcp import StdioServerParameters
+                from mcp.client.stdio import stdio_client
+                folder = Path(WORKSPACE) / ".mcp"
+                folder.mkdir(exist_ok=True)
+                connection = dict(close_mcp.connection_info, token="virtual-test", control_enabled=True)
+                connection_path = folder / "connection-test.json"
+                connection_path.write_text(json.dumps(connection), encoding="utf-8")
+                code = ("import sys, zou_lab_control, zlc_workbench; "
+                        "print(zou_lab_control.__file__, zlc_workbench.__file__, file=sys.stderr); "
+                        "from zlc_workbench.apps.mcp import main; main(['--workspace'," + repr(WORKSPACE) + "])")
+                async with stdio_client(StdioServerParameters(command=sys.executable, args=["-c",code], env=dict(os.environ))) as (sr, sw):
+                    async with ClientSession(sr, sw) as forwarded:
+                        await forwarded.initialize()
+                        assert "lab_call" in {t.name for t in (await forwarded.list_tools()).tools}
+                        via_stdio = await forwarded.call_tool("lab_call", {"handle":"devices", "method":"snapshot", "arguments":{}})
+                        assert not via_stdio.is_error and via_stdio.structured_content["result"]["loaded"]
+                connection_path.unlink()
                 # A frozen owner must not execute an old queued write after
                 # the client was explicitly told it timed out/cancelled.
                 block_owner.set()

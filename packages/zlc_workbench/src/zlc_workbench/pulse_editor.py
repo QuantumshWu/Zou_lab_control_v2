@@ -1184,6 +1184,7 @@ class PulseEditorPresenter:
         self.pulses_directory = str(pulses_directory)
         self.revision = 0
         self.last_warning = ""
+        self._present_messages = True
         self._control_validation: dict[str, object] | None = None
         self._make_preview = make_preview
         # How an existing preview takes new data.  Without one the host is
@@ -1342,6 +1343,32 @@ class PulseEditorPresenter:
             "last_warning": self.last_warning,
         }
 
+    def invoke_public(self, method: str, arguments: Mapping[str, Any] | None = None) -> object:
+        """Call one public API without synchronous message dialogs.
+
+        Uses the original method and return value, not an action registry.
+        Methods offering ``present`` receive False; their asynchronous
+        callbacks must retain that argument. Inspect normal state/error
+        channels after submission. Supply explicit paths for file operations.
+        Prefer ``request_fire`` over the synchronous notebook ``fire`` API.
+        """
+        from inspect import signature
+
+        if method.startswith("_") or method == "invoke_public":
+            raise ValueError("choose a public Pulse API method")
+        target = getattr(self, method)
+        if not callable(target):
+            raise TypeError(f"{method!r} is not a callable Pulse API")
+        values = dict(arguments or {})
+        if "present" in signature(target).parameters:
+            values["present"] = False
+        previous = self._present_messages
+        self._present_messages = False
+        try:
+            return target(**values)
+        finally:
+            self._present_messages = previous
+
     def control_catalog(self) -> dict[str, object]:
         """Describe the existing editor gestures, using this pulse's identities."""
         sequence = self.sequence
@@ -1429,7 +1456,8 @@ class PulseEditorPresenter:
             )
         result["validation"] = validation
         result["scan"] = {"rows": len(self._state.scan_rows), "repeats": self._state.scan_repeats,
-                          "source_dirty": self._state.scan_source_dirty}
+                          "source_dirty": self._state.scan_source_dirty,
+                          "pending": self._scan_running, "progress": self._scan_progress}
         result["config"] = {"draft_path": self._config_path, "draft_dirty": self._config_dirty(),
                             "active_path": self._active_config_path(),
                             "enabled": bool(sequence is not None and sequence.config_enabled),
@@ -1528,14 +1556,14 @@ class PulseEditorPresenter:
             if action == "open":
                 if self.dirty and arguments.get("discard_changes") is not True:
                     raise ValueError("Pulse has unsaved changes; save it or explicitly pass discard_changes=true to replace the draft")
-                accepted = self.open_pulse(str(arguments["path"]), present=False)
+                accepted = self.open_pulse(str(arguments["path"]), present=False,
+                                           discard_changes=arguments.get("discard_changes") is True)
             elif action == "save":
                 accepted = bool(self.save_pulse(str(arguments["path"]), present=False))
             elif action == "validate":
                 accepted = self._validate_control()
             elif action == "fire":
-                self.request_fire(present=False)
-                accepted = not bool(self.last_warning)
+                accepted = self.request_fire(present=False)
             elif action == "stop":
                 self.stop(present=False)
                 accepted = not bool(self.last_warning)
@@ -1589,7 +1617,8 @@ class PulseEditorPresenter:
                 if action == "config.load":
                     if self._config_dirty() and arguments.get("discard_changes") is not True:
                         raise ValueError("Config has unsaved changes; save it or explicitly pass discard_changes=true to replace the draft")
-                    accepted = self.load_config_values(str(arguments["path"]), present=False)
+                    accepted = self.load_config_values(str(arguments["path"]), present=False,
+                                                      discard_changes=arguments.get("discard_changes") is True)
                 elif action == "config.save":
                     accepted = self.save_config_values(path=str(arguments["path"]), present=False)
                 else:
@@ -1843,6 +1872,8 @@ class PulseEditorPresenter:
                 else:
                     key = str(payload)
                     current = next(c for c in self.sequence.components if c.component_id == key)
+                    if path is None and not present:
+                        raise ValueError("supply path explicitly when choosing a Subpulse source")
                     path = path if path is not None else self.view.ask_open_path(
                         "Choose Subpulse source", current.config_path or self.pulses_directory,
                         "ZLC Subpulse (*.subpulse.json *.json);;All files (*)",
@@ -1885,6 +1916,8 @@ class PulseEditorPresenter:
                 if not self._discard_subpulse_edits(present=present, discard_changes=discard_changes):
                     return False
                 if action == "open":
+                    if path is None and not present:
+                        raise ValueError("supply path explicitly when opening a Subpulse")
                     chosen = path if path is not None else self.view.ask_open_path(
                         "Open Subpulse", self._subpulse_path or self.pulses_directory,
                         "ZLC Subpulse (*.subpulse.json *.json);;All files (*)",
@@ -1917,6 +1950,8 @@ class PulseEditorPresenter:
                     raise ValueError("create or open a Subpulse first")
                 target = path if path is not None else self._subpulse_path if not context and action == "save" else ""
                 if not target:
+                    if not present:
+                        raise ValueError("supply path explicitly when saving or exporting a Subpulse")
                     target = self.view.ask_save_path(
                         "Save Subpulse", str(Path(self.pulses_directory or ".") / f"{fragment.name}.subpulse.json"),
                         "ZLC Subpulse (*.subpulse.json *.json);;All files (*)",
@@ -1944,6 +1979,8 @@ class PulseEditorPresenter:
                     self.view.set_summary(f"saved Subpulse {path.name}")
             elif action in {"insert", "insert_file"}:
                 if action == "insert_file":
+                    if path is None and not present:
+                        raise ValueError("supply path explicitly when inserting a Subpulse file")
                     chosen = path if path is not None else self.view.ask_open_path(
                         "Insert Subpulse", self.pulses_directory,
                         "ZLC Subpulse (*.subpulse.json *.json);;All files (*)",
@@ -2118,8 +2155,8 @@ class PulseEditorPresenter:
         view.scan_source_edited.connect(self._guarded(self.edit_scan_source))
         view.feedback_requested.connect(self._guarded(self._warn))
         view.scan_repeats_committed.connect(self._guarded(self.set_scan_repeats))
-        view.scan_hold_requested.connect(self._guarded(self._hold_from_view))
-        view.scan_step_requested.connect(self._guarded(self._step_from_view))
+        view.scan_hold_requested.connect(self._guarded(self.hold_scan_point))
+        view.scan_step_requested.connect(self._guarded(self.step_scan_point))
         view.scan_program_load_requested.connect(self._guarded(self.load_scan_program))
         view.scan_template_requested.connect(self._guarded(self.write_scan_template))
         view.scan_run_requested.connect(self._guarded(self.run_scan_program))
@@ -2163,6 +2200,9 @@ class PulseEditorPresenter:
         assembled differently from the one that will fire.
         """
 
+        if not self._present_messages:
+            self._warn("Use open_pulse(path=..., discard_changes=...) for a machine file request", present=False)
+            return False
         # Asked BEFORE the dialog, as Config's Load asks: choosing a file and
         # then being told the edits on screen would go wastes the choice.
         if not self._discard_pulse_edits():
@@ -2176,7 +2216,7 @@ class PulseEditorPresenter:
             return False
         return self.open_pulse(chosen)
 
-    def open_pulse(self, path: str, *, present: bool = True) -> bool:
+    def open_pulse(self, path: str, *, present: bool = True, discard_changes: bool = False) -> bool:
         """Replace what is being edited with one ``zlc.pulse`` JSON file.
 
         Attached, a pulse written for other wiring is moved onto the board
@@ -2186,6 +2226,9 @@ class PulseEditorPresenter:
         """
 
         self.last_warning = ""
+        if not present and self.dirty and not discard_changes:
+            self._warn("Pulse has unsaved changes; save it or explicitly pass discard_changes=true to replace the draft", present=False)
+            return False
         try:
             candidate = read_pulse(path)
         except Exception as error:
@@ -2245,8 +2288,13 @@ class PulseEditorPresenter:
     def _config_dirty(self) -> bool:
         return self._config_rows != self._config_saved_rows
 
-    def _discard_config_edits(self) -> bool:
-        return not self._config_dirty() or self.view.confirm_config_discard()
+    def _discard_config_edits(self, *, present: bool = True, discard_changes: bool = False) -> bool:
+        if not self._config_dirty() or discard_changes:
+            return True
+        if not present:
+            self._warn("Config has unsaved changes; save it or explicitly pass discard_changes=true to replace the draft", present=False)
+            return False
+        return self.view.confirm_config_discard()
 
     def _discard_pulse_edits(self) -> bool:
         """Whether the pulse on screen may be replaced, asked only when it
@@ -2258,14 +2306,15 @@ class PulseEditorPresenter:
 
         return self._state == self._saved_state or self.view.confirm_pulse_discard()
 
-    def new_config(self) -> None:
-        if not self._discard_config_edits():
-            return
+    def new_config(self, *, present: bool = True, discard_changes: bool = False) -> bool:
+        if not self._discard_config_edits(present=present, discard_changes=discard_changes):
+            return False
         if self._config_path or self._config_rows:
             self.revision += 1
         self._config_path = ""
         self._config_rows = self._config_saved_rows = ()
         self._refresh_config_page()
+        return True
 
     def edit_config_entries(self, rows: object) -> None:
         candidate = tuple(tuple(str(v) for v in row) for row in rows)
@@ -2380,8 +2429,12 @@ class PulseEditorPresenter:
         delivered(values, None)
         return True
 
-    def load_config_values(self, path: str | None = None, *, present: bool = True) -> bool:
-        if path is None and not self._discard_config_edits():
+    def load_config_values(self, path: str | None = None, *, present: bool = True,
+                           discard_changes: bool = False) -> bool:
+        if path is None and not present:
+            self._warn("load_config_values requires an explicit path", present=False)
+            return False
+        if (path is None or not present) and not self._discard_config_edits(present=present, discard_changes=discard_changes):
             return False
         directory = self._config_values_directory()
         chosen = path if path is not None else self.view.ask_open_path(
@@ -2391,15 +2444,15 @@ class PulseEditorPresenter:
             return False
         return self._config_file_operation(str(Path(chosen).resolve()), present=present)
 
-    def refresh_config_values(self) -> bool:
-        if not self._config_path or not self._discard_config_edits():
+    def refresh_config_values(self, *, present: bool = True, discard_changes: bool = False) -> bool:
+        if not self._config_path or not self._discard_config_edits(present=present, discard_changes=discard_changes):
             return False
         return self._config_file_operation(
-            self._config_path, activate=self._config_path == self._active_config_path(),
+            self._config_path, activate=self._config_path == self._active_config_path(), present=present,
         )
 
-    def unload_config(self) -> bool:
-        return self._config_file_operation("", load_draft=False)
+    def unload_config(self, *, present: bool = True) -> bool:
+        return self._config_file_operation("", load_draft=False, present=present)
 
     def save_config_values(self, *, save_as: bool = False, path: str | None = None,
                            present: bool = True) -> bool:
@@ -2420,6 +2473,9 @@ class PulseEditorPresenter:
             entries[key] = (value, unit.strip())
         target = self._config_path if path is None else path
         if path is None and (save_as or not target):
+            if not present:
+                self._warn("save_config_values requires an explicit path for this file", present=False)
+                return False
             directory = self._config_values_directory()
             target = self.view.ask_save_path(
                 "Save Config", target or str((directory or Path.cwd()) / CURRENT_CONFIG_VALUES),
@@ -3649,31 +3705,34 @@ class PulseEditorPresenter:
             source = resolve_scan_point(source)
         return source
 
-    def request_fire(self, *, present: bool = True) -> None:
-        """Submit the same nonblocking On Pulse action as the editor button."""
+    def request_fire(self, *, present: bool = True) -> bool:
+        """Submit the same nonblocking On Pulse action as the editor button.
+
+        True is acceptance, not completion. Inspect control_state pending,
+        board facts and last_warning; never retry an uncertain Fire.
+        """
         self.last_warning = ""
         if not self._check_bracket(present=present):
-            return
+            return False
         if self._run_device_work is None:
-            self.fire(present=present)
-            return
+            return self.fire(present=present)
         if not self._device_available(present=present):
-            return
+            return False
         if self.sequence is None:
             self._warn("no pulse is open", present=present)
-            return
+            return False
         sequencer = self.sequencer
         if sequencer is None:
             self._warn("this editor is not connected to a sequencer", present=present)
-            return
+            return False
         authored_revision = self.revision
         try:
             source, rows, sweeps = self._execution_request()
         except Exception as error:
             self._warn(f"cannot load this pulse: {error}", present=present)
-            return
+            return False
         if not self._acquire_command(present=present):
-            return
+            return False
         finite = bool(source.run_repeats and sweeps)
         previous_run = self._finite_run
         self._finite_run = None
@@ -3728,7 +3787,7 @@ class PulseEditorPresenter:
                 self._warn(message, present=present)
             self._render_run_state()
 
-        self._run_device_command(work, delivered, summary="Starting...", finite_run=finite)
+        return self._run_device_command(work, delivered, summary="Starting...", finite_run=finite)
 
     def _device_available(self, *, present: bool = True) -> bool:
         if self._preview_close_requested:
@@ -3876,7 +3935,9 @@ class PulseEditorPresenter:
         return True
 
     def fire(self, *, present: bool = True) -> bool:
-        """On Pulse: load what is on screen and run it the way the pulse says.
+        """Synchronous notebook API; GUI/automation should use request_fire.
+
+        Load what is on screen and run it the way the pulse says.
 
         ``run_repeats`` belongs to the Pulse and repeats the complete timeline
         at one scan point.  ``scan_repeats`` belongs to the armed table and
@@ -4523,6 +4584,9 @@ class PulseEditorPresenter:
         if self.sequence is None:
             self._warn("there is no pulse to save", present=present)
             return ""
+        if path is None and not present:
+            self._warn("save_pulse requires an explicit path", present=False)
+            return ""
         start = self.path or str(
             Path(self.pulses_directory or "") / f"{self.sequence.name or 'pulse'}.json"
         )
@@ -4720,7 +4784,7 @@ class PulseEditorPresenter:
         self._edit_state(**state_changes)
         self.refresh()
 
-    def _has_scan_slots(self) -> bool:
+    def _has_scan_slots(self, *, present: bool = True) -> bool:
         """Whether anything is bound, and say what to do when nothing is.
 
         A scan table has one column per bound field, so with nothing bound
@@ -4733,11 +4797,11 @@ class PulseEditorPresenter:
             if self.sequence is not None and resolve_subpulse_sources(self.sequence).scan_bindings:
                 return True
         except (ValueError, OSError) as error:
-            self._warn(str(error))
+            self._warn(str(error), present=present)
             return False
         self._warn(
             "bind at least one field to a scan slot first "
-            "(click a dot in the Edit tab)"
+            "(click a dot in the Edit tab)", present=present
         )
         return False
 
@@ -4810,26 +4874,28 @@ class PulseEditorPresenter:
 
         return scan_table_template(kind, scan_columns_for(self.sequence))
 
-    def write_scan_template(self, kind: str) -> None:
+    def write_scan_template(self, kind: str, *, present: bool = True) -> bool:
         """Replace the authored source with a starter program for these slots."""
 
         # The same question the run path asks, asked here too: a starter
         # program for zero bound slots can only be written by inventing one.
-        if not self._has_scan_slots():
-            return
+        if not self._has_scan_slots(present=present):
+            return False
         self._edit_state(
             scan_source=self._template(str(kind)),
             scan_source_dirty=True,
         )
         self._refresh_scan_page()
+        return True
 
-    def edit_scan_source(self, source: str) -> None:
+    def edit_scan_source(self, source: str) -> bool:
         """Accept each text edit immediately into the sole authoring state."""
 
         self._edit_state(scan_source=str(source), scan_source_dirty=True)
         self._refresh_scan_page()
+        return True
 
-    def run_scan_program(self) -> bool:
+    def run_scan_program(self, *, present: bool = True) -> bool:
         """Execute the scan program and keep the table it produced.
 
         The program is experiment code the operator just typed, run in this
@@ -4843,10 +4909,11 @@ class PulseEditorPresenter:
         point at a time, holds that worker and not the event loop: Stop still
         answers, and in the editor bound to a console every console panel
         does too.  Without a worker (a notebook) it runs here and is answered
-        before this returns; with one, True means it was started.
+        before this returns; with one, True means it was started. Inspect
+        control_state()['scan'] for pending/progress and last_warning for errors.
         """
 
-        if self.sequence is None or not self._has_scan_slots():
+        if self.sequence is None or not self._has_scan_slots(present=present):
             return False
         source = self._state.scan_source
         fields = self._scan_fields()
@@ -4855,12 +4922,12 @@ class PulseEditorPresenter:
             try:
                 table = _scan_table_of(source)
             except Exception as error:
-                return self._scan_program_refused(f"scan program failed: {error}")
-            return self._take_scan_program_table(source, table, fields)
+                return self._scan_program_refused(f"scan program failed: {error}", present=present)
+            return self._take_scan_program_table(source, table, fields, present=present)
         if self._preview_close_requested:
             return False
         if self._scan_running:
-            self._warn("the scan program is still running")
+            self._warn("the scan program is still running", present=present)
             return False
         # Queued behind any drawing on that worker, and never counted as
         # one: it touches nothing a close retires, so the retire does not
@@ -4875,33 +4942,32 @@ class PulseEditorPresenter:
             if self._preview_close_requested:
                 self._wake_close_guard()
                 return
-            self._take_scan_program_table(source, table, fields)
+            self._take_scan_program_table(source, table, fields, present=present)
 
         def failed(error: BaseException) -> None:
             self._scan_running = False
             if self._preview_close_requested:
                 self._wake_close_guard()
                 return
-            self._scan_program_refused(f"scan program failed: {error}")
+            self._scan_program_refused(f"scan program failed: {error}", present=present)
 
-        self._submit_work(runner, lambda: _scan_table_of(source), delivered, failed)
-        return True
+        return self._submit_work(runner, lambda: _scan_table_of(source), delivered, failed)
 
-    def _scan_program_refused(self, message: str) -> bool:
+    def _scan_program_refused(self, message: str, *, present: bool = True) -> bool:
         """Say why a run left no table, where its progress was being shown."""
 
         self._scan_progress = message
-        self._warn(message)
+        self._warn(message, present=present)
         self._refresh_scan_page()
         return False
 
-    def _take_scan_program_table(self, source: str, table: object, fields=None) -> bool:
+    def _take_scan_program_table(self, source: str, table: object, fields=None, *, present: bool = True) -> bool:
         """Keep the table a scan program produced, if it is one."""
 
         from zlc_pulse import scan_columns_for, validate_scan_table
 
         if table is None:
-            return self._scan_program_refused("the scan program did not assign scan_table")
+            return self._scan_program_refused("the scan program did not assign scan_table", present=present)
         if self.sequence is None:
             return False
         # Through zlc_pulse, which owns what a legal table is.  This window
@@ -4918,7 +4984,7 @@ class PulseEditorPresenter:
                 columns,
             )
         except Exception as error:
-            return self._scan_program_refused(str(error))
+            return self._scan_program_refused(str(error), present=present)
         self._accept_state(
             replace(
                 self._state,
@@ -4939,8 +5005,12 @@ class PulseEditorPresenter:
         self._edit_state(scan_repeats=max(0, int(repeats)))
         self._refresh_scan_page()
 
-    def load_scan_array(self) -> bool:
-        """Read a scan table from a file, instead of generating one."""
+    def load_scan_array(self, path: str | None = None, *, present: bool = True) -> bool:
+        """Load an explicit .npy/.csv/.txt scan table, or show the GUI picker.
+
+        With the window's command worker, True means submitted; inspect
+        control_state().pending and scan.progress for completion or refusal.
+        """
 
         import numpy as np
 
@@ -4948,19 +5018,24 @@ class PulseEditorPresenter:
 
         # Asked BEFORE the dialog: picking a file and then being told the
         # slots were never bound wastes the choice that was just made.
-        if not self._has_scan_slots():
+        if not self._has_scan_slots(present=present) or not self._device_available(present=present):
             return False
-        chosen = self.view.ask_open_path(
+        if path is None and not present:
+            self._warn("load_scan_array requires an explicit path", present=False)
+            return False
+        chosen = path if path is not None else self.view.ask_open_path(
             "Load scan array", str(Path(self.path).parent if self.path else ""),
             "Scan tables (*.npy *.csv *.txt);;All files (*)",
         )
         if not chosen:
             return False
-        try:
-            path = Path(chosen)
-            columns = scan_columns_for(self.sequence)
-            if path.suffix == ".npy":
-                data = np.load(path)
+        selected = Path(chosen)
+        columns = scan_columns_for(self.sequence)
+        fields = self._scan_fields()
+
+        def work(_operation: int):
+            if selected.suffix == ".npy":
+                data = np.load(selected)
                 if data.ndim == 1 and len(columns) == 1:
                     # One field, one value per point, however it was saved.
                     data = data.reshape(-1, 1)
@@ -4968,60 +5043,127 @@ class PulseEditorPresenter:
                 # A one-column file is one field's points, not one point of
                 # many fields: without ndmin the reader squeezed it flat, and
                 # the commonest sweep file was refused on its column count.
-                data = np.loadtxt(path, delimiter=",", ndmin=2)
-            self._take_scan_rows(validate_scan_table(data, columns))
+                data = np.loadtxt(selected, delimiter=",", ndmin=2)
+            return validate_scan_table(data, columns)
+
+        def delivered(rows, error):
+            if error is None:
+                try:
+                    if fields != self._scan_fields():
+                        raise ValueError("Scan fields or units changed while loading the table. Load it again.")
+                    self._take_scan_rows(rows)
+                except Exception as caught:
+                    error = caught
+            if error is not None:
+                self._scan_program_refused(f"cannot read {selected.name}: {error}", present=present)
+                return
+            self._scan_progress = f"loaded {len(rows)} scan point(s) from {selected}"
+            self._done(self._scan_progress, present=present)
+            self._refresh_scan_page()
+
+        if self._run_device_work is not None:
+            return self._run_device_command(work, delivered, summary="Loading scan array...")
+        try:
+            rows = work(0)
         except Exception as error:
-            self._warn(f"cannot read {Path(chosen).name}: {error}")
+            delivered(None, error)
             return False
-        self._done(
-            f"loaded {len(self._state.scan_rows)} scan point(s) from {Path(chosen).name}"
-        )
-        self._refresh_scan_page()
+        delivered(rows, None)
         return True
 
-    def load_scan_program(self) -> bool:
-        """Load Python source into the same immediate text state as typing."""
+    def load_scan_program(self, path: str | None = None, *, present: bool = True) -> bool:
+        """Load explicit Python source into the same draft as typing, without running it.
 
-        chosen = self.view.ask_open_path(
+        True is submission when a command worker is attached; inspect pending
+        and scan.progress. Omitting path opens the picker only for GUI calls.
+        """
+
+        if not self._device_available(present=present):
+            return False
+        if path is None and not present:
+            self._warn("load_scan_program requires an explicit path", present=False)
+            return False
+        chosen = path if path is not None else self.view.ask_open_path(
             "Load scan program",
             str(Path(self.path).parent if self.path else ""),
             "Python source (*.py);;All files (*)",
         )
         if not chosen:
             return False
+        def work(_operation: int):
+            return Path(chosen).read_text(encoding="utf-8")
+
+        def delivered(source, error):
+            if error is not None:
+                self._scan_program_refused(f"cannot read {Path(chosen).name}: {error}", present=present)
+                return
+            self.edit_scan_source(source)
+            self._scan_progress = f"loaded scan source from {chosen}"
+            self._done(self._scan_progress, present=present)
+            self._refresh_scan_page()
+
+        if self._run_device_work is not None:
+            return self._run_device_command(work, delivered, summary="Loading scan program...")
         try:
-            source = Path(chosen).read_text(encoding="utf-8")
+            source = work(0)
         except Exception as error:
-            self._warn(f"cannot read {Path(chosen).name}: {error}")
+            delivered(None, error)
             return False
-        self.edit_scan_source(source)
-        self._done(f"loaded scan source from {Path(chosen).name}")
+        delivered(source, None)
         return True
 
-    def save_scan_array(self) -> str:
-        """Write the authored table without discarding fractional durations."""
+    def save_scan_array(self, path: str | None = None, *, present: bool = True) -> str | bool:
+        """Save authored fractional scan values to an explicit .npy path.
+
+        No path retains the GUI's unique-name save beside the Pulse. With a
+        command worker, True is submission and scan.progress reports the saved
+        path; without a worker the completed path is returned. Never fires.
+        """
 
         import numpy as np
 
         if not self._state.scan_rows:
-            self._warn("there is no scan table to save")
+            self._warn("there is no scan table to save", present=present)
             return ""
+        if not self._device_available(present=present):
+            return False
+        selected = None if path is None else Path(path)
+        if selected is not None and selected.suffix != ".npy":
+            self._warn("save_scan_array requires a .npy path", present=present)
+            return False
         values = np.asarray(self._state.scan_rows, dtype=float)
-        try:
-            target = unique_path(
-                self._save_folder(),
-                f"{(self.sequence.name if self.sequence else 'scan')}-scan",
+        folder = self._save_folder()
+        name = f"{(self.sequence.name if self.sequence else 'scan')}-scan"
+
+        def work(_operation: int):
+            if selected is not None:
+                selected.parent.mkdir(parents=True, exist_ok=True)
+                np.save(selected, values)
+                return selected
+            return unique_path(
+                folder, name,
                 ".npy",
                 writer=lambda temporary: np.save(temporary, values),
             )
+
+        def delivered(target, error):
+            if error is not None:
+                self._scan_program_refused(f"cannot save the scan table: {error}", present=present)
+                return
+            self._scan_progress = f"saved {target}"
+            self._refresh_scan_page()
+
+        if self._run_device_work is not None:
+            return self._run_device_command(work, delivered, summary="Saving scan array...", always_deliver=True)
+        try:
+            target = work(0)
         except Exception as error:
-            self._warn(f"cannot save the scan table: {error}")
+            delivered(None, error)
             return ""
-        self._scan_progress = f"saved {target.name}"
-        self._refresh_scan_page()
+        delivered(target, None)
         return str(target)
 
-    def hold_scan_point(self, *, worker: object = None) -> bool:
+    def hold_scan_point(self, *, worker: object = None, present: bool = True) -> bool:
         """Stop advancing and PLAY the point the board is on, over and over.
 
         Holding is how a scan is inspected: the outputs stay at one row so a
@@ -5034,41 +5176,33 @@ class PulseEditorPresenter:
 
         A board that reports no cursor is not a reason to give up either.  It
         is idle, or it is not scanning, and "hold a point" still has an answer:
-        the first one.
+        the first one. A window uses its command worker by default; True
+        means submitted, not completed. Inspect pending/board state afterward.
+        Without a worker this is the synchronous notebook API.
         """
 
         if self.sequencer is None:
-            self._warn("this editor is not connected to a sequencer")
+            self._warn("this editor is not connected to a sequencer", present=present)
             return False
         if not self._scan_armed():
-            self._warn("there is no scan to hold a point of")
+            self._warn("there is no scan to hold a point of", present=present)
             return False
-        return self._hold(None, worker=worker)
+        return self._hold(None, worker=self._run_device_work if worker is None else worker, present=present)
 
-    def step_scan_point(self, delta: int, *, worker: object = None) -> bool:
-        """Move the held point by one, and keep playing the new one."""
+    def step_scan_point(self, delta: int, *, worker: object = None, present: bool = True) -> bool:
+        """Move by delta and keep playing, using the window's command worker.
+
+        True means submitted when a worker is attached; inspect pending/board
+        state afterward. Without a worker this is the synchronous notebook API.
+        """
 
         if self.sequencer is None or not self._scan_armed():
-            self._warn("nothing is held to step")
+            self._warn("nothing is held to step", present=present)
             return False
         held = 0 if self._held_point is None else self._held_point
-        return self._hold(held + int(delta), worker=worker)
+        return self._hold(held + int(delta), worker=self._run_device_work if worker is None else worker, present=present)
 
-    # A hand asked, so the board command runs on the device worker and its
-    # outcome is shown when it is delivered.  That is the ONLY thing that
-    # differs from the same action asked for in a script -- these used to be
-    # second copies of it, and the copies had quietly lost the guards, so
-    # Step with nothing held went straight at the board.  ``_guarded``
-    # resolves its handler by NAME, which is what keeps the connection from
-    # holding this presenter alive, so the adapter is a method rather than a
-    # lambda at the wiring.
-    def _hold_from_view(self) -> None:
-        self.hold_scan_point(worker=self._run_device_work)
-
-    def _step_from_view(self, delta: int) -> None:
-        self.step_scan_point(delta, worker=self._run_device_work)
-
-    def _hold(self, point: int | None, *, worker: object) -> bool:
+    def _hold(self, point: int | None, *, worker: object, present: bool = True) -> bool:
         """Play one scan row, held, until something else is asked for.
 
         The whole gesture in one place, because Hold and either Step are the
@@ -5098,7 +5232,7 @@ class PulseEditorPresenter:
         except Exception as error:
             held = self._clamp_scan_point(point, count)
             self._held_point = held
-            self._hold_failed(held, error)
+            self._hold_failed(held, error, present=present)
             return False
 
         def prepare(held: int) -> tuple[PulseSequence, object]:
@@ -5107,9 +5241,9 @@ class PulseEditorPresenter:
         # Refused before the lease is taken, as On Pulse is: a lease taken
         # and then refused would hold the sequencer against every other
         # owner with nothing playing.
-        if worker is not None and not self._device_available():
+        if worker is not None and not self._device_available(present=present):
             return False
-        if not self._acquire_command():
+        if not self._acquire_command(present=present):
             return False
         sequencer = self.sequencer
         previous_run = self._finite_run
@@ -5121,7 +5255,7 @@ class PulseEditorPresenter:
             except Exception as error:
                 # Settled as the worker's delivery settles it: the lease
                 # taken above goes back unless the board still plays.
-                self._settle_hold(held, count, self.board_state(), error, revision)
+                self._settle_hold(held, count, self.board_state(), error, revision, present=present)
                 return False
             self._finite_run = None
             error = self._drive_program(
@@ -5133,7 +5267,7 @@ class PulseEditorPresenter:
                 current=lambda: True,
                 halt_first=True,
             )
-            self._settle_hold(held, count, self.board_state(), error, revision)
+            self._settle_hold(held, count, self.board_state(), error, revision, present=present)
             return error is None
         self._finite_run = None
 
@@ -5161,7 +5295,7 @@ class PulseEditorPresenter:
                 else (self._clamp_scan_point(point, count), self._board_state, failure)
             )
             self._held_point = held
-            self._settle_hold(held, count, state, error, revision)
+            self._settle_hold(held, count, state, error, revision, present=present)
             if error is not None and state.firing and previous_run is not None:
                 self._finite_run = previous_run
                 self._watch_completion()
@@ -5199,9 +5333,9 @@ class PulseEditorPresenter:
         except Exception:  # noqa: BLE001 -- no cursor is an answer: the first row
             return None
 
-    def _hold_failed(self, held: int, error: BaseException) -> None:
+    def _hold_failed(self, held: int, error: BaseException, *, present: bool = True) -> None:
         self._scan_progress = f"cannot hold that point: {error}"
-        self._warn(f"cannot hold scan point {held + 1}: {error}")
+        self._warn(f"cannot hold scan point {held + 1}: {error}", present=present)
         self._refresh_scan_page()
 
     def _settle_hold(
@@ -5211,6 +5345,7 @@ class PulseEditorPresenter:
         state: BoardState,
         error: BaseException | None,
         revision: int,
+        *, present: bool = True,
     ) -> None:
         """Show what holding a point left the board doing."""
 
@@ -5223,7 +5358,7 @@ class PulseEditorPresenter:
             self._scan_progress = f"held at scan point {figure_padded(held + 1, count)} of {count}"
         else:
             self._scan_progress = f"cannot hold that point: {error}"
-            self._warn(f"cannot hold scan point {held + 1}: {error}")
+            self._warn(f"cannot hold scan point {held + 1}: {error}", present=present)
             if not state.firing:
                 self._release_drive()
         self._adopt_board_state(state)
@@ -5244,10 +5379,11 @@ class PulseEditorPresenter:
         )
         self.refresh()
 
-    def clear_scan_array(self) -> None:
+    def clear_scan_array(self) -> bool:
         self._edit_state(scan_rows=(), scan_fields=(), scan_source_dirty=bool(self._state.scan_source))
         self._scan_progress = "Scan array cleared; the Python source is unchanged."
         self.refresh()
+        return True
 
     def _scan_armed(self) -> bool:
         """A scan exists only when there is a table AND fields for it to drive.
@@ -5811,10 +5947,10 @@ class PulseEditorPresenter:
     def _warn(self, text: str, *, present: bool = True) -> None:
         self.last_warning = str(text)
         warn = getattr(self.view, "show_warning", None)
-        if present and warn is not None:
+        if present and self._present_messages and warn is not None:
             warn(text)
 
-    def _done(self, text: str) -> None:
+    def _done(self, text: str, *, present: bool = True) -> None:
         """Say that something the operator asked for has happened.
 
         Only ever spoke up to refuse, so a Save that worked and a Save that
@@ -5830,7 +5966,7 @@ class PulseEditorPresenter:
         """
 
         done = getattr(self.view, "show_done", None)
-        if done is not None:
+        if present and self._present_messages and done is not None:
             done(text)
 
     def _wake_close_guard(self) -> None:

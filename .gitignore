@@ -25,6 +25,9 @@ packages/zlc_pulse/fpga/.Xil/
 # another.
 /workspace/
 
+# Local experiment MCP listener credentials; never publish them.
+**/.mcp/
+
 # Numba disk cache: regenerable machine code for this checkout's kernels,
 # written where zlc_plot/_kernel_cache.py says (bin/warm_numba_cache.bat).
 /numba_cache/

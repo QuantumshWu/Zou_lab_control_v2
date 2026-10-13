@@ -10,6 +10,7 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "matplotlib==3.10.8",
+    "mcp==2.3.0",
     "numba==0.67.0",
     "numpy==2.4.2",
     "Pillow==12.1.1",
@@ -24,9 +25,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-mcp = [
-    "mcp==2.3.0",
-]
 slm-gpu = [
     "cupy-cuda12x[ctk]==14.2.0",
     "cuda-bindings==12.9.9",
@@ -78,6 +76,7 @@ check = "zlc_workbench.tools.check_environment:main"
 device_manager = "zlc_workbench.apps.device_manager:main"
 evidence = "zou_lab_control.__main__:evidence"
 figure_viewer = "zlc_workbench.apps.figure_viewer:main"
+mcp = "zlc_workbench.apps.mcp:main"
 fpga = "zlc_pulse.fpga:_main"
 pulse_editor = "zlc_workbench.apps.pulse_editor:main"
 pulse_server = "zlc_pulse.remote:_main"
