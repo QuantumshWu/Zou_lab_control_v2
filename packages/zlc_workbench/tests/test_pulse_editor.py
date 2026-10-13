@@ -449,11 +449,11 @@ class _EditorView:
         return getattr(self, "discard_pulse_answer", True)
 
     def set_component_document(
-        self, schedule, *, contexts=(), context_id="", path="", dirty=False,
+        self, schedule, *, contexts=(), context_id="", selected_id=None, path="", dirty=False,
         bindings=(), config_names=(), busy=False,
     ) -> None:
         self.component_document = SimpleNamespace(
-            schedule=schedule, contexts=contexts, context_id=context_id,
+            schedule=schedule, contexts=contexts, context_id=context_id, selected_id=selected_id,
             path=path, dirty=dirty, bindings=bindings,
             config_names=config_names, busy=busy,
         )
@@ -1608,6 +1608,62 @@ def test_default_config_mode_projects_file_subpulse_without_replacing_defaults(s
         presenter.save_pulse(str(saved), present=False)
         assert read_pulse(saved).sequence == presenter.sequence
         assert not read_pulse(saved).sequence.config_enabled
+    finally:
+        presenter.close()
+
+
+def test_subpulse_editor_selection_and_file_draft_survive_global_config_switch(sequence, tmp_path):
+    from zlc_pulse import group_component, extract_subpulse, write_subpulse, read_subpulse
+    source = group_component(sequence, tuple(p.period_id for p in sequence.periods[:2]), "Imaging")
+    source = group_component(source, tuple(p.period_id for p in sequence.periods[2:4]), "Cooling")
+    imaging, cooling = source.components
+    first = imaging.period_ids[0]
+    path = tmp_path / "imaging.subpulse.json"
+    fragment = extract_subpulse(source, imaging.component_id)
+    write_subpulse(path, replace(fragment, periods=(replace(fragment.periods[0], duration=4, unit="ms"), *fragment.periods[1:])))
+    view = _EditorView()
+    presenter = PulseEditorPresenter(view, source)
+    try:
+        view.component_action_requested.emit("edit", imaging.component_id)
+        assert view.component_document.selected_id == imaging.component_id
+        assert view.component_document.context_id == imaging.component_id
+        view.component_edit_requested.emit("duration", (first, 7, "ms"))
+        assert presenter.sequence.period_by_id[first].duration == 7
+        view.open_answer = str(path)
+        view.component_action_requested.emit("browse_source", imaging.component_id)
+        assert presenter.sequence.components[0].source == "default", "Browse must not change the main-card source choice"
+        view.component_action_requested.emit("source", (imaging.component_id, "config", str(path)))
+        assert view.component_document.context_id == "" and view.component_document.selected_id == imaging.component_id
+        view.component_edit_requested.emit("duration", (first, 6, "ms"))
+        draft = presenter._subpulse_draft
+        assert draft.periods[0].duration == 6 and presenter.sequence.period_by_id[first].duration == 7
+        refused = tmp_path / "other.subpulse.json"
+        write_subpulse(refused, fragment)
+        view.discard_component_answer = False
+        view.component_action_requested.emit("source", (imaging.component_id, "config", str(refused)))
+        assert presenter.sequence.components[0].config_path == str(path)
+        assert presenter._subpulse_draft is draft and view.component_document.selected_id == imaging.component_id
+        view.discard_component_answer = True
+        for enabled in (True, False, True):
+            view.config_mode_committed.emit(enabled)
+            assert presenter._subpulse_draft is draft
+            assert view.component_document.selected_id == imaging.component_id
+            assert view.component_document.context_id == "" and view.component_document.dirty
+        view.component_action_requested.emit("context", cooling.component_id)
+        assert view.component_document.context_id == cooling.component_id
+        view.component_action_requested.emit("context", imaging.component_id)
+        assert presenter._subpulse_draft is draft
+        view.component_action_requested.emit("save", None)
+        assert read_subpulse(path).periods[0].duration == 6
+        assert presenter.sequence.period_by_id[first].duration == 7
+        assert not view.component_document.dirty
+        other = tmp_path / "copy.subpulse.json"
+        view.save_answer = str(other)
+        view.component_action_requested.emit("save_as", None)
+        assert presenter.sequence.components[0].config_path == str(other)
+        assert view.component_document.selected_id == imaging.component_id
+        assert view.component_document.schedule is not None
+        assert not view.warnings, view.warnings
     finally:
         presenter.close()
 

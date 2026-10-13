@@ -276,8 +276,6 @@ class PulseEditorHandle(QtCore.QObject):
         if action in {"edit", "open_source"}:
             self._view.tabs.setCurrentWidget(self._view.component_view)
         self.component_action_requested.emit(action, payload)
-        if action in {"edit", "open_source"}:
-            self._view.component_view.focus_source(str(payload))
 
     def set_config_mode(self, enabled: bool, busy: bool = False, error: str = "") -> None:
         self._view.config_view.set_config_mode(enabled, error)
@@ -299,6 +297,7 @@ class PulseEditorHandle(QtCore.QObject):
         *,
         contexts: tuple[tuple[str, str], ...] = (),
         context_id: str = "",
+        selected_id: str | None = None,
         path: str = "",
         dirty: bool = False,
         bindings: tuple[tuple[str, str, str], ...] = (),
@@ -306,7 +305,7 @@ class PulseEditorHandle(QtCore.QObject):
         busy: bool = False,
     ) -> None:
         self._view.component_view.set_document(
-            schedule, contexts=contexts, context_id=context_id, path=path,
+            schedule, contexts=contexts, context_id=context_id, selected_id=selected_id, path=path,
             dirty=dirty, bindings=bindings, config_names=config_names, busy=busy,
         )
 

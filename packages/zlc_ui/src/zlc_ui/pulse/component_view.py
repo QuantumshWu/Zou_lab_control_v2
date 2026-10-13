@@ -6,7 +6,7 @@ from PyQt5 import QtCore, QtWidgets
 
 from zlc_ui.fluent import (
     ACCENT, GREY, YELLOW, ElidedLabel, FluentButton, FluentComboBox,
-    FluentGroupBox, FluentLabel, FluentLineEdit, FluentScrollArea,
+    FluentFrame, FluentGroupBox, FluentLabel, FluentLineEdit, FluentScrollArea,
     read_editable_combo, retire_widget, signals_blocked,
 )
 
@@ -25,89 +25,70 @@ class PulseComponentView(QtWidgets.QWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._context_id = ""
+        self._selected_id = ""
         self._accepted_name = ""
         self._binding_rows: dict[str, tuple] = {}
-        self._source_rows: dict[str, tuple] = {}
+        self._sources: tuple[tuple[str, str, str, str, str], ...] = ()
+        self._contexts: tuple[tuple[str, str], ...] = ()
         self.schedule_view: PulseScheduleView | None = None
         outer = QtWidgets.QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
-        self.scroll = FluentScrollArea(self)
-        body = QtWidgets.QWidget()
-        self.scroll.set_width_bounded_widget(body)
-        outer.addWidget(self.scroll)
-        content = QtWidgets.QVBoxLayout(body)
-        content.setContentsMargins(px(8), px(8), px(8), px(8))
-        content.setSpacing(px(8))
-        self.sources_box = FluentGroupBox("Pulse bindings")
-        sources_layout = QtWidgets.QVBoxLayout(self.sources_box)
-        sources_layout.setContentsMargins(px(10), px(8), px(10), px(10))
-        self.source_mode_label = FluentLabel("Pulse mode: Default")
-        sources_layout.addWidget(self.source_mode_label)
-        hint = FluentLabel("Browse to bind a file to each Subpulse. Save the Pulse to keep these bindings.")
-        hint.setWordWrap(True)
-        sources_layout.addWidget(hint)
-        self._source_grid = QtWidgets.QGridLayout()
-        self._source_grid.setHorizontalSpacing(px(8))
-        self._source_grid.setVerticalSpacing(px(6))
-        for column, (title, stretch) in enumerate(zip(
-            ("Subpulse", "Source", "Subpulse file", "", "", "Status"), (2, 0, 5, 0, 0, 3),
-        )):
-            label = FluentLabel(title)
-            font = label.font()
-            font.setBold(True)
-            label.setFont(font)
-            self._source_grid.addWidget(label, 0, column)
-            self._source_grid.setColumnStretch(column, stretch)
-        sources_layout.addLayout(self._source_grid)
-        self.sources_placeholder = FluentLabel("No Subpulses yet. Group periods or insert a Subpulse in Edit.")
-        self.sources_placeholder.setWordWrap(True)
-        sources_layout.addWidget(self.sources_placeholder)
-        content.addWidget(self.sources_box)
-
-        self.editor_box = FluentGroupBox("Subpulse editor")
-        head = QtWidgets.QVBoxLayout(self.editor_box)
-        self._editor_layout = head
-        head.setContentsMargins(px(10), px(8), px(10), px(10))
-        toolbar = QtWidgets.QHBoxLayout()
-        self._buttons = {}
-        for action, text, color in (
-            ("new", "New file", GREY), ("open", "Open file", ACCENT),
-            ("save", "Save", YELLOW), ("save_as", "Save as", YELLOW),
-            ("insert", "Insert into Pulse", ACCENT),
-        ):
-            button = FluentButton(text, color=color)
-            button.setFixedHeight(row_height())
-            button.clicked.connect(lambda _checked=False, a=action: self.action_requested.emit(a, self._context_id))
-            self._buttons[action] = button
-            toolbar.addWidget(button)
-            button.setVisible(action in ("new", "open"))
-        toolbar.addStretch(1)
-        head.addLayout(toolbar)
-        self.document_controls = QtWidgets.QWidget()
-        top = QtWidgets.QHBoxLayout(self.document_controls)
-        top.setContentsMargins(0, 0, 0, 0)
-        top.addWidget(FluentLabel("Editing"))
+        outer.setContentsMargins(px(8), px(8), px(8), px(8))
+        outer.setSpacing(px(8))
+        header = FluentFrame()
+        head = QtWidgets.QVBoxLayout(header)
+        head.setContentsMargins(px(12), px(10), px(12), px(10))
+        top = QtWidgets.QHBoxLayout()
+        top.addWidget(FluentLabel("Subpulse"))
         self.context_combo = FluentComboBox()
-        self.context_combo.setMinimumWidth(px(190))
+        self.context_combo.setMinimumWidth(px(150))
         self.context_combo.currentIndexChanged.connect(self._context_changed)
         top.addWidget(self.context_combo, 1)
-        self.context_combo.hide()
+        top.addWidget(FluentLabel("Name"))
         self.name_edit = FluentLineEdit("")
         self.name_edit.setPlaceholderText("Subpulse name")
         self.name_edit.editingFinished.connect(self._name_committed)
         top.addWidget(self.name_edit, 1)
-        head.addWidget(self.document_controls)
-        self.document_controls.hide()
+        self._buttons = {}
+        for action, text, color in (
+            ("new", "New", GREY), ("open", "Open", ACCENT),
+            ("save", "Save", YELLOW), ("save_as", "Save as", YELLOW),
+            ("insert", "Insert into Pulse", ACCENT),
+        ):
+            button = FluentButton(text, color=color)
+            button.clicked.connect(lambda _checked=False, a=action: self.action_requested.emit(a, self._context_id))
+            self._buttons[action] = button
+            top.addWidget(button)
+        head.addLayout(top)
+        self.config_file_row = QtWidgets.QWidget()
+        self.config_file_row.setObjectName("subpulseConfigFileRow")
+        self.config_file_row.setStyleSheet("QWidget#subpulseConfigFileRow { background: transparent; }")
+        file_row = QtWidgets.QHBoxLayout(self.config_file_row)
+        file_row.setContentsMargins(0, 0, 0, 0)
+        file_row.addWidget(FluentLabel("Config file"))
+        self.config_path_edit = FluentLineEdit("")
+        self.config_path_edit.setPlaceholderText("Choose a Subpulse file")
+        self.config_path_edit.editingFinished.connect(self._commit_source)
+        file_row.addWidget(self.config_path_edit, 1)
+        self.browse_source_button = FluentButton("Browse…", color=ACCENT)
+        self.browse_source_button.clicked.connect(
+            lambda _checked=False: self.action_requested.emit("browse_source", self._selected_id)
+        )
+        file_row.addWidget(self.browse_source_button)
+        head.addWidget(self.config_file_row)
+        self.config_file_row.hide()
+        self.source_status = ElidedLabel("")
+        self.source_status.setFixedSize(px(130), row_height())
+        file_row.addWidget(self.source_status)
+        self.source_status.hide()
         self.path_label = ElidedLabel("")
         head.addWidget(self.path_label)
-        self.path_label.hide()
-        self.scope_label = FluentLabel("")
-        self.scope_label.setWordWrap(True)
+        self.scope_label = ElidedLabel("")
         head.addWidget(self.scope_label)
-        self.scope_label.hide()
-        self.placeholder = FluentLabel("Click a Subpulse name above to edit its default, or open an independent file.")
+        outer.addWidget(header)
+        self.placeholder = FluentLabel("Choose a Subpulse above, or create or open a Subpulse file.")
         self.placeholder.setWordWrap(True)
-        head.addWidget(self.placeholder)
+        self.placeholder.setAlignment(QtCore.Qt.AlignCenter)
+        outer.addWidget(self.placeholder, 1)
         self.bindings_box = FluentGroupBox("Numeric Config references")
         bindings_layout = QtWidgets.QVBoxLayout(self.bindings_box)
         bindings_layout.setContentsMargins(px(10), px(8), px(10), px(10))
@@ -122,98 +103,70 @@ class PulseComponentView(QtWidgets.QWidget):
         self._binding_layout.setAlignment(QtCore.Qt.AlignTop)
         scroll.set_width_bounded_widget(body)
         bindings_layout.addWidget(scroll)
-        head.addWidget(self.bindings_box)
+        outer.addWidget(self.bindings_box)
         self.bindings_box.hide()
-        content.addWidget(self.editor_box)
-        content.addStretch(1)
 
     def set_sources(
         self, rows: tuple[tuple[str, str, str, str, str], ...], *,
         enabled: bool, busy: bool = False, error: str = "",
     ) -> None:
-        """Project every Pulse instance's file binding, independently of the editor below."""
-        self.source_mode_label.setText(
-            error or ("Config is on. Saved sources are applied."
-                      if enabled else "Config is off. Pulse defaults are used.")
-        )
-        self.source_mode_label.setWordWrap(True)
-        wanted = {key for key, _name, _source, _path, _status in rows}
-        for key in tuple(self._source_rows):
-            if key not in wanted:
-                for widget in self._source_rows.pop(key):
-                    self._source_grid.removeWidget(widget)
-                    retire_widget(widget)
-        for row, (key, name, source, path, status) in enumerate(rows, 1):
-            widgets = self._source_rows.get(key)
-            if widgets is None:
-                name_button = FluentButton(name, color=GREY)
-                name_button.setToolTip("Edit this Subpulse's embedded default")
-                name_button.clicked.connect(lambda _checked=False, item=key: self.action_requested.emit("edit", item))
-                source_combo = FluentComboBox()
-                source_combo.addItem("Default", "default")
-                source_combo.addItem("Config", "config")
-                source_combo.currentIndexChanged.connect(lambda _index, item=key: self._commit_source(item))
-                path_edit = FluentLineEdit("")
-                path_edit.setMinimumWidth(px(160))
-                path_edit.setPlaceholderText("Choose a Subpulse file")
-                path_edit.setToolTip("Enter a file to bind it as Config. Clear the path to use the embedded default.")
-                path_edit.editingFinished.connect(lambda item=key: self._commit_source(item, path_changed=True))
-                browse = FluentButton("Browse…", color=ACCENT)
-                browse.clicked.connect(lambda _checked=False, item=key: self.action_requested.emit("browse_source", item))
-                open_file = FluentButton("Open file", color=GREY)
-                open_file.clicked.connect(lambda _checked=False, item=key: self.action_requested.emit("open_source", item))
-                state = FluentLabel("")
-                state.setWordWrap(True)
-                widgets = self._source_rows[key] = (name_button, source_combo, path_edit, browse, open_file, state)
-                for widget in widgets[:-1]:
-                    widget.setFixedHeight(row_height())
-            name_button, source_combo, path_edit, browse, open_file, state = widgets
-            name_button.setText(name)
-            name_button.setToolTip(f"Select {name}")
-            with signals_blocked(source_combo, path_edit):
-                draft = path_edit.hasFocus() and path_edit.isModified()
-                source_combo.setCurrentIndex(source_combo.findData(source))
-                if not draft:
-                    path_edit.setText(path)
-                source_combo.setProperty("accepted_source", source)
-                path_edit.setProperty("accepted_path", path)
-            for widget in widgets[:-1]:
-                widget.setEnabled(not busy)
-            open_file.setEnabled(bool(path) and not busy)
-            path_edit.setToolTip(path or "Choose a Subpulse file")
-            state.setText(status or ("Choose file" if source == "config" and not path else "Embedded default"))
-            state.setToolTip(status)
-            for column, widget in enumerate(widgets):
-                self._source_grid.addWidget(widget, row, column)
-        self.sources_placeholder.setVisible(not rows)
+        """Update choices and the selected reference; global mode never changes selection."""
+        del enabled, error
+        self._sources = tuple(rows)
+        self._set_context_choices()
+        self._project_source(busy=busy)
 
-    def _commit_source(self, key: str, *, path_changed: bool = False) -> None:
-        _name, combo, path_edit, _browse, _open, _status = self._source_rows[key]
-        path = path_edit.text().strip()
-        source = combo.currentData()
-        if path_changed and path != (path_edit.property("accepted_path") or ""):
-            source = "config" if path else "default"
-        path_edit.setModified(False)
-        if (source, path) != (combo.property("accepted_source"), path_edit.property("accepted_path") or ""):
+    def _set_context_choices(self) -> None:
+        contexts = tuple((key, name) for key, name, _source, _path, _status in self._sources) or self._contexts
+        choices = (("", "Subpulse file"),) + tuple((key, label) for key, label in contexts if key)
+        with signals_blocked(self.context_combo):
+            existing = tuple((self.context_combo.itemData(index), self.context_combo.itemText(index))
+                             for index in range(self.context_combo.count()))
+            if existing != choices:
+                self.context_combo.clear()
+                for key, label in choices:
+                    self.context_combo.addItem(label, key)
+            self.context_combo.setCurrentIndex(self.context_combo.findData(self._selected_id))
+
+    def _project_source(self, *, busy: bool = False) -> None:
+        record = next((row for row in self._sources if row[0] == self._selected_id), None)
+        self.config_file_row.setVisible(record is not None)
+        self.source_status.setVisible(record is not None and bool(record[4]))
+        if record is None:
+            return
+        key, _name, source, path, status = record
+        with signals_blocked(self.config_path_edit):
+            draft = (self.config_path_edit.property("component_id") == key
+                     and self.config_path_edit.hasFocus() and self.config_path_edit.isModified())
+            if not draft:
+                self.config_path_edit.setText(path)
+            self.config_path_edit.setProperty("component_id", key)
+            self.config_path_edit.setProperty("accepted_source", source)
+            self.config_path_edit.setProperty("accepted_path", path)
+        self.config_path_edit.setEnabled(not busy)
+        self.browse_source_button.setEnabled(not busy)
+        self.config_path_edit.setToolTip(path or "Choose a Subpulse file")
+        self.source_status.setText(status)
+        self.source_status.setToolTip(status)
+
+    def _commit_source(self) -> None:
+        key = self.config_path_edit.property("component_id")
+        if not key or key != self._selected_id:
+            return
+        path = self.config_path_edit.text().strip()
+        source = self.config_path_edit.property("accepted_source")
+        self.config_path_edit.setModified(False)
+        if path != (self.config_path_edit.property("accepted_path") or ""):
             self.action_requested.emit("source", (key, source, path))
-        # The owner projects acceptance or rejection synchronously. Use that
-        # accepted projection even when a refused edit left the same record.
-        with signals_blocked(combo, path_edit):
-            combo.setCurrentIndex(combo.findData(combo.property("accepted_source")))
-            path_edit.setText(path_edit.property("accepted_path") or "")
-
-    def focus_source(self, component_id: str) -> None:
-        widgets = self._source_rows.get(str(component_id))
-        if widgets is not None:
-            path_edit = widgets[2]
-            self.scroll.ensureWidgetVisible(path_edit)
-            path_edit.setFocus(QtCore.Qt.OtherFocusReason)
-            path_edit.selectAll()
+        with signals_blocked(self.config_path_edit):
+            self.config_path_edit.setText(self.config_path_edit.property("accepted_path") or "")
 
     def _context_changed(self) -> None:
         key = self.context_combo.currentData()
-        if key is not None and key != self._context_id:
+        if key is not None and key != self._selected_id:
             self.action_requested.emit("context", str(key))
+            with signals_blocked(self.context_combo):
+                self.context_combo.setCurrentIndex(self.context_combo.findData(self._selected_id))
 
     def _name_committed(self) -> None:
         name = self.name_edit.text().strip()
@@ -235,8 +188,7 @@ class PulseComponentView(QtWidgets.QWidget):
         ):
             getattr(schedule, signal).connect(lambda *args, a=action: self.edit_requested.emit(a, args))
         schedule.feedback_requested.connect(self.feedback_requested)
-        schedule.setMinimumHeight(px(340))
-        self._editor_layout.insertWidget(self._editor_layout.indexOf(self.bindings_box), schedule, 1)
+        self.layout().insertWidget(1, schedule, 1)
         return schedule
 
     def set_document(
@@ -245,6 +197,7 @@ class PulseComponentView(QtWidgets.QWidget):
         *,
         contexts: tuple[tuple[str, str], ...] = (),
         context_id: str = "",
+        selected_id: str | None = None,
         path: str = "",
         dirty: bool = False,
         bindings: tuple[tuple[str, str, str], ...] = (),
@@ -252,34 +205,28 @@ class PulseComponentView(QtWidgets.QWidget):
         busy: bool = False,
     ) -> None:
         self._context_id = str(context_id)
-        choices = (("", "Subpulse file"),) + tuple((key, label) for key, label in contexts if key)
-        with signals_blocked(self.context_combo):
-            existing = tuple((self.context_combo.itemData(i), self.context_combo.itemText(i)) for i in range(self.context_combo.count()))
-            if existing != choices:
-                self.context_combo.clear()
-                for key, label in choices:
-                    self.context_combo.addItem(label, key)
-            self.context_combo.setCurrentIndex(self.context_combo.findData(self._context_id))
+        self._selected_id = str(context_id if selected_id is None else selected_id)
+        self._contexts = tuple(contexts)
+        self._set_context_choices()
+        self._project_source(busy=busy)
         self._accepted_name = schedule.document_name if schedule else ""
         self.name_edit.setText(self._accepted_name)
         self.name_edit.setEnabled(schedule is not None and not busy)
         instance = bool(self._context_id)
-        self.editor_box.setTitle("Embedded default" if instance else "Subpulse file")
         self._buttons["save"].setText("Save Pulse" if instance else "Save")
         self._buttons["save_as"].setText("Export file" if instance else "Save as")
         self._buttons["insert"].setText("Duplicate in Pulse" if instance else "Insert into Pulse")
         for action, button in self._buttons.items():
             button.setEnabled(not busy and (schedule is not None or action in ("new", "open")))
-            button.setVisible(schedule is not None or action in ("new", "open"))
         self._buttons["save"].set_dirty(dirty)
         self.path_label.setText(path or ("Embedded in the current Pulse" if instance else "Unsaved Subpulse"))
         self.path_label.setToolTip(path)
         self.scope_label.setText(
-            "Editing the embedded default. Save the Pulse to keep these changes."
-            if instance else "Save this file, then Refresh to apply it to its Subpulse references."
+            "Default in Pulse — Save Pulse keeps these edits."
+            if instance else "Config file — Save writes this Subpulse file."
+            if self._selected_id else "Subpulse file — Save writes this independent file."
         )
-        self.document_controls.setVisible(schedule is not None)
-        self.path_label.setVisible(schedule is not None)
+        self.path_label.setVisible(schedule is not None and not self._selected_id)
         self.scope_label.setVisible(schedule is not None)
         self.placeholder.setVisible(schedule is None)
         if schedule is not None:

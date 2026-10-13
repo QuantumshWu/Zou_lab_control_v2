@@ -1883,7 +1883,7 @@ assert len(main.drag_container.items()) == 2
 assert main.drag_container.flat_order() == vm.item_order
 card = main._component_cards[("component", "mot")]
 assert card.width() == main._cards["p3"].width()
-assert not hasattr(card, "_actions_popup") and not hasattr(card, "source_button")
+assert not hasattr(card, "_actions_popup") and card._source_popup is None
 card.expand_button.click(); app.processEvents()
 assert set(main._cards) == {"p1", "p2", "p3"}
 assert main.drag_container.flat_order() == vm.item_order
@@ -1974,6 +1974,23 @@ assert card.title() == "Subpulse"
 configured = replace(component, source="config", config_path="cooling.subpulse.json")
 vm = replace(vm, revision=5, components=(configured,))
 handle.set_schedule(vm)
+card.source_button.click(); app.processEvents()
+assert card._source_popup.isVisible() and card.source_switch.isChecked()
+assert not card._source_popup.findChildren(QtWidgets.QLineEdit), "source popup only selects Default/Config"
+assert not card._source_popup.findChildren(QtWidgets.QPushButton)
+popup_size = card._source_popup.size()
+card.source_switch.click()
+assert actions[-1] == ("source", ("mot", "default", "cooling.subpulse.json"))
+assert card.source_switch.isChecked(), "rejected source intent must restore its accepted state"
+count = len(actions)
+card.set_component(replace(configured, source="default"))
+assert len(actions) == count and not card.source_switch.isChecked()
+assert card._source_popup.size() == popup_size
+card.source_switch.click()
+assert actions[-1] == ("source", ("mot", "config", "cooling.subpulse.json"))
+assert not card.source_switch.isChecked()
+card.source_button.click()
+assert not card._source_popup.isVisible()
 effective_periods = tuple(replace(period, readonly=True, duration=replace(
     period.duration, config_active=True, config_enabled=True, binding_editable=False,
     default_text=period.duration.text)) for period in periods)

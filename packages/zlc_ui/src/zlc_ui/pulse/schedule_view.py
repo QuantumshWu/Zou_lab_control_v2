@@ -20,7 +20,8 @@ from zlc_ui.fluent import (
     CONFIG_GREEN_TINT, FluentButton, FluentCheckBox, FluentSwitch,
     FluentComboBox, FluentFrame, FluentGroupBox, fluent_count_box,
     FluentLabel, FluentLineEdit, FluentScrollArea, LinkedScrollPanes,
-    ElidedLabel, signals_blocked,
+    ElidedLabel, FluentPopup, FluentSettingsPopupAnchor,
+    show_fluent_popup_for_anchor, signals_blocked,
 )
 
 from ._layout import (
@@ -47,7 +48,7 @@ from .models import (
 
 #: The address the pulse server prints for a client on the same machine.  One
 #: constant so the seeded field, the tooltip and any host default agree.
-from .scan_line_edit import FluentScanLineEdit
+from .scan_line_edit import FluentScanLineEdit, _BindingButton
 
 
 def _apply_field(widget: FluentScanLineEdit, field: FieldVM) -> None:
@@ -930,7 +931,18 @@ class ComponentCard(FluentGroupBox):
             label.setAlignment(QtCore.Qt.AlignCenter)
             label.setFixedHeight(row_height())
         top_layout.addWidget(self.duration_label)
-        top_layout.addWidget(self.total_label)
+        value_row = QtWidgets.QWidget()
+        value_row.setFixedHeight(row_height())
+        value_layout = QtWidgets.QHBoxLayout(value_row)
+        value_layout.setContentsMargins(0, 0, 0, 0)
+        value_layout.setSpacing(0)
+        self.source_button = _BindingButton()
+        self.source_button.setAccessibleName("Subpulse source")
+        self.source_button.clicked.connect(self._toggle_source)
+        value_layout.addSpacing(self.source_button.width())
+        value_layout.addWidget(self.total_label, 1)
+        value_layout.addWidget(self.source_button)
+        top_layout.addWidget(value_row)
         # Keep the unit row's place so every name shares the Period name row.
         unit_row = QtWidgets.QWidget()
         unit_row.setFixedHeight(row_height())
@@ -960,7 +972,7 @@ class ComponentCard(FluentGroupBox):
         self.summary_label.setAlignment(QtCore.Qt.AlignCenter)
         column.addWidget(self.summary_label)
         self.edit_button = FluentButton("Edit", color=GREY)
-        self.edit_button.setToolTip("Edit this Subpulse's Config binding")
+        self.edit_button.setToolTip("Edit this Subpulse")
         self.edit_button.clicked.connect(lambda: self.action_requested.emit("edit", self.component_id))
         self.ungroup_button = FluentButton("Ungroup", color=GREY)
         self.ungroup_button.setToolTip("Keep the default contents as ordinary Pulse items")
@@ -971,7 +983,42 @@ class ComponentCard(FluentGroupBox):
             actions.addWidget(button, 0, QtCore.Qt.AlignHCenter)
         column.addLayout(actions)
         column.addStretch(1)
+        self._source_popup = None
         self.set_component(component)
+
+    def _toggle_source(self) -> None:
+        if self._source_popup is None:
+            self._source_popup = FluentPopup(self)
+            self._source_anchor = FluentSettingsPopupAnchor(self._source_popup, self.source_button)
+            layout = QtWidgets.QHBoxLayout(self._source_popup)
+            layout.setContentsMargins(px(10), px(10), px(10), px(10))
+            layout.setSpacing(px(6))
+            layout.addWidget(FluentLabel("Source"))
+            self.source_switch = FluentSwitch("Default")
+            self.source_switch.setFixedWidth(self.source_switch.sizeHint().width())
+            layout.addWidget(self.source_switch)
+            self.source_switch.toggled.connect(self._commit_source)
+        self._source_anchor.toggle(self._source_popup, prepare=self._project_source,
+                                   present=self._place_source)
+
+    def _place_source(self) -> None:
+        show_fluent_popup_for_anchor(
+            self._source_popup, self.source_button, self._source_popup,
+            minimum_width=1, minimum_height=1,
+            maximum_height=self._source_popup.sizeHint().height(),
+        )
+
+    def _project_source(self) -> None:
+        if self._source_popup is not None:
+            with signals_blocked(self.source_switch):
+                self.source_switch.setChecked(self._component.source == "config")
+                self.source_switch.setText("Config" if self._component.source == "config" else "Default")
+
+    def _commit_source(self, checked: bool) -> None:
+        source = "config" if checked else "default"
+        if source != self._component.source:
+            self.action_requested.emit("source", (self.component_id, source, self._component.config_path))
+        self._project_source()
 
     def _commit_name(self) -> None:
         name = self.name_edit.text().strip()
@@ -986,6 +1033,9 @@ class ComponentCard(FluentGroupBox):
         self.set_surface(fill=CONFIG_GREEN_TINT if component.config_active else None,
                          edge=CONFIG_GREEN if component.config_active else ACCENT)
         self.set_title_color(CONFIG_GREEN_DARK if component.config_active else ACCENT)
+        self.source_button.source = component.source
+        self.source_button.setToolTip(component.error or f"Subpulse source: {component.source.title()}")
+        self.source_button.update()
         controls = (self.expand_button, self.edit_button, self.ungroup_button)
         if self.mode != "closed":
             self.setFixedWidth(max(spacer_card_width(), max(button.sizeHint().width() for button in controls)
@@ -1009,6 +1059,7 @@ class ComponentCard(FluentGroupBox):
         self.summary_label.setText("\n".join(counts))
         self.summary_label.setVisible(self.mode == "closed")
         self.expand_button.setText("Expand" if self.mode == "closed" else "Collapse")
+        self._project_source()
 
 
 class PulseDragContainer(QtWidgets.QWidget):

@@ -58,15 +58,20 @@ bottom controls. Subpulses expand in place. There is no side inspector. The
 switch is labelled Config and replaces the old filename button in its original
 row. It applies to the whole Pulse; switching it off restores embedded defaults.
 
-Value Config and Subpulse Config are adjacent and both put Pulse bindings before
-file editing. A collapsed Subpulse card has only Expand, Edit and Ungroup, stacked
-vertically at equal widths. Edit selects its binding row in Subpulse Config.
-`set_subpulse_sources` projects each name, source, file and status; Browse binds a
-file, and Open file explicitly opens its editor below. A nonempty typed path
-selects Config; clearing it selects Default. Source changes use the existing
-`source`, `browse_source` and `open_source` actions. An invalid file never prevents
-Edit from reaching the binding to repair it. Only applied Config sources get green
-cards/boundaries; their internal Period/Bracket controls remain read-only.
+Value Config and Subpulse Config remain adjacent. A Subpulse's small source
+control on the main timeline selects Default or Config. The three vertical
+operations remain Expand, Edit and Ungroup. Edit selects that Subpulse in the
+original single-object editor: a selector, one Config file/Browse row and the
+horizontal Period/Bracket surface. There is no bindings table.
+
+`set_subpulse_sources` supplies selector/reference metadata; `selected_id` in
+`set_component_document` identifies the selected Subpulse independently of
+`context_id`, the actual embedded-default owner (empty when editing a file).
+Config source edits the chosen file even when the global Config switch is off.
+Changing that global switch never replaces the selection or the file draft.
+Browsing or editing the file path does not change the main-card source choice.
+Save Pulse writes embedded defaults; Save writes the selected file. Only applied
+Config sources get green cards/boundaries on the main timeline.
 
 Saved scan arrays retain ordered field IDs and units. A source update that changes
 this schema requires regeneration or an explicit Clear Array; that action keeps
