@@ -455,6 +455,9 @@ class _EditorView:
     def focus_component_name(self, component_id: str) -> None:
         self.focused_component_name = component_id
 
+    def component_insert_before(self) -> tuple[str, str] | None:
+        return getattr(self, "insert_component_before", None)
+
     # -- the preview -----------------------------------------------------
 
     @property
@@ -1389,10 +1392,14 @@ def test_component_instances_and_subpulse_files_share_edits_not_ownership(sequen
         assert len(presenter.state.scan_rows) == 2
         copies = []
         for _ in range(2):
+            view.insert_component_before = ("period", before.period_id)
             view.component_action_requested.emit("context", "")
             view.component_action_requested.emit("insert", None)
             copies.append(next(component for component in presenter.sequence.components
                                if component.component_id == view.component_document.context_id))
+            assert presenter.sequence.periods[0].period_id == copies[0].period_ids[0]
+            assert tuple(p.period_id for p in presenter.sequence.periods).index(copies[-1].period_ids[-1]) < tuple(
+                p.period_id for p in presenter.sequence.periods).index(before.period_id)
             assert presenter.state.scan_rows == ()
             assert presenter.state.scan_source_dirty
         assert len({component.component_id for component in presenter.sequence.components}) == 3
@@ -1487,6 +1494,31 @@ def test_component_instances_and_subpulse_files_share_edits_not_ownership(sequen
         assert not view.warnings, view.warnings
     finally:
         presenter.close()
+
+    # The two sides of a loop post are distinct insertion positions, even
+    # though they have the same next Period. Reuse the ordinary file insertion.
+    from zlc_pulse import PulseBracket
+    loop = PulseBracket("outer", before.period_id, first.period_id, 2)
+    for anchor, inside in (
+        (("bracket", "outer:start"), False),
+        (("period", before.period_id), True),
+        (("bracket", "outer:end"), True),
+        (("period", last.period_id), False),
+    ):
+        view = _EditorView()
+        view.open_answer = str(subpulse_path)
+        view.insert_component_before = anchor
+        presenter = PulseEditorPresenter(view, replace(sequence, brackets=(loop,)))
+        try:
+            view.component_action_requested.emit("insert_file", None)
+            assert not view.warnings, view.warnings
+            added, = presenter.sequence.components
+            periods = tuple(p.period_id for p in presenter.sequence.periods)
+            bracket = next(b for b in presenter.sequence.brackets if b.bracket_id == "outer")
+            enclosed = periods[periods.index(bracket.start_period_id):periods.index(bracket.end_period_id) + 1]
+            assert set(added.period_ids).issubset(enclosed) is inside
+        finally:
+            presenter.close()
 
 
 def test_save_updates_neither_path_nor_baseline_until_the_write_succeeds(
@@ -1944,7 +1976,7 @@ def test_formal_config_refresh_keeps_dac_codes_readable_at_small_scale(sequence,
         window._view.tabs.setCurrentWidget(window._view.config_view)
         window.config_load_requested.emit()
         _process_qt_until(app, lambda: not window.presenter._device_busy)
-        window._view.tabs.setCurrentWidget(window._view.schedule_view)
+        window._view.tabs.setCurrentWidget(window._view.edit_page)
         QtTest.QTest.qWait(20)
         assert edit.text() == "-512" and not edit.property("numericError")
         assert window.presenter.sequence == accepted

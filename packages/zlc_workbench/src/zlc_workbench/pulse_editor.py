@@ -141,6 +141,8 @@ def _bracket_vms(
             ordinal=index + 1, color=bracket_color(index),
             count_field=FieldVM(
                 str(b.count), can_scan=False, validator_kind=VALIDATOR_INT,
+                field_id=PulseFieldRef("bracket_count", bracket_id=b.bracket_id).key,
+                config_names=tuple(config_values or ()),
                 validator_lo=MINIMUM_BRACKET_COUNT, validator_hi=MAXIMUM_REPEAT_COUNT,
                 **_binding_field_state(
                     next((binding for binding in sequence.bindings
@@ -482,6 +484,8 @@ def project_period(
             # goes exponential above them, which silently rewrote an authored
             # duration the first time anyone touched its period.
             text=format_quantity(float(period.duration), "1"),
+            field_id=PulseFieldRef("duration", period_id=period.period_id).key,
+            config_names=tuple(config_values or ()),
             **_binding_field_state(duration_binding, config_values, scan_active),
             # A spacer's length is a property of the device it waits for (or
             # a Config value): never scanned, never set by an API caller.
@@ -684,6 +688,7 @@ def _binding_field_state(
         return {}
     effective = ""
     if binding.scan and scan_active:
+        effective = "Scan table"
         status = "The Scan table supplies this field; the default remains editable."
     elif binding.source == "config":
         value = (config_values or {}).get(binding.config_key) if binding.config_key else None
@@ -759,6 +764,8 @@ def _analog_field(
     binding = _binding_for(bindings, "dac", period.period_id, port.key)
     return FieldVM(
         text=str(value),
+        field_id=PulseFieldRef("dac", period_id=period.period_id, port=port.key).key,
+        config_names=tuple(config_values or ()),
         **_binding_field_state(binding, config_values, scan_active),
         editable=step is not None,
         validator_kind=VALIDATOR_INT,
@@ -813,6 +820,8 @@ def _delay_row(
         port_key=port_key,
         value=FieldVM(
             text="0" if sequence is None else format_quantity(float(value), "1"),
+            field_id=PulseFieldRef("delay", port=port_key).key,
+            config_names=tuple(config_values or ()),
             can_scan=False,
             **_binding_field_state(binding, config_values),
             editable=sequence is not None,
@@ -1645,15 +1654,33 @@ class PulseEditorPresenter:
                     self._subpulse_path = str(path)
                     self._subpulse_saved = fragment
                 self._done(f"saved Subpulse {path.name}")
-            elif action == "insert":
-                fragment = (extract_subpulse(self.sequence, self._component_context)
-                            if self._component_context else self._subpulse_draft)
+            elif action in {"insert", "insert_file"}:
+                if action == "insert_file":
+                    chosen = self.view.ask_open_path(
+                        "Insert Subpulse", self.pulses_directory,
+                        "ZLC Subpulse (*.subpulse.json *.json);;All files (*)",
+                    )
+                    if not chosen:
+                        return
+                    fragment = read_subpulse(chosen)
+                else:
+                    fragment = (extract_subpulse(self.sequence, self._component_context)
+                                if self._component_context else self._subpulse_draft)
                 if fragment is None:
                     raise ValueError("create or open a Subpulse first")
                 old = set() if self.sequence is None else {c.component_id for c in self.sequence.components}
+                before = self.view.component_insert_before()
+                order = () if self.sequence is None else _sequence_item_order(self.sequence)
+                position = len(order) if before is None else order.index(tuple(before))
                 candidate = insert_subpulse(self.sequence, fragment)
-                self._component_context = next(c.component_id for c in candidate.components if c.component_id not in old)
+                added = next(c for c in candidate.components if c.component_id not in old)
+                block = _sequence_item_order(extract_subpulse(candidate, added.component_id).to_sequence())
+                # Keep the chosen side of every bracket post. A period-only
+                # insertion address loses whether the new block is in a loop.
+                candidate = _reordered_sequence(candidate, order[:position] + block + order[position:])
+                self._component_context = added.component_id
                 self._apply(candidate)
+                self.view.focus_component_name(self._component_context)
             elif action == "group":
                 if self.sequence is None:
                     raise ValueError("open a Pulse before grouping its periods")

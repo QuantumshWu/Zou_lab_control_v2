@@ -105,6 +105,8 @@ class FieldVM:
     validator_hi: float = 0.0
     resolution: float = 0.0
     allow_any: bool = True
+    field_id: str = ""
+    config_names: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.validator_kind not in VALIDATOR_KINDS:

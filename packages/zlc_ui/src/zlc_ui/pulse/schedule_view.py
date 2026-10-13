@@ -52,10 +52,8 @@ from .scan_line_edit import FluentScanLineEdit
 
 def _apply_field(widget: FluentScanLineEdit, field: FieldVM) -> None:
     with signals_blocked(widget):
-        widget.set_field_state(editable=field.editable, scan=field.scan, source=field.source,
-                               can_scan=field.can_scan, effective_text=field.effective_text,
-                               source_text=field.source_text, config_key=field.config_key,
-                               can_api=field.can_api)
+        widget.setProperty("pulse_field_id", field.field_id)
+        widget.set_config_names(field.config_names)
         if field.validator_kind in (VALIDATOR_INT, VALIDATOR_FLOAT):
             widget.set_numeric_validator(
                 field.validator_kind,
@@ -67,6 +65,10 @@ def _apply_field(widget: FluentScanLineEdit, field: FieldVM) -> None:
         else:
             widget.setValidator(None)
         widget.setText(field.text)
+        widget.set_field_state(editable=field.editable, scan=field.scan, source=field.source,
+                               can_scan=field.can_scan, effective_text=field.effective_text,
+                               source_text=field.source_text, config_key=field.config_key,
+                               can_api=field.can_api)
 
 
 def _place_rows_in_order(layout: QtWidgets.QVBoxLayout, holders) -> None:
@@ -100,6 +102,7 @@ class PeriodCard(FluentGroupBox):
     digital_committed = QtCore.pyqtSignal(str, str, bool)
     analog_committed = QtCore.pyqtSignal(str, str, str, object)
     binding_committed = QtCore.pyqtSignal(str, object, object, bool, str)
+    config_binding_committed = QtCore.pyqtSignal(str, str)
     feedback_requested = QtCore.pyqtSignal(str)
 
     def __init__(self, period: PeriodVM, *, index: int = 0, total_periods: int = 1,
@@ -163,6 +166,9 @@ class PeriodCard(FluentGroupBox):
         self.duration_edit.valueNormalized.connect(self._commit_duration)
         self.duration_edit.binding_committed.connect(
             lambda scan, source: self.binding_committed.emit("duration", self.period_id, None, scan, source)
+        )
+        self.duration_edit.config_key_committed.connect(
+            lambda key: self.config_binding_committed.emit(self.duration_edit.property("pulse_field_id"), key)
         )
         self.unit_combo.currentTextChanged.connect(self._commit_duration)
         self.name_edit.editingFinished.connect(self._commit_name)
@@ -338,6 +344,9 @@ class PeriodCard(FluentGroupBox):
                 edit.editingFinished.connect(lambda key=port.key: self._commit_analog(key))
                 edit.valueNormalized.connect(lambda key=port.key: self._commit_analog(key))
                 edit.binding_committed.connect(lambda scan, source, key=port.key: self.binding_committed.emit("analog", self.period_id, key, scan, source))
+                edit.config_key_committed.connect(
+                    lambda key, field=edit: self.config_binding_committed.emit(field.property("pulse_field_id"), key)
+                )
                 row_layout.addWidget(combo)
                 row_layout.addWidget(edit, 1)
                 self.bus_mode_combos[port.key] = combo
@@ -509,6 +518,7 @@ class ChannelPanel(FluentGroupBox):
     feedback_requested = QtCore.pyqtSignal(str)
     delay_committed = QtCore.pyqtSignal(str, object, str)
     binding_committed = QtCore.pyqtSignal(str, object, object, bool, str)
+    config_binding_committed = QtCore.pyqtSignal(str, str)
     #: One output in EVERY period at once: on (a digital port high) or off
     #: (a digital port low, an analog port without steps).
     fill_port_requested = QtCore.pyqtSignal(str)
@@ -609,6 +619,9 @@ class ChannelPanel(FluentGroupBox):
                 clear = FluentButton("○", color=ORANGE)
                 clear.setFixedWidth(hide_button_width())
                 edit.binding_committed.connect(lambda scan, source, key=row.port_key: self.binding_committed.emit("delay", None, key, scan, source))
+                edit.config_key_committed.connect(
+                    lambda key, field=edit: self.config_binding_committed.emit(field.property("pulse_field_id"), key)
+                )
                 edit.editingFinished.connect(lambda key=row.port_key, field=edit, units=combo: self._emit_delay(key, field, units))
                 edit.valueNormalized.connect(lambda key=row.port_key, field=edit, units=combo: self._emit_delay(key, field, units))
                 combo.currentTextChanged.connect(lambda _text, key=row.port_key, field=edit, units=combo: self._emit_delay(key, field, units))
@@ -710,6 +723,7 @@ class BracketPost(FluentGroupBox):
 
     count_committed = QtCore.pyqtSignal(object)
     binding_committed = QtCore.pyqtSignal(bool, str)
+    config_binding_committed = QtCore.pyqtSignal(str, str)
     feedback_requested = QtCore.pyqtSignal(str)
 
     def __init__(
@@ -755,6 +769,9 @@ class BracketPost(FluentGroupBox):
         self.count_edit.editingFinished.connect(self._commit_count)
         self.count_edit.valueNormalized.connect(self._commit_count)
         self.count_edit.binding_committed.connect(self.binding_committed)
+        self.count_edit.config_key_committed.connect(
+            lambda key: self.config_binding_committed.emit(self.count_edit.property("pulse_field_id"), key)
+        )
         if kind == "start":
             self.count_edit.hide()
             spacer = QtWidgets.QWidget()
@@ -996,6 +1013,8 @@ class PulseDragContainer(QtWidgets.QWidget):
     #: (bracket id, count) from that bracket's end post.
     bracket_count_committed = QtCore.pyqtSignal(str, object)
     bracket_binding_committed = QtCore.pyqtSignal(str, bool, str)
+    config_binding_committed = QtCore.pyqtSignal(str, str)
+    selection_changed = QtCore.pyqtSignal()
     feedback_requested = QtCore.pyqtSignal(str)
 
     def __init__(self, parent=None) -> None:
@@ -1062,6 +1081,7 @@ class PulseDragContainer(QtWidgets.QWidget):
                                 self.bracket_binding_committed.emit(bid, scan, source)
                         )
                         post.feedback_requested.connect(self.feedback_requested)
+                        post.config_binding_committed.connect(self.config_binding_committed)
                 else:
                     # A kept post may have become another number: a bracket
                     # added or removed before it renumbers the rest.
@@ -1172,6 +1192,7 @@ class PulseDragContainer(QtWidgets.QWidget):
         return tuple(result)
 
     def show_selection(self, items=(), *, gap: int | None = None) -> None:
+        previous = self._selection
         if gap is not None and items:
             raise ValueError("select timeline items or a gap, not both")
         if gap is not None:
@@ -1180,6 +1201,8 @@ class PulseDragContainer(QtWidgets.QWidget):
             chosen = set(items)
             self._selection = tuple(self._item_key(item) for item in self.items() if self._item_key(item) in chosen)
         self._paint_selection(self.selected_items())
+        if previous != self._selection:
+            self.selection_changed.emit()
 
     def _paint_selection(self, selected) -> None:
         chosen = set(selected)
@@ -1449,6 +1472,8 @@ class PulseScheduleView(QtWidgets.QWidget):
     analog_committed = QtCore.pyqtSignal(str, str, str, object)
     delay_committed = QtCore.pyqtSignal(str, object, str)
     binding_committed = QtCore.pyqtSignal(str, object, object, bool, str)
+    config_binding_committed = QtCore.pyqtSignal(str, str)
+    component_selected = QtCore.pyqtSignal(str)
     insert_period_requested = QtCore.pyqtSignal(object)
     insert_spacer_requested = QtCore.pyqtSignal(object)
     reorder_items_requested = QtCore.pyqtSignal(object)
@@ -1480,6 +1505,7 @@ class PulseScheduleView(QtWidgets.QWidget):
         self._cards: dict[str, PeriodCard] = {}
         self._component_cards: dict[tuple[str, str], ComponentCard] = {}
         self._expanded_components: set[str] = set()
+        self._show_delays = False
         # Set by Add; the next schedule that brings exactly one new card is
         # what that Add produced, and the new card is picked.
         self._expect_new_card = False
@@ -1617,10 +1643,18 @@ class PulseScheduleView(QtWidgets.QWidget):
         self.spacer_button = FluentButton("Add Spacer", color=ACCENT)
         self.remove_button = FluentButton("Remove", color=ORANGE)
         self.bracket_button = FluentButton("Add Bracket", color=ACCENT)
-        self.save_button = FluentButton("Save*", color=YELLOW)
+        self.save_button = FluentButton("Save Pulse*", color=YELLOW)
         self.load_button = FluentButton("Load", color=ORANGE)
         self.collapse_button = FluentButton("Collapse", color=GREY)
         self.group_button = FluentButton("Group Component", color=ACCENT)
+        self.insert_component_button = FluentButton("Insert Subpulse…", color=ACCENT)
+        self.insert_component_button.setToolTip("Insert an independent copy at the selected position")
+        self.insert_component_button.clicked.connect(
+            lambda: self.component_action_requested.emit("insert_file", None)
+        )
+        self.delays_button = FluentButton("Delays", color=GREY)
+        self.delays_button.setToolTip("Show or hide channel delays and timing information")
+        self.delays_button.clicked.connect(self._toggle_delays)
         # Three compact rows: execute; edit the timeline; save and organize.
         control_buttons = (
             (self.run_button, 0, 0, 2), (self.stop_button, 0, 2, 1), (self.sync_button, 0, 3, 1),
@@ -1702,6 +1736,35 @@ class PulseScheduleView(QtWidgets.QWidget):
         self.button_frame.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Maximum)
         layout.addWidget(self.button_frame)
 
+        if not embedded:
+            # Editing follows the timeline; running and connecting remain below
+            # it. Moving the existing controls preserves their signal paths.
+            toolbar = QtWidgets.QHBoxLayout()
+            toolbar.setSpacing(px(6))
+            for button in (self.add_button, self.spacer_button, self.bracket_button,
+                           self.group_button, self.insert_component_button, self.remove_button):
+                button.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Fixed)
+                toolbar.addWidget(button)
+            toolbar.addStretch(1)
+            toolbar.addWidget(self.delays_button)
+            toolbar.addWidget(self.collapse_button)
+            layout.insertLayout(0, toolbar)
+            self.collapse_button.setText("Channels")
+            self.collapse_button.setToolTip("Show or hide channel names")
+            control_area.setTitle("Run Pulse")
+            run_options = QtWidgets.QHBoxLayout()
+            run_options.addWidget(FluentLabel("Run repeats"))
+            self.channel_panel.run_repeats_spin.setMaximumWidth(px(110))
+            run_options.addWidget(self.channel_panel.run_repeats_spin)
+            run_options.addStretch(1)
+            run_options.addWidget(FluentLabel("Config"))
+            self.channel_panel.config_status_button.setMinimumWidth(px(100))
+            self.channel_panel.config_status_button.setMaximumWidth(px(230))
+            run_options.addWidget(self.channel_panel.config_status_button, 1)
+            control_layout.addLayout(run_options)
+            self.channel_panel_holder.hide()
+            self._settle_left_pane_width()
+
         self._wire_signals()
         if embedded:
             self.channel_panel_holder.hide()
@@ -1736,6 +1799,9 @@ class PulseScheduleView(QtWidgets.QWidget):
         self.channel_panel.delay_committed.connect(self.delay_committed)
         self.channel_panel.feedback_requested.connect(self.feedback_requested)
         self.channel_panel.binding_committed.connect(self.binding_committed)
+        self.channel_panel.config_binding_committed.connect(self.config_binding_committed)
+        self.drag_container.config_binding_committed.connect(self.config_binding_committed)
+        self.drag_container.selection_changed.connect(self._selection_changed)
         self.channel_panel.fill_port_requested.connect(self.fill_port_requested)
         self.channel_panel.clear_port_requested.connect(self.clear_port_requested)
         self.channel_panel.config_requested.connect(self.config_requested)
@@ -1930,7 +1996,27 @@ class PulseScheduleView(QtWidgets.QWidget):
         card.digital_committed.connect(self.digital_committed)
         card.analog_committed.connect(self.analog_committed)
         card.binding_committed.connect(self.binding_committed)
+        card.config_binding_committed.connect(self.config_binding_committed)
         card.feedback_requested.connect(self.feedback_requested)
+
+    def _selection_changed(self) -> None:
+        selected = self.drag_container.selected_items()
+        if not selected or self._schedule is None:
+            self.component_selected.emit("")
+            return
+        owners = set()
+        for kind, key in selected:
+            if kind.startswith("component"):
+                owners.add(key)
+            else:
+                owners.add(next((c.component_id for c in self._schedule.components if (
+                    kind == "period" and key in c.period_ids
+                    or kind == "bracket" and key.rpartition(":")[0] in c.bracket_ids
+                )), ""))
+        self.component_selected.emit(next(iter(owners)) if len(owners) == 1 else "")
+
+    def component_insert_before(self) -> tuple[str, str] | None:
+        return self._selected_before_item()
 
     def _component_action(self, action: str, component_id: object) -> None:
         if action == "expand":
@@ -2322,16 +2408,24 @@ class PulseScheduleView(QtWidgets.QWidget):
     def _toggle_left_panels(self) -> None:
         visible = self.names_panel_holder.isVisible()
         self.names_panel_holder.setVisible(not visible)
-        self.channel_panel_holder.setVisible(not visible)
+        self.channel_panel_holder.setVisible(not visible and self._show_delays)
         self.left_panel_stub_holder.setVisible(visible)
-        self.collapse_button.setText("Show Left" if visible else "Collapse")
+        self.collapse_button.setText("Show channels" if visible else "Channels")
         self._settle_left_pane_width()
 
     def _show_left_panels(self) -> None:
         self.names_panel_holder.show()
-        self.channel_panel_holder.show()
+        self.channel_panel_holder.setVisible(self._show_delays)
         self.left_panel_stub_holder.hide()
-        self.collapse_button.setText("Collapse")
+        self.collapse_button.setText("Channels")
+        self._settle_left_pane_width()
+
+    def _toggle_delays(self) -> None:
+        self._show_delays = not self._show_delays
+        self.names_panel_holder.show()
+        self.left_panel_stub_holder.hide()
+        self.channel_panel_holder.setVisible(self._show_delays)
+        self.delays_button.setText("Hide delays" if self._show_delays else "Delays")
         self._settle_left_pane_width()
 
 

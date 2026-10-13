@@ -34,7 +34,11 @@ independent complete-Pulse count shown on Edit (`0 = infinite`).
 
 The inline binding button opens a Fluent popup with a Scan checkbox and
 Default/API/Config source choice. It emits `binding_committed`, and the presenter
-returns the accepted `FieldVM`. The popup does not edit Config names or files.
+returns the accepted `FieldVM`. The popup also edits the field's Config reference
+through `config_key_committed`; names come from `FieldVM.config_names`, and
+`FieldVM.field_id` carries the domain-owned field identity. It shows the editable
+default and current effective source together. Config values and files are still
+edited and saved separately on Config.
 S/A/C badges contain no numeric identity; Scan defaults remain editable.
 
 For a DAC channel, `PortRowVM.kind == "dac"` plus a
@@ -44,6 +48,17 @@ the same signal.  `Hold` is the authoring projection of no `AnalogStep`;
 choosing `Edge` or `Ramp` with a value creates the domain step.
 
 ## Schedule page
+
+The Edit workspace keeps the timeline beside a compact parameter panel for the
+selected Component. Selecting a component or its internal items projects that
+same instance; Expand edits its contents on the original timeline. The panel
+does not construct another schedule or keep a second document. Open/Save Pulse
+stay in the header, timeline commands sit above the timeline, and execution
+controls span the workspace below. Channel delays are available on demand.
+
+Subpulse file is a separate authoring page for an independent reusable file.
+Insert Subpulse and Duplicate create independent components at the selected
+timeline position. There is no shared-definition update behavior.
 
 ```python
 view = PulseScheduleView()

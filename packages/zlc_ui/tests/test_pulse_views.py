@@ -985,7 +985,7 @@ assert CONFIG_GREEN in edit.styleSheet()
 edit.set_field_state(editable=True, source="config", config_key="bias", effective_text="120 value")
 assert CONFIG_GREEN_TINT in edit.styleSheet() and CONFIG_GREEN_DARK in edit.styleSheet()
 edit.binding_button.click()
-assert edit.config_name.text() == "bias" and edit.config_name.isVisible()
+assert edit.config_name.currentText() == "bias" and edit.config_name.isVisible()
 edit.set_field_state(editable=False, source="config", config_key="bias", effective_text="120 value")
 assert not edit.isEnabled() and not edit.binding_button.isEnabled()
 assert edit.isReadOnly() and not edit._popup.isVisible()
@@ -995,7 +995,7 @@ assert not edit._popup.isVisible(), "a held value cannot open binding authoring"
 edit.set_field_state(editable=True, source="config", config_key="bias", effective_text="120 value")
 assert edit.isEnabled() and edit.binding_button.isEnabled() and not edit.isReadOnly()
 edit.binding_button.click()
-assert edit._popup.isVisible() and edit.config_name.text() == "bias"
+assert edit._popup.isVisible() and edit.config_name.currentText() == "bias"
 edit._popup.hide()
 
 edit.set_field_state(editable=True, scan=True, source="config")
@@ -1125,17 +1125,17 @@ handle.set_config_page(replace(record, entries=entries_before_names))
 QtTest.QTest.mouseClick(config.save_button, QtCore.Qt.LeftButton)
 assert saves == [True]
 assert view.scan_view.scan_load_array_button.text() == "Load Array"
-view.tabs.setCurrentWidget(view.schedule_view)
+view.tabs.setCurrentWidget(view.edit_page)
 app.processEvents()
 channel = view.schedule_view.channel_panel
 button = channel.config_status_button
 assert button.text() == 'saved.json' and button.toolTip() == 'saved.json'
-column = (channel.clock_label.mapTo(channel, QtCore.QPoint()).x(), channel.clock_label.width())
-assert (button.mapTo(channel, QtCore.QPoint()).x(), button.width()) == column
+assert button.isVisible(), 'Config entry stays in the common Run bar when delays are hidden'
+button_width = button.width()
 current_page = replace(record, entries=config._entries())
 handle.set_config_page(replace(current_page, active_path='C:/config/' + 'calibration_' * 30 + '.json'))
 app.processEvents()
-assert (button.mapTo(channel, QtCore.QPoint()).x(), button.width()) == column
+assert button.width() == button_width
 assert button.toolTip().startswith('C:/config/')
 assert button.text() == 'calibration_' * 30 + '.json'
 handle.set_config_page(current_page)
@@ -1420,21 +1420,19 @@ app.processEvents()
     )
 
 
-def test_the_bottom_bar_is_one_table_of_rows_across_three_cards(run_qt) -> None:
-    """Row two of Control is read beside row two of Connection and Ports.
-
-    They were three private rhythms -- two row heights and two gaps -- so the
-    fourth row of Control sat six pixels below the boxes beside it.
-    """
+def test_edit_actions_stay_with_timeline_and_run_controls_span_workspace(run_qt) -> None:
+    """Opening parameters must not squeeze the whole-Pulse execution bar."""
 
     run_qt(
         r'''
-from PyQt5 import QtWidgets
+from PyQt5 import QtCore, QtWidgets
 from zlc_ui.qt import ensure_qt_app
-from zlc_ui.pulse import PulseScheduleView
+from zlc_ui.pulse import PulseEditorView
 
 app = ensure_qt_app(["pulse-bottom-bar"])
-view = PulseScheduleView()
+editor = PulseEditorView()
+view = editor.schedule_view
+editor.resize(1200, 800); editor.show()
 view.resize(1100, 700); view.show()
 for _ in range(40):
     app.processEvents()
@@ -1442,40 +1440,23 @@ for _ in range(40):
 cards = {}
 for box in view.button_frame.findChildren(QtWidgets.QGroupBox):
     cards[box.title()] = box
-assert set(cards) == {"Control", "Connection", "Ports"}, sorted(cards)
-
-def rows(card):
-    """The top of every row this card lays out, in the window's frame."""
-
-    found = []
-    for item in (card.layout().itemAt(i) for i in range(card.layout().count())):
-        if item.widget() is not None:
-            found.append(item.widget().mapTo(view, item.widget().rect().topLeft()).y())
-        elif item.layout() is not None:
-            inner = item.layout()
-            if isinstance(inner, QtWidgets.QGridLayout):
-                for row in range(inner.rowCount()):
-                    cell = inner.itemAtPosition(row, 0)
-                    if cell is not None and cell.widget() is not None:
-                        widget = cell.widget()
-                        found.append(widget.mapTo(view, widget.rect().topLeft()).y())
-            else:
-                first = inner.itemAt(0)
-                if first is not None and first.widget() is not None:
-                    widget = first.widget()
-                    found.append(widget.mapTo(view, widget.rect().topLeft()).y())
-    return found
-
-tops = {name: rows(card) for name, card in cards.items()}
-shortest = min(len(value) for value in tops.values())
-assert shortest >= 3, tops
-for index in range(shortest):
-    values = {name: value[index] for name, value in tops.items()}
-    assert len(set(values.values())) == 1, (
-        f"row {index + 1} is at different heights across the bar: {values}"
-    )
-
-view.close()
+assert set(cards) == {"Run Pulse", "Connection", "Ports"}, sorted(cards)
+def top(widget):
+    return widget.mapTo(editor, QtCore.QPoint()).y()
+assert top(view.add_button) < top(view.dataset_surface) < top(view.run_button)
+assert top(view.save_button) < top(editor.tabs)
+assert not view.channel_panel_holder.isVisible()
+view.delays_button.click(); app.processEvents()
+assert view.channel_panel_holder.isVisible() and view.names_panel_holder.isVisible()
+view.delays_button.click(); app.processEvents()
+assert not view.channel_panel_holder.isVisible() and view.names_panel_holder.isVisible()
+bar_width = view.button_frame.width()
+editor.component_inspector.show(); app.processEvents()
+assert view.button_frame.width() == bar_width
+assert view.button_frame.width() > view.width()
+assert view.channel_panel.run_repeats_spin.isVisible()
+assert view.channel_panel.config_status_button.isVisible()
+editor.finish_close()
 app.processEvents()
 '''
     )
@@ -1720,18 +1701,23 @@ app.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
 
 
 def test_choosing_config_in_the_slot_popup_changes_a_text_not_the_popups_shape(run_qt) -> None:
-    """The Config name row is always there, never wider than the switch
-    above it: choosing Config fills a text in place.  Shown and hidden
-    with the source, the popup grew a row under the pointer."""
+    """Names are edited at the field; source changes preserve popup geometry."""
 
     run_qt(
         '''
+from PyQt5 import QtCore, QtTest
 from zlc_ui.qt import ensure_qt_app
-from zlc_ui.fluent import PLACEHOLDER
 from zlc_ui.pulse.scan_line_edit import FluentScanLineEdit
 
 app = ensure_qt_app(["popup-shape"])
 edit = FluentScanLineEdit("12")
+requested = []
+def accept_key(key):
+    requested.append(key)
+    if key != 'bad name':
+        edit.set_field_state(editable=True, source='config', config_key=key)
+edit.config_key_committed.connect(accept_key)
+edit.set_config_names(('bias', 'saved_only'))
 edit.show(); app.processEvents()
 edit.set_field_state(editable=True)
 edit.binding_button.click()
@@ -1739,21 +1725,55 @@ popup = edit._popup
 app.processEvents()
 assert popup.isVisible()
 assert edit.config_name_label.isVisible() and edit.config_name.isVisible()
-assert edit.config_name.text() == "\u2014" and PLACEHOLDER in edit.config_name.styleSheet()
+assert not edit.config_name.isEnabled() and edit.config_name.currentText() == ''
+assert edit.default_value.text() == '12'
+assert edit.effective_value.text() == '12 · default'
 resting = popup.size()
 hint = popup.sizeHint()
 edit.set_field_state(editable=True, source="config", config_key="a_config_name_far_longer_than_the_switch_row")
 app.processEvents()
 assert popup.isVisible() and popup.size() == resting and popup.sizeHint() == hint, (resting, popup.size())
 assert edit.config_name.toolTip() == "a_config_name_far_longer_than_the_switch_row"
-assert "\u2026" in edit.config_name.text(), edit.config_name.text()
-assert edit.config_name.width() <= edit.source_switch.width()
-edit.set_field_state(editable=True, source="config", config_key="bias")
+assert edit.config_name.isEnabled() and not requested
+assert 'not supplied' in edit.source_note.text()
+edit.set_field_state(editable=True, source="config", config_key="bias", effective_text='120 value')
 app.processEvents()
-assert edit.config_name.text() == "bias" and popup.size() == resting
+assert edit.config_name.currentText() == "bias" and popup.size() == resting
+assert edit.effective_value.text() == '120 value'
+assert edit.default_value.text() == '12'
+combo = edit.config_name
+combo.showPopup()
+QtTest.QTest.keyClick(combo.view(), QtCore.Qt.Key_End)
+QtTest.QTest.keyClick(combo.view(), QtCore.Qt.Key_Return)
+assert requested == ['saved_only'] and popup.isVisible()
+combo.lineEdit().setFocus(); combo.lineEdit().selectAll()
+QtTest.QTest.keyClicks(combo.lineEdit(), 'custom')
+QtTest.QTest.keyClick(combo.lineEdit(), QtCore.Qt.Key_Return)
+QtTest.QTest.keyClick(combo.lineEdit(), QtCore.Qt.Key_Tab)
+assert requested == ['saved_only', 'custom']
+combo.lineEdit().setFocus(); combo.lineEdit().selectAll()
+QtTest.QTest.keyClicks(combo.lineEdit(), 'bad name')
+QtTest.QTest.keyClick(combo.lineEdit(), QtCore.Qt.Key_Return)
+assert combo.currentText() == 'custom', 'rejected text returns to the accepted key'
+combo.lineEdit().setFocus(); combo.lineEdit().selectAll()
+QtTest.QTest.keyClicks(combo.lineEdit(), 'unfinished')
+edit.set_config_names(('new_file_name',))
+assert combo.currentText() == 'unfinished', 'catalog refresh preserves the in-progress name'
 edit.set_field_state(editable=True, source="api")
 app.processEvents()
-assert edit.config_name.text() == "\u2014" and popup.size() == resting
+combo.editingFinished.emit()
+assert requested == ['saved_only', 'custom', 'bad name'], 'source projection must not commit stale text'
+assert combo.currentText() == '' and not combo.isEnabled() and popup.size() == resting
+edit.set_field_state(editable=True, source='config')
+assert 'unassigned' in edit.source_note.text()
+assert edit.effective_value.text() == '12 · default'
+assert combo.currentText() == '' and tuple(combo.itemText(i) for i in range(combo.count())) == ('new_file_name',)
+from zlc_ui.pulse.models import FieldVM
+from zlc_ui.pulse.schedule_view import _apply_field
+_apply_field(edit, FieldVM('24', source='config'))
+assert edit.default_value.text() == '24' and edit.effective_value.text() == '24 · default'
+_apply_field(edit, FieldVM('36', source='config'))
+assert edit.default_value.text() == '36' and edit.effective_value.text() == '36 · default'
 popup.hide()
 '''
     )
@@ -1812,7 +1832,7 @@ assert not main._cards["p2"].is_selected(), "Shift selection must never fill an 
 QtTest.QTest.mouseClick(strip, QtCore.Qt.LeftButton, QtCore.Qt.ShiftModifier, QtCore.QPoint(1, 15))
 assert strip.selected_items() == (("period", "p1"), ("period", "p3"))
 main.group_button.click()
-assert actions == [("group", (("period", "p1"), ("period", "p3")))], actions
+assert [item for item in actions if item[0] != "context"] == [("group", (("period", "p1"), ("period", "p3")))], actions
 assert strip.selected_items() == (("period", "p1"), ("period", "p3"))
 check = main._cards["p2"].port_rows["d0"]
 level = check.isChecked()
@@ -1836,6 +1856,8 @@ card = main._component_cards[("component", "mot")]
 assert card.width() == main._cards["p3"].width()
 assert card._actions_popup is None
 card.expand_button.click(); app.processEvents()
+assert view.tabs.currentWidget() is view.edit_page
+assert ("context", "mot") in actions, actions
 assert set(main._cards) == {"p1", "p2", "p3"}
 assert main.drag_container.flat_order() == vm.item_order
 visible = tuple(strip._item_key(item) for item in strip.items())
@@ -1882,26 +1904,65 @@ assert card._actions_popup.isVisible()
 export = next(button for button in card._actions_popup.findChildren(QtWidgets.QPushButton) if button.text() == "Export Subpulse")
 export.click(); app.processEvents()
 assert not card._actions_popup.isVisible()
-assert actions == [("export", "mot")], actions
+assert [item for item in actions if item[0] != "context"] == [("export", "mot")], actions
 actions.clear()
 main.drag_container.show_selection((("component", "mot"),))
 main.remove_button.click()
 assert deletions[-1] == (("component", "mot"),), deletions
-local = replace(vm, document_generation=2, periods=periods, components=())
+local_periods = (replace(periods[0], duration=replace(field, field_id="duration:p1",
+                         config_names=("mot_time",))), periods[1])
+local = replace(vm, document_generation=2, periods=local_periods, components=())
 handle.set_component_document(local, contexts=(("mot", "MOT · current Pulse"),), context_id="mot")
+app.processEvents()
+inspector = view.component_inspector
+assert view.tabs.currentWidget() is view.edit_page and inspector.isVisible()
+assert inspector._context_id == "mot"
+assert inspector.schedule_view is None, "the inspector must not construct a second timeline"
+assert view.component_view.schedule_view is None, "selecting an instance must not populate the file editor"
+events = []
+handle.component_edit_requested.connect(lambda *args: events.append((inspector._context_id, *args)))
+duration = inspector._parameter_rows[("duration", "p1", "")][2]
+duration.setFocus(); duration.selectAll()
+QtTest.QTest.keyClicks(duration, "6")
+QtTest.QTest.keyClick(duration, QtCore.Qt.Key_Return)
+assert events[-1] == ("mot", "duration", ("p1", 6.0, "us")), events
+local = replace(local, revision=5, periods=(replace(local_periods[0],
+                duration=replace(local_periods[0].duration, text="6")), local_periods[1]))
+handle.set_component_document(local, contexts=(("mot", "MOT · current Pulse"),), context_id="mot")
+QtTest.QTest.mouseClick(duration.binding_button, QtCore.Qt.LeftButton); app.processEvents()
+QtTest.QTest.mouseClick(duration.source_switch, QtCore.Qt.LeftButton,
+                       pos=QtCore.QPoint(duration.source_switch.width() - 8, duration.source_switch.height() // 2))
+assert events[-1] == ("mot", "binding", ("duration", "p1", None, False, "config")), events
+local = replace(local, revision=6, periods=(replace(local.periods[0],
+                duration=replace(local.periods[0].duration, source="config")), local.periods[1]))
+handle.set_component_document(local, contexts=(("mot", "MOT · current Pulse"),), context_id="mot")
+duration.config_name.lineEdit().setFocus()
+QtTest.QTest.keyClicks(duration.config_name.lineEdit(), "mot_time")
+QtTest.QTest.keyClick(duration.config_name.lineEdit(), QtCore.Qt.Key_Return)
+assert events[-1] == ("mot", "config_binding", ("duration:p1", "mot_time")), events
+duration._popup.hide()
+inspector._buttons["expand"].click(); app.processEvents()
+assert view.tabs.currentWidget() is view.edit_page
+assert {"p1", "p2", "p3"} == set(main._cards)
+assert inspector._context_id == "mot" and inspector.schedule_view is None
+actions.clear()
 view.tabs.setCurrentWidget(view.component_view); app.processEvents()
-assert view.component_view._buttons["save"].text() == "Save Pulse"
+assert ("context", "") in actions, "opening a file must leave instance editing"
+handle.set_component_document(local, context_id="", path="readout.subpulse.json")
+app.processEvents()
+assert not inspector.isVisible() and view.component_view._context_id == ""
+assert view.component_view.context_combo.count() == 1
+assert view.component_view._buttons["save"].text() == "Save Subpulse"
 assert not view.component_view.schedule_view.run_button.isVisible()
 assert not view.component_view.schedule_view.names_panel.name_edit.isVisible()
 assert not view.component_view.schedule_view.names_panel._rows["d0"].isEnabled()
 assert view.component_view.schedule_view.names_panel._rows["d0"].isReadOnly()
 assert main.names_panel._rows["d0"].isEnabled()
 assert isinstance(view.component_view.schedule_view._cards["p1"], PeriodCard)
-events = []
-handle.component_edit_requested.connect(lambda *args: events.append(args))
+events.clear()
 view.component_view.schedule_view._cards["p1"].name_edit.setText("Load")
 view.component_view.schedule_view._cards["p1"].name_edit.editingFinished.emit()
-assert events == [("period_name", ("p1", "Load"))], events
+assert events == [("", "period_name", ("p1", "Load"))], events
 view.finish_close(); view.deleteLater()
 app.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
 ''')
