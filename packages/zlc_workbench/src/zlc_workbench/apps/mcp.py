@@ -348,11 +348,12 @@ def start_server(flow, *, host="127.0.0.1", port: int, token: str, allow_control
                                     expected_revision: int | None = None) -> dict[str, object]:
             """Use an opened Pulse/SLM editor's discovered action, via the same authoring/worker as the GUI.
             Consult lab_editor_catalog; path arguments are workspace-relative or absolute inside the workspace.
+            An empty path stays empty for actions that explicitly clear a file reference.
             Saving/applying/solving can be asynchronous; inspect pending/errors afterward. expected_revision rejects
             edits against a stale draft. This does not override normal device ownership or stale-device protections.
             """
             arguments = dict(arguments)
-            if "path" in arguments:
+            if "path" in arguments and arguments["path"] != "":
                 arguments["path"] = str(workspace_path(str(arguments["path"])))
             def submit():
                 selected = editor(device_id)

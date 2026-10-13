@@ -1951,6 +1951,7 @@ def test_a_queued_value_the_drain_refuses_is_said_on_its_field(workspace) -> Non
 def test_mcp_uses_current_virtual_session_and_keeps_stop_available(workspace):
     """The actual HTTP protocol, Qt owner and existing virtual lifecycle agree."""
     pytest.importorskip("mcp")
+    write_ordinary_pulse(workspace)
     result = _run_script(r'''
 import asyncio, base64, socket, time
 from threading import Event
@@ -1991,6 +1992,32 @@ async def client():
                         break
                     await asyncio.sleep(.02)
                 assert state["session_open"]
+                await call("lab_device_action", {"action":"open", "device_id":"sequencer"})
+                async def edit(action, arguments, **guards):
+                    reply = await call("lab_editor_action", {"device_id":"sequencer", "action":action,
+                                                             "arguments":arguments, **guards})
+                    assert reply["accepted"], reply
+                    return reply["state"]
+                await edit("open", {"path":"pulses/imaging_test.json"})
+                pulse = await edit("subpulse.group", {"items":[["period","load"]]})
+                component = pulse["components"][0]["component_id"]
+                await edit("subpulse.export", {"component_id":component, "path":"pulses/load.subpulse.json"})
+                await edit("subpulse.source", {"component_id":component, "source":"default",
+                                               "path":"pulses/load.subpulse.json"})
+                pulse = await edit("subpulse.source", {"component_id":component, "source":"default", "path":""})
+                assert pulse["components"][0]["path"] == ""  # Clear, not workspace root.
+                pulse = await edit("subpulse.open", {"path":"pulses/load.subpulse.json"})
+                revision = pulse["revision"]
+                local_period = pulse["subpulse"]["period_ids"][0]
+                pulse = await edit("subpulse.edit", {"edit":"duration", "period_id":local_period,
+                                                     "value":3, "unit":"ms"}, expected_revision=revision)
+                assert pulse["revision"] != revision and pulse["subpulse"]["dirty"]
+                stale = await c.call_tool("lab_editor_action", {"device_id":"sequencer", "action":"subpulse.edit",
+                    "arguments":{"edit":"duration", "period_id":local_period, "value":4, "unit":"ms"},
+                    "expected_revision":revision})
+                assert stale.is_error and "revision changed" in str(stale.content)
+                await edit("subpulse.save", {"path":"pulses/load.subpulse.json"})
+                await edit("save", {"path":"pulses/mcp_checked.json"})
                 assert "fields" not in (await call("lab_catalog"))["logic"][0]
                 added = await call("lab_action", {"action":"logic.add", "arguments":{
                     "api_name":"camera_measurement", "values":{"repeat":0}, "device_keys":{"camera":"camera"}}})

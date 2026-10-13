@@ -1345,6 +1345,7 @@ class PulseEditorPresenter:
     def control_catalog(self) -> dict[str, object]:
         """Describe the existing editor gestures, using this pulse's identities."""
         sequence = self.sequence
+        state = self.control_state()
         return {
             "editor_kind": "pulse",
             "actions": {
@@ -1358,7 +1359,7 @@ class PulseEditorPresenter:
                 "digital": "period_id, port_key, high: boolean TTL state",
                 "analog": "period_id, port_key, mode, value: signed DAC code; hold removes the step",
                 "delay": "port_key, value, unit: output delay; zero removes it",
-                "binding": "field_kind (duration, analog or delay), period_id (null for delay), port_key (null for duration), scan (bool), source (default, api or config)",
+                "binding": "field_kind (duration, analog, delay or bracket_count), period_id/port_key as applicable, bracket_id for bracket_count, scan (bool), source (default, api or config); bracket_count uses count units and cannot Scan",
                 "config_binding": "field_id, key: assign an existing Config-source binding to a Config name",
                 "run_repeats": "repeats: complete Pulse runs per point; 0 means infinite",
                 "scan_repeats": "repeats: complete scan-table sweeps; 0 means infinite; independent of Run repeats",
@@ -1374,6 +1375,21 @@ class PulseEditorPresenter:
                 "config.unload": "no arguments; unload active Config, preserving its draft",
                 "config.mode": "enabled: boolean; choose Default or Config for this Pulse",
                 "config.refresh": "no arguments; refresh saved numeric Config and Subpulse sources",
+                "subpulse.select": "component_id: select its embedded default or referenced file for editing; empty selects the retained independent file draft; discard_changes=true permits replacing unsaved file content",
+                "subpulse.source": "component_id, source (default/config), optional path (empty clears, omitted keeps reference); assigning a path does not change source; discard_changes=true permits replacing unsaved selected file content",
+                "subpulse.open_source": "component_id; open its referenced file for editing; discard_changes=true permits replacing unsaved file content",
+                "subpulse.new": "create an independent draft; discard_changes=true permits replacing unsaved file content",
+                "subpulse.open": "path: explicit Subpulse JSON file; discard_changes=true permits replacing unsaved file content",
+                "subpulse.save": "path: explicit save destination; embedded editing saves the main Pulse, file editing saves the Subpulse (see subpulse.save_target)",
+                "subpulse.save_as": "path: explicit Subpulse JSON destination; a selected file reference follows Save as",
+                "subpulse.export": "path, optional component_id; export that embedded component or the current draft without switching editing owner",
+                "subpulse.insert": "optional before_item [period|bracket,item_id]; insert the current editing content into the main Pulse, omitted appends",
+                "subpulse.insert_file": "path, optional before_item [period|bracket,item_id]; insert a Subpulse file into the main Pulse, omitted appends",
+                "subpulse.group": "items: ordered selection of [period|bracket,item_id]; group consecutive complete timeline items",
+                "subpulse.ungroup": "component_id: remove grouping while retaining its embedded content",
+                "subpulse.remove": "component_id: remove this embedded component",
+                "subpulse.rename": "name, optional component_id; omitted renames the currently selected editing object",
+                "subpulse.edit": "edit: period_name/duration/digital/analog/binding/config_binding/bracket/bracket_add/bracket_remove/period_add/spacer_add/period_remove/document_name, with the same flat arguments as the main edit; edits the selected owner, never performs file operations",
             },
             "time_units": list(_TIME_UNITS),
             "analog_modes": [*ANALOG_MODE_CHOICES, HOLD_MODE],
@@ -1386,10 +1402,13 @@ class PulseEditorPresenter:
             ],
             "bindings": [] if sequence is None else [
                 {"field_id": b.field_id, "label": field_label(sequence, b.field_ref),
-                 "unit": b.unit, "scan": b.scan, "source": b.source, "config_key": b.config_key}
+                 "unit": b.unit, "scan": b.scan, "source": b.source, "config_key": b.config_key,
+                 "field_kind": b.field_ref.kind, "bracket_id": b.field_ref.bracket_id}
                 for b in sequence.bindings
             ],
-            "state": self.control_state(),
+            "components": state["components"],
+            "edit_scope": "main Pulse embedded defaults; Config-supplied values and file-backed content are read-only while Config is enabled; subpulse.edit uses the selected editing owner",
+            "state": state,
         }
 
     def control_state(self, details: bool = False) -> dict[str, object]:
@@ -1415,6 +1434,39 @@ class PulseEditorPresenter:
                             "active_path": self._active_config_path(),
                             "enabled": bool(sequence is not None and sequence.config_enabled),
                             "error": self._config_error}
+        components = () if sequence is None else sequence.components
+        result["components"] = [
+            {"component_id": c.component_id, "name": c.name, "source": c.source, "path": c.config_path,
+             "period_ids": list(c.period_ids), "bracket_ids": list(c.bracket_ids),
+             "effective_read_only": bool(sequence.config_enabled and c.source == "config")}
+            for c in components
+        ]
+        context = self._component_context
+        selected = next((c for c in components if c.component_id == self._selected_subpulse_id), None)
+        fragment = self._selected_component_fragment()
+        file_path = (selected.config_path if not context and selected is not None else self._subpulse_path)
+        subpulse = {
+            "selected_id": self._selected_subpulse_id, "component_id": context,
+            "edit_owner": "embedded_default" if context else "file_draft" if fragment is not None or file_path else "none",
+            "available": fragment is not None, "path": "" if context else file_path,
+            "dirty": self.dirty if context else fragment is not None and fragment != self._subpulse_saved,
+            "save_target": {"kind": "pulse" if context else "subpulse", "path": self.path if context else file_path},
+            "period_ids": [] if fragment is None else [p.period_id for p in fragment.periods],
+            "bindings": [] if fragment is None else [
+                {"field_id": b.field_id, "field_kind": b.field_ref.kind, "unit": b.unit,
+                 "source": b.source, "scan": b.scan, "config_key": b.config_key}
+                for b in fragment.bindings
+            ],
+            "file_draft": {"path": self._subpulse_path, "available": self._subpulse_draft is not None,
+                           "dirty": self._subpulse_draft != self._subpulse_saved},
+        }
+        result["subpulse"] = subpulse
+        result["effective"] = {
+            "scope": "cached editor display, refreshed by edits/config.refresh; not a compilation or board receipt",
+            "available": self._shown is not None and not self._config_error,
+            "total_text": None if self._shown is None else self._shown.total_text,
+            "error": self._config_error,
+        }
         if sequence is not None:
             duration, timing_error = None, None
             try:
@@ -1430,7 +1482,26 @@ class PulseEditorPresenter:
                              "duration": p.duration, "unit": p.unit} for p in sequence.periods],
                 "brackets": [asdict(b) for b in sequence.brackets],
             }
+            if not sequence.config_enabled:
+                result["effective"].update(
+                    scope="embedded defaults; external Config and Subpulse sources are disabled",
+                    available=timing_error is None, error=timing_error,
+                    total_text=None if duration is None else _readable(duration * 1e9),
+                )
         if details:
+            from zlc_pulse import subpulse_to_tree
+            for target, draft in ((subpulse, fragment), (subpulse["file_draft"], self._subpulse_draft)):
+                if draft is not None:
+                    try:
+                        target["document"] = subpulse_to_tree(draft)
+                    except ValueError as error:
+                        target["document_error"] = str(error)
+            shown = self._shown
+            if sequence is not None and not sequence.config_enabled:
+                shown = project_schedule(sequence, revision=self.revision, pins=self.pins)
+            if shown is not None:
+                result["effective"]["periods"] = [asdict(p) for p in shown.periods]
+                result["effective"]["brackets"] = [asdict(b) for b in shown.brackets]
             result["config"]["draft_rows"] = [list(row) for row in self._config_rows]
             result["config"]["active_values"] = dict(self._active_config_values())
             result["config"]["scope"] = "loaded values; unsaved Config draft is not active; Fire rereads the active file"
@@ -1471,11 +1542,42 @@ class PulseEditorPresenter:
             elif action == "config.mode":
                 if not isinstance(arguments["enabled"], bool):
                     raise ValueError("enabled must be boolean")
-                self.set_config_mode(arguments["enabled"])
+                self.set_config_mode(arguments["enabled"], present=False)
                 accepted = not bool(self.last_warning or self._config_error)
             elif action == "config.refresh":
-                self.refresh_effective_sources()
+                self.refresh_effective_sources(present=False)
                 accepted = not bool(self.last_warning or self._config_error)
+            elif action.startswith("subpulse."):
+                command = action.removeprefix("subpulse.")
+                if command == "edit":
+                    edit = str(arguments["edit"])
+                    if edit in {"delay", "run_repeats", "scan_repeats"}:
+                        raise ValueError("delays and repeat counts belong to the main Pulse")
+                    edit, args = _control_edit_arguments(edit, arguments)
+                    accepted = self._edit_component_contents(self._component_context, edit, args, present=False)
+                else:
+                    key = str(arguments.get("component_id", ""))
+                    payload: object = key
+                    if command == "select":
+                        command = "context"
+                    elif command == "source":
+                        current = next(c for c in self.sequence.components if c.component_id == key)
+                        payload = (key, arguments["source"], arguments.get("path", current.config_path))
+                    elif command == "group":
+                        payload = arguments["items"]
+                    elif command == "rename":
+                        payload = (arguments.get("component_id", self._component_context), arguments["name"])
+                    elif command not in {"open_source", "new", "open", "save", "save_as", "export",
+                                         "insert", "insert_file", "ungroup", "remove"}:
+                        raise ValueError(f"unknown Subpulse action {command!r}")
+                    path = arguments.get("path")
+                    if command in {"open", "save", "save_as", "export", "insert_file"} and not path:
+                        raise ValueError(f"subpulse.{command} requires an explicit path")
+                    accepted = self.component_action(
+                        command, payload, path=path, present=False,
+                        discard_changes=arguments.get("discard_changes") is True,
+                        before_item=None if arguments.get("before_item") is None else tuple(arguments["before_item"]),
+                    )
             elif action == "config.edit":
                 if not self._device_available(present=False):
                     return {"accepted": False, "error": self.last_warning, "state": self.control_state()}
@@ -1498,50 +1600,14 @@ class PulseEditorPresenter:
                 if action == "scan_repeats":
                     self.set_scan_repeats(arguments["repeats"])
                 else:
-                    if action == "delay":
-                        candidate = _sequence_edited(self.sequence, "delay", (
-                            arguments["port_key"], arguments["value"], arguments["unit"]))
-                    elif action == "run_repeats":
-                        candidate = replace_sequence(self.sequence, run_repeats=arguments["repeats"])
-                    else:
-                        if action == "period_name":
-                            args = (arguments["period_id"], arguments["name"])
-                        elif action == "duration":
-                            args = (arguments["period_id"], arguments["value"], arguments["unit"])
-                        elif action == "digital":
-                            if not isinstance(arguments["high"], bool):
-                                raise TypeError("high must be a boolean")
-                            args = (arguments["period_id"], arguments["port_key"], arguments["high"])
-                        elif action == "analog":
-                            args = (arguments["period_id"], arguments["port_key"], arguments["mode"], arguments.get("value"))
-                        elif action == "binding":
-                            args = (arguments["field_kind"], arguments.get("period_id"), arguments.get("port_key"),
-                                    arguments["scan"], arguments["source"])
-                        elif action == "config_binding":
-                            args = (arguments["field_id"], arguments["key"])
-                        elif action == "bracket":
-                            args = (arguments["bracket_id"], arguments["start"], arguments["end"], arguments["count"])
-                        elif action == "bracket_add":
-                            args = (arguments["start"], arguments["end"], arguments["count"])
-                        elif action in {"period_add", "spacer_add"}:
-                            action = "insert_period" if action == "period_add" else "insert_spacer"
-                            before = arguments.get("before_item")
-                            args = (None if before is None else tuple(before),)
-                        elif action in {"period_remove", "bracket_remove"}:
-                            item = (("period", arguments["period_id"]) if action == "period_remove" else
-                                    ("bracket", bracket_post_key(arguments["bracket_id"], "start")))
-                            action, args = "remove_items", ((item,),)
-                        else:
-                            raise ValueError(f"unknown Pulse action {action!r}; inspect control_catalog")
-                        candidate = _sequence_edited(self.sequence, action, args)
-                    candidate, dropped = prune_orphaned_bindings(candidate)
+                    edit, args = _control_edit_arguments(action, arguments)
+                    candidate = self._edited_candidate(edit, args, present=False)
+                    accepted = candidate is not None
                     self._apply(candidate)
-                    if dropped:
-                        self.last_warning = "unbound " + ", ".join(dropped) + ": the field is no longer set here"
         except Exception as error:
             accepted = False
             self._warn(str(error), present=False)
-        return {"accepted": accepted, "error": None if accepted else self.last_warning,
+        return {"accepted": accepted, "error": None if accepted else self.last_warning or self._config_error or "operation refused",
                 "state": self.control_state()}
 
     def _validate_control(self) -> bool:
@@ -1616,30 +1682,73 @@ class PulseEditorPresenter:
             )
         self._accept_state(replace(self._state, **changes))
 
-    def _edited_candidate(self, action: str, args: tuple, *, default_edit: bool = False) -> PulseSequence | None:
+    def _edited_candidate(self, action: str, args: tuple, *, default_edit: bool = False,
+                          present: bool = True) -> PulseSequence | None:
         if self.sequence is None:
             return None
         try:
             if self.sequence.config_enabled and not default_edit:
-                if action in {"duration", "analog", "digital", "period_name", "binding"}:
+                if action in {"remove_items", "insert_period", "insert_spacer", "reorder_items", "bracket_add"}:
+                    order = _sequence_item_order(self.sequence)
+                    for component in self.sequence.components:
+                        if component.source != "config":
+                            continue
+                        members = {("period", key) for key in component.period_ids}
+                        members.update(("bracket", bracket_post_key(key, side))
+                                       for key in component.bracket_ids for side in ("start", "end"))
+                        refused = False
+                        if action == "remove_items":
+                            refused = any(tuple(item) in members for item in args[0])
+                        elif action in {"insert_period", "insert_spacer"} and args[0] is not None:
+                            positions = [i for i, item in enumerate(order) if item in members]
+                            refused = min(positions) < order.index(tuple(args[0])) <= max(positions)
+                        elif action == "reorder_items":
+                            edited_order = tuple(tuple(item) for item in args[0])
+                            positions = [i for i, item in enumerate(edited_order) if item in members]
+                            refused = (tuple(item for item in edited_order if item in members)
+                                       != tuple(item for item in order if item in members)
+                                       or bool(positions) and max(positions) - min(positions) + 1 != len(positions))
+                        elif action == "bracket_add":
+                            ids = tuple(self.sequence.period_by_id)
+                            if args[0] in ids and args[1] in ids:
+                                covered = set(ids[ids.index(args[0]):ids.index(args[1]) + 1])
+                                inside = covered.intersection(component.period_ids)
+                                refused = bool(inside) and not set(component.period_ids).issubset(covered)
+                        if refused:
+                            raise ValueError("This Subpulse comes from a file. Open its source, or switch to Default to edit its contents.")
+                if action in {"duration", "analog", "digital", "period_name", "binding", "bracket"}:
                     period_id = args[1] if action == "binding" else args[0]
-                    component = self.sequence.component_for_period(str(period_id))
+                    if action == "bracket" or action == "binding" and args[0] == "bracket_count":
+                        component = self.sequence.component_for_field(PulseFieldRef("bracket_count", bracket_id=str(period_id)))
+                    else:
+                        component = self.sequence.component_for_period(str(period_id))
                     if component is not None and component.source == "config":
                         raise ValueError("This Subpulse comes from a file. Open its source, or switch to Default to edit the embedded content.")
-                if action in {"duration", "analog", "delay"}:
+                if action in {"duration", "analog", "delay", "bracket"}:
                     reference = (PulseFieldRef("delay", port=str(args[0])) if action == "delay" else
                                  PulseFieldRef("duration", period_id=str(args[0])) if action == "duration" else
+                                 PulseFieldRef("bracket_count", bracket_id=str(args[0])) if action == "bracket" else
                                  PulseFieldRef("dac", period_id=str(args[0]), port=str(args[1])))
                     if any(b.field_ref == reference and b.config_key in self._active_config_values()
                            and not (b.scan and self._scan_armed()) for b in self.sequence.config_bindings):
                         raise ValueError("This value is supplied by Config. Edit the Config file, or switch to Default.")
             candidate, dropped = prune_orphaned_bindings(_sequence_edited(self.sequence, action, args))
             if dropped:
-                self._warn("unbound " + ", ".join(dropped) + ": the field is no longer set here")
+                self._warn("unbound " + ", ".join(dropped) + ": the field is no longer set here", present=present)
             return candidate
         except (TypeError, ValueError, KeyError) as error:
-            self._warn(str(error))
+            self._warn(str(error), present=present)
             return None
+
+    def _selected_component_fragment(self) -> Subpulse | None:
+        """The selected editing owner's content; never read a file here."""
+        if self._component_context:
+            return extract_subpulse(self.sequence, self._component_context)
+        selected = next((c for c in (() if self.sequence is None else self.sequence.components)
+                         if c.component_id == self._selected_subpulse_id), None)
+        if selected is not None and (not selected.config_path or selected.config_path != self._subpulse_path):
+            return None
+        return self._subpulse_draft
 
     def _refresh_component_document(self) -> None:
         sequence = self.sequence
@@ -1659,13 +1768,9 @@ class PulseEditorPresenter:
         if self._component_context not in dict(contexts):
             self._component_context = ""
         context = self._component_context
-        fragment = extract_subpulse(sequence, context) if context else self._subpulse_draft
+        fragment = self._selected_component_fragment()
         selected_source = next((c for c in (() if sequence is None else sequence.components)
                                 if c.component_id == self._selected_subpulse_id), None)
-        if not context and selected_source is not None and (
-            not selected_source.config_path or selected_source.config_path != self._subpulse_path
-        ):
-            fragment = None
         self._component_projection_revision += 1
         vm = None
         bindings = ()
@@ -1693,10 +1798,15 @@ class PulseEditorPresenter:
             busy=False,
         )
 
-    def _discard_subpulse_edits(self) -> bool:
-        return self._subpulse_draft == self._subpulse_saved or self.view.confirm_component_discard()
+    def _discard_subpulse_edits(self, *, present: bool = True, discard_changes: bool = False) -> bool:
+        if self._subpulse_draft == self._subpulse_saved or discard_changes:
+            return True
+        if not present:
+            raise ValueError("Subpulse has unsaved changes; save it or explicitly pass discard_changes=true to replace the file draft")
+        return self.view.confirm_component_discard()
 
-    def _select_subpulse(self, key: str, *, discard_checked: bool = False) -> bool:
+    def _select_subpulse(self, key: str, *, discard_checked: bool = False,
+                        present: bool = True, discard_changes: bool = False) -> bool:
         """Select one editing object; the global execution switch is irrelevant."""
         component = next((c for c in (() if self.sequence is None else self.sequence.components)
                           if c.component_id == key), None)
@@ -1705,7 +1815,7 @@ class PulseEditorPresenter:
         if component is not None and component.source == "config":
             path = component.config_path
             if path and path != self._subpulse_path:
-                if not discard_checked and not self._discard_subpulse_edits():
+                if not discard_checked and not self._discard_subpulse_edits(present=present, discard_changes=discard_changes):
                     return False
                 # Keep selection repairable when the referenced file cannot be read.
                 self._selected_subpulse_id, self._component_context = key, ""
@@ -1718,8 +1828,12 @@ class PulseEditorPresenter:
             self._selected_subpulse_id = self._component_context = key
         return True
 
-    def component_action(self, action: str, payload: object) -> None:
+    def component_action(self, action: str, payload: object, *, path: str | None = None,
+                         before_item: tuple[str, str] | None = None, present: bool = True,
+                         discard_changes: bool = False) -> bool:
         """Component file and grouping commands; all scientific edits use zlc_pulse."""
+        editing_before = (self._selected_subpulse_id, self._component_context, self._subpulse_draft, self._subpulse_path)
+        revision_before = self.revision
         try:
             if action in {"source", "browse_source"}:
                 if self.sequence is None:
@@ -1729,12 +1843,12 @@ class PulseEditorPresenter:
                 else:
                     key = str(payload)
                     current = next(c for c in self.sequence.components if c.component_id == key)
-                    path = self.view.ask_open_path(
+                    path = path if path is not None else self.view.ask_open_path(
                         "Choose Subpulse source", current.config_path or self.pulses_directory,
                         "ZLC Subpulse (*.subpulse.json *.json);;All files (*)",
                     )
                     if not path:
-                        return
+                        return False
                     source = current.source
                 if path:
                     location = Path(path).expanduser()
@@ -1743,39 +1857,40 @@ class PulseEditorPresenter:
                     path = str(location.resolve())
                 editing = self._selected_subpulse_id == str(key)
                 if (editing and source == "config" and path and path != self._subpulse_path
-                        and not self._discard_subpulse_edits()):
+                        and not self._discard_subpulse_edits(present=present, discard_changes=discard_changes)):
                     self._refresh_component_document()
-                    return
+                    return False
                 self._apply(set_subpulse_source(self.sequence, str(key), str(source), str(path)))
                 if editing:
-                    self._select_subpulse(str(key), discard_checked=True)
+                    self._select_subpulse(str(key), discard_checked=True, present=present)
                     self._refresh_component_document()
-                return
+                return True
             if action == "open_source":
                 component = next(c for c in self.sequence.components if c.component_id == str(payload))
                 if not component.config_path:
                     raise ValueError("choose a Subpulse source file first")
-                if not self._discard_subpulse_edits():
-                    return
+                if not self._discard_subpulse_edits(present=present, discard_changes=discard_changes):
+                    return False
                 self._subpulse_draft = self._subpulse_saved = read_subpulse(component.config_path)
                 self._subpulse_path = component.config_path
                 self._selected_subpulse_id = component.component_id
                 self._component_context = ""
                 self._subpulse_visible_ports = None
                 self._refresh_component_document()
-                return
+                return True
             if action in {"context", "edit"}:
-                self._select_subpulse(str(payload or ""))
+                if not self._select_subpulse(str(payload or ""), present=present, discard_changes=discard_changes):
+                    return False
             elif action in {"new", "open"}:
-                if not self._discard_subpulse_edits():
-                    return
+                if not self._discard_subpulse_edits(present=present, discard_changes=discard_changes):
+                    return False
                 if action == "open":
-                    chosen = self.view.ask_open_path(
+                    chosen = path if path is not None else self.view.ask_open_path(
                         "Open Subpulse", self._subpulse_path or self.pulses_directory,
                         "ZLC Subpulse (*.subpulse.json *.json);;All files (*)",
                     )
                     if not chosen:
-                        return
+                        return False
                     self._subpulse_draft = self._subpulse_saved = read_subpulse(chosen)
                     self._subpulse_path = str(Path(chosen).expanduser().resolve())
                 else:
@@ -1793,21 +1908,21 @@ class PulseEditorPresenter:
                 self._subpulse_visible_ports = None
             elif action in {"save", "save_as", "export"}:
                 if action == "save" and self._component_context:
-                    self.save_pulse()
+                    saved = self.save_pulse(path, present=present)
                     self._refresh_component_document()
-                    return
+                    return bool(saved)
                 context = str(payload or self._component_context) if action == "export" else self._component_context
-                fragment = extract_subpulse(self.sequence, context) if context else self._subpulse_draft
+                fragment = extract_subpulse(self.sequence, context) if context else self._selected_component_fragment()
                 if fragment is None:
                     raise ValueError("create or open a Subpulse first")
-                target = self._subpulse_path if not context and action == "save" else ""
+                target = path if path is not None else self._subpulse_path if not context and action == "save" else ""
                 if not target:
                     target = self.view.ask_save_path(
                         "Save Subpulse", str(Path(self.pulses_directory or ".") / f"{fragment.name}.subpulse.json"),
                         "ZLC Subpulse (*.subpulse.json *.json);;All files (*)",
                     )
                 if not target:
-                    return
+                    return False
                 path = Path(target).expanduser().resolve()
                 if not path.suffix:
                     path = path.with_suffix(".subpulse.json")
@@ -1823,23 +1938,25 @@ class PulseEditorPresenter:
                         self._edit_state(sequence=set_subpulse_source(self.sequence, selected.component_id,
                                                                       selected.source, str(path.resolve())))
                     self.refresh()
-                self._done(f"saved Subpulse {path.name}")
+                if present:
+                    self._done(f"saved Subpulse {path.name}")
+                else:
+                    self.view.set_summary(f"saved Subpulse {path.name}")
             elif action in {"insert", "insert_file"}:
                 if action == "insert_file":
-                    chosen = self.view.ask_open_path(
+                    chosen = path if path is not None else self.view.ask_open_path(
                         "Insert Subpulse", self.pulses_directory,
                         "ZLC Subpulse (*.subpulse.json *.json);;All files (*)",
                     )
                     if not chosen:
-                        return
+                        return False
                     fragment = read_subpulse(chosen)
                 else:
-                    fragment = (extract_subpulse(self.sequence, self._component_context)
-                                if self._component_context else self._subpulse_draft)
+                    fragment = self._selected_component_fragment()
                 if fragment is None:
                     raise ValueError("create or open a Subpulse first")
                 old = set() if self.sequence is None else {c.component_id for c in self.sequence.components}
-                before = self.view.component_insert_before()
+                before = self.view.component_insert_before() if present and before_item is None else before_item
                 if before is not None:
                     before = self._authored_items((before,))[0]
                 order = () if self.sequence is None else _sequence_item_order(self.sequence)
@@ -1889,62 +2006,74 @@ class PulseEditorPresenter:
                         replace(c, name=str(name)) if c.component_id == key else c for c in self.sequence.components
                     )))
                 elif self._subpulse_draft is not None:
+                    if self._selected_component_fragment() is None:
+                        raise ValueError("open the selected Subpulse source before editing it")
                     self._subpulse_draft = replace(self._subpulse_draft, name=str(name))
             elif action in {"insert_period", "insert_spacer"}:
                 key, before = payload
-                self._edit_component_contents(str(key), action, (before,))
+                return self._edit_component_contents(str(key), action, (before,), present=present)
             elif action == "bracket_add":
                 key, args = payload
-                self._edit_component_contents(str(key), action, tuple(args))
+                return self._edit_component_contents(str(key), action, tuple(args), present=present)
             else:
                 raise ValueError(f"unknown Component action {action!r}")
         except (TypeError, ValueError, KeyError, OSError) as error:
-            self._warn(f"cannot {action} Component: {error}")
+            self._warn(f"cannot {action} Component: {error}", present=present)
+            return False
+        finally:
+            editing_after = (self._selected_subpulse_id, self._component_context, self._subpulse_draft, self._subpulse_path)
+            if editing_after != editing_before and self.revision == revision_before:
+                self.revision += 1
         self._refresh_component_document()
+        return True
 
     def edit_component(self, action: str, args: object) -> None:
         self._edit_component_contents(self._component_context, action, tuple(args))
 
-    def _edit_component_contents(self, context: str, action: str, args: tuple) -> None:
+    def _edit_component_contents(self, context: str, action: str, args: tuple, *, present: bool = True) -> bool:
         if context and self.sequence is not None and self.sequence.config_enabled and any(
             c.component_id == context and c.source == "config" for c in self.sequence.components
         ):
-            self._warn("This Subpulse comes from a file. Open the source file to edit it.")
-            return
+            self._warn("This Subpulse comes from a file. Open the source file to edit it.", present=present)
+            return False
         if action == "visible_ports":
             if context:
                 self.set_visible_ports(args[0])
             else:
                 self._subpulse_visible_ports = frozenset(args[0])
             self._refresh_component_document()
-            return
+            return True
         try:
             if context:
                 if action == "document_name":
-                    self.component_action("rename", (context, args[0]))
-                    return
+                    return self.component_action("rename", (context, args[0]), present=present)
                 if action in {"period_name", "duration", "digital", "analog", "binding", "config_binding"}:
                     # Real parent context supplies incoming DAC carry and stable IDs.
-                    self._apply(self._edited_candidate(action, args, default_edit=True))
+                    candidate = self._edited_candidate(action, args, default_edit=True, present=present)
+                    self._apply(candidate)
                     self._refresh_component_document()
-                    return
+                    return candidate is not None
                 fragment = extract_subpulse(self.sequence, context)
             else:
-                fragment = self._subpulse_draft
+                fragment = self._selected_component_fragment()
             if fragment is None:
-                raise ValueError("create or open a Subpulse first")
+                raise ValueError("create or open the selected Subpulse source first")
             candidate, dropped = prune_orphaned_bindings(_sequence_edited(fragment.to_sequence(), action, args))
             if dropped:
-                self._warn("unbound " + ", ".join(dropped) + ": the field is no longer set here")
+                self._warn("unbound " + ", ".join(dropped) + ": the field is no longer set here", present=present)
             edited = Subpulse(candidate.name, candidate.target, candidate.time_step_ns,
                               candidate.periods, candidate.bindings, candidate.brackets)
             if context:
                 self._apply(replace_component(self.sequence, context, edited))
             else:
-                self._subpulse_draft = edited
+                if edited != self._subpulse_draft:
+                    self._subpulse_draft = edited
+                    self.revision += 1
         except (TypeError, ValueError, KeyError) as error:
-            self._warn(f"cannot edit Component: {error}")
+            self._warn(f"cannot edit Component: {error}", present=present)
+            return False
         self._refresh_component_document()
+        return True
 
     # --------------------------------------------------------------- wiring
 
@@ -2132,12 +2261,17 @@ class PulseEditorPresenter:
     def new_config(self) -> None:
         if not self._discard_config_edits():
             return
+        if self._config_path or self._config_rows:
+            self.revision += 1
         self._config_path = ""
         self._config_rows = self._config_saved_rows = ()
         self._refresh_config_page()
 
     def edit_config_entries(self, rows: object) -> None:
-        self._config_rows = tuple(tuple(str(v) for v in row) for row in rows)
+        candidate = tuple(tuple(str(v) for v in row) for row in rows)
+        if candidate != self._config_rows:
+            self._config_rows = candidate
+            self.revision += 1
         self._refresh_config_page()
 
     def _active_config_values(self) -> Mapping[str, tuple[float, str]]:
@@ -2194,6 +2328,8 @@ class PulseEditorPresenter:
         """Use the ordinary worker for one Config read/save/bind operation."""
         if not self._device_available(present=present):
             return False
+        config_before = (self._active_config_path(), dict(self._active_config_values()),
+                         self._config_path, self._config_rows, self._config_saved_rows)
         sequencer = self.sequencer
         def work(_operation: int):
             if entries is not None:
@@ -2225,6 +2361,10 @@ class PulseEditorPresenter:
                     (key, format_quantity(value, "1"), unit)
                     for key, (value, unit) in values.items()
                 )
+            config_after = (self._active_config_path(), dict(self._active_config_values()),
+                            self._config_path, self._config_rows, self._config_saved_rows)
+            if config_after != config_before:
+                self.revision += 1
             self._digest_revision = -1
             self.refresh()
 
@@ -2293,23 +2433,23 @@ class PulseEditorPresenter:
     def _save_config_as(self) -> bool:
         return self.save_config_values(save_as=True)
 
-    def set_config_mode(self, enabled: bool) -> None:
+    def set_config_mode(self, enabled: bool, *, present: bool = True) -> None:
         if self.sequence is None:
             self.view.set_config_mode(False, busy=True)
             return
-        if not self._device_available():
+        if not self._device_available(present=present):
             self.view.set_config_mode(self.sequence.config_enabled, busy=True)
             return
         self._edit_state(sequence=replace(self.sequence, config_enabled=bool(enabled)))
         self._config_error = ""
         if enabled:
-            self.refresh_effective_sources()
+            self.refresh_effective_sources(present=present)
         else:
             self.refresh()
 
-    def refresh_effective_sources(self) -> None:
+    def refresh_effective_sources(self, *, present: bool = True) -> None:
         if self.sequence is not None and self.sequence.config_enabled and self._active_config_path():
-            self._config_file_operation(self._active_config_path(), load_draft=False)
+            self._config_file_operation(self._active_config_path(), load_draft=False, present=present)
         else:
             self.refresh()
 
@@ -5845,6 +5985,44 @@ def _reordered_sequence(
     )
 
 
+def _control_edit_arguments(action: str, values: Mapping[str, Any]) -> tuple[str, tuple]:
+    """Translate the flat control arguments into the existing editor intents."""
+    if action in {"period_name", "duration", "digital", "analog"}:
+        key = values["period_id"]
+        if action == "period_name":
+            return action, (key, values["name"])
+        if action == "duration":
+            return action, (key, values["value"], values["unit"])
+        if action == "digital":
+            if not isinstance(values["high"], bool):
+                raise TypeError("high must be a boolean")
+            return action, (key, values["port_key"], values["high"])
+        return action, (key, values["port_key"], values["mode"], values.get("value"))
+    if action == "binding":
+        kind = values["field_kind"]
+        return action, (kind, values["bracket_id"] if kind == "bracket_count" else values.get("period_id"),
+                        values.get("port_key"), values["scan"], values["source"])
+    if action == "config_binding":
+        return action, (values["field_id"], values["key"])
+    if action in {"bracket", "bracket_add"}:
+        args = (values["start"], values["end"], values["count"])
+        return action, (values["bracket_id"], *args) if action == "bracket" else args
+    if action in {"period_add", "spacer_add"}:
+        before = values.get("before_item")
+        return ("insert_period" if action == "period_add" else "insert_spacer"), (None if before is None else tuple(before),)
+    if action in {"period_remove", "bracket_remove"}:
+        item = (("period", values["period_id"]) if action == "period_remove" else
+                ("bracket", bracket_post_key(values["bracket_id"], "start")))
+        return "remove_items", ((item,),)
+    if action == "delay":
+        return action, (values["port_key"], values["value"], values["unit"])
+    if action == "run_repeats":
+        return action, (values["repeats"],)
+    if action == "document_name":
+        return action, (values["name"],)
+    raise ValueError(f"unknown Pulse edit {action!r}; inspect control_catalog")
+
+
 def _sequence_edited(sequence: PulseSequence, action: str, args: tuple) -> PulseSequence:
     """The existing authoring operations, independent of which view emitted them.
 
@@ -5853,6 +6031,8 @@ def _sequence_edited(sequence: PulseSequence, action: str, args: tuple) -> Pulse
     """
     if action == "document_name":
         return replace(sequence, name=str(args[0]))
+    if action == "run_repeats":
+        return replace(sequence, run_repeats=args[0])
     if action in {"period_name", "duration", "digital", "analog"}:
         key = str(args[0])
         period = sequence.period_by_id[key]
@@ -5976,7 +6156,7 @@ def _sequence_edited(sequence: PulseSequence, action: str, args: tuple) -> Pulse
         else:
             key, start, end, count = args
         changed = PulseBracket(str(key), None if start is None else str(start),
-                               None if end is None else str(end), int(count))
+                               None if end is None else str(end), count)
         # Adding a wrapper around an existing same-span loop makes it the
         # outer loop; stable model ordering preserves that explicit choice.
         brackets = ((changed,) + sequence.brackets if action == "bracket_add" else tuple(

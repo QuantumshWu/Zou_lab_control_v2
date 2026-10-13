@@ -4854,6 +4854,7 @@ def test_control_inspects_edits_and_compiles_loaded_config_without_firing(sequen
         run_safe_work=_run_preview_immediately,
     )
     try:
+        view.show_warning = lambda text: pytest.fail(f"machine action opened a warning: {text}")
         catalog = presenter.control_catalog()
         assert catalog["editor_kind"] == "pulse" and "duration" in catalog["actions"]
         assert "document" not in catalog["state"]
@@ -4868,6 +4869,17 @@ def test_control_inspects_edits_and_compiles_loaded_config_without_firing(sequen
             "start": period.period_id, "end": period.period_id, "count": 2,
         })["accepted"]
         bracket = presenter.sequence.brackets[0].bracket_id
+        assert presenter.control_action("binding", {
+            "field_kind": "bracket_count", "bracket_id": bracket, "scan": False, "source": "api",
+        })["accepted"]
+        binding = next(b for b in presenter.control_catalog()["bindings"] if b["field_kind"] == "bracket_count")
+        assert binding["bracket_id"] == bracket and binding["unit"] == "count"
+        assert not presenter.control_action("binding", {
+            "field_kind": "bracket_count", "bracket_id": bracket, "scan": True, "source": "api",
+        })["accepted"]
+        assert not presenter.control_action("bracket", {
+            "bracket_id": bracket, "start": period.period_id, "end": period.period_id, "count": 2.5,
+        })["accepted"]
         assert presenter.control_action("bracket_remove", {"bracket_id": bracket})["accepted"]
         assert presenter.control_action("run_repeats", {"repeats": 1})["accepted"]
         assert presenter.control_action("period_name", {"period_id": period.period_id, "name": "Camera before"})["accepted"]
@@ -4883,12 +4895,32 @@ def test_control_inspects_edits_and_compiles_loaded_config_without_firing(sequen
         })["accepted"]
         config_path = str(tmp_path / "control-config.json")
         assert presenter.control_action("config.save", {"path": config_path})["accepted"]
+        refused = presenter.control_action("config.mode", {"enabled": True})
+        assert not refused["accepted"] and "progress" in refused["error"]
         worker.deliver_until(lambda: not presenter.control_state()["pending"])
+        assert presenter.control_action("config.mode", {"enabled": True})["accepted"]
+        worker.deliver_until(lambda: not presenter.control_state()["pending"])
+        refused = presenter.control_action("duration", {
+            "period_id": period.period_id, "value": default + 1, "unit": period.unit,
+        })
+        assert not refused["accepted"] and "supplied by Config" in refused["error"]
+        assert presenter.sequence.period_by_id[period.period_id].duration == default
+        assert presenter.control_action("config.mode", {"enabled": False})["accepted"]
+        assert presenter.control_action("duration", {
+            "period_id": period.period_id, "value": default + 1, "unit": period.unit,
+        })["accepted"]
+        assert presenter.sequence.period_by_id[period.period_id].duration == default + 1
+        assert presenter.control_action("duration", {
+            "period_id": period.period_id, "value": default, "unit": period.unit,
+        })["accepted"]
         assert presenter.control_action("config.mode", {"enabled": True})["accepted"]
         worker.deliver_until(lambda: not presenter.control_state()["pending"])
         assert presenter.control_action("config.edit", {
             "rows": [["exposure_window", default * 3, period.unit]],
         })["accepted"]
+        unchanged_revision = presenter.revision
+        presenter.control_action("config.edit", {"rows": [["exposure_window", default * 3, period.unit]]})
+        assert presenter.revision == unchanged_revision
         before = presenter.sequence
         board.events.clear()
         submitted = presenter.control_action("validate", {})
@@ -4948,6 +4980,68 @@ def test_control_inspects_edits_and_compiles_loaded_config_without_firing(sequen
         assert not presenter.sequence.brackets and not presenter.dirty
         assert presenter.control_action("open", {"path": path})["accepted"]
         assert presenter.control_state(details=True)["document"] == state_to_tree(presenter.state)
+
+        # The selected Subpulse owner is independent of the main Config mode.
+        first, second = presenter.sequence.periods[:2]
+        grouped = presenter.control_action("subpulse.group", {"items": [["period", first.period_id], ["period", second.period_id]]})
+        component = grouped["state"]["components"][0]["component_id"]
+        subpath = str(tmp_path / "source.subpulse.json")
+        assert presenter.control_action("subpulse.export", {"component_id": component, "path": subpath})["accepted"]
+        assert presenter.control_action("subpulse.source", {"component_id": component, "source": "config", "path": subpath})["accepted"]
+        refused = presenter.control_action("digital", {"period_id": first.period_id, "port_key": ttl.key, "high": False})
+        assert not refused["accepted"] and "comes from a file" in refused["error"]
+        for edit, args in (
+            ("period_remove", {"period_id": first.period_id}),
+            ("period_add", {"before_item": ["period", second.period_id]}),
+            ("spacer_add", {"before_item": ["period", second.period_id]}),
+        ):
+            refused = presenter.control_action(edit, args)
+            assert not refused["accepted"] and "comes from a file" in refused["error"]
+        selected = presenter.control_action("subpulse.select", {"component_id": component})
+        assert selected["state"]["subpulse"]["edit_owner"] == "file_draft"
+        local_id = selected["state"]["subpulse"]["period_ids"][0]
+        edit_args = {"edit": "duration", "period_id": local_id, "value": 7, "unit": "ms"}
+        before_revision = presenter.revision
+        assert presenter.control_action("subpulse.edit", edit_args)["accepted"]
+        assert presenter.revision > before_revision
+        same_revision = presenter.revision
+        assert presenter.control_action("subpulse.edit", edit_args)["accepted"]
+        assert presenter.revision == same_revision
+        assert presenter.control_action("config.mode", {"enabled": False})["accepted"]
+        kept = presenter.control_state()["subpulse"]
+        assert kept["edit_owner"] == "file_draft" and kept["dirty"]
+        assert presenter.control_action("config.mode", {"enabled": True})["accepted"]
+        worker.deliver_until(lambda: not presenter.control_state()["pending"])
+        refused = presenter.control_action("subpulse.open", {"path": subpath})
+        assert not refused["accepted"] and "discard_changes" in refused["error"]
+        old_draft = presenter._subpulse_draft
+        cleared = presenter.control_action("subpulse.source", {"component_id": component, "source": "config", "path": ""})
+        assert cleared["accepted"] and not cleared["state"]["subpulse"]["available"]
+        assert not presenter.control_action("subpulse.edit", edit_args)["accepted"]
+        assert not presenter.control_action("subpulse.save", {"path": str(tmp_path / "wrong.json")})["accepted"]
+        assert presenter._subpulse_draft is old_draft
+        assert presenter.control_action("subpulse.source", {"component_id": component, "source": "config", "path": subpath})["accepted"]
+        saved_subpath = str(tmp_path / "saved.subpulse.json")
+        assert presenter.control_action("subpulse.save_as", {"path": saved_subpath})["accepted"]
+        assert not presenter.control_state()["subpulse"]["dirty"]
+        assert presenter.control_action("subpulse.open", {"path": saved_subpath})["accepted"]
+        substate = presenter.control_state(details=True)["subpulse"]
+        assert substate["document"]["periods"][0]["duration"] == 7
+        assert substate["save_target"] == {"kind": "subpulse", "path": saved_subpath}
+
+        # Loading changed unbound values still changes the editing context
+        # while Config is off; the visible Pulse cannot supply this revision.
+        assert presenter.control_action("config.mode", {"enabled": False})["accepted"]
+        from zlc_pulse import write_config_values
+        write_config_values(config_path, {"unbound": (123, "ms")})
+        before_revision = presenter.revision
+        assert presenter.control_action("config.load", {"path": config_path})["accepted"]
+        worker.deliver_until(lambda: not presenter.control_state()["pending"])
+        assert presenter.revision > before_revision
+        same_revision = presenter.revision
+        assert presenter.control_action("config.load", {"path": config_path})["accepted"]
+        worker.deliver_until(lambda: not presenter.control_state()["pending"])
+        assert presenter.revision == same_revision
     finally:
         presenter.close()
 

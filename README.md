@@ -147,6 +147,15 @@ device owner or permission to bypass them.
   preview and device-confirmed digest; never infer physical timing from draft
   period lengths alone. Dirty Pulse/Config replacement requires explicit
   `discard_changes=true`.
+  Config-covered values and file-backed Subpulse contents follow the same
+  read-only rules as the GUI; switch to Default or edit their source instead.
+  `subpulse.*` actions select, group, bind sources, edit, insert and save using
+  the existing Subpulse owner. File paths are explicit; an empty source path
+  clears the reference. State distinguishes embedded defaults from the selected
+  file draft and its save target/dirty state. Use the catalog for arguments,
+  including `bracket_count` bindings; editor revision also covers Subpulse
+  selection and draft changes. State inspection does not reread source files:
+  use `config.refresh` or `validate` when updated saved sources must be checked.
   SLM actions edit Target/pupil/operator, solve, Send/Adopt, and load/save Target
   or Science Context. Inspection does not solve or Send, and command receipts
   do not claim optical settling. `expected_revision` rejects stale editor
