@@ -40,13 +40,13 @@ class PulseConfigView(QtWidgets.QWidget):
         content = QtWidgets.QVBoxLayout(body)
         content.setContentsMargins(px(8), px(8), px(8), px(8))
         content.setSpacing(px(8))
-        file_box = FluentGroupBox("Config file")
+        file_box = FluentGroupBox("Value file")
         file_layout = QtWidgets.QVBoxLayout(file_box)
         file_layout.setContentsMargins(px(10), px(8), px(10), px(10))
         toolbar = QtWidgets.QHBoxLayout()
         self._file_buttons = []
         for name, text, color in (
-            ("new", "New", GREY), ("load", "Load", ACCENT),
+            ("new", "New file", GREY), ("load", "Open file", ACCENT),
             ("refresh", "Refresh", GREY), ("save", "Save", YELLOW),
             ("save_as", "Save as", YELLOW), ("unload", "Unload", ORANGE),
         ):
@@ -60,7 +60,7 @@ class PulseConfigView(QtWidgets.QWidget):
         file_layout.addLayout(toolbar)
         self.path_text = FluentLineEdit("")
         self.path_text.setReadOnly(True)
-        self.path_text.setPlaceholderText("Unsaved Config")
+        self.path_text.setPlaceholderText("No value file selected")
         file_layout.addWidget(self.path_text)
         self.file_status = ElidedLabel("Save the Config file before using its values.")
         file_layout.addWidget(self.file_status)
@@ -84,16 +84,19 @@ class PulseConfigView(QtWidgets.QWidget):
         file_layout.addLayout(actions)
         content.addWidget(file_box)
 
-        bindings_box = FluentGroupBox("This Pulse bindings")
+        bindings_box = FluentGroupBox("Pulse bindings")
         bindings_layout = QtWidgets.QVBoxLayout(bindings_box)
         bindings_layout.setContentsMargins(px(10), px(8), px(10), px(10))
-        hint = ElidedLabel("Assign Config names here. Unassigned fields keep their Pulse default.")
+        self.mode_label = FluentLabel("Config is off. Pulse defaults are used.")
+        self.mode_label.setWordWrap(True)
+        bindings_layout.addWidget(self.mode_label)
+        hint = ElidedLabel("Choose a value name for each field. Save the Pulse to keep these bindings.")
         bindings_layout.addWidget(hint)
         self._binding_grid = QtWidgets.QGridLayout()
         self._binding_grid.setHorizontalSpacing(px(8))
         self._binding_grid.setVerticalSpacing(px(6))
         for column, (title, stretch) in enumerate(zip(
-            ("Pulse field", "Config name", "Pulse default", "Saved value", "Status"),
+            ("Pulse field", "Value name", "Default", "Config value", "Status"),
             (2, 2, 1, 1, 2),
         )):
             header = FluentLabel(title)
@@ -103,8 +106,15 @@ class PulseConfigView(QtWidgets.QWidget):
             self._binding_grid.addWidget(header, 0, column)
             self._binding_grid.setColumnStretch(column, stretch)
         bindings_layout.addLayout(self._binding_grid)
-        content.addWidget(bindings_box)
+        self.bindings_placeholder = FluentLabel("No value bindings yet. Choose Config from a field's source control in Edit.")
+        self.bindings_placeholder.setWordWrap(True)
+        bindings_layout.addWidget(self.bindings_placeholder)
+        content.insertWidget(0, bindings_box)
         content.addStretch(1)
+
+    def set_config_mode(self, enabled: bool, error: str = "") -> None:
+        self.mode_label.setText(error or ("Config is on. Saved sources are applied."
+                                        if enabled else "Config is off. Pulse defaults are used."))
 
     def _entries(self) -> tuple[tuple[str, str, str], ...]:
         return tuple(
@@ -143,9 +153,10 @@ class PulseConfigView(QtWidgets.QWidget):
             combo.setEditText(accepted)
 
     def set_page(self, record: ConfigPageRecord) -> None:
+        self.bindings_placeholder.setVisible(not record.bindings)
         self.path_text.setText(record.file_path)
         self.path_text.setToolTip(record.file_path)
-        status = f"Active file: {Path(record.active_path).name}" if record.active_path else "No active file; Pulse defaults are used."
+        status = f"Loaded file: {Path(record.active_path).name}" if record.active_path else "No value file selected."
         if record.dirty:
             status += "  Unsaved edits do not participate in Fire."
         self.file_status.setText(status)

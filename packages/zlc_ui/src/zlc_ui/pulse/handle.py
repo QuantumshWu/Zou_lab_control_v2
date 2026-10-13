@@ -22,7 +22,6 @@ host is asked for its widget here, where widgets are allowed.
 from __future__ import annotations
 
 from typing import Any
-from pathlib import Path
 
 from PyQt5 import QtCore
 
@@ -272,24 +271,27 @@ class PulseEditorHandle(QtCore.QObject):
 
     def set_config_page(self, record: ConfigPageRecord) -> None:
         self._view.config_view.set_page(record)
-        button = self._view.schedule_view.channel_panel.config_status_button
-        button.setText(Path(record.active_path).name if record.active_path else "none")
-        button.setToolTip(record.active_path or "No active Config file; Pulse defaults are used.")
 
     def _component_action(self, action: str, payload: object) -> None:
         if action in {"edit", "open_source"}:
             self._view.tabs.setCurrentWidget(self._view.component_view)
         self.component_action_requested.emit(action, payload)
+        if action in {"edit", "open_source"}:
+            self._view.component_view.focus_source(str(payload))
 
     def set_config_mode(self, enabled: bool, busy: bool = False, error: str = "") -> None:
+        self._view.config_view.set_config_mode(enabled, error)
         panel = self._view.schedule_view.channel_panel
         with signals_blocked(panel.config_mode):
             panel.config_mode.setChecked(enabled)
-            panel.config_mode.setText("Config" if enabled else "Default")
+            panel.config_mode.setText("Config")
         panel.config_mode.setEnabled(not busy)
         panel.config_refresh_button.setEnabled(not busy and enabled)
         panel.config_mode.setToolTip(error or "Default uses authored content; Config uses saved sources")
         panel.config_refresh_button.setToolTip(error or "Reload saved Config values and Subpulse sources")
+
+    def set_subpulse_sources(self, rows, *, enabled: bool, busy: bool = False, error: str = "") -> None:
+        self._view.component_view.set_sources(rows, enabled=enabled, busy=busy, error=error)
 
     def set_component_document(
         self,

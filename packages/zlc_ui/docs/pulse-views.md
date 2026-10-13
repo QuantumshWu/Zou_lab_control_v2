@@ -42,7 +42,7 @@ returns the accepted `FieldVM`. The popup also edits the field's Config referenc
 through `config_key_committed`; names come from `FieldVM.config_names`, and
 `FieldVM.field_id` carries the domain-owned field identity. It shows the editable
 default and current effective source together. Config values and files are still
-edited and saved separately on Config.
+edited and saved separately on Value Config.
 S/A/C badges contain no numeric identity; Scan defaults remain editable.
 
 For a DAC channel, `PortRowVM.kind == "dac"` plus a
@@ -55,15 +55,18 @@ choosing `Edge` or `Ramp` with a value creates the domain step.
 
 The Edit workspace keeps its original horizontal timeline, channel columns and
 bottom controls. Subpulses expand in place. There is no side inspector. The
-Default/Config switch lives beside the original Config controls and applies to
-the whole Pulse; switching to Default restores the embedded content.
+switch is labelled Config and replaces the old filename button in its original
+row. It applies to the whole Pulse; switching it off restores embedded defaults.
 
-The Subpulse page edits the selected embedded default or an explicitly opened
-source file. A card's source popup chooses Default or Config and a file path;
-it emits `source`, `browse_source` and `open_source` through the existing action
-signal. Only resolved Config sources get green cards/boundaries. Their internal
-Period/Bracket controls are read-only; opening the source file edits that file.
-The presenter retains the embedded default and displays a derived execution copy.
+Value Config and Subpulse Config are adjacent and both put Pulse bindings before
+file editing. A collapsed Subpulse card has only Expand, Edit and Ungroup, stacked
+vertically at equal widths. Edit selects its binding row in Subpulse Config.
+`set_subpulse_sources` projects each name, source, file and status; Browse binds a
+file, and Open file explicitly opens its editor below. A nonempty typed path
+selects Config; clearing it selects Default. Source changes use the existing
+`source`, `browse_source` and `open_source` actions. An invalid file never prevents
+Edit from reaching the binding to repair it. Only applied Config sources get green
+cards/boundaries; their internal Period/Bracket controls remain read-only.
 
 Saved scan arrays retain ordered field IDs and units. A source update that changes
 this schema requires regeneration or an explicit Clear Array; that action keeps

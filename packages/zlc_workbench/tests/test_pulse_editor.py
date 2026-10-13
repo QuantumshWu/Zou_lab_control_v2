@@ -438,6 +438,9 @@ class _EditorView:
         self.config_mode = bool(enabled)
         self.config_error = str(error)
 
+    def set_subpulse_sources(self, rows, *, enabled, busy=False, error="") -> None:
+        self.subpulse_sources = tuple(rows)
+
     def confirm_config_discard(self) -> bool:
         return getattr(self, "discard_config_answer", True)
 

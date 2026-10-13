@@ -84,16 +84,15 @@ class PulseEditorView(QtWidgets.QWidget):
         self.component_view = PulseComponentView()
         self.target_view = PulseTargetView()
         self.tabs.add_permanent_tab(self.schedule_view, "Edit")
-        self.tabs.add_permanent_tab(self.component_view, "Subpulse")
         self.tabs.add_permanent_tab(self.preview_view, "Preview")
         self.tabs.add_permanent_tab(self.scan_view, "Scan")
-        self.tabs.add_permanent_tab(self.config_view, "Config")
+        self.tabs.add_permanent_tab(self.config_view, "Value Config")
+        self.tabs.add_permanent_tab(self.component_view, "Subpulse Config")
         self.tabs.add_permanent_tab(self.target_view, "Target")
         outer.addWidget(self.tabs, 1)
         self.tabs.currentChanged.connect(
             lambda index: self.page_changed.emit(self.tabs.tabText(index))
         )
-        self.schedule_view.config_requested.connect(lambda: self.tabs.setCurrentWidget(self.config_view))
         # What just happened is SAID, in the one modal this project owns for
         # every refusal and confirmation.  A strip along the bottom was
         # invented here instead,

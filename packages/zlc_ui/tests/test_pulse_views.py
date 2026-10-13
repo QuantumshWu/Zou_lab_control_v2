@@ -1069,7 +1069,7 @@ handle.config_binding_committed.connect(accept_binding)
 handle.config_save_requested.connect(lambda: saves.append(True))
 assert config.path_text.text() == "draft.json"
 assert "saved.json" in config.file_status.text()
-assert "saved.json" in view.schedule_view.channel_panel.config_status_button.text()
+assert not hasattr(view.schedule_view.channel_panel, "config_status_button")
 table = config.values_table
 index = config.values_model.index(0, 1)
 QtTest.QTest.mouseClick(table.viewport(), QtCore.Qt.LeftButton, pos=table.visualRect(index).center())
@@ -1139,19 +1139,16 @@ assert view.scan_view.scan_load_array_button.text() == "Load Array"
 view.tabs.setCurrentWidget(view.schedule_view)
 app.processEvents()
 channel = view.schedule_view.channel_panel
-button = channel.config_status_button
-assert button.text() == 'saved.json' and button.toolTip() == 'saved.json'
-assert button.isVisible(), 'Config entry stays in the common Run bar when delays are hidden'
-button_width = button.width()
+switch = channel.config_mode
+assert switch.text() == "Config" and switch.isVisible()
+switch_width = switch.width()
 current_page = replace(record, entries=config._entries())
 handle.set_config_page(replace(current_page, active_path='C:/config/' + 'calibration_' * 30 + '.json'))
 app.processEvents()
-assert button.width() == button_width
-assert button.toolTip().startswith('C:/config/')
-assert button.text() == 'calibration_' * 30 + '.json'
+assert switch.width() == switch_width and switch.text() == "Config"
 handle.set_config_page(current_page)
-QtTest.QTest.mouseClick(button, QtCore.Qt.LeftButton)
-assert view.current_page == "Config"
+view.tabs.setCurrentWidget(view.config_view)
+assert view.current_page == "Value Config"
 kept_items = tuple(config.values_model.item(1, column) for column in range(3))
 assert all(item is not None for item in kept_items)
 entries = config._entries()
@@ -1886,7 +1883,7 @@ assert len(main.drag_container.items()) == 2
 assert main.drag_container.flat_order() == vm.item_order
 card = main._component_cards[("component", "mot")]
 assert card.width() == main._cards["p3"].width()
-assert card._actions_popup is None
+assert not hasattr(card, "_actions_popup") and not hasattr(card, "source_button")
 card.expand_button.click(); app.processEvents()
 assert set(main._cards) == {"p1", "p2", "p3"}
 assert main.drag_container.flat_order() == vm.item_order
@@ -1929,12 +1926,15 @@ assert set(main._cards) == {"p3"}
 data.setData(main.drag_container.ITEM_MIME, QtCore.QByteArray(json.dumps(("component", "mot")).encode()))
 assert main.drag_container._proposal_at(data, 2) == (("period", "p3"), *vm.item_order[:-1])
 card = main._component_cards[("component", "mot")]
-card.more_button.click(); app.processEvents()
-assert card._actions_popup.isVisible()
-export = next(button for button in card._actions_popup.findChildren(QtWidgets.QPushButton) if button.text() == "Export Subpulse")
-export.click(); app.processEvents()
-assert not card._actions_popup.isVisible()
-assert actions == [("export", "mot")], actions
+buttons = (card.expand_button, card.edit_button, card.ungroup_button)
+assert tuple(button.text() for button in buttons) == ("Expand", "Edit", "Ungroup")
+assert len({button.width() for button in buttons}) == 1
+centers = [button.mapTo(card, button.rect().center()).x() for button in buttons]
+assert len(set(centers)) == 1
+tops = [button.mapTo(card, QtCore.QPoint()).y() for button in buttons]
+assert tops[0] < tops[1] < tops[2]
+card.ungroup_button.click(); app.processEvents()
+assert actions == [("ungroup", "mot")], actions
 actions.clear()
 main.drag_container.show_selection((("component", "mot"),))
 main.remove_button.click()
@@ -1957,35 +1957,23 @@ assert events == [("period_name", ("p1", "Load"))], events
 view.tabs.setCurrentWidget(main)
 assert not hasattr(view, "component_inspector")
 assert main.channel_panel_holder.isVisible() and main.names_panel_holder.isVisible()
-assert view.tabs.tabText(view.tabs.indexOf(view.component_view)) == "Subpulse"
+assert view.tabs.tabText(view.tabs.indexOf(view.component_view)) == "Subpulse Config"
 modes, refreshes = [], []
 handle.config_mode_committed.connect(modes.append)
 handle.refresh_effective_requested.connect(lambda: refreshes.append(True))
 handle.set_config_mode(False)
+assert main.channel_panel.config_mode.text() == "Config"
 main.channel_panel.config_mode.click()
 assert modes == [True]
 handle.set_config_mode(True)
+assert main.channel_panel.config_mode.text() == "Config"
 main.channel_panel.config_refresh_button.click()
 assert refreshes == [True] and modes == [True]
 card = main._component_cards[("component", "mot")]
 assert card.title() == "Subpulse"
-card.source_button.click(); app.processEvents()
-assert card._source_popup.isVisible()
-card.source_switch.click()
-assert actions[-1] == ("source", ("mot", "config", "")), actions
 configured = replace(component, source="config", config_path="cooling.subpulse.json")
 vm = replace(vm, revision=5, components=(configured,))
 handle.set_schedule(vm)
-assert card.source_switch.isChecked() and card.source_path.text() == configured.config_path
-card.browse_source_button.click()
-assert actions[-1] == ("browse_source", "mot")
-card.source_button.click()
-card.source_path.setFocus(); card.source_path.selectAll()
-QtTest.QTest.keyClicks(card.source_path, "new.subpulse.json")
-QtTest.QTest.keyClick(card.source_path, QtCore.Qt.Key_Return)
-assert actions[-1] == ("source", ("mot", "config", "new.subpulse.json"))
-assert card.source_path.text() == configured.config_path, "a rejected source path must restore the accepted reference"
-card._source_popup.hide()
 effective_periods = tuple(replace(period, readonly=True, duration=replace(
     period.duration, config_active=True, config_enabled=True, binding_editable=False,
     default_text=period.duration.text)) for period in periods)
@@ -1996,7 +1984,7 @@ handle.set_schedule(vm)
 from zlc_ui.fluent import CONFIG_GREEN_TINT
 assert card._zlc_surface[0] == CONFIG_GREEN_TINT
 card.edit_button.click()
-assert actions[-1] == ("open_source", "mot")
+assert card.edit_button.text() == "Edit" and actions[-1] == ("edit", "mot")
 view.tabs.setCurrentWidget(main)
 card.expand_button.click(); app.processEvents()
 first = main._cards["p1"]

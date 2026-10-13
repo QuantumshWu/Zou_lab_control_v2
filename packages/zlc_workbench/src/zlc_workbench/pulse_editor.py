@@ -1642,6 +1642,16 @@ class PulseEditorPresenter:
 
     def _refresh_component_document(self) -> None:
         sequence = self.sequence
+        enabled = bool(sequence is not None and sequence.config_enabled)
+        self.view.set_subpulse_sources(
+            tuple((c.component_id, c.name, c.source, c.config_path,
+                   "Default" if c.source != "config" else
+                   "Choose a file" if not c.config_path else
+                   "Config off" if not enabled else
+                   "Not applied — Config error" if self._config_error else "Applied")
+                  for c in (() if sequence is None else sequence.components)),
+            enabled=enabled, busy=self._device_busy or self._stop_busy, error=self._config_error,
+        )
         contexts = () if sequence is None else tuple((c.component_id, c.name) for c in sequence.components)
         if self._component_context not in dict(contexts):
             self._component_context = ""
@@ -1687,7 +1697,11 @@ class PulseEditorPresenter:
             if action == "edit" and self.sequence is not None and self.sequence.config_enabled:
                 selected = next((c for c in self.sequence.components if c.component_id == str(payload)), None)
                 if selected is not None and selected.source == "config":
-                    action = "open_source"
+                    # Edit navigates to the binding even when its file is broken.
+                    # Opening that file is the explicit Open file action there.
+                    self._component_context = ""
+                    self._refresh_component_document()
+                    return
             if action in {"source", "browse_source"}:
                 if self.sequence is None:
                     raise ValueError("open a Pulse before assigning a Subpulse source")
@@ -2124,9 +2138,10 @@ class PulseEditorPresenter:
                     b.field_id, field_label(self.sequence, b.field_ref), b.config_key,
                     f"{format_quantity(default, '1')} {b.unit}",
                     "" if effective is None else f"{format_quantity(effective[0], '1')} {effective[1]}",
-                    "Default mode" if not self.sequence.config_enabled else
+                    "Config off" if not self.sequence.config_enabled else
+                    "Not applied — Config error" if self._config_error else
                     "Scan table" if b.scan and scan_active else
-                    "Using default" if effective is None else "Config override",
+                    "Default" if effective is None else "Applied",
                 ))
                 component = self.sequence.component_for_field(b.field_ref)
                 binding_groups.append((
