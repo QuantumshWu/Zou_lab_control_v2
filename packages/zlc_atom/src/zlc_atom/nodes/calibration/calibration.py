@@ -1625,24 +1625,6 @@ def _refine_center_subpixel(image: np.ndarray, peaks_xy: np.ndarray, index: int,
     return _core_centroid(image, x_int, y_int)
 
 
-def _brightest_within(
-    image: np.ndarray,
-    row: int,
-    column: int,
-    reach: int = 1,
-) -> tuple[int, int]:
-    """The brightest pixel within a pixel or two of a candidate peak."""
-
-    height, width = image.shape
-    y0, y1 = max(0, row - reach), min(height, row + reach + 1)
-    x0, x1 = max(0, column - reach), min(width, column + reach + 1)
-    patch = np.asarray(image[y0:y1, x0:x1], dtype=float)
-    if not patch.size or not np.isfinite(patch).any():
-        return int(row), int(column)
-    offset_y, offset_x = np.unravel_index(int(np.nanargmax(patch)), patch.shape)
-    return int(y0 + offset_y), int(x0 + offset_x)
-
-
 def _core_centroid(image: np.ndarray, x_int: int, y_int: int) -> tuple[float, float]:
     """The spot's centre of light over its own core, used when a fit will not.
 
@@ -1730,7 +1712,7 @@ def _accumulate_run(
     total_response = np.zeros(stack.shape[1:], dtype=float)
     total_image = np.zeros(stack.shape[1:], dtype=float)
     transitions = 0
-    previous_response: np.ndarray | None = None
+    previous_smoothed: np.ndarray | None = None
     # Frames are filtered many at a time, in blocks sized by memory rather than
     # by frame count: one SciPy call over a block costs a fraction of one call
     # per frame, and filtering makes two more copies of whatever it is given,
@@ -1740,27 +1722,29 @@ def _accumulate_run(
     for start in range(0, int(stack.shape[0]), block):
         frames = np.asarray(stack[start : start + block], dtype=float)
         total_image += np.sum(frames, axis=0)
-        response = ndimage.gaussian_filter(
+        smoothed = ndimage.gaussian_filter(
             frames, sigma=(0.0, spot_sigma, spot_sigma)
-        ) - ndimage.gaussian_filter(
+        )
+        response = smoothed - ndimage.gaussian_filter(
             frames, sigma=(0.0, background_sigma, background_sigma)
         )
         baseline = np.median(response, axis=(1, 2), keepdims=True)
         response = response - baseline
         total_response += np.sum(response, axis=0)
+        del response
 
-        # A low-loading site can appear on one frame only.  Its evidence is
-        # therefore the spatially shaped CHANGE between neighbouring frames,
-        # not whether either absolute frame cleared a global brightness bar.
-        # Keep the previous block's last response so a block boundary cannot
-        # silently remove one physical transition.
-        changes = np.diff(response, axis=0)
-        if previous_response is not None:
+        # Temporal subtraction removes fixed background. Use the smoothed
+        # photon images here: abs(band-pass difference) would turn its negative
+        # annular skirts into positive, changing false spots. A transition's
+        # median removes common background drift without creating those rings.
+        # Keep the previous block's last image across filtering blocks.
+        changes = np.diff(smoothed, axis=0)
+        if previous_smoothed is not None:
             changes = np.concatenate(
-                (response[:1] - previous_response[np.newaxis, ...], changes),
+                (smoothed[:1] - previous_smoothed[np.newaxis, ...], changes),
                 axis=0,
             )
-        previous_response = np.array(response[-1], copy=True)
+        previous_smoothed = np.array(smoothed[-1], copy=True)
         if not changes.shape[0]:
             continue
         change_baseline = np.median(changes, axis=(1, 2), keepdims=True)
@@ -1933,25 +1917,11 @@ def _candidate_peaks(
     required = admission.required
     single_change_cut = admission.single_change_cut
 
-    # Site identity comes from the complete average's local maxima, even when
-    # the average is too weak to admit the site on its own.  A single loaded
-    # frame still leaves the same Gaussian peak scaled by 1/N.  This prevents
-    # overlapping skirts from becoming extra sites merely because they change
-    # on many pairs.  Temporal evidence may land one raster pixel beside that
-    # maximum, so each average peak reads the strongest 3x3 neighbourhood.
-    #
-    # A CHANGE ADMITS THE PLACE WHERE THE CHANGE PEAKS.  A changing
-    # neighbour's band-pass dark ring changes with it, as much as a weak trap
-    # does, and the middle of an unloaded lattice cell -- the one place
-    # farthest from every neighbour -- is a local maximum of the average (the
-    # least dark point of the rings) while being a HOLLOW of the change,
-    # which grows towards whichever neighbour made it.  Judged on the summed
-    # change magnitude against the ring one spot out: a trap's own changes
-    # make a bump there on top of whatever its neighbours' rings do, a
-    # hollow is below its ring in every direction.  The sum, not the count
-    # of threshold crossings or the largest single change: those are
-    # noise-flat across a neighbourhood the rings keep above the cut.  A
-    # change that only ever grows away from a place is somebody else's.
+    # A changing site must peak in its own temporal evidence, not necessarily
+    # in the average: rare loading can be buried under a steady neighbour's
+    # skirt there. The spot-scale ring still rejects hollows between changing
+    # neighbours. Sum magnitudes for spatial identity; crossing counts and
+    # the largest single transition are only the significance statistics.
     total_change = evidence.total_change
     outer, inner = change_window ** 2, (change_window - 2) ** 2
     ring = (
@@ -1980,19 +1950,12 @@ def _candidate_peaks(
     # binomial bar; a site visible in only one frame uses the family-wise
     # single-change bar over every pixel and transition.  The average path has
     # its authored/global sigma bar for steady or highly loaded sites.
-    # Identity is a peak relative to its eight immediate neighbours. The
-    # wider change-evidence ring must not let a bright neighbour's skirt veto it.
+    # The two independent identities each use their eight neighbours.
     persistent = average == ndimage.maximum_filter(average, size=3, mode="nearest")
-    # A CHANGE IS NOT A DIRECTION: ``magnitude`` is an absolute value on
-    # purpose, an atom leaving being as much evidence as one arriving, and a
-    # site whose one loaded frame is under its neighbours' band-pass dark
-    # ring never stands above the frame's background on any single frame.
-    # These two statistics and the average are the whole admission; any
-    # further bar on what a changing place must look like is an operator's
-    # call in the detected-site review, not the detector's.
     # Neighbourhood lookup tolerates a one-pixel shift of temporal evidence,
     # but the candidate itself must not be a hollow borrowing a neighbour's bump.
-    changed = persistent & change_peak & (
+    temporal = total_change == ndimage.maximum_filter(total_change, size=3, mode="nearest")
+    changed = temporal & change_peak & (
         (nearby_hits >= required) | (nearby_change_z >= single_change_cut)
     )
     averaged = persistent & (average_z >= average_cut)
@@ -2014,7 +1977,6 @@ def _candidate_peaks(
 def _place_candidates(
     ranked: list,
     *,
-    average: np.ndarray,
     image: np.ndarray,
     frame_shape: tuple,
     spot_sigma: float,
@@ -2022,15 +1984,18 @@ def _place_candidates(
 ) -> tuple[list, list]:
     """Where each admitted place is, and one answer per trap.
 
-    Position is settled on the average, the only map linear in the light.
-    Duplicate temporal/average candidates collapse only when they snap to the
-    same average-image peak; a second significant local maximum remains a
-    second possible site for the operator review.
+    Temporal and average peaks can differ by one raster pixel. Merge only
+    that same-core offset, retaining the strongest evidence's anchor. Never
+    snap a temporal identity back to the average, where it may have no peak.
+    Refine all identities with the same raw-photon, neighbour-aware fit.
     """
 
 
-    peaks = list(dict.fromkeys(_brightest_within(average, int(row), int(column))
-                               for row, column in ranked))
+    peaks = []
+    for row, column in ranked:
+        peak = (int(row), int(column))
+        if not any(max(abs(peak[0] - old[0]), abs(peak[1] - old[1])) <= 1 for old in peaks):
+            peaks.append(peak)
     peaks_xy = np.asarray(peaks).reshape(-1, 2)[:, ::-1]
     selected: list[tuple[int, int]] = []
     centers_list: list[np.ndarray] = []
@@ -2136,7 +2101,6 @@ def detect_sites(
     )
     selected, centers_list = _place_candidates(
         ranked,
-        average=admission.average,
         image=evidence.total_image / float(stack.shape[0]),
         frame_shape=evidence.change_hits.shape,
         spot_sigma=spot_sigma,

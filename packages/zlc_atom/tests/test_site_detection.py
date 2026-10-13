@@ -120,6 +120,24 @@ def test_a_rarely_loaded_trap_is_still_found_by_frame_changes() -> None:
     assert missed <= 1
     assert found >= len(centres) - 1
 
+    # Real handoff failure: a rare site has no average-image maximum beside a
+    # steady bright neighbour. Exercise raw images through both evidence paths
+    # and joint localisation, rather than prebuilding a candidate evidence map.
+    rng = np.random.default_rng(43)
+    grid_y, grid_x = np.mgrid[:48, :48]
+    stack = rng.normal(100.0, 3.0, size=(200, 48, 48))
+    close_centres = np.asarray([(22.2, 24.3), (26.4, 24.3)])
+    for index, (x, y) in enumerate(close_centres):
+        spot = np.exp(-((grid_x - x) ** 2 + (grid_y - y) ** 2) / (2 * 1.2**2))
+        if index == 0:
+            stack += 1100.0 * spot
+        else:
+            stack[[21, 102]] += 1200.0 * spot
+    found = detect_sites(stack, spot_sigma=1.2, detection_sigma=6.0)
+    assert found.n_sites == 2
+    distances = np.linalg.norm(found.centers_xy[:, None] - close_centres[None], axis=2)
+    assert np.max(np.min(distances, axis=0)) < .05
+
 
 def test_a_weak_trap_in_its_neighbours_dark_ring_is_admitted_by_its_changes() -> None:
     """The two evidences are the whole admission; there is no brightness bar.

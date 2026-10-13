@@ -1338,6 +1338,7 @@ class PulseEditorPresenter:
             "stopping": self._stop_busy,
             "closing": self._preview_close_requested,
             "running": self.running,
+            "completion_pending": self._finite_run is not None,
             "board": asdict(self._board_state),
             "authored_run_repeats": None if self.sequence is None else self.sequence.run_repeats,
             "last_warning": self.last_warning,

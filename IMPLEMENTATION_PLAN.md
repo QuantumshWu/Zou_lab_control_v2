@@ -428,6 +428,7 @@
 
 ### 2.4 Domain Task artifacts
 
+- 2026-10-13 实验交接复核：calibration-20的200张真实长参考基线为31点，四个稀有装载点被average共同峰门槛否决。时间证据改用Gaussian平滑原图相邻差值（transition median去共同漂移），避免abs(带通差值)把负环变伪峰；两图独立峰合并同一像素核，删除average吸附函数。修改后35个已知站点全部匹配、零额外；原31点最大位移0.0268px，旧calibration-8平均图仍35点。8项直接检测用例通过，包括原图输入的近邻稀有装载回归。未修改Calibration保存格式或旧文件，未进行新硬件采集；原始证据与前后JSON/对照图只留ignored research。
 - Calibration密集站点整改：保留带通/相邻差分admission，原始reference均值在同一遍历中累加供亚像素定位；像素积分局部多峰模型显式包含邻居贡献。BOX仍是原真实窗口总和，PSF读出的邻居耦合单独核查，不以窗口重叠拒绝站点、不自动挪成理想网格或修改旧artifact阈值。
 - 2026-10-13 按实验机弱邻峰反馈，将候选身份最大值窗口固定为3×3；原spot尺度窗口明确改名change_window，只用于帧差外环，不再负责峰间竞争。加入强邻点尾部8.178、独立弱峰2.611/7.224σ的合成回归，平均图与帧差路径均保留弱峰。仅改窗口曾令原有3项测试出现伪点，已确认旧窗口下对应测试通过；根因为变化凹底通过邻域max借入邻居的帧差证据，改为候选自身同时满足原change_peak外环判断。阈值、滤波、环尺度及定位不变，全部8项site detection测试通过；未取得/重算现场归档，不宣称现场35点复验。
 - PSF生成改为reference图对自身占据的联合回归及局部最小范数去混；复用signed psf_weights合同，在线无新矩阵求解。原短曝光的阈值/fidelity仍使用同一稳定cycle标签，模板学习不要求所有邻居在前后均保持占据。保存可辨识性与数值条件事实，不静默重解释旧Calibration。
@@ -436,7 +437,7 @@
 - Calibration：每run一个folder，final Calibration JSON、summary JSON/text、精选报告Figure
   NPZ与PNG。默认不保存全部raw frames。
 - Calibration threshold method默认Gaussian、可显式选Empirical。Gaussian模式对每site全部finite short-shot values做无标签双Gaussian mixture fit，并在两均值间解析求拟合population-weighted分量曲线交点；真实reference labels不参与Gaussian fit/weight/threshold。fit或交点无效site才用全部有效labelled samples上最大化overall correct fraction的Empirical fallback；Empirical模式全部使用该empirical路径。Histogram线是最终classifier threshold，Gaussian曲线直接携带Calibration同一组分量而不在Plot二次拟合；fallback只有最终线而无伪造理论曲线。`actual_fidelity`是最终threshold在全部有效真实Calibration数据上的overall正确率，`gaussian_fidelity`是Gaussian threshold按其拟合population weights积分的理论正确率。
-- Calibration SiteMap detector使用真实相邻frame difference＋完整average两条证据并集。difference逐transition按自身背景噪声标准化；重复中等变化使用run-measured binomial bar，单次明显变化使用pixel×transition family-wise bar；steady/high-loading由average保留。两条路径都不能低于authored `detection_sigma`，candidate identity只来自average local maxima。旧even/odd half state、split veto、absolute per-frame sighting、单帧亮度gate（max level z与其pixel×frame family-wise cut）与global saddle owner全部删除。difference候选按summed change magnitude相对spot尺度外环判定为峰（`_candidate_peaks`）：邻居暗环凹底的未加载cell不被admit，暗环里的弱trap仍被admit。
+- Calibration SiteMap detector使用真实相邻frame difference＋完整average两条证据并集。difference逐transition按自身背景噪声标准化；重复中等变化使用run-measured binomial bar，单次明显变化使用pixel×transition family-wise bar；steady/high-loading由average保留。两条路径都不能低于authored `detection_sigma`，候选身份分别取完整average与summed change magnitude的3×3局部峰，不再让average否决稀有装载时间峰。旧even/odd half state、split veto、absolute per-frame sighting、单帧亮度gate（max level z与其pixel×frame family-wise cut）与global saddle owner全部删除。difference候选仍须通过spot尺度外环（`_candidate_peaks`），两图同一像素核合并后直接进入原始reference均值的像素积分邻居拟合，不再向average峰吸附；无网格或目标点数输入。
 - Calibration新增默认关闭的`Review detected sites`。开启时capture与detect各执行一次，候选SiteMap通过`calibration/review` companion signal同时进入Monitor和modal point review；operator可单点、列表或框选排除零到多个ghost sites，确认后最终SiteMap重新连续编号并只运行一次全部下游分析。review使用`FluentDialogWindow`和完整Fluent control family；`zlc_ui`拥有view，`zlc_plot`只拥有Image point gesture/overlay，Workbench组合。candidate/excluded/final映射进入Calibration report与summary，`site_review.npz/png`保存候选和排除结果；取消等同Stop。Runtime的唯一operator request/response lifecycle同样承载Seamless的manual轴：`manual-axis` request让run停在该点，TaskConsole以Continue/Stop对话框请operator把knob移到给定值。
 - SLM Feedback增加Ramsey frequency模式：选既有有限Acquisition Logic及Fit parameter signal，每phase只跑一次完整采集并等待exact final lineage Fit；反馈只占SLM，采集/源链沿原NodeHost生命周期。频率正响应，复用权重分配；不套camera probe/半样本早停，保存真实Fit参数与误差/来源及现有Science Context、history Figures和partial结果。
 - SLM Feedback：保存输入摘要、stable site table和逐candidate精选BOX samples、fit、weights、
@@ -456,6 +457,7 @@
 
 ### 2.5 Device Control与settings provenance
 
+- 2026-10-13 实验交接SOP补入实际workspace说明必读入口，以及SLM Send确认、完整触发周期、同代采集和数据ref、固定Pattern位置比较。Pulse的running只是board.firing缓存，不能当有限播放生命周期完成；execution_snapshot直接公开既有`_finite_run`的`completion_pending`，没有新状态或额外通信，既有有限完成用例通过。旧calibration-10/11无raw，不能断言唯一硬件根因；未改相机/FPGA协议或加入重试。
 - 2026-10-13 MCP延迟修复：选定端点复用ClientSession/HTTP连接与SDK schema/validator缓存，保持并发Stop；Devices摘要不复制后删除参数，snapshot调用不重复返回同一状态。实际Qt/虚拟设备/STDIO暖态状态约50–60→10–18 ms、Load约57–68→15–20 ms（小样本同探针，非硬件上限），首次进程/SDK冷启动仍存在。通用lab_batch/lab_wait_for经SDK原工具注册执行调用方给定操作/条件，没有内置设备或实验步骤；曾提出的Load→Init→等待特判已完全撤掉，未合入。标准准备顺序只更新EXPERIMENT_CONTEXT模板与通用使用指引。现有HTTP/STDIO用例验证会话不重复初始化、wait与Stop并发、组合停止/超时/禁止用写操作等待及正常退出；Devices2项通过。证据留ignored research，测试窗口/进程关闭，未触碰真实设备。
 
 - 2026-10-13 MCP接入收口：普通experiment启动默认本机control，--no-mcp/--mcp-read-only显式覆盖，--check不启动；SDK进入正常依赖。每listener独立本机凭据，默认端口占用自动分配，显式冲突不关闭GUI；退出只清理自家记录。zlc mcp --workspace使用官方SDK代理当前listener，启动前无GUI时仍可连接后选择，多个窗口明确选择，不启动另一Session或重放操作。lab_handles/lab_api/lab_call动态发现原owner公开API，lab_intent发现真实GUI Handle意图；快捷工具不再是能力上限。Devices补显式Load/Save/参数提交、纯状态和原schema投影；Pulse公共调用统一非模态，Scan文件IO/Hold/Step沿原worker。7项Devices、Pulse原4项及扩展2项、真实启动/端口/退出清理用例通过；真实HTTP/Qt与STDIO端到端通过，并验证新增公开方法无需MCP注册、Devices保存加载、GUI intent、私有方法拒绝和原Stop/超时语义。以下初版记录中的optional/显式启动描述已被本条取代。只使用虚拟设备，测试进程退出，无硬件操作。

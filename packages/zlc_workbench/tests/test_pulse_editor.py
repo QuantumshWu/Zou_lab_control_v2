@@ -1216,6 +1216,7 @@ def test_finite_completion_arrives_without_a_status_tick_and_survives_sync(seque
         assert waiting.wait(1)
         run = presenter._finite_run
         lease, events = presenter._drive_lease, tuple(board.events)
+        assert presenter.control_state()["completion_pending"] is True
         assert presenter.control_action("validate", {})["accepted"]
         commands.deliver_until(lambda: not presenter._device_busy)
         assert presenter.control_state()["validation"]["valid"]
@@ -1230,6 +1231,7 @@ def test_finite_completion_arrives_without_a_status_tick_and_survives_sync(seque
         finished.set()
         completion.deliver_until(lambda: presenter._finite_run is None)
         assert presenter._drive_lease is None and not presenter.running
+        assert presenter.control_state()["completion_pending"] is False
         commands.deliver_until(lambda: not presenter._status_in_flight)
         assert not presenter.running, "an old snapshot must not restore RUNNING"
         assert board.wait_timeouts == [None]

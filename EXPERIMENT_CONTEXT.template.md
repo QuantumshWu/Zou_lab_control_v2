@@ -171,7 +171,45 @@
 1. 加载所选 apparatus JSON，再 Init 并等待实际就绪。Experiment 窗口自动打开，不另发“打开 Experiment”动作。顺序已经确定时可用通用 `lab_batch` 组合原操作，等待条件用 `lab_wait_for` 明确给出；服务端不内置这套实验流程。
 2. **使用 SLM 光阱时，每次 Init／重新 Init 后都要加载本实验指定的初始相位或 Science Context，执行 Send，并确认设备命令成功。** 只在编辑器显示相位不算已应用；Adopt 也不能代替加载需要的相位。指定文件见第 7 节，未填时询问，不自行挑文件。
 3. 按本次实验选择 Pulse、Config、Camera 设置和 Calibration。检查帧含义与资源适用条件；不要把上次实验的选择默认为这次所需。
-4. 按选定方法启动：若 Logic／Task 自己负责采集和 Fire，让它完成，不再额外发一次 Fire；手动触发采集则先等待 Camera 就绪再 Fire。
-5. 查看结果、错误和数据有效性，再进入下一步。只有 pending 时才等待；不要在每个已经成功的同步操作后重复读取全套状态。
+4. 先准备 Pulse，再开始寻找相机视野；不要在 Init 时照抄历史小 ROI。载波、阵列或光路改变后先用较大视野定位，再收紧到完整阵列及所需背景／读出边界。只改 ROI 草稿不代表相机已经采用，须在下一次采集核对实际坐标。
+5. 手动定位也须收齐所选 Pulse 的完整触发周期：例如一个周期有 3 次触发，就采 3 帧，不能因为只看第一帧而只采 1 帧。明确设置有限 `run_repeats`，Camera 本代 ready 后才 Fire；相机采完后还要等原 Pulse 有限播放生命周期结束。
+6. 若 Calibration 等 Logic／Task 自己负责采集和 Fire，只 Start 一次，记录 generation 并等待这一代；不再额外 Fire。查看结果、错误和数据有效性，再进入下一步。不要在每个已经成功的同步操作后重复读取全套状态。
 
 本装置需要增加或替换的准备步骤：待填
+
+### MCP 调用与完成条件
+
+以下沿用公共工具，不是新增工作流。将示例路径和设备 ID 换成本装置实际值；已知参数可用 `lab_batch` 组合，每批最多 16 步、30 秒。需要读图、选择 ROI 或判断科学结果时结束该批，再作决定。
+
+**A · 初始化、SLM 准备。** 输入为本轮 apparatus 与 Science Context，前提是无冲突的活动任务。
+
+```json
+{"tool":"lab_call","arguments":{"handle":"devices","method":"load","arguments":{"path":"apparatus.json"}}}
+{"tool":"lab_initialize","arguments":{}}
+{"tool":"lab_wait_for","arguments":{"tool_name":"lab_state","arguments":{},"path":["session_open"],"equals":true}}
+```
+
+这些对象是 `lab_batch(calls=[...])` 的条目，不是一个合并 JSON 文件。检查等待结果中的 `result.device_failures` 为空，设备身份／连接正确、初始化不再 pending；`session_open=true` 本身不保证全部设备成功。
+
+打开 SLM Control 后调用 `lab_editor_action(device_id=实际ID, action="context.load", arguments={"path":实际Context路径})`。使用下列等待条目，再检查其 `result.error` 为空且 `solved=true`、`send_enabled=true`，才发送：
+
+```json
+{"tool":"lab_wait_for","arguments":{"tool_name":"lab_editor_state","arguments":{"device_id":"实际SLM_ID"},"path":["pending"],"equals":false}}
+{"tool":"lab_editor_state","arguments":{"device_id":"实际SLM_ID"},"expect":{"pending":false,"error":null,"solved":true,"send_enabled":true}}
+{"tool":"lab_editor_action","arguments":{"device_id":"实际SLM_ID","action":"device.send","arguments":{}}}
+```
+
+Send 后再次等 `pending=false`，确认 `error=null`、`command_known=true`、`device_diverged=false`，记录本次 `command_revision`／receipt；旧的 known 状态或只显示 solved 不证明本次 Send 成功。软件命令确认也不等于光学稳定。
+
+**B · 手动完整周期定位。** 输入为已准备的有限 Pulse、Camera 草稿和预计视野。
+
+- `lab_action(action="logic.start", arguments={"node_id":相机节点}, expected_draft_revision=读到的修订)`；从返回的节点状态取 generation。
+- `lab_wait(node_id=相机节点, generation=本代, until="ready")` 确认 `reached=true`、`still_current=true` 且无错误后，`lab_pulse(action="fire", device_id=实际sequencer_ID)`，只发一次。
+- `lab_wait(..., until="terminal")` 等相机正常 done；再用 `lab_wait_for(tool_name="lab_pulse_state", arguments={"device_id":实际sequencer_ID}, path=["pending"], equals=false)`，随后等 `path=["completion_pending"], equals=false`。后者来自原有限播放生命周期，DONE 处理／释放完成后才清除；`running` 和 `board.firing` 都只是缓存的板状态。最终检查 `running=false`、`board.fault` 为空及 `last_warning` 无本次错误；停止／失败也可结束生命周期，不能只凭某个 false 宣布正常 DONE。
+- 用 `lab_signal(signal=输出名, generation=本代)` 读取；分页的完整 `ref` 必须一致，不能只对 generation。Panel/Frozen 可能仍是旧图，截图／导出前 Refresh 并核对 publication；需要固定整份数据时读取该代保存的 Figure。
+
+**C · Calibration。** 输入为本轮 Pulse／Config、正确帧角色和已核实的相机实际 ROI。只 Start 一次，记录 generation／run directory，沿同一 generation 用 `lab_wait` 观察。正常 done 后检查站点坐标、usable、loading、BOX bright−dark、实际与理论 fidelity；Task done 或理论 fidelity 高不能代替实际分类验证。正常批次按需求选择 `save_frames`，排查帧角色／漏点时开启原始帧留存。
+
+**D · 位置比较。** 固定同一 Pattern／Target／Pupil、Pulse、曝光和重复数。前一 Calibration 与 Pulse 均结束后，只用 `operator.update` 的 `values` 修改载波，Send 并确认；保存该位置 Context、实际 ROI、command revision 与 run directory，再按 B/C 采集。最后复测起始位置区分空间差异和时间漂移，不自动重解 Pattern 或改变权重。
+
+**异常出口统一：** `matched=false`／`reached=false` 是观察超时，不是没有执行；任何拒绝、非空 error、generation 变化或未知写入结果都停止后续组合，查原命令／原代。已完成步骤不回滚、不重放整个 batch。图像解释、ROI 是否包含全阵及是否继续实验仍由操作者／AI 根据实际证据判断，不由工具 `accepted` 替代。

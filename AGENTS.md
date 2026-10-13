@@ -42,6 +42,11 @@ They constrain implementation method; product and architecture truth remain in
 
 ## Read the current authority before designing
 
+- Before operating an experiment, read the actual workspace's
+  `EXPERIMENT_CONTEXT.md` completely (through `lab_artifact` when using MCP).
+  It supplies apparatus-specific procedures and physical meanings, not live
+  device state or permission to repeat hardware actions. Do not substitute the
+  repository template for the operator's completed workspace document.
 - For every defect, design conflict, performance problem, or implementation
   choice, first search both `ARCHITECTURE_DESIGN.md` and
   `IMPLEMENTATION_PLAN.md`, then read the complete relevant sections before

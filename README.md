@@ -130,8 +130,14 @@ no built-in Load/Init/SLM procedure or inferred physical readiness in these tool
 Do not batch steps needing new scientific interpretation or human decisions.
 
 Keep the apparatus-specific procedure in `workspace/EXPERIMENT_CONTEXT.md`.
-The template includes the SLM phase-loading/Send check after Init; these are
-operator instructions, not hidden automatic device operations. MCP instructions
+The template includes schema-matched examples and completion conditions for
+Init/SLM Send, full-cycle camera localization, Calibration and fixed-pattern
+position comparisons. In particular, collect all Pulse triggers, wait for the
+exact Camera generation **and** the Pulse editor's finite
+`completion_pending=false` lifecycle (after command `pending=false`), and compare
+exact data references before trusting a Panel or export. `running` and
+`board.firing` are cached board facts, not separate lifecycle acknowledgements.
+These are operator instructions, not hidden automatic device operations. MCP instructions
 reduce unnecessary model turns but cannot control the AI client's reasoning
 budget or guarantee that a model follows every instruction.
 
