@@ -245,10 +245,19 @@ def test_a_replay_publishes_what_the_node_declares(tmp_path: Path) -> None:
             plane.close()
 
 
-def test_site_review_filters_once_then_runs_the_complete_analysis(tmp_path: Path) -> None:
+def test_site_review_filters_once_then_runs_the_complete_analysis(tmp_path: Path, monkeypatch) -> None:
     acquired_request = replace(calibration_request(repeats=8), save_frames=True)
     with calibration_task(acquired_request) as task:
         acquired = task.run(tmp_path)
+    from zlc_atom.nodes.calibration import calibration as science
+    fitted_rosters = []
+    original_refine = science._refine_center_subpixel
+
+    def refine(image, peaks_xy, index, spot_sigma):
+        fitted_rosters.append(len(peaks_xy))
+        return original_refine(image, peaks_xy, index, spot_sigma)
+
+    monkeypatch.setattr(science, "_refine_center_subpixel", refine)
     folder = acquired.artifact_path.parents[1] / "figures"
     request = replace(
         acquired_request,
@@ -304,6 +313,8 @@ def test_site_review_filters_once_then_runs_the_complete_analysis(tmp_path: Path
             result = host.final_result
             assert isinstance(result, CalibrationRunResult)
             assert result.calibration.site_map.n_sites == len(point_ids) - 1
+            assert fitted_rosters.count(len(point_ids)) == len(point_ids)
+            assert fitted_rosters.count(len(point_ids) - 1) == len(point_ids) - 1
             assert result.summary["site_review"] == {
                 "detected_sites": len(point_ids),
                 "excluded_site_ids": excluded,

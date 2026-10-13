@@ -120,23 +120,24 @@ def test_a_rarely_loaded_trap_is_still_found_by_frame_changes() -> None:
     assert missed <= 1
     assert found >= len(centres) - 1
 
-    # Real handoff failure: a rare site has no average-image maximum beside a
-    # steady bright neighbour. Exercise raw images through both evidence paths
-    # and joint localisation, rather than prebuilding a candidate evidence map.
-    rng = np.random.default_rng(43)
+    # Real handoff failures: a rare site has no average maximum beside a
+    # steady neighbour; frequent neighbour changes also erase it from the
+    # summed temporal map. Its individual loading events must retain identity.
     grid_y, grid_x = np.mgrid[:48, :48]
-    stack = rng.normal(100.0, 3.0, size=(200, 48, 48))
     close_centres = np.asarray([(22.2, 24.3), (26.4, 24.3)])
-    for index, (x, y) in enumerate(close_centres):
-        spot = np.exp(-((grid_x - x) ** 2 + (grid_y - y) ** 2) / (2 * 1.2**2))
-        if index == 0:
-            stack += 1100.0 * spot
-        else:
-            stack[[21, 102]] += 1200.0 * spot
-    found = detect_sites(stack, spot_sigma=1.2, detection_sigma=6.0)
-    assert found.n_sites == 2
-    distances = np.linalg.norm(found.centers_xy[:, None] - close_centres[None], axis=2)
-    assert np.max(np.min(distances, axis=0)) < .05
+    for changing_neighbour in (False, True):
+        rng = np.random.default_rng(43)
+        stack = rng.normal(100.0, 3.0, size=(200, 48, 48))
+        for index, (x, y) in enumerate(close_centres):
+            spot = np.exp(-((grid_x - x) ** 2 + (grid_y - y) ** 2) / (2 * 1.2**2))
+            if index == 0:
+                stack[::2 if changing_neighbour else 1] += 1100.0 * spot
+            else:
+                stack[[21, 102]] += 1200.0 * spot
+        found = detect_sites(stack, spot_sigma=1.2, detection_sigma=6.0)
+        assert found.n_sites == 2
+        distances = np.linalg.norm(found.centers_xy[:, None] - close_centres[None], axis=2)
+        assert np.max(np.min(distances, axis=0)) < .05
 
 
 def test_a_weak_trap_in_its_neighbours_dark_ring_is_admitted_by_its_changes() -> None:
@@ -293,16 +294,15 @@ def test_average_peak_identity_preserves_close_lattices_without_duplicates() -> 
     significance[7, 3] = 20.0
     evidence = _RunEvidence(
         change_hits=np.zeros(average.shape, dtype=np.int64),
-        max_change_z=np.zeros_like(average), total_change=np.zeros_like(average),
+        max_change_z=np.zeros_like(average),
         total_response=average, total_image=average, transitions=99, background_sigma=4.0,
     )
     for changing in (False, True):
         significance[7, 7] = 5.0 if changing else 7.224
         evidence.max_change_z[7, 7] = 7.224 if changing else 0.0
-        evidence.total_change[7, 7] = 10.0 if changing else 0.0
         ranked, _ = _candidate_peaks(
             evidence, _Admission(average, 2, 6.0, significance, 6.0),
-            spot_sigma=1.0, change_window=5, measurement_radius=2,
+            spot_sigma=1.0, measurement_radius=2,
         )
         assert {tuple(point) for point in ranked} == {(7, 3), (7, 7)}
 

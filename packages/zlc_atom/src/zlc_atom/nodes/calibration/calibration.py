@@ -1675,11 +1675,9 @@ def _stable_site_order(centers_xy: np.ndarray, row_tolerance: float) -> np.ndarr
 class _RunEvidence:
     """Everything one pass over the frames can say, before it means anything."""
 
+    #: Only spatial peaks observed in an individual transition count here.
     change_hits: np.ndarray
     max_change_z: np.ndarray
-    #: Every standardized change magnitude added up: the one map a trap's
-    #: own change peaks on, whatever its neighbours do around it.
-    total_change: np.ndarray
     total_response: np.ndarray
     total_image: np.ndarray
     transitions: int
@@ -1706,7 +1704,9 @@ def _accumulate_run(
     background_sigma = max(4.0 * spot_sigma, spot_sigma + 2.0)
     change_hits = np.zeros(stack.shape[1:], dtype=np.int64)
     max_change_z = np.zeros(stack.shape[1:], dtype=float)
-    total_change = np.zeros(stack.shape[1:], dtype=float)
+    # Same optical FWHM ring as before, now evaluated at each actual event.
+    change_window = max(3, 2 * int(np.ceil(1.1775 * spot_sigma)) + 1)
+    outer, inner = change_window ** 2, (change_window - 2) ** 2
     #: Every frame added up: a highly loaded site may hardly change between
     #: neighbours, but it remains bright in the complete average.
     total_response = np.zeros(stack.shape[1:], dtype=float)
@@ -1745,29 +1745,42 @@ def _accumulate_run(
                 axis=0,
             )
         previous_smoothed = np.array(smoothed[-1], copy=True)
+        del smoothed
         if not changes.shape[0]:
             continue
         change_baseline = np.median(changes, axis=(1, 2), keepdims=True)
         magnitude = np.abs(changes - change_baseline)
+        del changes
         noise = 1.4826 * np.median(magnitude, axis=(1, 2), keepdims=True)
         noise = np.maximum(
             noise,
             np.finfo(float).eps
             * np.maximum(1.0, np.max(magnitude, axis=(1, 2), keepdims=True)),
         )
-        standardized = magnitude / noise
-        changed = standardized >= detection_sigma
+        # Preserve identity BEFORE combining transitions. A rare site's peak
+        # can disappear in a sum (or maximum) of images from different times.
+        # The ring belongs to the same transition as its local peak, never a
+        # later average that lets more frequent neighbours erase the event.
+        ring = (
+            outer * ndimage.uniform_filter(magnitude, size=(1, change_window, change_window), mode="nearest")
+            - inner * ndimage.uniform_filter(magnitude, size=(1, change_window - 2, change_window - 2), mode="nearest")
+        ) / float(outer - inner)
+        # Score the localized change, not a bright neighbour's broad skirt.
+        # Keep the pre-contrast background scatter as the conservative scale;
+        # this is not an exact per-pixel photon-noise probability.
+        standardized = (magnitude - ring) / noise
+        del ring
+        peaks = magnitude == ndimage.maximum_filter(magnitude, size=(1, 3, 3), mode="nearest")
+        changed = peaks & (standardized >= detection_sigma)
         change_hits += np.count_nonzero(changed, axis=0)
         max_change_z = np.maximum(
             max_change_z,
-            np.max(standardized, axis=0),
+            np.max(np.where(peaks, standardized, 0.0), axis=0),
         )
-        total_change += np.sum(standardized, axis=0)
-        transitions += int(changes.shape[0])
+        transitions += int(magnitude.shape[0])
     return _RunEvidence(
         change_hits,
         max_change_z,
-        total_change,
         total_response,
         total_image,
         transitions,
@@ -1898,7 +1911,6 @@ def _candidate_peaks(
     admission: _Admission,
     *,
     spot_sigma: float,
-    change_window: int,
     measurement_radius: int,
 ) -> tuple[list, np.ndarray]:
     """Every place admitted by frame-change or average-image evidence.
@@ -1917,24 +1929,6 @@ def _candidate_peaks(
     required = admission.required
     single_change_cut = admission.single_change_cut
 
-    # A changing site must peak in its own temporal evidence, not necessarily
-    # in the average: rare loading can be buried under a steady neighbour's
-    # skirt there. The spot-scale ring still rejects hollows between changing
-    # neighbours. Sum magnitudes for spatial identity; crossing counts and
-    # the largest single transition are only the significance statistics.
-    total_change = evidence.total_change
-    outer, inner = change_window ** 2, (change_window - 2) ** 2
-    ring = (
-        outer * ndimage.uniform_filter(total_change, size=change_window, mode="nearest")
-        - inner * ndimage.uniform_filter(total_change, size=change_window - 2, mode="nearest")
-    ) / float(outer - inner)
-    change_peak = total_change >= ring
-    nearby_hits = ndimage.maximum_filter(
-        np.where(change_peak, hits, 0), size=3, mode="nearest"
-    )
-    nearby_change_z = ndimage.maximum_filter(
-        np.where(change_peak, max_change_z, 0.0), size=3, mode="nearest"
-    )
     # A site has to be a place the picture actually shows, and a place that
     # can be MEASURED: within a spot's reach of the border there is no
     # background to compare against -- the filters invent one by extending the
@@ -1950,28 +1944,24 @@ def _candidate_peaks(
     # binomial bar; a site visible in only one frame uses the family-wise
     # single-change bar over every pixel and transition.  The average path has
     # its authored/global sigma bar for steady or highly loaded sites.
-    # The two independent identities each use their eight neighbours.
+    # Temporal identity was established at the actual transition. Do not ask
+    # any run-summary image to contain that peak again or borrow nearby hits.
     persistent = average == ndimage.maximum_filter(average, size=3, mode="nearest")
-    # Neighbourhood lookup tolerates a one-pixel shift of temporal evidence,
-    # but the candidate itself must not be a hollow borrowing a neighbour's bump.
-    temporal = total_change == ndimage.maximum_filter(total_change, size=3, mode="nearest")
-    changed = temporal & change_peak & (
-        (nearby_hits >= required) | (nearby_change_z >= single_change_cut)
-    )
+    changed = (hits >= required) | (max_change_z >= single_change_cut)
     averaged = persistent & (average_z >= average_cut)
     candidates = np.argwhere((changed | averaged) & inside)
     ranked = sorted(
         candidates,
         key=lambda item: (
             -max(
-                float(nearby_change_z[tuple(item)]),
+                float(max_change_z[tuple(item)]),
                 float(average_z[tuple(item)]),
             ),
             int(item[0]),
             int(item[1]),
         ),
     )
-    return ranked, nearby_change_z
+    return ranked, max_change_z
 
 
 def _place_candidates(
@@ -2077,10 +2067,6 @@ def detect_sites(
         raise ValueError("spot_sigma must be positive and finite")
     if detection_sigma <= 0 or not np.isfinite(detection_sigma):
         raise ValueError("detection_sigma must be positive and finite")
-    # The frame-change evidence ring uses the spot's full width at half
-    # maximum (2.355 sigma), rounded up to an odd window. It does not set
-    # the neighbourhood used to identify average-image local peaks.
-    change_window = max(3, 2 * int(np.ceil(1.1775 * spot_sigma)) + 1)
     # How near in y two sites must be to be READ as one row of the array.
     # Ordering only: it decides the order site ids are handed out in, never
     # which places are sites.
@@ -2096,7 +2082,6 @@ def detect_sites(
         evidence,
         admission,
         spot_sigma=spot_sigma,
-        change_window=change_window,
         measurement_radius=int(measurement_radius),
     )
     selected, centers_list = _place_candidates(
@@ -2603,9 +2588,22 @@ def calibrate(
         measurement_radius=measurement_radius,
     )
     if site_map_filter is not None:
+        candidate_count = site_map.n_sites
         site_map = site_map_filter(site_map, reference_average)
         if not isinstance(site_map, SiteMap) or not site_map.n_sites:
             raise ValueError("site_map_filter must retain a non-empty SiteMap")
+        if site_map.n_sites < candidate_count:
+            # Rejected candidates must no longer act as fitted neighbours of
+            # the retained sites. Reuse the same raw-image localisation once.
+            anchors = np.rint(site_map.centers_xy)
+            centers = np.array(site_map.centers_xy, copy=True)
+            for index in range(site_map.n_sites):
+                center = _refine_center_subpixel(
+                    reference_average, anchors, index, detection_spot_sigma
+                )
+                if box_fits(center, measurement_radius, reference_average.shape):
+                    centers[index] = center
+            site_map = replace(site_map, centers_xy=centers)
     centers = site_map.centers_xy
 
     box_extractor: Callable[[np.ndarray], np.ndarray] = lambda frame: extract_box_signals(

@@ -1631,10 +1631,10 @@ class CalibrationTask:
                 )
                 response = context.request_operator_input(
                     SITE_REVIEW_REQUEST,
-                    title="Review detected calibration sites",
+                    title="Review candidate calibration sites",
                     message=(
-                        "Exclude high-order diffraction or other unwanted sites, "
-                        "then continue with the retained SiteMap."
+                        "Candidates may include extra peaks; rare sites may be faint in this average. "
+                        "Exclude unwanted sites, then continue with the retained SiteMap."
                     ),
                     payload={
                         "producer": "review",
