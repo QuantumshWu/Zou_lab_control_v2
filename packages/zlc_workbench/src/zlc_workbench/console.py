@@ -8947,8 +8947,9 @@ class ConsolePresenter:
             if observed.error:
                 state, status = "error", observed.error
                 if binding.following:
-                    state = "running"
-                    status = f"waiting for a new source generation: {observed.error}"
+                    # Still an error: the follower restarts on its own only
+                    # when the source starts a new run.
+                    status = f"failed; restarts with the source's next run: {observed.error}"
             elif observed.running:
                 state, status = "running", self._observation_status(observed)
             elif binding.draft_error:

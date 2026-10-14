@@ -6347,8 +6347,8 @@ def test_a_following_processor_survives_its_camera_stop_and_restart(
     assert survival.following
     assert next(row for row in presenter.view.logic_rows if row.title == survival_id).commands[1]
     assert presenter.logic_editor_projection(survival_id)["can_stop"]
-    assert presenter._logic_state(survival)[0] == "running"
-    assert "waiting for a new source generation" in presenter._logic_state(survival)[1]
+    assert presenter._logic_state(survival)[0] == "error"
+    assert "restarts with the source's next run" in presenter._logic_state(survival)[1]
     # More shots from the same incompatible schema must not spin restarts.
     session.fire(shots=1)
     for _ in range(3):
