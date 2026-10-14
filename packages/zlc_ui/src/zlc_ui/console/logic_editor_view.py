@@ -615,7 +615,7 @@ class LogicEditorView(QtWidgets.QWidget):
                     })
                 )
                 self._acquisition_combo = combo
-                self._add_selector_row(field.label, combo)
+                self._add_selector_row(required_label(field.label, field.required), combo)
             combo.setToolTip(field.description)
             combo.setEnabled(bool(projection.get("acquisition_enabled", True)) and not field.unavailable)
             self._fill_combo(
@@ -805,7 +805,7 @@ def _row_labels(projection: Mapping[str, object]) -> tuple[str, ...]:
     acquisition_key = str(projection.get("acquisition_input") or "")
     if acquisition_key:
         labels.extend(
-            field.label for field in projection["form_spec"].fields
+            required_label(field.label, field.required) for field in projection["form_spec"].fields
             if field.key == acquisition_key
         )
     labels.extend(
