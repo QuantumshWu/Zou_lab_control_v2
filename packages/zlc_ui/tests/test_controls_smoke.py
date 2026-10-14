@@ -684,9 +684,9 @@ def test_a_widget_named_twice_is_unblocked_when_the_block_ends() -> None:
 
 def test_one_save_rule_one_destructive_look_and_a_flush_readout(run_qt) -> None:
     """Every Save is standard when clean and the primary with a star when
-    unsaved; every labelled destructive command sits on the faint red seat
-    while a one-glyph row remover stays a ghost; a readout starts where the
-    text above it starts."""
+    unsaved; every labelled destructive command sits on the red tint while a
+    one-glyph row remover stays a ghost; a command on a tinted card is white
+    with no edge; a readout starts where the text above it starts."""
 
     run_qt(
         """
@@ -722,9 +722,17 @@ def face(button):
     image = button.grab().toImage()
     return image.pixelColor(image.width() // 2, image.height() // 5)
 assert face(ghost).alpha() == 0, face(ghost).name()
-from zlc_ui.fluent.style import RED_SEAT
-assert face(seated).name().upper() == RED_SEAT.upper(), face(seated).name()
+from zlc_ui.fluent.style import RED_TINT, SURFACE
+assert face(seated).name().upper() == RED_TINT.upper(), face(seated).name()
 assert not seated.isCheckable(), 'a command is never a toggle'
+on_tint = FluentButton('Expand')
+on_tint.set_on_tint(True)
+row.addWidget(on_tint)
+app.processEvents()
+image = on_tint.grab().toImage()
+assert face(on_tint).name().upper() == SURFACE.upper(), face(on_tint).name()
+edge = image.pixelColor(image.width() // 2, 0).name().upper()
+assert edge == SURFACE.upper(), ('a command on a tint has no field edge', edge)
 
 column = QtWidgets.QWidget()
 column.setStyleSheet('background: white;')
@@ -762,19 +770,23 @@ def test_a_setting_is_a_switch_beside_its_label_in_a_row_of_buttons(run_qt) -> N
         """
 from PyQt5 import QtCore, QtGui, QtTest, QtWidgets
 from zlc_ui.qt import ensure_qt_app
-from zlc_ui.fluent import FluentButton, FluentLineEdit, FluentSwitch
+from zlc_ui.fluent import (
+    FluentButton, FluentLineEdit, FluentSegmentedButtons, FluentSwitch, add_row_switch,
+)
 from zlc_ui.fluent.style import ACCENT, MUTED_INK, SURFACE
 app = ensure_qt_app(['zlc-ui-tests'])
 
 host = QtWidgets.QWidget()
 host.setStyleSheet('background: white;')
 row = QtWidgets.QHBoxLayout(host)
+row.setSpacing(8)
 switch = FluentSwitch('Plot')
 start = FluentButton('Start', role='primary')
-row.addWidget(switch)
+add_row_switch(row, switch, lead=False)
 row.addWidget(start)
 host.show()
 app.processEvents()
+assert start.x() - switch.geometry().right() - 1 >= 2 * row.spacing(), 'a switch is its own group'
 assert switch.height() == start.height(), (switch.height(), start.height())
 assert abs(switch.geometry().center().y() - start.geometry().center().y()) <= 1
 track, radius = switch.focus_frame()
@@ -799,6 +811,16 @@ app.processEvents()
 ring = switch._zlc_focus_ring
 assert ring.isVisible()
 assert ring.geometry().width() < switch.width(), 'the ring goes round the track only'
+
+segments = FluentSegmentedButtons((('range', 'Range'), ('values', 'Values')))
+segments.set_current('range')
+segments.show()
+app.processEvents()
+widths = [segments.button(value).width() for value in ('range', 'values')]
+segments.set_current('values')
+app.processEvents()
+assert [segments.button(value).width() for value in ('range', 'values')] == widths, (
+    'marking a choice must not move the others')
 
 info = FluentLineEdit()
 prompt = FluentLineEdit()

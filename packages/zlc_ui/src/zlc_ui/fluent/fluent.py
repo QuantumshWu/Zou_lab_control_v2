@@ -67,7 +67,6 @@ from .style import (
     RADIUS,
     RED,
     RED_DARK,
-    RED_SEAT,
     RED_TINT,
     TEXT,
     TITLE_ICON_GAP,
@@ -1178,7 +1177,7 @@ class FluentGroupBox(QtWidgets.QGroupBox):
 #: ``primary`` is a surface's ONE run or commit action (the deep
 #: ACCENT_STRONG fill, white ink) -- at most one per surface; ``standard``
 #: every other command (the light-blue tint); ``destructive`` a command that
-#: takes something away (a labelled one sits on the faint RED_SEAT face, a
+#: takes something away (a labelled one sits on the RED_TINT face, a
 #: one-glyph row remover is a ghost); and ``destructive_primary`` the confirm
 #: of a destructive question -- the one white-on-red fill.
 BUTTON_ROLES = ("primary", "standard", "destructive", "destructive_primary")
@@ -1198,15 +1197,18 @@ def _button_stylesheet() -> str:
     BUTTON_TINT with HOVER ink (7.7:1); primary the deep ACCENT_STRONG with
     white ink (5.2:1), the one dark face on its surface.  Destructive has ONE
     look for every labelled command -- Remove, Delete, Clear, Unload: the
-    faint RED_SEAT face, no edge, RED_DARK ink (5.9:1) -- so a Remove reads
-    the same in a toolbar, a button grid or alone; a one-glyph remover
-    repeated down a list of rows (x) stays a ghost with the red wash only
-    under the pointer, because a column of red faces shouted louder than the
-    rows it removed.  destructive_primary is the RED_DARK fill with white
-    ink.  A command ON A TINTED CARD (``on_tint``, the green config Subpulse)
-    is a white face with the field edge and HOVER ink, so it keeps an edge
-    and does not lay blue on green.  Pointer and press each step the face a
-    shade.  Dirty (something new to save) is ONE rule for every save or
+    RED_TINT face, no edge, RED_DARK ink (5.4:1), as far from white as the
+    light-blue face is -- so a Remove reads the same in a toolbar, a button
+    grid or alone; a one-glyph remover repeated down a list of rows (x)
+    stays a ghost with the red wash only under the pointer, because a column
+    of red faces shouted louder than the rows it removed.
+    destructive_primary is the RED_DARK fill with white ink.  A command ON A
+    TINTED CARD (``on_tint``, the green config Subpulse) is a white face
+    with NO edge and HOVER ink (9.9:1): white stands CIEDE2000 11.8 off the
+    green card, as BUTTON_TINT stands off a white one, and does not lay blue
+    on green; the card's FIELDS keep their white face AND their edge, so a
+    command beneath a name field is not one more box.  Pointer and press
+    each step the face a shade.  Dirty (something new to save) is ONE rule for every save or
     commit: clean it is the role it was given, unsaved it is the primary
     with a trailing star.  Disabled is an outline on the page grey with
     DISABLED_INK; a disabled ghost stays a ghost.
@@ -1219,11 +1221,10 @@ def _button_stylesheet() -> str:
     tint_pressed = _mixed(BUTTON_TINT, ACCENT, 0.45).name()
     strong_hover = QtGui.QColor(ACCENT_STRONG).darker(110).name()
     strong_pressed = QtGui.QColor(ACCENT_STRONG).darker(122).name()
-    seat_hover = _mixed(RED_SEAT, RED, 0.27).name()
-    seat_pressed = _mixed(RED_SEAT, RED, 0.38).name()
-    red_tint_pressed = _mixed(RED_TINT, RED, 0.18).name()
-    red_hover = QtGui.QColor(RED_DARK).darker(112).name()
-    red_pressed = QtGui.QColor(RED_DARK).darker(126).name()
+    red_hover = _mixed(RED_TINT, RED, 0.19).name()
+    red_tint_pressed = _mixed(RED_TINT, RED, 0.3).name()
+    red_strong_hover = QtGui.QColor(RED_DARK).darker(112).name()
+    red_strong_pressed = QtGui.QColor(RED_DARK).darker(126).name()
     on_tint_pressed = _mixed(BG, DIVIDER, 0.6).name()
     style = f"""
     QPushButton {{
@@ -1238,11 +1239,11 @@ def _button_stylesheet() -> str:
     QPushButton:hover {{ background: {tint_hover}; border-color: {tint_hover}; }}
     QPushButton:pressed {{ background: {tint_pressed}; border-color: {tint_pressed}; }}
     QPushButton[on_tint="true"] {{
-        background: {SURFACE}; border-color: {PLACEHOLDER}; color: {HOVER};
+        background: {SURFACE}; border-color: {SURFACE}; color: {HOVER};
     }}
-    QPushButton[on_tint="true"]:hover {{ background: {BG}; border-color: {GRAPHITE}; }}
+    QPushButton[on_tint="true"]:hover {{ background: {BG}; border-color: {BG}; }}
     QPushButton[on_tint="true"]:pressed {{
-        background: {on_tint_pressed}; border-color: {GRAPHITE};
+        background: {on_tint_pressed}; border-color: {on_tint_pressed};
     }}
     QPushButton[role="primary"] {{
         background: {ACCENT_STRONG}; border-color: {ACCENT_STRONG}; color: white;
@@ -1254,13 +1255,13 @@ def _button_stylesheet() -> str:
         background: {strong_pressed}; border-color: {strong_pressed};
     }}
     QPushButton[role="destructive"] {{
-        background: {RED_SEAT}; border-color: {RED_SEAT}; color: {RED_DARK};
+        background: {RED_TINT}; border-color: {RED_TINT}; color: {RED_DARK};
     }}
     QPushButton[role="destructive"]:hover {{
-        background: {seat_hover}; border-color: {seat_hover};
+        background: {red_hover}; border-color: {red_hover};
     }}
     QPushButton[role="destructive"]:pressed {{
-        background: {seat_pressed}; border-color: {seat_pressed};
+        background: {red_tint_pressed}; border-color: {red_tint_pressed};
     }}
     QPushButton[role="destructive"][glyph="true"] {{
         background: transparent; border-color: transparent;
@@ -1275,10 +1276,10 @@ def _button_stylesheet() -> str:
         background: {RED_DARK}; border-color: {RED_DARK}; color: white;
     }}
     QPushButton[role="destructive_primary"]:hover {{
-        background: {red_hover}; border-color: {red_hover};
+        background: {red_strong_hover}; border-color: {red_strong_hover};
     }}
     QPushButton[role="destructive_primary"]:pressed {{
-        background: {red_pressed}; border-color: {red_pressed};
+        background: {red_strong_pressed}; border-color: {red_strong_pressed};
     }}
     QPushButton[glyph="true"] {{
         padding: 0px {scaled_px(4, minimum=2)}px;
@@ -1357,8 +1358,9 @@ class FluentButton(QtWidgets.QPushButton):
     def set_on_tint(self, on_tint: bool) -> None:
         """Whether the button sits on a TINTED card (a config Subpulse).
 
-        There a light-blue face laid a second hue on the card's and lost its
-        edge against it; it wears a white face with the field edge instead.
+        There a light-blue face laid a second hue on the card's; it wears a
+        white face with no edge instead, which the card's fields (white AND
+        edged) do not.
         """
 
         value = bool(on_tint)
@@ -4871,15 +4873,18 @@ class FluentSwitch(QtWidgets.QAbstractButton):
     Remote -- including one that sits in a row of commands: a checkable
     button there read as one more command, and on was told from off by a
     shade.  The label used to be painted across the track, under the thumb,
-    which covered a letter of every word it carried.  Off is a white track
-    ringed in PLACEHOLDER with a GRAPHITE thumb; on is the ACCENT track with
-    a white thumb whose hairline DERIVED_EDGE rim (half strength) keeps it
-    crisp on the light accent.  Under the pointer the on track steps to
-    ACCENT_HOVER and the off ring to GRAPHITE.  The widget is a control's
-    height (30 design px) with the track centred in it, so a switch lines up
-    with the buttons of its row; keyboard focus is the same ring outside the
-    track that a button wears outside its face.  The whole width, label
-    included, takes the click.
+    which covered a letter of every word it carried.  Every state graphic
+    holds 3:1 against what it sits on: off is a white track ringed in
+    GRAPHITE (3.9:1 on white) with a GRAPHITE thumb; on is the ACCENT track
+    outlined in DERIVED_EDGE (3.4:1 on white -- the light accent alone was
+    2.45:1) with a white thumb rimmed in DERIVED_EDGE (3.4:1 against the
+    thumb).  Under the pointer the on track steps to ACCENT_HOVER and the
+    off ring to TEXT.  The widget is a control's height (30 design px) with
+    the track centred in it, so a switch lines up with the buttons of its
+    row; keyboard focus is the same ring outside the track that a button
+    wears outside its face.  The whole width, label included, takes the
+    click.  In a row of commands a switch and its label are their own group:
+    :func:`add_row_switch` puts the air of two button gaps either side.
     """
 
     def __init__(self, text: str = "", parent=None):
@@ -4956,13 +4961,12 @@ class FluentSwitch(QtWidgets.QAbstractButton):
         if on:
             fill = QtGui.QColor(
                 ACCENT_HOVER if hovered else ACCENT if enabled else PLACEHOLDER)
-            edge, thumb = fill, QtGui.QColor(SURFACE)
+            edge, thumb = QtGui.QColor(DERIVED_EDGE if enabled else PLACEHOLDER), QtGui.QColor(SURFACE)
             if enabled:
                 rim = QtGui.QColor(DERIVED_EDGE)
-                rim.setAlpha(128)
         else:
             fill = QtGui.QColor(SURFACE if enabled else BG)
-            edge = QtGui.QColor(GRAPHITE if hovered else PLACEHOLDER if enabled else DIVIDER)
+            edge = QtGui.QColor(TEXT if hovered else GRAPHITE if enabled else DIVIDER)
             thumb = QtGui.QColor(GRAPHITE if enabled else PLACEHOLDER)
         painter.setPen(QtGui.QPen(edge, 1.0))
         painter.setBrush(fill)
@@ -5038,6 +5042,32 @@ class FluentSwitch(QtWidgets.QAbstractButton):
         self.update()
 
     offset = QtCore.pyqtProperty(float, fget=getOffset, fset=setOffset)
+
+
+def add_row_switch(
+    layout: QtWidgets.QBoxLayout,
+    switch: FluentSwitch,
+    *,
+    lead: bool = True,
+    trail: bool = True,
+) -> None:
+    """Add ``switch`` to a row of commands as a group of its own.
+
+    At the row's own spacing a switch's label ran into the next command --
+    "Remote Log", "Plot Start" -- and read as one more word on a button.  A
+    second gap on each side that has a neighbour (``lead`` before the
+    track, ``trail`` after the label) keeps the setting and its label apart
+    from the commands, whatever the row's spacing is.
+    """
+
+    gap = layout.spacing()
+    if gap < 0:
+        gap = scaled_px(8, minimum=6)
+    if lead:
+        layout.addSpacing(gap)
+    layout.addWidget(switch, 0, QtCore.Qt.AlignVCenter)
+    if trail:
+        layout.addSpacing(gap)
 
 
 class FluentTriSwitch(QtWidgets.QAbstractButton):
@@ -6478,13 +6508,54 @@ class FluentScrollArea(QtWidgets.QScrollArea):
         self._reserve_scrollbar_gutter()
 
 
+def _end_column(header: QtWidgets.QHeaderView, step: int) -> int:
+    """The logical column shown first (``step`` 1) or last (-1), or -1."""
+
+    count = header.count()
+    visual = 0 if step > 0 else count - 1
+    while 0 <= visual < count and header.isSectionHidden(header.logicalIndex(visual)):
+        visual += step
+    return header.logicalIndex(visual) if 0 <= visual < count else -1
+
+
 class _RowHoverDelegate(QtWidgets.QStyledItemDelegate):
     """Marks every cell of the hovered ROW as under the pointer.
 
     A table view hovers one cell; a data table's unit is the row, so the
     view says which row the pointer is on and each of its cells draws the
-    hover wash.
+    hover wash.  A selected row is also OUTLINED in DERIVED_EDGE (3.4:1 on
+    the white rows; its ACCENT fill alone was 2.45:1): each cell draws the
+    row's top and bottom, the first and last columns its ends, and a run of
+    selected rows shares one box rather than a line between every pair.
     """
+
+    def paint(self, painter, option, index) -> None:
+        super().paint(painter, option, index)
+        if not option.state & QtWidgets.QStyle.State_Selected:
+            return
+        view = self.parent()
+        selection = view.selectionModel() if view is not None else None
+        if selection is None:
+            return
+        row, parent = index.row(), index.parent()
+        model = index.model()
+        header = view.horizontalHeader()
+        first, last = _end_column(header, 1), _end_column(header, -1)
+        above = row > 0 and selection.isRowSelected(row - 1, parent)
+        below = row + 1 < model.rowCount(parent) and selection.isRowSelected(row + 1, parent)
+        width = scaled_px(1, minimum=1)
+        rect = option.rect
+        painter.save()
+        color = QtGui.QColor(DERIVED_EDGE)
+        if not above:
+            painter.fillRect(QtCore.QRect(rect.left(), rect.top(), rect.width(), width), color)
+        if not below:
+            painter.fillRect(QtCore.QRect(rect.left(), rect.bottom() + 1 - width, rect.width(), width), color)
+        if index.column() == first:
+            painter.fillRect(QtCore.QRect(rect.left(), rect.top(), width, rect.height()), color)
+        if index.column() == last:
+            painter.fillRect(QtCore.QRect(rect.right() + 1 - width, rect.top(), width, rect.height()), color)
+        painter.restore()
 
     def initStyleOption(self, option, index) -> None:  # noqa: N802 - Qt naming
         super().initStyleOption(option, index)
@@ -7022,8 +7093,9 @@ class _SelectionGridModel(QtCore.QAbstractTableModel):
 class _SelectionGridDelegate(QtWidgets.QStyledItemDelegate):
     """A cell is a small card: blank until chosen, named once it is.
 
-    A chosen cell wears the selection's look -- the ACCENT fill, TEXT ink,
-    no edge.  A DERIVED cell -- reached by a rule rather than marked -- is
+    A chosen cell wears the selection's look -- the ACCENT fill, TEXT ink --
+    outlined in solid DERIVED_EDGE, because the fill alone is 2.45:1 on the
+    white card.  A DERIVED cell -- reached by a rule rather than marked -- is
     clearly weaker: the ACCENT_TINT wash, a dashed DERIVED_EDGE, its name in
     DERIVED_INK.  What tells a derived cell from an EMPTY one is its LABEL
     and its blue dashed EDGE, not the fill: the wash is 1.17:1 from white,
@@ -7047,7 +7119,7 @@ class _SelectionGridDelegate(QtWidgets.QStyledItemDelegate):
         painter.save()
         painter.setRenderHint(QtGui.QPainter.Antialiasing)
         if selected and state != "warning":
-            painter.setPen(QtCore.Qt.NoPen)
+            painter.setPen(QtGui.QPen(QtGui.QColor(DERIVED_EDGE), float(scaled_px(1, minimum=1))))
         else:
             edge = (RED if state == "warning" else ACCENT if hovered
                     else DERIVED_EDGE if derived else PLACEHOLDER)
@@ -7369,9 +7441,11 @@ class FluentSegmentedButtons(QtWidgets.QWidget):
 
     A neutral rounded track holds the choices flush, each a transparent face
     in TEXT ink; the pointer darkens a choice a neutral step, and the
-    current one wears the selection's look (the ACCENT fill, TEXT ink).  A
-    row of separate tinted buttons read as a row of commands, which these
-    are not.
+    current one wears the selection's look (the ACCENT fill, TEXT ink) with
+    two more cues, because the fill alone is 1.84:1 on the track: a
+    DERIVED_EDGE outline and a semibold label.  Every choice is as wide as
+    its semibold label, so marking one never shifts the others.  A row of
+    separate tinted buttons read as a row of commands, which these are not.
 
     ``activated`` carries the value an operator clicked; :meth:`set_current`
     marks a value (or none) without emitting it.
@@ -7386,11 +7460,16 @@ class FluentSegmentedButtons(QtWidgets.QWidget):
         layout.setContentsMargins(rim, rim, rim, rim)
         layout.setSpacing(0)
         self._buttons: dict[object, QtWidgets.QPushButton] = {}
+        pad = scaled_px(10, minimum=6)
+        strong = QtGui.QFont(FONT, fluent_font_size())
+        strong.setWeight(QtGui.QFont.DemiBold)
+        strong_metrics = QtGui.QFontMetrics(strong)
         for value, label in choices:
             button = _SegmentButton(label, self)
             button.setCursor(QtCore.Qt.PointingHandCursor)
             button.setFocusPolicy(QtCore.Qt.TabFocus)
             button.setMinimumHeight(scaled_px(30, minimum=22) - 2 * rim)
+            button.setMinimumWidth(fluent_text_width(strong_metrics, str(label)) + 2 * pad + 2)
             button.setProperty("current", False)
             button.clicked.connect(lambda _checked=False, value=value: self.activated.emit(value))
             layout.addWidget(button)
@@ -7403,19 +7482,21 @@ class FluentSegmentedButtons(QtWidgets.QWidget):
             QPushButton {{
                 background: transparent;
                 color: {TEXT};
-                border: none;
+                border: 1px solid transparent;
                 border-radius: {max(1, _radius() - 1)}px;
-                padding: 0px {scaled_px(10, minimum=6)}px;
+                padding: 0px {pad - 1}px;
                 font: {fluent_font_size()}pt "{FONT}";
                 outline: none;
             }}
             QPushButton:hover, QPushButton:focus {{ background: {hover}; }}
             QPushButton:pressed {{ background: {pressed}; }}
-            QPushButton[current="true"] {{ background: {ACCENT}; }}
+            QPushButton[current="true"] {{
+                background: {ACCENT}; border-color: {DERIVED_EDGE}; font-weight: 600;
+            }}
             QPushButton[current="true"]:hover {{ background: {ACCENT_HOVER}; }}
             QPushButton[current="true"]:pressed {{ background: {ACCENT_PRESSED}; }}
             QPushButton:disabled {{ background: transparent; color: {DISABLED_INK}; }}
-            QPushButton[current="true"]:disabled {{ background: {SURFACE}; }}
+            QPushButton[current="true"]:disabled {{ background: {SURFACE}; border-color: {DIVIDER}; }}
             """
         )
 

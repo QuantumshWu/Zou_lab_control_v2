@@ -9,9 +9,13 @@ from __future__ import annotations
 #: The accent, and what every "this is the one chosen" state wears -- a
 #: switch that is on (its track), the current segmented choice, a chosen grid
 #: card, the picked row of a popup list or a data table, an active cycle
-#: combo: the fill alone, no edge, with TEXT ink (5.3:1).  It is told from a
-#: command by FILL -- 1.9:1 against BUTTON_TINT -- and from the main command
-#: by ACCENT_STRONG (2.1:1).
+#: combo: the fill with TEXT ink (5.3:1).  It is told from a command by FILL
+#: -- 1.9:1 against BUTTON_TINT -- and from the main command by
+#: ACCENT_STRONG (2.1:1).  The fill is only 2.45:1 against white (1.84:1 on a
+#: segmented track), so where a selection stands among unselected neighbours
+#: on a plain surface -- a switch track, the current segment, a chosen grid
+#: card, a selected table row -- it also carries a DERIVED_EDGE outline
+#: (3.4:1), and the current segment a semibold label.
 ACCENT = "#77AADD"
 #: The selection's hover and pressed faces: ACCENT stepped toward HOVER,
 #: TEXT ink still 4.8:1 and 4.6:1 on them.  ACCENT_HOVER is also the track of
@@ -42,14 +46,15 @@ ACCENT_STRONG = "#2F6FB0"
 #: dashed edge in DERIVED_EDGE (3.4:1 on white, flat-capped dashes as long as
 #: their gaps) and its name in DERIVED_INK (5.0:1 on the wash).  The LABEL
 #: and the blue dashed EDGE are what tell it from an empty cell -- the wash
-#: is only 1.17:1 from white and is never asked to carry that alone.  On an
-#: on switch's white thumb DERIVED_EDGE at half strength is the hairline rim
-#: that keeps the thumb crisp on the ACCENT track.
+#: is only 1.17:1 from white and is never asked to carry that alone.  Solid,
+#: the same colour is the selection's second cue (see ACCENT): the outline
+#: of an on switch's track and the rim of its white thumb, of the current
+#: segment, a chosen grid card and a selected table row.
 DERIVED_EDGE = "#5A8FC7"
 DERIVED_INK = "#40688F"
 #: Dark accent: the ink of a standard command (7.7:1 on BUTTON_TINT), of a
-#: command on a tinted card (9.9:1 on its white face) and the keyboard-focus
-#: ring.
+#: command on a tinted card (9.9:1 on its white, edgeless face) and the
+#: keyboard-focus ring.
 HOVER = "#004578"
 BG = "#F3F3F3"
 TEXT = "#323130"
@@ -73,14 +78,15 @@ RED = "#CD7380"
 #: white) and of an error line.  RED itself is a dot and a fill colour; as
 #: text on white it was 3.3:1, too pale to read as the warning it is.
 RED_DARK = "#9E3B4A"
-#: RED as a wash: what a destructive GLYPH (a row's ×, a ghost with no face
-#: at rest) wears under the pointer, RED_DARK ink still 5.4:1 on it.
+#: RED as a wash: the face of every LABELLED destructive command -- Remove,
+#: Delete, Clear, Unload, Remove selected, Clear All -- no edge, RED_DARK
+#: ink 5.4:1.  It sits CIEDE2000 10.1 from white, the weight of BUTTON_TINT
+#: (10.3), so a Remove among light-blue commands is a command too; a fainter
+#: seat (#FBF0F1, 5.9 from white) sat nearer the disabled face (2.4) and
+#: read as a hole in a grid of buttons.  Under the pointer it steps toward
+#: RED (#EFCED3, 4.5:1), pressed further.  A destructive GLYPH (a row's ×)
+#: wears it only under the pointer.
 RED_TINT = "#F7E3E6"
-#: The face of every LABELLED destructive command -- Remove, Delete, Clear,
-#: Unload, Remove selected, Clear All: a seat of red so faint it sits among
-#: the light-blue commands without shouting, no edge, RED_DARK ink 5.9:1.
-#: Under the pointer it steps toward RED (#EFCED2, 4.5:1), pressed further.
-RED_SEAT = "#FBF0F1"
 ORANGE = "#D69A6E"
 ORANGE_TINT = "#F6E3D4"
 ORANGE_DARK = "#8A4B1F"
@@ -189,7 +195,6 @@ __all__ = [
     "RADIUS",
     "RED",
     "RED_DARK",
-    "RED_SEAT",
     "RED_TINT",
     "SURFACE",
     "TEXT",

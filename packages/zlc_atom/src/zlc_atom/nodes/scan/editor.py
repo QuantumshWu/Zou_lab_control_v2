@@ -35,6 +35,7 @@ from zlc_ui.fluent import (
     FluentLineEdit,
     FluentSpinBox,
     FluentLabel,
+    FluentSegmentedButtons,
     ElidedLabel,
     fill_grouped_choice_combo,
     fluent_unit_picker,
@@ -136,8 +137,12 @@ class _AxisRow(QtWidgets.QWidget):
         self.input_stack = QtWidgets.QStackedWidget(self)
         self.input_stack.addWidget(self.range_inputs)
         self.input_stack.addWidget(self.values_edit)
-        self.mode_button = FluentButton("Range")
-        self.mode_button.setToolTip("Switch between independent Range and Values inputs")
+        #: Which input bank the axis plays: a two-way SETTING, so it shows
+        #: both choices with the current one marked.  A command button
+        #: naming the current mode looked like "Add axis" beside it, and
+        #: pressing "Range" switched the row to Values.
+        self.mode_choice = FluentSegmentedButtons((("range", "Range"), ("values", "Values")))
+        self.mode_choice.setToolTip("Scan a from/to/points range, or the values written")
         #: Which spelling of the port's unit both ends are read in.  ONE
         #: picker, not two: "from" and "to" are two ends of one sweep, and a
         #: row that could say 1 us to 40 ms is a row nobody can read.
@@ -162,7 +167,7 @@ class _AxisRow(QtWidgets.QWidget):
         layout.addWidget(self.input_stack)
         layout.addWidget(self._unit_host)
         layout.addWidget(self.custom_label)
-        layout.addWidget(self.mode_button)
+        layout.addWidget(self.mode_choice)
         layout.addWidget(remove)
         self._custom_values: tuple[float, ...] | None = None
         self._unit_request = None
@@ -173,17 +178,20 @@ class _AxisRow(QtWidgets.QWidget):
         for spin in (self.start_spin, self.stop_spin, self.points_spin):
             spin.valueNormalized.connect(self._range_normalized)
         self.values_edit.editingFinished.connect(self.edited.emit)
-        self.mode_button.clicked.connect(self._toggle_mode)
+        self.mode_choice.activated.connect(self._pick_mode)
         self.remove_button.clicked.connect(lambda: self.remove_requested.emit(self))
 
-    def _toggle_mode(self) -> None:
-        self.input_stack.setCurrentIndex(1 - self.input_stack.currentIndex())
+    def _pick_mode(self, mode: str) -> None:
+        index = int(mode == "values")
+        if index == self.input_stack.currentIndex():
+            return
+        self.input_stack.setCurrentIndex(index)
         self._refresh_mode()
         self.edited.emit()
 
     def _refresh_mode(self) -> None:
         values_mode = self.input_stack.currentIndex() == 1
-        self.mode_button.setText("Values" if values_mode else "Range")
+        self.mode_choice.set_current("values" if values_mode else "range")
         self.custom_label.setText(
             "custom values" if not values_mode and self._custom_values is not None else ""
         )
@@ -448,7 +456,6 @@ class _ManualAxisRow(_AxisRow):
         QtWidgets.QWidget.__init__(self, parent)
         self.name_edit = FluentLineEdit()
         self.name_edit.setPlaceholderText("manual axis name")
-        self.name_edit.set_placeholder_prompt()
         identity = QtWidgets.QWidget(self)
         identity_layout = QtWidgets.QHBoxLayout(identity)
         identity_layout.setContentsMargins(0, 0, 0, 0)
@@ -1011,7 +1018,7 @@ class ScanPlanEditor(QtWidgets.QWidget):
         widths[1] = max(row.range_inputs.sizeHint().width() for row in self._rows)
         widths[2] = max(cell.sizeHint().width() for cell in units)
         widths[3] = self.fontMetrics().horizontalAdvance("custom values") + scaled_px(4)
-        widths[4] = max(self.fontMetrics().horizontalAdvance(text) for text in ("Range", "Values")) + scaled_px(28)
+        widths[4] = max(row.mode_choice.sizeHint().width() for row in self._rows)
         widths[5] = scaled_px(32)
         for cell in units:
             if cell.minimumWidth() != widths[2] or cell.maximumWidth() != widths[2]:

@@ -22,6 +22,7 @@ from zlc_ui.fluent import (
     FluentScrollArea,
     FluentStatusDot,
     FluentSwitch,
+    add_row_switch,
     FluentTabWidget,
     fluent_widget_stylesheet,
     muted_note_label,
@@ -122,10 +123,12 @@ class TaskConsoleView(QtWidgets.QWidget):
         ):
             header.addWidget(widget, 0, QtCore.Qt.AlignVCenter)
         header.addWidget(self.summary_label, 1, QtCore.Qt.AlignVCenter)
+        header.addWidget(self.kind_combo, 0, QtCore.Qt.AlignVCenter)
+        header.addWidget(self.add_panel_button, 0, QtCore.Qt.AlignVCenter)
+        # The setting is a group of its own between the commands, so its
+        # label does not run into Pause.
+        add_row_switch(header, self.selectors_switch)
         for widget in (
-            self.kind_combo,
-            self.add_panel_button,
-            self.selectors_switch,
             self.pause_switch,
             self.save_screenshot_button,
             self.save_layout_button,

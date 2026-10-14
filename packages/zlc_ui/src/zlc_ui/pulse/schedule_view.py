@@ -155,8 +155,9 @@ class PeriodCard(FluentGroupBox):
         self.unit_combo.setFixedWidth(control_width)
         top_layout.addWidget(self.unit_combo)
         self.name_edit = FluentLineEdit("")
+        # No label repeats it on the card: the placeholder is the field's
+        # only name, so it reads in MUTED_INK, not as a faint prompt.
         self.name_edit.setPlaceholderText("name")
-        self.name_edit.set_placeholder_prompt()
         self.name_edit.setFixedWidth(control_width)
         # A spacer is named by the editor, not the operator: the name is
         # shown where every card shows its name and cannot be typed into.
@@ -950,8 +951,8 @@ class ComponentCard(FluentGroupBox):
         self.name_edit = FluentLineEdit(component.name)
         self.name_edit.setFixedWidth(control_width)
         self.name_edit.setAlignment(QtCore.Qt.AlignCenter)
+        # The card shows no Name label: the placeholder carries it.
         self.name_edit.setPlaceholderText("Name")
-        self.name_edit.set_placeholder_prompt()
         self.name_edit.editingFinished.connect(self._commit_name)
         self.end_label = ElidedLabel(component.name, align=QtCore.Qt.AlignCenter)
         self.end_label.setFixedSize(control_width, row_height())
@@ -1034,8 +1035,9 @@ class ComponentCard(FluentGroupBox):
         self.set_surface(fill=CONFIG_GREEN_TINT if component.config_active else None,
                          edge=CONFIG_GREEN if component.config_active else ACCENT)
         self.set_title_color(CONFIG_GREEN_DARK if component.config_active else ACCENT)
-        # On the green card a light-blue face would lay a second hue on it
-        # and lose its edge: the commands go white with the field edge.
+        # On the green card a light-blue face would lay a second hue on it:
+        # the commands go white with NO edge, so they are not mistaken for
+        # the white, edged name field above them.
         for button in (self.expand_button, self.edit_button, self.ungroup_button):
             button.set_on_tint(component.config_active)
         self.source_button.source = component.source

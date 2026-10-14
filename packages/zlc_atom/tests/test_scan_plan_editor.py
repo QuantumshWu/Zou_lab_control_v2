@@ -231,7 +231,7 @@ def test_a_manual_row_round_trips_through_the_document(points: int) -> None:
         range_values = row.input_entry()["values"]
         widgets = (row.start_spin, row.stop_spin, row.points_spin, row.values_edit)
         assert row.input_entry()["value_text"] == ""
-        row.mode_button.click()
+        row.mode_choice.button("values").click()
         assert row.input_stack.currentIndex() == 1
         assert row.range_inputs.isHidden() and not row.points_spin.isVisibleTo(row)
         assert row.input_entry()["mode"] == "values"
@@ -253,11 +253,11 @@ def test_a_manual_row_round_trips_through_the_document(points: int) -> None:
             assert reopened._current_plan().axes[0].values == (9.0, 3.0, 9.0)
             assert restored.input_entry()["values"] == range_values
             restored_widgets = (restored.start_spin, restored.stop_spin, restored.points_spin, restored.values_edit)
-            restored.mode_button.click()
+            restored.mode_choice.button("range").click()
             assert restored.input_stack.currentIndex() == 0
             assert reopened._current_plan().axes[0].values == tuple(range_values)
             assert restored.values_edit.text() == "9, 3, 9"
-            restored.mode_button.click()
+            restored.mode_choice.button("values").click()
             from zlc_runtime import SelectionRange, SelectionState
             from zlc_atom.nodes.seamless_scan import LOGIC_NODE
 
@@ -643,7 +643,7 @@ def test_device_port_unit_conversion_runs_off_the_qt_thread_and_never_overwrites
         assert _axis(restored).values == tuple(units.convert(plan.axes[0].values, "mVpp", "dBm"))
         assert restored.custom_label.text() == "custom values"
         assert parse_scan_values(restored.values_edit.text()) == tuple(units.convert(converted_values, "mVpp", "dBm"))
-        restored.mode_button.click()
+        restored.mode_choice.button("values").click()
         gate.clear()
         restored.unit_picker.unit_picked.emit("mVpp")
         from PyQt5 import QtTest

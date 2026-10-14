@@ -1511,7 +1511,7 @@ assert row.start_spin.value() == 1 and row.stop_spin.value() == 3
 assert scan_readout._rows[1].start_spin.valueUnit() == 'MHz'
 assert scan_readout._rows[2].stop_spin.value() == 6
 assert scan_readout._rows[2].input_stack.currentIndex() == 0
-assert scan_readout._rows[2].mode_button.text() == 'Values'
+assert scan_readout._rows[2].mode_choice.button('values').property('current') is True
 assert scan_readout._rows[2].custom_label.text() == 'Range off'
 assert 'not in this pulse' not in scan_readout._rows[1].port_combo.currentText()
 plan['axes'][0]['values'] = [4, 5, 6]

@@ -28,6 +28,7 @@ from zlc_ui.fluent import (
     FluentSettingRow,
     FluentStatusDot,
     FluentSwitch,
+    add_row_switch,
     FluentTreeComboBox,
     FONT,
     fill_grouped_choice_combo,
@@ -196,7 +197,7 @@ class LogicEditorView(QtWidgets.QWidget):
         self.preview_switch.toggled.connect(self.auto_preview_changed.emit)
         # Start/Stop stays the rightmost control, where every edit page keeps
         # its main action; the Plot setting sits to its left, ahead of Restart.
-        actions.addWidget(self.preview_switch)
+        add_row_switch(actions, self.preview_switch, lead=False)
         actions.addWidget(self.restart_button)
         actions.addWidget(self.run_button)
         # Clear of the help paragraph above, so the ghost Remove reads as a

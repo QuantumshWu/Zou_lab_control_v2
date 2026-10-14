@@ -16,6 +16,7 @@ from zlc_ui.fluent import (
     FluentLabel,
     FluentStatusDot,
     FluentSwitch,
+    add_row_switch,
     popup_gap,
     retire_widget,
     scaled_px,
@@ -102,8 +103,9 @@ class LogicRowView(FluentFrame):
         top.addWidget(self.name_label)
         top.addWidget(self.kind_label)
         top.addWidget(self.status_label, 1)
+        # Air after the "Plot" label, so it does not read as part of Start.
+        add_row_switch(top, self.preview_switch, lead=False)
         for button in (
-            self.preview_switch,
             self.run_button,
             self.edit_button,
             self.more_button,

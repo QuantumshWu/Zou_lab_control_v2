@@ -12,7 +12,7 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 from zlc_ui.fluent import (
     detach_widget,
     FluentButton, FluentComboBox, FluentFrame, FluentLabel,
-    FluentReadoutEdit, FluentScrollArea, FluentSwitch, signals_blocked,
+    FluentReadoutEdit, FluentScrollArea, FluentSwitch, add_row_switch, signals_blocked,
 )
 
 from ._layout import px
@@ -55,8 +55,11 @@ class PulsePreviewView(QtWidgets.QWidget):
         self.preview_save_figure_button.clicked.connect(self.save_requested)
         self.preview_status = FluentReadoutEdit("")
         self.preview_status.setFixedHeight(control_h)
-        for widget in (self.preview_include_off, self.preview_selectors_switch,
-                       self.preview_size_label, self.preview_size_combo):
+        # Each setting and its label is a group of its own: the air after a
+        # label keeps "Show off rows" from reading into "Selectors".
+        add_row_switch(row, self.preview_include_off, lead=False)
+        add_row_switch(row, self.preview_selectors_switch, lead=False)
+        for widget in (self.preview_size_label, self.preview_size_combo):
             row.addWidget(widget)
         row.addWidget(self.preview_status, 1)
         row.addWidget(self.preview_save_figure_button)

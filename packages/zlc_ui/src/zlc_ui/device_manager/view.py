@@ -28,6 +28,7 @@ from zlc_ui.fluent import (
     FluentSectionLabel,
     FluentStatusDot,
     FluentSwitch,
+    add_row_switch,
     FluentTabWidget,
     fluent_font_size,
     muted_note_label,
@@ -201,9 +202,11 @@ class _LiveDeviceCard(FluentFrame):
         identity.addWidget(self.detail_label)
         outer.addLayout(identity, 1)
         outer.addWidget(self.control_button)
-        outer.addWidget(self.remote_button)
         outer.addWidget(self.log_button)
         outer.addWidget(self.close_button)
+        # The setting stands apart from the commands, at the row's end: in
+        # the middle of them its label read as part of Log.
+        add_row_switch(outer, self.remote_button, trail=False)
         self.control_button.clicked.connect(
             lambda: self.device_open_requested.emit(self.instance_id)
         )
