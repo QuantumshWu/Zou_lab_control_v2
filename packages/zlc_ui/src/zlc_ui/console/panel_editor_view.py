@@ -17,7 +17,6 @@ from PyQt5 import QtCore, QtWidgets
 from zlc_ui.fluent import (
     detach_widget,
     FluentButton,
-    FluentComboBox,
     FluentFrame,
     FluentGroupBox,
     FluentLabel,
@@ -26,6 +25,7 @@ from zlc_ui.fluent import (
     FluentPathEdit,
     FluentReadoutEdit,
     FluentScrollArea,
+    FluentSegmentedButtons,
     FluentSettingRow,
     FluentSwitch,
     MUTED_INK,
@@ -247,9 +247,11 @@ class PanelEditorView(QtWidgets.QWidget):
         save_layout.addWidget(FluentSettingRow(
             "Name", name_controls, label_width=label_width, parent=save_group
         ))
-        self.save_format = FluentComboBox(save_group)
-        for extension in _IMAGE_FORMATS:
-            self.save_format.addItem(extension.upper(), extension)
+        self.save_format = FluentSegmentedButtons(
+            tuple((extension, extension.upper()) for extension in _IMAGE_FORMATS), save_group
+        )
+        self._save_extension = _IMAGE_FORMATS[0]
+        self.save_format.set_current(self._save_extension)
         save_layout.addWidget(FluentSettingRow(
             "Format", self.save_format, label_width=label_width, parent=save_group
         ))
@@ -266,7 +268,7 @@ class PanelEditorView(QtWidgets.QWidget):
         self.save_directory.changed.connect(self._update_save_controls)
         self.save_auto_name.toggled.connect(self._update_save_controls)
         self.save_name.textChanged.connect(self._update_save_controls)
-        self.save_format.currentIndexChanged[int].connect(self._update_save_controls)
+        self.save_format.activated.connect(self._save_format_picked)
         self.save_button.clicked.connect(self._save_figure)
         body_layout.addStretch(1)
 
@@ -524,7 +526,7 @@ class PanelEditorView(QtWidgets.QWidget):
         directory_text = self.save_directory.text().strip()
         if not directory_text:
             return None
-        extension = str(self.save_format.currentData() or "png")
+        extension = self._save_extension
         if self.save_auto_name.isChecked():
             name = stamped_file_name(
                 str(self._state.get("title") or self.panel_id),
@@ -537,6 +539,11 @@ class PanelEditorView(QtWidgets.QWidget):
                 return None
             name = f"{Path(typed).stem}.{extension}"
         return Path(directory_text).expanduser() / name
+
+    def _save_format_picked(self, extension: str) -> None:
+        self._save_extension = str(extension)
+        self.save_format.set_current(self._save_extension)
+        self._update_save_controls()
 
     def _update_save_controls(self, *_args: object) -> None:
         self.save_name.setEnabled(not self.save_auto_name.isChecked())

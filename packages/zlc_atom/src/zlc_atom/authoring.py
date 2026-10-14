@@ -79,10 +79,19 @@ class AuthoringField:
     #: a derive's signals -- and every row is projected by these fields
     #: exactly as a whole draft is by its schema.
     columns: tuple["AuthoringField", ...] = ()
+    #: Show ``choices`` side by side as one segmented control rather than a
+    #: popup.  The owner's call, for a closed set it declares with labels
+    #: short enough to sit on one line (it declares those labels too); a
+    #: form never infers it from how many choices there are.
+    segmented: bool = False
 
     def __post_init__(self) -> None:
         if not self.name or not self.value_type or not self.label:
             raise ValueError("authoring fields require name, value_type, and label")
+        if not isinstance(self.segmented, bool):
+            raise TypeError("authoring field segmented must be bool")
+        if self.segmented and not self.choices:
+            raise ValueError(f"segmented field {self.name!r} needs its choices")
         if not isinstance(self.description, str) or not isinstance(self.blank_label, str):
             raise TypeError("authoring field description and blank_label must be text")
         if self.derived and (self.required or self.enabled_when is not None):

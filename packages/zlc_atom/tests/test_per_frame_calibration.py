@@ -414,10 +414,8 @@ def test_the_calibrations_editor_gives_frames_to_files_by_clicking(monkeypatch) 
                                 QtCore.QPoint(10, rows.sectionViewportPosition(1) + 10))
         assert drafts[-1]["artifact_inputs"]["calibrations"] == (
             load, {"path": "C:/data/other.json", "frames": ("rest",)})
-        # The readout model, set once, is a dropdown under the files.
-        index = editor.model.findData("box")
-        editor.model.setCurrentIndex(index)
-        editor.model.activated.emit(index)
+        # The readout model, set once, is a segmented choice under the files.
+        QtTest.QTest.mouseClick(editor.model.button("box"), QtCore.Qt.LeftButton)
         assert drafts[-1] == {"values": {"model_kind": "box"}}
         editor.add_file("C:/data/extra.json")
         assert drafts[-1]["artifact_inputs"]["calibrations"][-1] == {

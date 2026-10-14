@@ -38,6 +38,7 @@ from zlc_ui.fluent import (
     FluentLineEdit,
     FluentScrollArea,
     FluentSectionLabel,
+    FluentSegmentedButtons,
     FluentSettingRow,
     FluentSpinBox,
     FluentSwitch,
@@ -287,7 +288,11 @@ class _DataEditorView(QtWidgets.QWidget):
         self._updating = False
         self._selected_axis = ""
         self._adding_axis = False
-        self._domain_choices: tuple = ()
+        #: The axis draft's domain and the component the table shows: what
+        #: the two segmented choices mark, which report clicks and hold no
+        #: value to read back.
+        self._domain: object = None
+        self._component: object = None
         self._save_suggested = "figure.npz"
         self._axis_view_widgets: dict[
             str,
@@ -391,7 +396,15 @@ class _DataEditorView(QtWidgets.QWidget):
         axis_choice_row.addWidget(self.axis_choice_row, 1)
         axis_choice_row.addWidget(self.remove_axis_button)
         axes_layout.addLayout(axis_choice_row)
-        self.domain_combo = FluentComboBox()
+        # The presenter's closed sets -- the three domains here, the
+        # components below -- are each one segmented choice, built with the
+        # projection the editor opens on and only marked after that.
+        opening = dict(projection or {})
+        domains = tuple(
+            (key, str(label)) for key, label in tuple(opening.get("domain_choices", ()))
+        )
+        self._domain_keys = tuple(key for key, _label in domains)
+        self.domain_choice = FluentSegmentedButtons(domains)
         self.axis_size_spin = FluentSpinBox()
         self.axis_size_spin.setRange(1, 2_147_483_647)
         self.axis_size_spin.setKeyboardTracking(False)
@@ -408,7 +421,7 @@ class _DataEditorView(QtWidgets.QWidget):
             ("name", "Name", self.axis_name_edit, 0, 0),
             ("size", "Length", self.axis_size_spin, 0, 1),
             ("unit", "Unit", self.axis_unit_edit, 1, 0),
-            ("domain", "Domain", self.domain_combo, 1, 1),
+            ("domain", "Domain", self.domain_choice, 1, 1),
         ):
             row = FluentSettingRow(label, control, label_width=axis_label_width)
             self._axis_rows[field] = row
@@ -457,8 +470,12 @@ class _DataEditorView(QtWidgets.QWidget):
         # switch that decides whether "sigma" is even on offer.  A setting
         # row is a width CONSUMER, so the pair travels inside its control
         # slot rather than beside it in a box that would collapse it.
-        self.component_combo = FluentComboBox()
-        self.component_combo.setMinimumContentsLength(10)
+        self.component_choice = FluentSegmentedButtons(
+            tuple(
+                (row[0], str(row[1]))
+                for row in tuple(dict(opening.get("table", {})).get("component_choices", ()))
+            )
+        )
         # A setting, so a switch -- the same control every on/off of
         # these windows is -- named by what it turns on.
         self.sigma_switch = FluentSwitch("Sigma")
@@ -467,7 +484,7 @@ class _DataEditorView(QtWidgets.QWidget):
         component_layout = QtWidgets.QHBoxLayout(component_controls)
         component_layout.setContentsMargins(0, 0, 0, 0)
         component_layout.setSpacing(window_pad(0.5))
-        component_layout.addWidget(self.component_combo)
+        component_layout.addWidget(self.component_choice)
         component_layout.addWidget(self.sigma_switch)
         component_layout.addStretch(1)
         data_layout.addWidget(
@@ -512,12 +529,11 @@ class _DataEditorView(QtWidgets.QWidget):
             )
         )
         self.axis_value_model.rejected.connect(self._show_local_rejection)
-        self.component_combo.activated.connect(
-            lambda _index: self._emit("set_component", component=self.component_combo.currentData())
-        )
+        self.domain_choice.activated.connect(self._show_domain)
+        self.component_choice.activated.connect(self._component_picked)
         self.sigma_switch.toggled.connect(lambda enabled: self._emit("toggle_sigma", enabled=bool(enabled)))
         self.value_model.edits_requested.connect(
-            lambda cells: self._emit("set_cells", component=self.component_combo.currentData(), cells=cells)
+            lambda cells: self._emit("set_cells", component=self._component, cells=cells)
         )
         self.value_model.rejected.connect(self._show_local_rejection)
         self.apply_button.clicked.connect(lambda: self._emit("apply_preview", note=self.note_edit.text()))
@@ -538,6 +554,20 @@ class _DataEditorView(QtWidgets.QWidget):
     def _show_local_rejection(self, message: str) -> None:
         self.message_label.setText(str(message))
 
+    def _show_domain(self, domain: object) -> None:
+        # Part of the axis draft: sent with its name and length by Apply or
+        # Create, not on its own.
+        self._domain = domain
+        self.domain_choice.set_current(domain)
+
+    def _show_component(self, component: object) -> None:
+        self._component = component
+        self.component_choice.set_current(component)
+
+    def _component_picked(self, component: object) -> None:
+        self._show_component(component)
+        self._emit("set_component", component=component)
+
     def _select_axis(self, _index: int) -> None:
         self._adding_axis = False
         self._emit("select_axis", axis_id=self.axis_combo.currentData())
@@ -553,9 +583,7 @@ class _DataEditorView(QtWidgets.QWidget):
         self.axis_value_model.set_projection(
             {"shape": (0, 1), "values": (), "column_headers": ("Value",)}
         )
-        _fill_choice_combo(self.domain_combo, self._domain_choices, None)
-        if self.domain_combo.count():
-            self.domain_combo.setCurrentIndex(0)
+        self._show_domain(self._domain_keys[0] if self._domain_keys else None)
         self.axis_mode_label.setText("New axis")
         self.apply_axis_button.setText("Create axis")
         self._set_axis_mode_controls(has_axis=False)
@@ -577,7 +605,7 @@ class _DataEditorView(QtWidgets.QWidget):
             self.axis_name_edit,
             self.axis_size_spin,
             self.axis_unit_edit,
-            self.domain_combo,
+            self.domain_choice,
             self.apply_axis_button,
         ):
             control.setEnabled(editing)
@@ -593,7 +621,7 @@ class _DataEditorView(QtWidgets.QWidget):
             "name": name,
             "length": int(self.axis_size_spin.value()),
             "unit": self.axis_unit_edit.text().strip(),
-            "domain": self.domain_combo.currentData(),
+            "domain": self._domain,
         }
         if self._adding_axis:
             # Still adding until the projection shows the axis made
@@ -734,13 +762,8 @@ class _DataEditorView(QtWidgets.QWidget):
             if self._adding_axis:
                 self.axis_combo.setCurrentIndex(-1)
             self._selected_axis = selected_axis
-            self._domain_choices = tuple(data.get("domain_choices", ()))
             if not self._adding_axis:
-                _fill_choice_combo(
-                    self.domain_combo,
-                    self._domain_choices,
-                    None if selected is None else selected.get("domain"),
-                )
+                self._show_domain(None if selected is None else selected.get("domain"))
                 project(
                     self.axis_name_edit,
                     "" if selected is None else str(selected.get("name", "")),
@@ -759,11 +782,13 @@ class _DataEditorView(QtWidgets.QWidget):
             table = dict(data.get("table", {}))
             self._set_structure(table.get("structure", ()))
             self._set_axis_view_controls(table.get("axes", ()))
-            _fill_choice_combo(
-                self.component_combo,
-                table.get("component_choices", ()),
-                table.get("component"),
-            )
+            # Sigma is offered only while the draft carries one; it keeps its
+            # place, so switching Sigma on does not widen the choice beside it.
+            for row in tuple(table.get("component_choices", ())):
+                self.component_choice.button(row[0]).setEnabled(
+                    bool(row[2]) if len(row) == 3 else True
+                )
+            self._show_component(table.get("component"))
             with signals_blocked(self.sigma_switch):
                 self.sigma_switch.setChecked(bool(table.get("sigma_enabled", False)))
             self.value_model.set_projection(table)

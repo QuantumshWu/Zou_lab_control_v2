@@ -1211,7 +1211,7 @@ def test_real_period_form_preserves_choice_identity_and_updates_disabled_nominal
         project()
         assert form.read_value("nominal_playback_seconds") == pytest.approx(32/60, abs=1e-6)
         frame_mode = form.widget_for("frame_mode")
-        QtTest.QTest.keyClick(frame_mode, QtCore.Qt.Key_Down)
+        QtTest.QTest.mouseClick(frame_mode.button("camera_step"), QtCore.Qt.LeftButton)
         app.processEvents()
         assert patches[-1]["values"] == {"frame_mode": "camera_step"}
         values.update(patches[-1]["values"], max_camera_step=.75)
@@ -1222,7 +1222,7 @@ def test_real_period_form_preserves_choice_identity_and_updates_disabled_nominal
         assert form.read_value("max_camera_step") == .75
         assert form.read_value("nominal_playback_seconds") is None
         assert form.widget_for("nominal_playback_seconds").placeholderText() == "Pending occupancy"
-        QtTest.QTest.keyClick(frame_mode, QtCore.Qt.Key_Up)
+        QtTest.QTest.mouseClick(form.widget_for("frame_mode").button("fixed"), QtCore.Qt.LeftButton)
         app.processEvents()
         values.update(patches[-1]["values"])
         project()

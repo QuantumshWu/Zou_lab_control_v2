@@ -205,6 +205,7 @@ def control_document(control: object) -> dict[str, object]:
             getattr(control, "unavailable_reason", "")
         ),
         "co_edited_with": co_edited_with,
+        "segmented": bool(getattr(control, "segmented", False)),
     }
 
 

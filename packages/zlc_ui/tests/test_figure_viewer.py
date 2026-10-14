@@ -240,7 +240,9 @@ projection = {
     },
     'table': {
         'component': 'values',
-        'component_choices': (('values', 'Values'), ('validity', 'Validity')),
+        'component_choices': (
+            ('values', 'Values', True), ('validity', 'Validity', True), ('sigma', 'Sigma', False),
+        ),
         'sigma_enabled': False,
         'blank_help': 'Blank removes the value', 'blank_hint': 'No value',
         'shape': values.shape, 'values': values, 'validity': validity,
@@ -277,10 +279,15 @@ view.resize(1500, 900); view.show(); app.processEvents()
 assert editor.dataset_group.width() == editor.axes_group.width() == editor.data_group.width()
 for first, second in ((editor.name_edit, editor.axis_name_edit),
                       (editor.unit_edit, editor.axis_unit_edit),
-                      (editor.dtype_combo, editor.axis_size_spin),
-                      (editor.note_edit, editor.domain_combo)):
+                      (editor.dtype_combo, editor.axis_size_spin)):
     assert first.mapTo(editor, QtCore.QPoint()).x() == second.mapTo(editor, QtCore.QPoint()).x()
     assert first.width() == second.width()
+# The domain is a segmented choice as wide as its labels, on the same edge.
+assert (editor.note_edit.mapTo(editor, QtCore.QPoint()).x()
+        == editor.domain_choice.mapTo(editor, QtCore.QPoint()).x())
+# Sigma keeps its place in the components, offered once the draft has one.
+assert not editor.component_choice.button('sigma').isEnabled()
+assert editor.component_choice.button('validity').isEnabled()
 assert editor.axis_value_model.rowCount() == 100_000
 assert editor.axis_value_model.columnCount() == 1
 assert editor.axis_value_table.verticalScrollBar().maximum() > 0
@@ -309,8 +316,8 @@ editor.update_projection(projection); app.processEvents()
 assert editor.value_table.verticalScrollBarPolicy() == QtCore.Qt.ScrollBarAsNeeded
 assert editor.value_table.indexWidget(editor.value_model.index(0, 0)) is None
 removed = []; headers = []
-for combo in (editor.dtype_combo, editor.axis_combo, editor.domain_combo,
-              editor.component_combo, *(parts[2] for parts in editor._axis_view_widgets.values())):
+for combo in (editor.dtype_combo, editor.axis_combo,
+              *(parts[2] for parts in editor._axis_view_widgets.values())):
     combo.model().rowsRemoved.connect(lambda *_args: removed.append(True))
 editor.axis_value_model.headerDataChanged.connect(lambda *_args: headers.append(True))
 editor.value_model.headerDataChanged.connect(lambda *_args: headers.append(True))
@@ -375,13 +382,14 @@ QtTest.QTest.mouseClick(editor.remove_axis_button, QtCore.Qt.LeftButton)
 assert len(intents) == before_delete, 'Delete fired while adding an axis'
 editor.axis_name_edit.setText('shot')
 editor.axis_size_spin.setValue(2)
-domain = editor.domain_combo.findData('repeat')
-editor.domain_combo.setCurrentIndex(domain)
+sent = len(intents)
+QtTest.QTest.mouseClick(editor.domain_choice.button('cell_data'), QtCore.Qt.LeftButton)
+assert len(intents) == sent, 'a domain is part of the axis draft, not an edit of its own'
 QtTest.QTest.mouseClick(editor.apply_axis_button, QtCore.Qt.LeftButton)
 assert intents[-1] == (
     'manual-1',
     {'op': 'add_axis', 'name': 'shot', 'length': 2, 'unit': '',
-     'domain': 'repeat'},
+     'domain': 'cell_data'},
 )
 # A refused Create re-projects the axes that were already there.  The New
 # axis draft, and the Create that sends it, stay the operator's: cleared on
@@ -413,7 +421,7 @@ editor.update_projection(scalar)
 assert not editor.axis_name_edit.isEnabled() and not editor.apply_axis_button.isEnabled()
 QtTest.QTest.mouseClick(editor.add_axis_button, QtCore.Qt.LeftButton)
 assert editor.axis_name_edit.isEnabled() and editor.apply_axis_button.isEnabled()
-assert editor.domain_combo.count() == 3 and not editor.remove_axis_button.isEnabled()
+assert editor.domain_choice.isEnabled() and not editor.remove_axis_button.isEnabled()
 editor.axis_name_edit.setText('again')
 QtTest.QTest.mouseClick(editor.apply_axis_button, QtCore.Qt.LeftButton)
 assert intents[-1] == (

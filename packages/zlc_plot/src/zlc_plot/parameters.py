@@ -82,6 +82,12 @@ class ParameterSpec(Generic[T]):
     #: are not y limits, and a curve cell that inherited an image cell's
     #: TIGHT colour re-fit re-fitted its y axis on every shot.
     portable: bool = True
+    #: Whether an editor shows ``choices`` side by side as one segmented
+    #: control rather than a popup: this declaration's call, for a closed
+    #: set of short labels (limit modes, a presentation), carried unchanged
+    #: to the widget -- no consumer infers it from how many choices there
+    #: are.
+    segmented: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.name, str) or not self.name.strip():
@@ -128,6 +134,10 @@ class ParameterSpec(Generic[T]):
             raise ValueError("parameter choices must not contain None")
         if len(set(values)) != len(values):
             raise ValueError("parameter choices must be unique")
+        if not isinstance(self.segmented, bool):
+            raise TypeError("segmented must be bool")
+        if self.segmented and not prepared_choices:
+            raise ValueError("a segmented parameter needs its choices")
         object.__setattr__(self, "choices", tuple(prepared_choices))
         normalized = self.prepare(self.default)
         object.__setattr__(self, "default", normalized)

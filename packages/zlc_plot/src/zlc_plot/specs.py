@@ -570,6 +570,7 @@ _PULSE_X_UNIT_PARAMETER = ParameterSpec(
     # SHOWN in is not the same question, and this layer cannot see that
     # model anyway.  Copying the range here is how the two drift.
     choices=_spelled_choices(DEFAULT_UNITS.display_choices("s")),
+    segmented=True,
 )
 
 
@@ -584,6 +585,7 @@ def _curve_parameters() -> tuple[ParameterSpec[object], ...]:
             label="Limits",
             portable=False,
             choices=_enum_choices(RelimMode),
+            segmented=True,
         ),
         ParameterSpec(
             "y_min",
@@ -677,6 +679,7 @@ def _histogram_parameters() -> tuple[ParameterSpec[object], ...]:
             label="Count limits",
             portable=False,
             choices=_enum_choices(RelimMode),
+            segmented=True,
         ),
         ParameterSpec(
             "y_min",
@@ -723,6 +726,7 @@ def _histogram_parameters() -> tuple[ParameterSpec[object], ...]:
             label="Value limits",
             portable=False,
             choices=_enum_choices(RelimMode),
+            segmented=True,
         ),
         ParameterSpec(
             "x_min",
@@ -807,6 +811,7 @@ def _image_parameters(style: PlotStyleConfig) -> tuple[ParameterSpec[object], ..
             label="Color limits",
             portable=False,
             choices=_enum_choices(RelimMode),
+            segmented=True,
         ),
         ParameterSpec(
             "colormap",
@@ -863,6 +868,7 @@ def _image_parameters(style: PlotStyleConfig) -> tuple[ParameterSpec[object], ..
                 normalizer=_image_presentation,
                 label="Presentation",
                 choices=_enum_choices(ImagePresentation),
+                segmented=True,
             ),
             ParameterSpec(
                 "camera_azimuth",

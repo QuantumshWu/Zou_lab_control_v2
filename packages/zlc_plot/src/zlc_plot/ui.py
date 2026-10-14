@@ -44,6 +44,8 @@ class ParameterControl:
     #: not from the first entry of a list.
     automatic_value: object = None
     unavailable_reason: str = ""
+    #: The declaration's :attr:`ParameterSpec.segmented`, as declared.
+    segmented: bool = False
 
 
 def parameter_controls(
@@ -118,6 +120,7 @@ def parameter_controls(
                     if limit_field and not fixed_limits
                     else ""
                 ),
+                segmented=spec.segmented,
             )
         )
     return tuple(result)

@@ -347,6 +347,7 @@ def _wire_value(value: object, *, omit_vocabulary: bool = False) -> object:
                             "maximum": parameter.maximum,
                             "step": parameter.step,
                             "portable": parameter.portable,
+                            "segmented": parameter.segmented,
                         }
                         for parameter in value.parameter_schema.values()
                     ),
@@ -520,6 +521,7 @@ def _unwire_vocabulary(document: Mapping[str, object]) -> tuple[object, ...]:
                 maximum=parameter["maximum"],
                 step=parameter["step"],
                 portable=parameter["portable"],
+                segmented=parameter["segmented"],
             )
             for parameter in document["parameter_schema"]
         ),

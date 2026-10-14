@@ -14,10 +14,11 @@ below.  Nothing here changes a claim
 because the frame count changed: what was authored stays until the operator
 edits it.  A file is removed by the × that ends its row and replaced by
 clicking its name.  The readout model -- which model each file is read
-with, set once -- is a dropdown under the files it applies to.  The file names are the
+with, set once -- is a segmented choice under the files it applies to: the
+four models are this node's closed set.  The file names are the
 editor's label column, shared with the form: the title, the model's label
 and the names end where the form's labels do (the longest name widens the
-column for all of them), so Add, the first card, the model dropdown and the
+column for all of them), so Add, the first card, the model choice and the
 form's fields start on one edge.  The console resolves the
 files and projects how the source's frames read them; this widget only
 draws that and writes the edits back.
@@ -33,9 +34,9 @@ from zlc_ui.fluent import (
     RED_DARK,
     TEXT,
     FluentButton,
-    FluentComboBox,
     FluentLabel,
     FluentSectionLabel,
+    FluentSegmentedButtons,
     FluentSelectionGrid,
     fluent_open_path,
     muted_note_label,
@@ -43,7 +44,7 @@ from zlc_ui.fluent import (
 )
 
 from zlc_atom.nodes._framework.frames import FIRST, LAST, REST, canonical_frames, reach_frames
-from zlc_atom.nodes.calibration import READOUT_MODEL_CHOICES
+from zlc_atom.nodes.calibration import DEFAULT_READOUT_MODEL_CHOICE, READOUT_MODEL_CHOICES
 
 #: The artifact input this editor manages.
 CALIBRATIONS = "calibrations"
@@ -104,11 +105,11 @@ class CalibrationsEditor(QtWidgets.QWidget):
         self.model_label = FluentLabel("Readout model")
         self.model_label.setStyleSheet(f"color: {TEXT}; background: transparent; border: none;")
         model_layout.addWidget(self.model_label)
-        self.model = FluentComboBox(self.model_row)
-        for choice in READOUT_MODEL_CHOICES:
-            self.model.addItem(choice.label, choice.value)
-        self.model.activated.connect(
-            lambda _index: self.draft_changed.emit({"values": {"model_kind": self.model.currentData()}}))
+        self.model = FluentSegmentedButtons(
+            tuple((choice.value, choice.label) for choice in READOUT_MODEL_CHOICES), self.model_row)
+        self.model.button(DEFAULT_READOUT_MODEL_CHOICE).setToolTip(
+            "Read each file with its calibration's own default model")
+        self.model.activated.connect(self._model_picked)
         model_layout.addWidget(self.model)
         model_layout.addStretch(1)
         layout.addWidget(self.model_row)
@@ -142,13 +143,7 @@ class CalibrationsEditor(QtWidgets.QWidget):
         self._base_dir = str(claims["base_dir"])
         self._filter = str(claims["file_filter"])
         frames = projection.get("source_frames")
-        index = self.model.findData(projection["form_values"]["model_kind"])
-        if index != self.model.currentIndex():
-            blocked = self.model.blockSignals(True)
-            try:
-                self.model.setCurrentIndex(index)
-            finally:
-                self.model.blockSignals(blocked)
+        self.model.set_current(projection["form_values"]["model_kind"])
         self._draw(frames, claims["files"], claims["problems"])
 
     def _draw(self, frames, files, problems) -> None:
@@ -247,6 +242,12 @@ class CalibrationsEditor(QtWidgets.QWidget):
         self.note.setVisible(bool(problems))
 
     # ---------------------------------------------------------------- editing
+
+    def _model_picked(self, value) -> None:
+        # Marked at once, as a popup shows its pick; the projection the edit
+        # comes back as marks it again, or puts back what was refused.
+        self.model.set_current(value)
+        self.draft_changed.emit({"values": {"model_kind": value}})
 
     def _marked(self, cells) -> None:
         before = set(self.grid_cells_claimed())

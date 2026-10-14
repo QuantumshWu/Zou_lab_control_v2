@@ -36,6 +36,7 @@ from ..fluent import (
     FluentDoubleSpinBox,
     FluentLineEdit,
     FluentPathEdit,
+    FluentSegmentedButtons,
     FluentSettingRow,
     FluentSwitch,
     FluentTreeComboBox,
@@ -707,13 +708,19 @@ class _BoolHandler(_StaticHandler):
 
 
 class _ChoiceHandler(FormWidgetHandler):
-    """The popup rows, and behind one of them a lazy sub-domain.
+    """The popup rows, and behind one of them a lazy sub-domain -- or, for
+    a closed set its owner declares ``segmented``, every choice side by side.
 
     The sub-domain is DATA -- every coordinate of an axis -- read one
     position at a time, so nothing here walks it when the widget already
     answers the question: what the widget shows at its position IS a value
     of the domain, and asking the domain to confirm it read the whole axis,
     on every beat, for a value that had not moved.
+
+    A segmented set is never refilled: it is closed, so other choices are
+    another declaration, and :func:`_widget_family` builds another control
+    for it.  What it holds is the choice it marks as current -- the one
+    thing the operator sees -- so there is no second record to disagree.
     """
 
     def normalize(self, field: FormFieldProps, value: object) -> object:
@@ -761,6 +768,21 @@ class _ChoiceHandler(FormWidgetHandler):
 
     def build(self, field, value, on_change, context=None):
         del context
+        if field.segmented:
+            segments = FluentSegmentedButtons(
+                tuple((choice.value, choice.label) for choice in field.choices)
+            )
+            self.write(field, segments, value)
+            segments.setToolTip(field.unavailable_reason or field.description)
+
+            def picked(chosen: object) -> None:
+                # The strip reports a click and leaves the marking to its
+                # owner; marked first, so the edit reads what was clicked.
+                segments.set_current(chosen)
+                on_change()
+
+            segments.activated.connect(picked)
+            return segments
         widget = (
             FluentCycleComboBox()
             if field.cycle_choices is not None
@@ -773,6 +795,15 @@ class _ChoiceHandler(FormWidgetHandler):
         return widget
 
     def read(self, field, widget):
+        if isinstance(widget, FluentSegmentedButtons):
+            return next(
+                (
+                    choice.value
+                    for choice in field.choices
+                    if widget.button(choice.value).property("current")
+                ),
+                None,
+            )
         if widget.currentIndex() < 0:
             return None
         if isinstance(widget, FluentCycleComboBox) and widget.isCycleSelected():
@@ -782,6 +813,12 @@ class _ChoiceHandler(FormWidgetHandler):
         return self.normalize(field, widget.currentData())
 
     def write(self, field, widget, value):
+        if isinstance(widget, FluentSegmentedButtons):
+            choice = None if value is None else field.choice_for(value)
+            if value is not None and choice is None:
+                raise _value_error(field, "value is not one of the typed choices")
+            widget.set_current(None if choice is None else choice.value)
+            return
         if value is None:
             widget.setCurrentIndex(-1)
             return
@@ -801,11 +838,15 @@ class _ChoiceHandler(FormWidgetHandler):
         widget.setCyclePosition(cycle[0])
 
     def is_empty(self, field, widget):
-        del field
+        if isinstance(widget, FluentSegmentedButtons):
+            return self.read(field, widget) is None
         return widget.currentIndex() < 0
 
     def refresh(self, field, widget, context=None):
         del context
+        if isinstance(widget, FluentSegmentedButtons):
+            widget.setToolTip(field.unavailable_reason or field.description)
+            return
         current = self.read(field, widget)
         desired = tuple((choice.label, choice.value) for choice in field.choices)
         if field.cycle_choices is not None:
@@ -932,6 +973,9 @@ def _widget_family(field: FormFieldProps) -> str:
     if field.kind == "rows":
         return "rows"
     if field.kind == "choice":
+        if field.segmented:
+            # A segmented strip is its choices: other choices, another strip.
+            return f"{prefix}choice-segments:{field.choices!r}"
         return prefix + (
             "choice-cycle" if field.cycle_choices is not None else "choice"
         )

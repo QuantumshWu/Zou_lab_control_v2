@@ -219,6 +219,7 @@ def _project_field(field: AuthoringField) -> FormFieldProps:
         choices=tuple(
             FormChoice(choice.label, choice.value) for choice in field.choices
         ),
+        segmented=field.segmented,
         columns=tuple(_project_field(column) for column in field.columns),
         description=field.description or {
             "pair": "two integers as y, x",
