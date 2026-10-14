@@ -110,6 +110,12 @@ def test_a_chosen_grid_card_is_the_selected_fill_and_nothing_round_it(app, host)
         inked = [x for x in range(rect.left(), rect.right() + 1) if colour(x, row) != ground]
         return inked[0] - rect.left(), rect.right() - inked[-1]
     assert extent(chosen) == extent(derived) == extent(empty)
+    # The grid ends on its last row's cards: no gutter below them adds to
+    # the gap the layout puts after the grid.
+    faced = [y for y in range(warned.top(), viewport.height())
+             if colour(warned.left() + 6, y) == RED_TINT.upper()]
+    assert faced and faced[-1] == viewport.height() - 1
+    assert warned.height() < chosen.height()
 
     # Under the pointer: an empty card takes the hover wash.
     _under_pointer(viewport, empty.center())
@@ -307,6 +313,28 @@ def test_an_info_tree_row_is_washed_whole(app, host) -> None:
     _under_pointer(viewport, tree.visualItemRect(second).center())
     app.processEvents()
     assert _at(viewport, viewport.width() // 2, tree.visualItemRect(second).center().y()) == ACCENT_TINT.upper()
+
+
+def test_an_empty_code_view_says_why_in_muted_ink(app, host) -> None:
+    """The note is set after the (empty) text, as a page projects it: Qt
+    5.15 drew a QPlainTextEdit placeholder only after a text change, and
+    the empty scan table stood blank."""
+
+    from PyQt5 import QtGui
+    from zlc_ui.fluent import FluentCodeEdit
+    from zlc_ui.fluent.style import MUTED_INK
+
+    view = FluentCodeEdit(read_only=True, parent=host)
+    view.resize(300, 120)
+    view.setPlainText("")
+    view.setPlaceholderText("No scan table yet: write a program and press Run.")
+    _shown(app, host, view)
+    image = view.viewport().grab().toImage()
+    lightness = [image.pixelColor(x, y).lightness()
+                 for y in range(image.height()) for x in range(image.width())]
+    muted = QtGui.QColor(MUTED_INK).lightness()
+    assert min(lightness) <= muted + 8, "the empty view shows its note"
+    assert min(lightness) >= muted - 8, "in the muted ink of a note, not the text's"
 
 
 def test_a_glyph_is_centred_on_its_ink(app) -> None:

@@ -843,6 +843,14 @@ class FluentStatusDot(QtWidgets.QLabel):
         self.setStyleSheet(status_dot_stylesheet(wanted, radius=max(1, self._size // 2)))
 
 
+#: THE weight of every heading -- a card's title, a section title, a column's
+#: name -- spelled for a sheet: Segoe UI Semibold (``QFont.DemiBold``, 63).
+#: Qt 5 reads a sheet's CSS weight divided by 8, so the CSS 600 the sheets
+#: wrote was Qt's Bold (75) and every heading set in a sheet stood a stroke
+#: heavier than the card title painted with ``QFont.DemiBold``.
+HEADING_CSS_WEIGHT = int(QtGui.QFont.DemiBold) * 8
+
+
 def _paint_label_line(label: QtWidgets.QLabel) -> bool:
     """Paint a one-line, plain-text, vertically centred ``label`` with its
     line on :func:`centred_line_top` of its contents -- the line the field
@@ -916,16 +924,18 @@ def muted_note_label(text: str) -> "QtWidgets.QLabel":
 
 
 def column_header_label(text: str) -> "FluentLabel":
-    """The name of a column laid out by hand -- a grid of bindings, a form
-    set in columns -- in the look of a FluentTableView's column names:
-    weight 600 in MUTED_INK, on the line of the row it heads.  ``setBold``
-    on a FluentLabel changes nothing (its sheet's ``font`` shorthand wins
-    over a QFont), and headings made that way read as one more row of
-    data."""
+    """A heading INSIDE a card: the name of a column laid out by hand -- a
+    grid of bindings, a form set in columns -- or of a small group of rows
+    within the card.  One step quieter than the card's own title and a
+    :class:`FluentSectionLabel`: the same Semibold (:data:`HEADING_CSS_WEIGHT`)
+    in MUTED_INK, the look of a FluentTableView's column names, on the line
+    of the row it heads.  ``setBold`` on a FluentLabel changes nothing (its
+    sheet's ``font`` shorthand wins over a QFont), and headings made that
+    way read as one more row of data."""
 
     label = FluentLabel(text)
     label.setStyleSheet(
-        f'QLabel {{ color: {MUTED_INK}; font: 600 {fluent_font_size()}pt "{FONT}"; '
+        f'QLabel {{ color: {MUTED_INK}; font: {HEADING_CSS_WEIGHT} {fluent_font_size()}pt "{FONT}"; '
         f"background: transparent; border: none; }}"
     )
     return label
@@ -2812,19 +2822,22 @@ class FluentSectionLabel(FluentLabel):
     """THE section title: a group's name on its own line, or the title of a
     header row whose commands and summary sit beside it.
 
-    One style, everywhere a section is named: TEXT ink at the weight of a
-    card's title and a table's column names (600), as tall as a control,
-    its line on the line a field of that height puts its text on.  It kept
-    a top margin for an own-line header, and as the title of a row of
-    fields that margin put it two pixels under their text; the space above
-    a section is the section gap of the layout it stands in."""
+    One style, everywhere a section is named: TEXT ink at the one heading
+    weight, Semibold (:data:`HEADING_CSS_WEIGHT`) -- the weight of a
+    FluentGroupBox's title, so a card's title and a section's read alike;
+    a heading inside a card is one step quieter
+    (:func:`column_header_label`) -- as tall as a control, its line on the
+    line a field of that height puts its text on.  It kept a top margin
+    for an own-line header, and as the title of a row of fields that
+    margin put it two pixels under their text; the space above a section
+    is the section gap of the layout it stands in."""
 
     def __init__(self, text: str = "", parent=None):
         super().__init__(text, parent)
         # The weight goes in the SHEET, the one that renders: a QFont-only
         # weight set before a sheet is dropped when the sheet repolishes.
         self.setStyleSheet(
-            f'QLabel {{ color: {TEXT}; font: 600 {fluent_font_size()}pt "{FONT}"; '
+            f'QLabel {{ color: {TEXT}; font: {HEADING_CSS_WEIGHT} {fluent_font_size()}pt "{FONT}"; '
             f"background: transparent; border: none; }}"
         )
         self.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
@@ -2857,8 +2870,14 @@ class FluentSettingRow(QtWidgets.QWidget):
     weight ONLY -- never by indentation.  Labels are TEXT: grey read as disabled beside a
     required field, and grey is what a HINT wears.  Share ONE column width
     per form via :func:`setting_label_width` so the rows align.  Do NOT use a ``QFormLayout`` (its
-    labels render dark + auto-width = a different style) and do NOT use a bare ``FluentLabel`` as a
-    row/section label using the shared ``[QLabel | widget]`` row template."""
+    labels render dark + auto-width = a different style), and do NOT build a row by hand from a
+    label and a control.
+
+    ``label`` is the row's words, or the label widget a host keeps to change or annotate later.
+    THE row-label widget is :class:`FluentLabel` (or :class:`ElidedLabel` for words that may not
+    fit): both paint their one line on the line the field beside them puts its text on.  A plain
+    ``QLabel`` centres its line box Qt's way and reads a device pixel under the field's text.
+    Any other widget -- a switch that names the row -- is laid in the label column as given."""
 
     def __init__(
         self,
@@ -5136,12 +5155,17 @@ class FluentTabWidget(QtWidgets.QTabWidget):
     host that does want a page an operator can dismiss uses
     :meth:`add_closable_tab`, which shows the close affordance and emits
     :attr:`tab_close_requested` with the page widget so the host can tear it
-    down -- the tab widget never removes a page behind its owner's back."""
+    down -- the tab widget never removes a page behind its owner's back.
+
+    The first tab, and its underline, starts where the pages' content
+    starts (:meth:`set_page_inset`), so the strip and the page below it
+    share one left edge."""
 
     tab_close_requested = QtCore.pyqtSignal(QtWidgets.QWidget)
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._page_inset = section_gap()
         self.setTabPosition(QtWidgets.QTabWidget.North)
         self.setTabBar(_FluentTabBar(self))     # content-width pivot tabs; elides to fit, no arrows
         self.tabBar().setExpanding(False)
@@ -5159,6 +5183,34 @@ class FluentTabWidget(QtWidgets.QTabWidget):
         # Edit / Preview / Scan, which must always exist) never get a close
         # affordance.  ``add_closable_tab`` opts in a CUSTOM, subtle close button
         # (a soft grey "x" that highlights on hover -- not the harsh native X).
+        self._apply_sheet()
+        self._overflow_btn = self._build_overflow_button()
+        # The corner widget sits FLUSH at the widget's right edge, so the button's rounded hover
+        # background used to be CLIPPED on the right.  Wrap it in a transparent holder whose right
+        # margin reserves the clearance, so the full hover pill is visible.
+        corner = QtWidgets.QWidget(self)
+        corner.setStyleSheet("background: transparent;")
+        corner_lay = QtWidgets.QHBoxLayout(corner)
+        corner_lay.setContentsMargins(0, 0, scaled_px(6, minimum=4), 0)
+        corner_lay.setSpacing(0)
+        corner_lay.addWidget(self._overflow_btn)
+        self._overflow_corner = corner
+        self.setCornerWidget(corner, QtCore.Qt.TopRightCorner)
+        corner.hide()
+        self.currentChanged.connect(lambda _i: self._update_overflow())
+
+    def set_page_inset(self, inset: int) -> None:
+        """Where the pages' content starts, in from this widget's left edge:
+        the first tab's underline starts there too.  A page's content starts
+        :func:`section_gap` in (the default); a host whose pages lay their
+        content elsewhere -- flush, or a card's padding in -- says where."""
+
+        inset = max(0, int(inset))
+        if inset != self._page_inset:
+            self._page_inset = inset
+            self._apply_sheet()
+
+    def _apply_sheet(self) -> None:
         self.setStyleSheet(
             f"""
             QTabWidget {{
@@ -5197,7 +5249,7 @@ class FluentTabWidget(QtWidgets.QTabWidget):
                 margin: 0px {_tab_margin_h()}px;
                 font: {fluent_font_size()}pt "{FONT}";
             }}
-            QTabBar::tab:first {{ margin-left: {scaled_px(CARD_PAD)}px; }}
+            QTabBar::tab:first {{ margin-left: {self._page_inset}px; }}
             QTabBar::tab:selected {{
                 color: {TEXT};
                 border-bottom: {scaled_px(2, minimum=2)}px solid {ACCENT};
@@ -5207,20 +5259,6 @@ class FluentTabWidget(QtWidgets.QTabWidget):
             }}
             """
         )
-        self._overflow_btn = self._build_overflow_button()
-        # The corner widget sits FLUSH at the widget's right edge, so the button's rounded hover
-        # background used to be CLIPPED on the right.  Wrap it in a transparent holder whose right
-        # margin reserves the clearance, so the full hover pill is visible.
-        corner = QtWidgets.QWidget(self)
-        corner.setStyleSheet("background: transparent;")
-        corner_lay = QtWidgets.QHBoxLayout(corner)
-        corner_lay.setContentsMargins(0, 0, scaled_px(6, minimum=4), 0)
-        corner_lay.setSpacing(0)
-        corner_lay.addWidget(self._overflow_btn)
-        self._overflow_corner = corner
-        self.setCornerWidget(corner, QtCore.Qt.TopRightCorner)
-        corner.hide()
-        self.currentChanged.connect(lambda _i: self._update_overflow())
 
     def paintEvent(self, event) -> None:  # noqa: N802 - Qt naming
         # The tab widget is a plain WHITE rounded card with NO border line ANYWHERE -- the pivot tabs sit
@@ -6115,7 +6153,18 @@ class FluentCodeEdit(QtWidgets.QPlainTextEdit):
     padding put it 2.3 px further in -- and the first line sits as far below the top edge.
     Only code being WRITTEN is coloured: a read-only view shows what a program produced, a
     table or the sentence that says there is none yet, and Python colouring painted the
-    "and" of that sentence as a keyword."""
+    "and" of that sentence as a keyword.
+
+    An empty editor shows its placeholder as a note: in MUTED_INK and the body font, wrapped,
+    where its text would start.  The editor paints it itself -- Qt 5.15 decides whether to
+    show a QPlainTextEdit's placeholder only when the TEXT changes, so a note given to an
+    editor that was already empty (an empty scan table, a fresh expression box) was never
+    drawn and the pane stood blank."""
+
+    #: The placeholder note, and whether the viewport shows it; class
+    #: attributes so they exist before __init__ runs.
+    _note = ""
+    _noted = False
 
     def __init__(self, text: str = "", parent=None, *, read_only: bool = False):
         super().__init__(parent)
@@ -6131,6 +6180,39 @@ class FluentCodeEdit(QtWidgets.QPlainTextEdit):
         apply_fluent_scrollbars(self)
         if not read_only:
             self._highlighter = _PythonHighlighter(self.document())
+        self.textChanged.connect(self._show_note_with_text)
+
+    def _wants_note(self) -> bool:
+        return bool(self._note) and self.document().isEmpty()
+
+    def _show_note_with_text(self) -> None:
+        # An edit repaints only the lines it touched; the note, wrapped,
+        # reaches further, so it comes and goes with the whole viewport.
+        if self._noted != self._wants_note():
+            self.viewport().update()
+
+    def placeholderText(self) -> str:  # noqa: N802 - Qt API name
+        return self._note
+
+    def setPlaceholderText(self, text: str) -> None:  # noqa: N802 - Qt API name
+        note = str(text or "")
+        if note != self._note:
+            self._note = note
+            self.viewport().update()
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        super().paintEvent(event)
+        self._noted = self._wants_note()
+        if not self._noted:
+            return
+        painter = QtGui.QPainter(self.viewport())
+        painter.setFont(QtGui.QFont(FONT, fluent_font_size()))
+        painter.setPen(QtGui.QColor(MUTED_INK if self.isEnabled() else DISABLED_INK))
+        painter.drawText(
+            QtCore.QRectF(self.viewport().rect()),
+            int(QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop | QtCore.Qt.TextWordWrap), self._note,
+        )
+        painter.end()
 
     def contextMenuEvent(self, event) -> None:  # noqa: N802 - Qt naming
         _apply_fluent_context_menu(self, event)   # Fluent right-click (undo/cut/copy/paste), not the native menu
@@ -7384,21 +7466,26 @@ class FluentScrollArea(QtWidgets.QScrollArea):
         self._reserve_scrollbar_gutter()
 
 
-class _RuledRowHeader(QtWidgets.QHeaderView):
-    """A table's row header whose row rules are painted like the cells'.
+class _TableHeader(QtWidgets.QHeaderView):
+    """A FluentTableView's header, either way.
 
-    The rules continue the viewport's own, one edge-width at each row's
-    bottom, and the rule that would lie on the frame's bottom edge is not
-    drawn -- as a section border it doubled the edge and squared the
-    rounded corner beside it.
+    Every label is drawn as a CELL, by the table's own item painter: a
+    column's name centred on its band the way a value is centred in its
+    row, a row's number on the line of the values beside it.  The header's
+    section painter centred its line box another way and put every label
+    a pixel under the cells'.  Labels are MUTED_INK, aligned as the model
+    says (``TextAlignmentRole``) or else as the header's default; a column's
+    name is a heading (Semibold, :data:`HEADING_CSS_WEIGHT`), and a row of
+    the selection names itself in bold, as Qt's own row header did.
 
-    A row's label is drawn as a CELL of its row, by the table's own item
-    painter: the header's section painter centred its line box another
-    way and put every row number a pixel under the values beside it."""
+    The row header's rules continue the viewport's own, one edge-width at
+    each row's bottom, and the rule that would lie on the frame's bottom
+    edge is not drawn -- as a section border it doubled the edge and
+    squared the rounded corner beside it."""
 
-    def __init__(self, parent=None):
-        super().__init__(QtCore.Qt.Vertical, parent)
-        # What QTableView gives the header it makes for itself.
+    def __init__(self, orientation, parent=None):
+        super().__init__(orientation, parent)
+        # What QTableView gives the headers it makes for itself.
         self.setSectionsClickable(True)
         self.setHighlightSections(True)
 
@@ -7408,24 +7495,32 @@ class _RuledRowHeader(QtWidgets.QHeaderView):
         if not isinstance(table, QtWidgets.QTableView) or model is None or not rect.isValid():
             super().paintSection(painter, rect, section)
             return
+        orientation = self.orientation()
         option = table.viewOptions()
         option.rect = rect
-        option.text = str(model.headerData(section, QtCore.Qt.Vertical, QtCore.Qt.DisplayRole) or "")
+        option.text = str(model.headerData(section, orientation, QtCore.Qt.DisplayRole) or "")
         option.features |= QtWidgets.QStyleOptionViewItem.HasDisplay
-        option.displayAlignment = self.defaultAlignment()
+        alignment = model.headerData(section, orientation, QtCore.Qt.TextAlignmentRole)
+        option.displayAlignment = (
+            self.defaultAlignment() if alignment is None else QtCore.Qt.Alignment(int(alignment))
+        )
         option.state &= ~(QtWidgets.QStyle.State_Selected | QtWidgets.QStyle.State_MouseOver
                           | QtWidgets.QStyle.State_HasFocus)
         option.palette.setColor(QtGui.QPalette.Text, QtGui.QColor(MUTED_INK))
-        selection = table.selectionModel()
-        # A row of the selection names itself in bold, as Qt's own header did.
-        option.font.setBold(bool(
-            self.highlightSections() and selection is not None
-            and selection.rowIntersectsSelection(section, table.rootIndex())
-        ))
+        if orientation == QtCore.Qt.Horizontal:
+            option.font.setWeight(QtGui.QFont.DemiBold)
+        else:
+            selection = table.selectionModel()
+            option.font.setBold(bool(
+                self.highlightSections() and selection is not None
+                and selection.rowIntersectsSelection(section, table.rootIndex())
+            ))
         table.style().drawControl(QtWidgets.QStyle.CE_ItemViewItem, option, painter, table)
 
     def paintEvent(self, event) -> None:  # noqa: N802 - Qt naming
         super().paintEvent(event)
+        if self.orientation() != QtCore.Qt.Vertical:
+            return
         viewport = self.viewport()
         edge = frame_border_px(viewport)
         width = float(viewport.width())
@@ -7562,7 +7657,8 @@ class FluentTableView(QtWidgets.QTableView):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setVerticalHeader(_RuledRowHeader(self))
+        self.setHorizontalHeader(_TableHeader(QtCore.Qt.Horizontal, self))
+        self.setVerticalHeader(_TableHeader(QtCore.Qt.Vertical, self))
         self.setFrameShape(QtWidgets.QFrame.NoFrame)
         # Rows, not boxes: one hairline under each row, no vertical rules.
         # No banding either -- every other Fluent surface is one white
@@ -7605,9 +7701,10 @@ class FluentTableView(QtWidgets.QTableView):
         self.verticalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Fixed)
         self.verticalHeader().setDefaultSectionSize(scaled_px(28, minimum=22))
         self.verticalHeader().setMinimumWidth(scaled_px(58, minimum=46))
-        # A cell's text sits the item padding PLUS the style's own item text
-        # margin in from its edge; a header section gets only its padding,
-        # so the same padding put every heading outboard of its column.
+        # A header label is painted as a cell (_TableHeader): its text sits
+        # the item padding PLUS the style's own item text margin in from its
+        # edge.  The section rule only sizes the header, so it pads by the
+        # same, and a column sized to its heading holds it whole.
         text_margin = self.style().pixelMetric(QtWidgets.QStyle.PM_FocusFrameHMargin, None, self) + 1
         header_pad = scaled_px(6, minimum=4) + text_margin
         # The header RULES are painted by _TableRules, one pass for both,
@@ -7654,7 +7751,7 @@ class FluentTableView(QtWidgets.QTableView):
                 padding: {scaled_px(4, minimum=3)}px {header_pad}px;
                 font: {fluent_font_size()}pt "{FONT}";
             }}
-            QHeaderView::section:horizontal {{ font-weight: 600; }}
+            QHeaderView::section:horizontal {{ font-weight: {HEADING_CSS_WEIGHT}; }}
             QTableCornerButton::section {{ background: transparent; border: none; border-radius: 0px; }}
             """
         )
@@ -8329,6 +8426,7 @@ class _SelectionGridDelegate(QtWidgets.QStyledItemDelegate):
         if not held and not index.flags() & QtCore.Qt.ItemIsSelectable:
             return
         grid = self.parent()
+        cell = grid._card_cell(option.rect, index.row())
         live = grid.isEnabled()
         selected = bool(option.state & QtWidgets.QStyle.State_Selected)
         hovered = bool(option.state & QtWidgets.QStyle.State_MouseOver) and not held and live
@@ -8350,7 +8448,7 @@ class _SelectionGridDelegate(QtWidgets.QStyledItemDelegate):
             if state == "missing":
                 edge = RED
         painter.save()
-        rect = _paint_grid_card(painter, grid.viewport(), option.rect, fill, edge)
+        rect = _paint_grid_card(painter, grid.viewport(), cell, fill, edge)
         # A name says the row has the cell; the empty states say nobody, or
         # somebody else, has it -- named only as the preview under the pointer.
         if selected or hovered or derived or warning:
@@ -8362,7 +8460,7 @@ class _SelectionGridDelegate(QtWidgets.QStyledItemDelegate):
             # The font the grid sizes its columns with (set_grid).
             font = QtGui.QFont(FONT)
             font.setPointSize(fluent_font_size())
-            _paint_grid_label(painter, rect, _grid_card_band(grid.viewport(), option.rect),
+            _paint_grid_label(painter, rect, _grid_card_band(grid.viewport(), cell),
                               QtCore.Qt.AlignHCenter, font, str(index.data() or ""), ink)
         painter.restore()
 
@@ -8383,7 +8481,7 @@ class _SelectionGridDelegate(QtWidgets.QStyledItemDelegate):
         hover_face, pressed_face = _destructive_glyph_faces()
         side = grid.row_height()
         square = QtCore.QRect(0, 0, side, side)
-        square.moveCenter(option.rect.center())
+        square.moveCenter(grid._card_cell(option.rect, index.row()).center())
         painter.save()
         rect = _paint_grid_card(
             painter, grid.viewport(), square,
@@ -8454,6 +8552,7 @@ class _SelectionGridRowHeader(QtWidgets.QHeaderView):
         label, note = self._texts(section)
         label_font, note_font = self._fonts()
         hovered = section == self._hovered and self.isEnabled()
+        rect = self.parent()._card_cell(rect, section)
         # Left-aligned labels start on the grid's own edge, the edge the
         # content above and below it shares; right-aligned ones sit off it.
         pad = scaled_px(8, minimum=5)
@@ -8529,7 +8628,8 @@ class FluentSelectionGrid(QtWidgets.QTableView):
     whole line -- so nothing new is learned.  What differs from
     :class:`FluentTableView` is the reading: an unchosen cell is blank, a
     chosen one is a named card, cells without a label are no cells at all,
-    and the grid is exactly as large as its cells.  ``selection_edited``
+    and the grid is exactly as large as its cells -- its bottom edge is its
+    last row's cards'.  ``selection_edited``
     carries the chosen ``(row, column)`` cells after an operator's change;
     :meth:`set_selected` and :meth:`set_grid` never emit it.
 
@@ -8655,10 +8755,12 @@ class FluentSelectionGrid(QtWidgets.QTableView):
             # An action's column holds its square face and the gutters.
             horizontal.resizeSection(column, gap if column == trailing.start else self.row_height())
         rows_header = self.verticalHeader()
-        rows_header.setDefaultSectionSize(max(
-            self.row_height(),
-            rows_header.two_line_height() if any(row_notes) else 0,
-        ))
+        height = max(self.row_height(), rows_header.two_line_height() if any(row_notes) else 0)
+        rows_header.setDefaultSectionSize(height)
+        if rows:
+            # The grid ends where its last cards end: whatever follows it
+            # stands the layout's own gap away, not that and a gutter.
+            rows_header.resizeSection(len(rows) - 1, height - _grid_gutter())
         self.updateGeometry()
 
     @staticmethod
@@ -8667,6 +8769,16 @@ class FluentSelectionGrid(QtWidgets.QTableView):
         beside the grid, and its gutters."""
 
         return control_height() + 2 * _grid_gutter()
+
+    def _card_cell(self, rect: QtCore.QRect, row: int) -> QtCore.QRect:
+        """The cell ``rect`` of ``row`` that its cards and label are laid
+        in: the last row's section stops at its cards' bottom edge (the
+        grid has no gutter below it), so its cell is that section and the
+        gutter beneath it, and its cards are as tall as every other row's."""
+
+        if row == self._grid_model.rowCount() - 1:
+            return QtCore.QRect(rect).adjusted(0, 0, 0, _grid_gutter())
+        return QtCore.QRect(rect)
 
     def label_width_hint(self) -> int:
         """The form label column at which every row label still fits."""
