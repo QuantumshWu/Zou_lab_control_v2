@@ -298,9 +298,9 @@ def test_a_calibration_arms_its_camera_with_the_longest_window_and_shows_it() ->
 def _claims_projection(entries, frames):
     """What the console projects for the calibrations editor."""
 
-    from zlc_atom.nodes import check_claims, frame_problems, reach_frames
+    from zlc_atom.nodes import check_claims, claim_names, frame_problems, reach_frames
 
-    names = tuple(Path(entry["path"]).stem for entry in entries)
+    names = claim_names(entries)
     claimed = tuple(entry["frames"] for entry in entries)
     problems, reads = (), None
     try:
@@ -431,6 +431,12 @@ def test_the_calibrations_editor_gives_frames_to_files_by_clicking(monkeypatch) 
         editor.add_file("C:/data/extra.json")
         assert drafts[-1]["artifact_inputs"]["calibrations"][-1] == {
             "path": "C:/data/extra.json", "frames": ()}, "Rest is taken; the new file starts with no frame"
+        # A row is named as every sentence about it names it: by its stem,
+        # or "row N" before it has a file.
+        project(({"path": "", "frames": ()}, readout))
+        assert grid.model().headerData(0, QtCore.Qt.Vertical) == "row 1"
+        project((readout,))
+        assert editor.summary.text() == "readout reads every frame"
         project(())
         assert not grid.isVisible() and editor.summary.text() == "No calibration yet"
         assert not editor.model_row.isVisible() and editor.add_button.isVisible()

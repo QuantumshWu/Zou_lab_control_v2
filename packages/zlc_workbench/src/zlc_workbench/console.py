@@ -74,7 +74,6 @@ from .logic import (
     LogicDraftFinalization,
     artifact_input_specs,
     build_arguments,
-    claim_names,
     dataset_inputs,
     device_key_options,
     draft_devices,
@@ -264,7 +263,7 @@ def _claims_projection(
 ) -> dict[str, Any]:
     """One frame-claims input for its editor and for lab_catalog(node_id); all plain."""
 
-    from zlc_atom.nodes import check_claims, frame_claim_entries, frame_problems, reach_frames
+    from zlc_atom.nodes import check_claims, claim_names, frame_claim_entries, frame_problems, reach_frames
 
     try:
         entries = frame_claim_entries(raw)

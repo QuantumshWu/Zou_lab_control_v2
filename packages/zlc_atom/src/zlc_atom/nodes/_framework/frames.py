@@ -27,8 +27,9 @@ are valid again once the frame count that suited them returns.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 
 FIRST = "first"
 LAST = "last"
@@ -113,6 +114,22 @@ def describe_frames(frames: Sequence[FrameToken]) -> str:
     """The one text form of claimed frames: ``"2, first, last"``."""
 
     return ", ".join(str(token) for token in frames) or "no frame"
+
+
+def claim_names(entries: Sequence[Mapping[str, object]]) -> tuple[str, ...]:
+    """What each frame-claims row is called, wherever a row is named.
+
+    The file's stem -- every calibration is a .json, so the extension tells
+    no row from another -- or "row N" for a row with no file yet.  The
+    editor's rows, its summary and tooltips, the draft issues and the claims
+    projection all name rows through here, so a row reads one way on screen
+    and in every sentence about it.
+    """
+
+    return tuple(
+        Path(str(entry["path"])).stem or f"row {index + 1}"
+        for index, entry in enumerate(entries)
+    )
 
 
 def check_claims(
@@ -268,6 +285,7 @@ __all__ = [
     "assign_frames",
     "canonical_frames",
     "check_claims",
+    "claim_names",
     "describe_frames",
     "frame_identity",
     "frame_problems",

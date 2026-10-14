@@ -25,8 +25,8 @@ editor's label column, shared with the form, so the first card, the model
 choice and the form's fields start on one edge.  The column is set by the
 labels that stay ("Readout model", the form's) and a fixed room for file
 names, never by a file name itself, so it does not move as files come and
-go.  A row names its file by its stem --
-every calibration is a .json, so the extension tells no row from another --
+go.  A row is named as every sentence about it names it
+(:func:`claim_names`: the file's stem, or "row N" before it has a file),
 elided in the middle when it is wider than the column; the tooltip reads
 the whole path.  The console resolves the
 files and projects how the source's frames read them; this widget only
@@ -34,8 +34,6 @@ draws that and writes the edits back.
 """
 
 from __future__ import annotations
-
-from pathlib import Path
 
 from PyQt5 import QtCore, QtGui, QtWidgets
 
@@ -57,7 +55,7 @@ from zlc_ui.fluent import (
 )
 from zlc_ui.fluent.column_set import section_header
 
-from zlc_atom.nodes._framework.frames import FIRST, LAST, REST, canonical_frames, reach_frames
+from zlc_atom.nodes._framework.frames import FIRST, LAST, REST, canonical_frames, claim_names, reach_frames
 from zlc_atom.nodes.calibration import DEFAULT_READOUT_MODEL_CHOICE, READOUT_MODEL_CHOICES
 
 #: The artifact input this editor manages.
@@ -195,7 +193,7 @@ class CalibrationsEditor(QtWidgets.QWidget):
         selected: list[tuple[int, int]] = []
         states: dict[tuple[int, int], str] = {}
         tips: dict[tuple[int, int], str] = {}
-        names = tuple(_name(entry) for entry in entries)
+        names = claim_names(entries)
         for row, entry in enumerate(entries):
             for column, token in enumerate(self._columns):
                 if token is _GAP:
@@ -240,7 +238,7 @@ class CalibrationsEditor(QtWidgets.QWidget):
             ) if part)
             for index, (entry, item) in enumerate(zip(entries, files))
         )
-        fitted = tuple(_fitted(_stem(entry), self._label_width) for entry in entries)
+        fitted = tuple(_fitted(name, self._label_width) for name in names)
         shown = (fitted, labels, tuple(sorted(cells.items())), row_tips)
         if shown != self._shown:
             self._shown = shown
@@ -342,14 +340,6 @@ class CalibrationsEditor(QtWidgets.QWidget):
 
     def set_mutation_enabled(self, enabled: bool) -> None:
         self.setEnabled(bool(enabled))
-
-
-def _name(entry) -> str:
-    return Path(entry["path"]).name if entry["path"] else "(no file)"
-
-
-def _stem(entry) -> str:
-    return Path(entry["path"]).stem if entry["path"] else "(no file)"
 
 
 def _fitted(name: str, width: int | None) -> str:
