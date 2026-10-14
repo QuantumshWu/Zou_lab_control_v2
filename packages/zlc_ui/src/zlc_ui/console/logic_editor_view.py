@@ -13,6 +13,7 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 
 from zlc_ui.fluent import (
     GREY,
+    HEADING_CSS_WEIGHT,
     MUTED_INK,
     TEXT,
     FluentButton,
@@ -119,8 +120,8 @@ class LogicEditorView(QtWidgets.QWidget):
         title_row.setSpacing(row_gap())
         self.title_label = FluentLabel(self.node_id)
         self.title_label.setStyleSheet(
-            f'QLabel {{ color: {TEXT}; font: {fluent_font_size()}pt "{FONT}"; '
-            "font-weight: 600; background: transparent; }"
+            f'QLabel {{ color: {TEXT}; font: {HEADING_CSS_WEIGHT} {fluent_font_size()}pt "{FONT}"; '
+            "background: transparent; }"
         )
         self.kind_label = FluentLabel("")
         self.kind_label.setStyleSheet(f"color: {MUTED_INK}; background: transparent; border: none;")
