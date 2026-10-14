@@ -749,6 +749,7 @@ class InfoPane(QtWidgets.QWidget):
         layout.addWidget(header_frame)
 
         self.info_tabs = FluentTabWidget()
+        self.info_tabs.set_page_inset(pad)
         self.info_tabs.setSizePolicy(
             QtWidgets.QSizePolicy.Expanding,
             QtWidgets.QSizePolicy.Expanding,

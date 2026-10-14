@@ -5149,12 +5149,17 @@ class FluentTabWidget(QtWidgets.QTabWidget):
     host that does want a page an operator can dismiss uses
     :meth:`add_closable_tab`, which shows the close affordance and emits
     :attr:`tab_close_requested` with the page widget so the host can tear it
-    down -- the tab widget never removes a page behind its owner's back."""
+    down -- the tab widget never removes a page behind its owner's back.
+
+    The first tab, and its underline, starts where the pages' content
+    starts (:meth:`set_page_inset`), so the strip and the page below it
+    share one left edge."""
 
     tab_close_requested = QtCore.pyqtSignal(QtWidgets.QWidget)
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._page_inset = section_gap()
         self.setTabPosition(QtWidgets.QTabWidget.North)
         self.setTabBar(_FluentTabBar(self))     # content-width pivot tabs; elides to fit, no arrows
         self.tabBar().setExpanding(False)
@@ -5172,6 +5177,34 @@ class FluentTabWidget(QtWidgets.QTabWidget):
         # Edit / Preview / Scan, which must always exist) never get a close
         # affordance.  ``add_closable_tab`` opts in a CUSTOM, subtle close button
         # (a soft grey "x" that highlights on hover -- not the harsh native X).
+        self._apply_sheet()
+        self._overflow_btn = self._build_overflow_button()
+        # The corner widget sits FLUSH at the widget's right edge, so the button's rounded hover
+        # background used to be CLIPPED on the right.  Wrap it in a transparent holder whose right
+        # margin reserves the clearance, so the full hover pill is visible.
+        corner = QtWidgets.QWidget(self)
+        corner.setStyleSheet("background: transparent;")
+        corner_lay = QtWidgets.QHBoxLayout(corner)
+        corner_lay.setContentsMargins(0, 0, scaled_px(6, minimum=4), 0)
+        corner_lay.setSpacing(0)
+        corner_lay.addWidget(self._overflow_btn)
+        self._overflow_corner = corner
+        self.setCornerWidget(corner, QtCore.Qt.TopRightCorner)
+        corner.hide()
+        self.currentChanged.connect(lambda _i: self._update_overflow())
+
+    def set_page_inset(self, inset: int) -> None:
+        """Where the pages' content starts, in from this widget's left edge:
+        the first tab's underline starts there too.  A page's content starts
+        :func:`section_gap` in (the default); a host whose pages lay their
+        content elsewhere -- flush, or a card's padding in -- says where."""
+
+        inset = max(0, int(inset))
+        if inset != self._page_inset:
+            self._page_inset = inset
+            self._apply_sheet()
+
+    def _apply_sheet(self) -> None:
         self.setStyleSheet(
             f"""
             QTabWidget {{
@@ -5210,7 +5243,7 @@ class FluentTabWidget(QtWidgets.QTabWidget):
                 margin: 0px {_tab_margin_h()}px;
                 font: {fluent_font_size()}pt "{FONT}";
             }}
-            QTabBar::tab:first {{ margin-left: {scaled_px(CARD_PAD)}px; }}
+            QTabBar::tab:first {{ margin-left: {self._page_inset}px; }}
             QTabBar::tab:selected {{
                 color: {TEXT};
                 border-bottom: {scaled_px(2, minimum=2)}px solid {ACCENT};
@@ -5220,20 +5253,6 @@ class FluentTabWidget(QtWidgets.QTabWidget):
             }}
             """
         )
-        self._overflow_btn = self._build_overflow_button()
-        # The corner widget sits FLUSH at the widget's right edge, so the button's rounded hover
-        # background used to be CLIPPED on the right.  Wrap it in a transparent holder whose right
-        # margin reserves the clearance, so the full hover pill is visible.
-        corner = QtWidgets.QWidget(self)
-        corner.setStyleSheet("background: transparent;")
-        corner_lay = QtWidgets.QHBoxLayout(corner)
-        corner_lay.setContentsMargins(0, 0, scaled_px(6, minimum=4), 0)
-        corner_lay.setSpacing(0)
-        corner_lay.addWidget(self._overflow_btn)
-        self._overflow_corner = corner
-        self.setCornerWidget(corner, QtCore.Qt.TopRightCorner)
-        corner.hide()
-        self.currentChanged.connect(lambda _i: self._update_overflow())
 
     def paintEvent(self, event) -> None:  # noqa: N802 - Qt naming
         # The tab widget is a plain WHITE rounded card with NO border line ANYWHERE -- the pivot tabs sit
