@@ -8033,11 +8033,13 @@ def _paint_grid_card(
     smaller than its outlined neighbours, so the gutters looked uneven."""
 
     inset = scaled_px(2, minimum=1)
+    # QRectF(QRect) is exclusive at the right and bottom already: the cell's
+    # far edges are right() and bottom(), with no QRect "+ 1".
     raw = QtCore.QRectF(cell).adjusted(inset, inset, -inset, -inset)
     left = device_snap(surface, raw.left())
     top = device_snap(surface, raw.top(), axis="y")
-    right = device_snap(surface, raw.right() + 1)
-    bottom = device_snap(surface, raw.bottom() + 1, axis="y")
+    right = device_snap(surface, raw.right())
+    bottom = device_snap(surface, raw.bottom(), axis="y")
     outer = QtCore.QRectF(left, top, right - left, bottom - top)
     radius = float(_radius())
     stroke = frame_border_px(surface)

@@ -74,11 +74,19 @@ def card_title_row(
 
 def _rule_between(layout: QtWidgets.QLayout) -> None:
     """Rule every item of a list but the last: a rule separates items, it
-    never closes the list -- the card's own edge does that."""
+    never closes the list -- the card's own edge does that.
+
+    An item is in the list unless it was hidden ON PURPOSE.  ``isHidden``
+    is not that: a card made under a window already on screen is hidden
+    until the layout's queued show reaches it, so a list filled while the
+    manager was open skipped every new card and left the last one ruled."""
 
     frames = [
         item.widget() for item in (layout.itemAt(i) for i in range(layout.count()))
-        if isinstance(item.widget(), FluentFrame) and not item.widget().isHidden()
+        if isinstance(item.widget(), FluentFrame) and not (
+            item.widget().isHidden()
+            and item.widget().testAttribute(QtCore.Qt.WA_WState_ExplicitShowHide)
+        )
     ]
     for index, frame in enumerate(frames):
         frame.set_rule(index < len(frames) - 1)
