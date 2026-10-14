@@ -1731,6 +1731,7 @@ class PulseScheduleView(QtWidgets.QWidget):
         bar.addWidget(control_area, 1)
 
         connection_area = FluentGroupBox("Connection")
+        self.connection_card = connection_area
         connection_area.setFixedWidth(px(252, minimum=212))
         connection_layout = QtWidgets.QVBoxLayout(connection_area)
         connection_layout.setContentsMargins(*card_margins)
@@ -1762,14 +1763,10 @@ class PulseScheduleView(QtWidgets.QWidget):
         # says instead what On Pulse re-arms.  Hidden until a host supplies
         # the choices, so a standalone editor keeps its endpoint row.
         self.acquisition_combo = FluentComboBox()
+        self.acquisition_combo.setAccessibleName("Acquisition")
         self.acquisition_combo.setFixedHeight(control_height)
         self.acquisition_combo.setSizePolicy(
             QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed
-        )
-        self.acquisition_combo.setToolTip(
-            "On Pulse, Hold and Step stop the board, restart this Measurement with "
-            "its current settings and wait until it is armed, then play. Stop Pulse "
-            "leaves it running. None = play without restarting."
         )
         self.acquisition_combo.hide()
         connection_row.addWidget(self.acquisition_combo, 1)
@@ -2191,7 +2188,12 @@ class PulseScheduleView(QtWidgets.QWidget):
         self.connection_status.setToolTip(vm.status)
 
     def set_acquisition(self, choices: tuple[tuple[str, str], ...], selected: str) -> None:
-        """Project what On Pulse re-arms: (label, value) items and the chosen value."""
+        """Project what On Pulse re-arms: (label, value) items and the chosen value.
+
+        The card is named for it too, so "under Acquisition" in a refusal
+        points at something on screen; the tooltip repeats the whole chosen
+        label, which a long node name can push past the collapsed box.
+        """
 
         with signals_blocked(self.acquisition_combo):
             self.acquisition_combo.clear()
@@ -2203,6 +2205,14 @@ class PulseScheduleView(QtWidgets.QWidget):
                     f"selected acquisition {selected!r} was not supplied to the view"
                 )
             self.acquisition_combo.setCurrentIndex(index)
+        self.acquisition_combo.setToolTip(
+            f"Acquisition: {self.acquisition_combo.currentText()}\n"
+            "On Pulse, Hold and Step stop the board, start or restart this Measurement "
+            "with its current settings, wait until it is armed, then play. Auto restarts "
+            "the one running Measurement and never starts an idle one. Stop Pulse leaves "
+            "it running. None plays without restarting."
+        )
+        self.connection_card.setTitle("Connection · Acquisition")
         self.acquisition_combo.show()
 
     def _request_connection(self) -> None:

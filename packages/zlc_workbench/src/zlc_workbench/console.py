@@ -9635,15 +9635,22 @@ class ConsolePresenter:
             for node_id in self._acquisition_options("")
         )
 
-    def rearm_acquisition(
+    def _rearm_acquisition(
         self, choice: str, still_wanted: Callable[[], bool],
     ) -> tuple[str, str] | None:
         """Start or Restart what an On Pulse plays into, and wait until it is armed.
 
         The Pulse Editor's command worker calls this between LOAD and FIRE,
-        with the board idle.  ``"auto"`` restarts the one ready-reporting
-        Measurement that is running and never starts an idle one; a node id
-        is Started when idle and Restarted when running, as Seamless's
+        with the board idle; the experiment flow hands it over when it links
+        the editor.  Private because it waits for an owner turn: called on
+        the owner thread (an MCP ``lab_call`` runs there) it would wait for
+        itself.
+
+        ``"auto"`` restarts the one ready-reporting Measurement that is
+        running and never starts an idle one.  It counts every such
+        Measurement, a free-running waveform source (an IMU) as much as a
+        triggered camera, so with both running it refuses.  A node id is
+        Started when idle and Restarted when running, as Seamless's
         Acquisition logic is.  Returns the node and the generation that
         reported ready; None when Auto found nothing running or
         ``still_wanted`` turned False -- a run already restarted then stays
@@ -9651,25 +9658,26 @@ class ConsolePresenter:
         ends before ready raises, naming the node.
         """
 
+        from .pulse_editor import auto_acquisition
+
         def restart() -> object:
             if self._closing:
                 raise RuntimeError("Task Console is closing")
             options = self._acquisition_options("")
             if choice == "auto":
-                running = [node for node in options if self._acquiring(self.logic[node])]
-                if not running:
+                # Again here, on the turn that acts: the editor's own check
+                # ran before the board was touched and may be stale now.
+                node_id = auto_acquisition(self.acquisition_choices())
+                if node_id is None:
                     return None
-                if len(running) > 1:
-                    raise RuntimeError(
-                        f"{len(running)} Measurements are running ({', '.join(running)}); "
-                        "choose one under Acquisition"
-                    )
-                node_id = running[0]
             else:
                 node_id = choice
             active = self._active_task()
             if active is not None:
-                raise RuntimeError(f"{active.node_id}: stop the Task before On Pulse re-arms {node_id}")
+                raise RuntimeError(
+                    f"{active.node_id}: stop the Task before On Pulse re-arms {node_id}, "
+                    "or choose None under Acquisition"
+                )
             if node_id not in options:
                 raise ValueError(f"{node_id!r} is not an available acquisition Measurement")
             binding = self.logic[node_id]

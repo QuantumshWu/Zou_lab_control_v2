@@ -584,7 +584,7 @@ class ExperimentGuiFlow:
             # this flow is the one place that holds both.
             control.presenter.link_acquisitions(
                 self.console_presenter.acquisition_choices,
-                self.console_presenter.rearm_acquisition,
+                self.console_presenter._rearm_acquisition,
             )
         return control
 

@@ -4780,8 +4780,12 @@ def test_connect_hold_step_and_sync_run_on_the_device_worker(sequence) -> None:
         assert view.acquisition == ((
             ("Auto · camera_measurement", "auto"),
             ("None", ""),
-            ("camera_measurement · running", "camera_measurement"),
+            ("Restart · camera_measurement", "camera_measurement"),
         ), "auto")
+        # Only callables are kept: anything else would break every beat.
+        with pytest.raises(TypeError):
+            presenter.link_acquisitions("choices", True)
+        assert presenter._acquisition_link[1] is rearm
         board.events.clear()
         view.scan_hold_requested.emit()
         worker.deliver_until(lambda: not presenter._device_busy)
@@ -4841,6 +4845,45 @@ def test_connect_hold_step_and_sync_run_on_the_device_worker(sequence) -> None:
         assert not any(event.startswith("fire") for event in board.events), board.events
         assert board.events[-1] == "safe" and presenter.running is False
         assert asked == ["auto"] and view.summary == "Stopped"
+
+        # Auto with two running is refused before the board is touched: the
+        # pulse already playing keeps playing, for On Pulse, Hold and MCP.
+        presenter.link_acquisitions(lambda: (("camera_measurement", True),), rearm)
+        view.fire_requested.emit()
+        worker.deliver_until(lambda: not presenter._device_busy)
+        assert presenter.running is True
+        lease = presenter._drive_lease
+        presenter.link_acquisitions(
+            lambda: (("camera_measurement", True), ("imu_monitor", True)), rearm,
+        )
+        assert view.acquisition[0][0] == ("Auto · 2 running — choose", "auto")
+        assert view.acquisition[0][2:] == (
+            ("Restart · camera_measurement", "camera_measurement"),
+            ("Restart · imu_monitor", "imu_monitor"),
+        )
+        board.events.clear()
+        asked.clear()
+        warned = len(view.warnings)
+        view.fire_requested.emit()
+        view.scan_hold_requested.emit()
+        assert presenter.request_fire(present=False) is False
+        assert not presenter._device_busy
+        assert board.events == [] and asked == [], board.events
+        assert presenter.running is True and presenter._drive_lease is lease
+        refusal = (
+            "2 Measurements are running (camera_measurement, imu_monitor); "
+            "choose one under Acquisition, or None; the board was not touched"
+        )
+        assert view.warnings[warned:] == [refusal, refusal]
+        assert presenter.last_warning == refusal
+        # Choosing one plays again, re-arming only that one.
+        presenter.control_action("acquisition", {"logic": "camera_measurement"})
+        view.fire_requested.emit()
+        worker.deliver_until(lambda: not presenter._device_busy)
+        assert board.events[:3] == ["safe", "load", "rearm"] and asked == ["camera_measurement"]
+        presenter.select_acquisition("auto")
+        view.stop_requested.emit()
+        worker.deliver_until(lambda: not presenter._stop_busy)
 
         # A refused re-arm: no FIRE, the lease goes back, and the reason shows.
         def refused(choice, still_wanted):

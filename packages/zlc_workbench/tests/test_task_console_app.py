@@ -1172,6 +1172,7 @@ try:
     wait_for(lambda: console.logic[node].host is not None and console.logic[node].host.wait_ready(0))
     wait_for(lambda: schedule.acquisition_combo.currentText() == f'Auto \\u00b7 {node}')
     assert schedule.acquisition_combo.isVisible()
+    assert schedule.connection_card.title() == 'Connection \\u00b7 Acquisition'
     assert not schedule.connection_endpoint.isVisible() and not schedule.connection_button.isVisible()
     pulse_path = r'%s/pulses/imaging_test.json'
     assert editor.open_pulse(pulse_path, present=False)

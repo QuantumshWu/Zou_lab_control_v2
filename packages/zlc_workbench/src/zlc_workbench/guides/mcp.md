@@ -56,13 +56,25 @@ without it they return the confirmation text without opening a GUI dialog.
 
 Camera Measurement publishes complete cycles with all authored frames, pixel
 coordinates, units and validity. It does not own the experiment Pulse. Collect
-all triggers in each Pulse cycle even when interested in just one frame. With a
-running ready-reporting Measurement, `lab_pulse` fire re-arms it (Pulse state
-`acquisition`; `acquisition.armed.generation` names the run its frames go
-into); do not Start the camera separately before Fire. Set `acquisition` to ""
-to fire without restarting; for a finite capture choose the Measurement
-explicitly. Wait for camera completion and the Pulse's pending/completion_pending flags to
-clear before beginning another capture. Cached board.firing=false alone is not
+all triggers in each Pulse cycle even when interested in just one frame.
+
+`lab_pulse` fire (like On Pulse, Hold and Step) re-arms the bound Pulse
+editor's Acquisition between load and fire, so camera cycles count from the
+new pulse's first trigger. Read the choice and its candidates in
+`lab_editor_state` → `acquisition` (`choice`, `choices` as [value, label],
+`armed.node_id`/`armed.generation` after a Fire). Set it with
+`lab_editor_action(device_id, action='acquisition', arguments={'logic': ...})`:
+`'auto'` (default) restarts the one running ready-reporting Measurement and
+never starts an idle one; a listed node id is Started when idle and Restarted
+when running; `''` (None) fires without touching any Measurement. Auto counts
+every running ready-reporting Measurement, a free-running waveform source
+(e.g. an IMU monitor) as much as a camera: with two running, Fire is refused
+before the board is touched until one is chosen or None is. If the camera is
+idle, either choose it explicitly so Fire starts it, or Start it once; do not
+add Start → ready before every Fire. A Task that is running refuses the re-arm.
+For a finite capture choose the Measurement explicitly. Wait for camera
+completion and the Pulse's pending/completion_pending flags to clear before
+beginning another capture. Cached board.firing=false alone is not
 proof that the finite command lifecycle is complete.
 
 Calibration and Seamless Scan already manage their own acquisition/trigger
