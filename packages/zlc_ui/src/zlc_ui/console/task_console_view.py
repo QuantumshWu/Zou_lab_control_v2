@@ -81,9 +81,12 @@ class TaskConsoleView(QtWidgets.QWidget):
         # a bottom log panel and therefore never shifts the board vertically.
         self.status_strip = StatusStrip(action_text="Stop task")
         self.status_strip.action_clicked.connect(self.stop_task_requested.emit)
-        # The header's dot and word are laid out as the strip's dot and line
-        # right under them -- its side margin, one dot size, its gap -- so
-        # the two dots stand on one x and the two texts start on one x.
+        # Every content edge of the window is one x: the header, the strip
+        # and every tab page start (and end) a window pad in.  The header's
+        # dot and word are laid out as the strip's dot and line right under
+        # them -- its side margin, one dot size, its gap -- so the two dots
+        # stand on one x and the two texts start on one x.
+        self.status_strip.set_inset(True, pad=window_pad())
         strip_layout = self.status_strip.layout()
         side = strip_layout.contentsMargins().left()
 

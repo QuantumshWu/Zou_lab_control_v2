@@ -9884,17 +9884,20 @@ class FluentStatusStrip(FluentFrame):
         self._severity = None
         self.show_message("", severity="idle")
 
-    def set_inset(self, inset: bool, *, right: int = 0) -> None:
-        """Whether the strip keeps its content one card pad in from its
-        sides -- a strip that is its own white card, whose dot then starts
-        where a card's title and the tabs' first underline start -- or lies
-        flush, in a page that is already white and padded, where the page's
-        own edge is the one its dot starts on.  ``right`` keeps out of the
-        line whatever room the page reserves on its right (a scroll
-        gutter), so the line ends where the page's rows end."""
+    def set_inset(self, inset: bool, *, pad: int | None = None, right: int = 0) -> None:
+        """Whether the strip keeps its content in from its sides -- a strip
+        that is its own white card, whose dot then starts where the content
+        under it starts -- or lies flush, in a page that is already white and
+        padded, where the page's own edge is the one its dot starts on.
 
-        pad = card_pad() if inset else 0
-        self.layout().setContentsMargins(pad, scaled_px(4), pad + max(0, int(right)), scaled_px(4))
+        An inset strip stands ``pad`` in, one card pad unless the window
+        under it puts its pages elsewhere (TaskConsole's pages start a window
+        pad in, so its strip does too).  ``right`` keeps out of the line
+        whatever room the page reserves on its right (a scroll gutter), so
+        the line ends where the page's rows end."""
+
+        side = (card_pad() if pad is None else max(0, int(pad))) if inset else 0
+        self.layout().setContentsMargins(side, scaled_px(4), side + max(0, int(right)), scaled_px(4))
 
     @property
     def current_severity(self) -> str:

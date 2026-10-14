@@ -1911,6 +1911,19 @@ view.tabs.setCurrentIndex(1); app.processEvents()
 logic = at(row)
 assert monitor == logic, (monitor, logic)
 assert underline == monitor[0], (underline, monitor)
+
+# And the header and the strip above the tabs stand on those same edges: the
+# header's dot, the strip's dot, the first underline and the first Logic card
+# start on one x, and the header's last command ends where the Logic card
+# ends -- one left edge and one right edge for the whole window.
+def x_in_view(widget, x=0):
+    return widget.mapTo(view, QtCore.QPoint(x, 0)).x()
+page_left = x_in_view(view.tabs, monitor[0])
+edges = (x_in_view(view.status_dot), x_in_view(view.status_strip.dot), page_left, x_in_view(row))
+assert len(set(edges)) == 1, edges
+clear_right = x_in_view(view.clear_board_button, view.clear_board_button.width())
+row_right = x_in_view(row, row.width())
+assert clear_right == row_right, (clear_right, row_right)
 """
     )
 
