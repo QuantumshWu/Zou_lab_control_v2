@@ -139,10 +139,27 @@ so they survive a Pulse that adds or removes a photograph; `custom` publishes
 exactly the `pairs` rows, e.g. `{"selection":"custom","pairs":[{"start":0,"end":1}]}`.
 Pairs rows given with any other selection are refused, not ignored.
 
-Derive is the existing route for expressions and named-axis reductions not
-already provided by a node. Its output names are authored, not a fixed empty
-capability list. Use the built-in expression/axis help and retain Dataset validity
-and units. Do not export arrays to reconstruct Occupancy or Frame Survival.
+Derive is within-shot algebra on one producer's bundle; averages over shots,
+per-site probabilities and fits belong in a plot panel. Read the exact member,
+axis names and frame labels from `lab_catalog(node_id=<derive>)["node"]["inputs"]`,
+then give `values.outputs` one row per published signal. A row applies, in
+order, `value` at `at` (a readout-event label) → `where` → `op`/`with` →
+`statistic` over within-shot axes; chain rows for more. Booleans: `sum` is the
+number true, `mean` the fraction true, `count` the valid samples.
+
+| name | row |
+| --- | --- |
+| bright | `{"value":"counts","at":"1","where":"occupied","where_at":"1"}` |
+| loaded | `{"value":"occupied","at":"0","statistic":"sum","over":"Site"}` |
+| survival | `{"value":"occupied","at":"2","where":"occupied","where_at":"0","statistic":"mean","over":"Site"}` |
+| ratio | `{"value":"counts","at":"1","op":"/","with":"counts","with_at":"0"}` |
+| over30 | `{"value":"counts","at":"1","op":">","with":"30"}` |
+| norm | `{"value":"counts","at":"1","op":"/","with":"level"}` (level: a per-shot mean row above it) |
+| subset | `{"code":"a.occupied.sel(frame=1).sel(Site=[1, 2, 3]).all('Site')"}` |
+
+Each row also carries its `name`. A row that does not type against the source
+refuses Start as `<name> · <stage>: <reason>`; a code row's failure names its
+row the same way. Do not export arrays to reconstruct Occupancy or Frame Survival.
 
 ## scan
 
