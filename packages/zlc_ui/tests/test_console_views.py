@@ -812,29 +812,49 @@ from PyQt5 import QtCore, QtTest
 from zlc_ui.qt import ensure_qt_app
 from zlc_ui.console import LogicRowView
 app = ensure_qt_app(['test'])
-row = LogicRowView('Processor', 'processor'); row.show(); app.processEvents()
-assert not row.run_button.isEnabled() and row.run_button.text() == 'Start'
+row = LogicRowView('Processor', 'processor'); row.resize(1000, 48); row.show(); app.processEvents()
+start, stop = row.start_button, row.stop_button
+assert not start.isEnabled() and start.text() == 'Start'
+# Stop is always there, idle or not -- disabled until there is something to stop.
+assert stop.isVisible() and not stop.isEnabled() and stop.role() == 'destructive'
+# Remove is on the row, not behind a menu.
+assert row.remove_button.isVisible() and row.remove_button.isEnabled()
+slots = lambda: (start.x(), start.width(), stop.x(), stop.width(), row.edit_button.x())
+idle = slots()
 row.set_commands(can_start=True, can_stop=True)
 row.set_state('running', 'processing fake input')
 row.set_publishes((('out', '1', 'fake output'),))
+app.processEvents()
 assert row.status_label.text() == 'processing fake input'
-# One lifecycle button: a running node offers Stop; Restart is in the menu.
-assert row.run_button.text() == 'Stop' and row.run_button.isEnabled()
-assert row.restart_action.isEnabled()
+# Running, Start says what it now does; neither slot moves.
+assert start.text() == 'Restart' and start.isEnabled() and stop.isEnabled()
+assert slots() == idle, (slots(), idle)
 assert 'out' in row.publishes_label.text()
+# A start queued behind a device release: Starting…, and Stop cancels it.
+row.set_commands(can_start=False, can_stop=True, pending=True)
+app.processEvents()
+assert start.text() == 'Starting…' and not start.isEnabled() and stop.isEnabled()
+assert slots() == idle, (slots(), idle)
+# A failed processor that still follows its source has something to stop.
+row.set_state('error', "failed; restarts with the source's next run")
+row.set_commands(can_start=True, can_stop=True)
+assert start.text() == 'Restart' and start.isEnabled() and stop.isEnabled()
 events = []
 row.start_requested.connect(lambda: events.append('start'))
 row.stop_requested.connect(lambda: events.append('stop'))
 row.edit_requested.connect(lambda: events.append('edit'))
 row.remove_requested.connect(lambda: events.append('remove'))
-QtTest.QTest.mouseClick(row.run_button, QtCore.Qt.LeftButton)
-row.restart_action.trigger()
+QtTest.QTest.mouseClick(start, QtCore.Qt.LeftButton)
+QtTest.QTest.mouseClick(stop, QtCore.Qt.LeftButton)
 row.set_state('idle', 'stopped')
-assert row.run_button.text() == 'Start' and not row.restart_action.isEnabled()
-QtTest.QTest.mouseClick(row.run_button, QtCore.Qt.LeftButton)
+row.set_commands(can_start=True, can_stop=False)
+app.processEvents()
+assert start.text() == 'Start' and not stop.isEnabled() and stop.isVisible()
+assert slots() == idle, (slots(), idle)
+QtTest.QTest.mouseClick(start, QtCore.Qt.LeftButton)
 QtTest.QTest.mouseClick(row.edit_button, QtCore.Qt.LeftButton)
-row.remove_action.trigger()
-assert events == ['stop', 'start', 'start', 'edit', 'remove']
+QtTest.QTest.mouseClick(row.remove_button, QtCore.Qt.LeftButton)
+assert events == ['start', 'stop', 'start', 'edit', 'remove']
 """
     )
 
@@ -920,9 +940,20 @@ publisher = handle._panel_publisher_rows['panel-1']
 assert tuple(view._logic_rows) == (handle._rows['camera-1'], publisher)
 assert not publisher.publishes_label.isHidden()
 assert all(button.isHidden() for button in (
-    publisher.run_button, publisher.preview_switch, publisher.more_button,
+    publisher.start_button, publisher.stop_button,
+    publisher.preview_switch, publisher.remove_button,
 ))
 assert not publisher.edit_button.isHidden()
+# The hidden controls keep their places, so a publisher row's name and Edit
+# stand in the node rows' columns.
+view.tabs.setCurrentIndex(1)
+app.processEvents()
+node_row = handle._rows['camera-1']
+at = lambda widget: widget.mapTo(view, QtCore.QPoint()).x()
+assert at(publisher.edit_button) == at(node_row.edit_button), (
+    at(publisher.edit_button), at(node_row.edit_button))
+assert at(publisher.name_label) == at(node_row.name_label)
+assert at(publisher.kind_label) == at(node_row.kind_label)
 publisher_edits = []
 handle.panel_publisher_edit_requested.connect(publisher_edits.append)
 QtTest.QTest.mouseClick(publisher.edit_button, QtCore.Qt.LeftButton)
@@ -950,14 +981,16 @@ handle.panel_publisher_draft_changed.connect(
 handle.open_panel_publisher_editor('panel-1', publisher_projection)
 publisher_editor = handle._panel_publisher_editors['panel-1']
 assert publisher_editor.source_combo is None
-assert publisher_editor.run_button.isHidden()
+assert publisher_editor.start_button.isHidden() and publisher_editor.stop_button.isHidden()
 publisher_editor.form.widget_for('roi_max').click()
 assert publisher_patches == [('panel-1', {'values': {'roi_max': False}})]
 assert view.tabs.indexOf(editor) >= 0
 assert view.tabs.indexOf(publisher_editor) >= 0
 assert view.tabs.currentWidget() is publisher_editor
-assert not editor.run_button.isEnabled()
-assert not handle._rows['camera-1'].run_button.isEnabled()
+assert not editor.start_button.isEnabled()
+assert not editor.stop_button.isHidden() and not editor.stop_button.isEnabled()
+assert not handle._rows['camera-1'].start_button.isEnabled()
+assert not handle._rows['camera-1'].stop_button.isEnabled()
 editor.form.widget_for('repeat').setValue(3)
 artifact_picker = editor.artifact_form.widget_for('calibration_path')
 assert artifact_picker.browse.text() == 'Browse…'
@@ -1033,8 +1066,11 @@ running = dict(
 handle.set_logic_commands('camera-1', can_start=True, can_stop=True)
 handle.update_logic_editor('camera-1', running)
 assert not patches, patches
-assert editor.run_button.text() == 'Stop' and editor.run_button.isEnabled()
-assert not editor.restart_button.isHidden() and editor.restart_button.isEnabled()
+assert editor.start_button.text() == 'Restart' and editor.start_button.isEnabled()
+assert editor.stop_button.isEnabled()
+# The row says the same thing about the same node.
+assert handle._rows['camera-1'].start_button.text() == 'Restart'
+assert handle._rows['camera-1'].stop_button.isEnabled()
 # Mode-dependent inputs use this same editor and its ordinary Fluent forms.
 from zlc_atom.nodes.slm_feedback.logic_node import LOGIC_NODE as feedback
 from zlc_workbench.authoring_form import project_logic_schema, display_value
@@ -1861,12 +1897,21 @@ assert ('clear',) in events
 handle.add_panel('task-preview', 'Capture preview')
 handle.add_logic_row('calibration', 'task')
 handle.add_logic_row('camera', 'measurement')
-handle.set_logic_commands('calibration', can_start=True, can_stop=False)
-handle.set_logic_commands('camera', can_start=True, can_stop=False)
+handle.set_logic_commands('calibration', can_start=True, can_stop=True)
+handle.set_logic_commands('camera', can_start=True, can_stop=True)
+handle.logic_stop_requested.connect(lambda node_id: events.append(('stop', node_id)))
 preview = handle._cards['task-preview']
 task_row = handle._rows['calibration']
 camera_row = handle._rows['camera']
-handle.set_task_takeover(True)
+view.tabs.setCurrentIndex(1)
+app.processEvents()
+slots = lambda row: tuple(
+    widget.mapTo(view, QtCore.QPoint()).x()
+    for widget in (row.preview_switch, row.start_button, row.stop_button, row.edit_button)
+)
+before_takeover = slots(task_row)
+handle.set_task_takeover('calibration')
+app.processEvents()
 assert view.status_strip.action_button is not None
 assert view.status_strip.action_button.isVisible()
 assert view.kind_combo.isEnabled()
@@ -1879,15 +1924,21 @@ assert view.pause_switch.isEnabled()
 assert view.save_screenshot_button.isEnabled()
 assert preview.settings_button.isEnabled()
 for row in (task_row, camera_row):
-    assert not row.run_button.isEnabled()
+    assert not row.start_button.isEnabled()
     assert not row.edit_button.isEnabled()
-    assert not row.more_button.isEnabled()
-    assert not row.remove_action.isEnabled()
-assert not task_row.run_button.isVisible()
+    assert not row.remove_button.isEnabled()
+# The running Task's own row keeps its Stop, in its place; every other
+# row's Stop waits for the Task like the rest of its commands.
+assert task_row.stop_button.isVisible() and task_row.stop_button.isEnabled()
+assert slots(task_row) == before_takeover, (slots(task_row), before_takeover)
+assert camera_row.stop_button.isVisible() and not camera_row.stop_button.isEnabled()
 before = list(events)
 QtTest.QTest.mouseClick(view.add_panel_button, QtCore.Qt.LeftButton)
-QtTest.QTest.mouseClick(camera_row.run_button, QtCore.Qt.LeftButton)
+QtTest.QTest.mouseClick(camera_row.start_button, QtCore.Qt.LeftButton)
+QtTest.QTest.mouseClick(camera_row.stop_button, QtCore.Qt.LeftButton)
 assert events == before
+QtTest.QTest.mouseClick(task_row.stop_button, QtCore.Qt.LeftButton)
+assert events[-1] == ('stop', 'calibration')
 view.kind_combo.setCurrentIndex(0)
 assert view.kind_combo.currentData()[0] == 'plot'
 assert view.add_panel_button.isEnabled()
@@ -1896,14 +1947,15 @@ assert events[-1] == ('panel', 'curve')
 QtTest.QTest.mouseClick(view.status_strip.action_button, QtCore.Qt.LeftButton)
 assert events[-1] == ('stop-task',)
 
-handle.set_task_takeover(False)
+handle.set_task_takeover('')
 assert not view.status_strip.action_button.isVisible()
 assert view.kind_combo.isEnabled()
 assert view.add_panel_button.isEnabled()
 assert preview.settings_button.isEnabled()
-assert camera_row.run_button.isEnabled()
+assert camera_row.start_button.isEnabled()
+assert camera_row.stop_button.isEnabled()
 assert camera_row.edit_button.isEnabled()
-assert camera_row.remove_action.isEnabled()
+assert camera_row.remove_button.isEnabled()
 
 """
     )
@@ -2241,11 +2293,16 @@ layout = row.layout().itemAt(0).layout()
 for index in range(layout.count()):
     widget = layout.itemAt(index).widget()
     if widget is not None and widget in (
-        row.run_button, row.preview_switch, row.edit_button, row.more_button,
+        row.start_button, row.stop_button, row.preview_switch,
+        row.edit_button, row.remove_button,
     ):
         order.append(widget)
-assert order.index(row.preview_switch) == order.index(row.run_button) - 1, (
-    'the switch belongs immediately left of Start, as on the Edit page')
+assert order == [
+    row.preview_switch, row.start_button, row.stop_button,
+    row.edit_button, row.remove_button,
+], order
+# The switch belongs immediately left of Start and Stop immediately right of
+# it, as on the Edit page.
 
 row.set_task_takeover(True)
 assert not switch.isEnabled(), 'a row that cannot Start cannot re-aim Start'
@@ -2270,6 +2327,7 @@ def test_the_editor_shows_the_same_preview_switch_beside_its_own_start(run_qt) -
 
     run_qt(
         """
+from PyQt5 import QtCore, QtTest
 from zlc_ui.qt import ensure_qt_app
 from zlc_ui.fluent import FluentSwitch
 from zlc_ui.form import FormSpec
@@ -2298,26 +2356,58 @@ switch = editor.preview_switch
 assert isinstance(switch, FluentSwitch), type(switch)
 assert switch.isChecked() is False, 'the editor shows the stored preference'
 
-# Beside Start, in pixels: same row, immediately to its left.  Start keeps
-# the rightmost slot every edit page gives its main action, so a setting
-# never sits where the action is looked for.  A switch that merely EXISTS
-# somewhere is what an operator could not find.
-start = editor.run_button
+# Beside Start, in pixels: same row, immediately to its left.  A switch that
+# merely EXISTS somewhere is what an operator could not find.
+start, stop = editor.start_button, editor.stop_button
 assert switch.isVisible() and start.isVisible()
 assert abs(switch.y() - start.y()) <= 2, (switch.geometry(), start.geometry())
 gap = start.x() - (switch.x() + switch.width())
 assert 0 <= gap <= 40, (switch.geometry(), start.geometry())
-assert start.role() == 'primary'
+assert start.role() == 'primary' and start.text() == 'Start' and start.isEnabled()
+# Start then Stop, as on the row and as On Pulse then Stop Pulse; Stop is
+# always there, disabled while there is nothing to stop.
+assert stop.isVisible() and not stop.isEnabled() and stop.role() == 'destructive'
+assert abs(stop.y() - start.y()) <= 2 and start.x() + start.width() < stop.x()
+slots = lambda: (switch.x(), start.x(), start.width(), stop.x(), stop.width())
+idle = slots()
 
-# Running, the one button is Stop -- still this page's primary, so the way to
-# stop is the loudest control exactly while it is needed.
+# Running, Start says Restart and stays this page's primary; nothing on the
+# row moves -- no button appears beside it.
 editor.update_projection(dict(projection, running=True, can_stop=True))
 app.processEvents()
-assert start.text() == 'Stop' and start.role() == 'primary', (start.text(), start.role())
-assert editor.restart_button.isVisible()
-assert editor.restart_button.x() < start.x() and switch.x() < editor.restart_button.x()
+assert start.text() == 'Restart' and start.role() == 'primary', (start.text(), start.role())
+assert start.isEnabled() and stop.isEnabled()
+assert slots() == idle, (slots(), idle)
+
+# A follower waiting for its source has no host yet, but it IS active: the
+# page says what the row says, Restart and an enabled Stop.
+from zlc_ui.console.logic_row_view import start_label
+editor.update_projection(dict(projection, running=False, can_stop=True))
+app.processEvents()
+assert start.text() == start_label(pending=False, active=True) == 'Restart'
+assert stop.isEnabled()
+
+# A start queued behind a device release can be cancelled from here.
+editor.update_projection(dict(projection, pending=True, can_start=False, can_stop=True))
+app.processEvents()
+assert start.text() == 'Starting…' and not start.isEnabled() and stop.isEnabled()
+assert slots() == idle, (slots(), idle)
+stops = []
+editor.stop_requested.connect(lambda: stops.append('stop'))
+QtTest.QTest.mouseClick(stop, QtCore.Qt.LeftButton)
+assert stops == ['stop']
+
+# While a Task owns the console only that Task's own Stop stays live.
+editor.update_projection(dict(projection, running=True, can_stop=True))
+editor.set_mutation_enabled(False, owns_task=True)
+assert stop.isEnabled() and not start.isEnabled() and not editor.remove_button.isEnabled()
+editor.set_mutation_enabled(False)
+assert not stop.isEnabled()
+editor.set_mutation_enabled(True)
 editor.update_projection(projection)
 app.processEvents()
+assert start.text() == 'Start' and not stop.isEnabled()
+assert slots() == idle, (slots(), idle)
 
 raised = []
 switch.toggled.connect(raised.append)

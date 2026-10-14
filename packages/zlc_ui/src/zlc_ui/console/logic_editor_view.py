@@ -39,6 +39,7 @@ from zlc_ui.fluent import (
 )
 from zlc_ui.form import FluentParameterForm, FormSpec
 from zlc_ui.form.qt_form import _form_label_width
+from .logic_row_view import fit_start_button, start_label
 
 
 class LogicEditorView(QtWidgets.QWidget):
@@ -63,6 +64,7 @@ class LogicEditorView(QtWidgets.QWidget):
         super().__init__(parent)
         self.node_id = str(node_id)
         self._mutation_enabled = True
+        self._owns_task = False
         self._projection: dict[str, object] = {}
         #: The projection minus what the status half applies, as last
         #: rebuilt from.  A beat that changes neither rebuilds nothing.
@@ -168,24 +170,21 @@ class LogicEditorView(QtWidgets.QWidget):
         self._artifact_result_rows: dict[str, FluentSettingRow] = {}
         self._body_layout.addWidget(self._artifact_result_frame)
 
-        # The lifecycle in one button, as on the node's row: Start while it is
-        # stopped, Stop while it runs -- primary either way, the one run action
-        # of this page.  Restart shows only while it runs, and
-        # Remove keeps to the far side, away from the button pressed most.
+        # The node row's two fixed slots, in its order -- Start then Stop, as
+        # On Pulse then Stop Pulse -- and with its words: Start reads Restart
+        # while the node is active and Starting… while its start waits.  Both
+        # are always there, so nothing on this row moves when a run begins.
+        # Remove keeps to the far side, away from the buttons pressed most.
         actions = QtWidgets.QHBoxLayout()
         self.remove_button = FluentButton("Remove", role="destructive")
         self.remove_button.clicked.connect(self.remove_requested.emit)
         actions.addWidget(self.remove_button)
         actions.addStretch(1)
-        self.restart_button = FluentButton("Restart")
-        self.restart_button.clicked.connect(self.start_requested.emit)
-        self.run_button = FluentButton("Stop", role="primary")
-        stop_width = self.run_button.sizeHint().width()
-        self.run_button.setText("Starting…")
-        starting_width = self.run_button.sizeHint().width()
-        self.run_button.setText("Start")
-        self.run_button.setMinimumWidth(max(stop_width, starting_width, self.run_button.sizeHint().width()))
-        self.run_button.clicked.connect(self._run_clicked)
+        self.start_button = FluentButton("Start", role="primary")
+        fit_start_button(self.start_button)
+        self.start_button.clicked.connect(self.start_requested.emit)
+        self.stop_button = FluentButton("Stop", role="destructive")
+        self.stop_button.clicked.connect(self.stop_requested.emit)
         # This is the Start an operator actually presses -- adding a node
         # opens its Edit and focuses it -- so the switch that says what Start
         # will do belongs here too.  Both views show the SAME preference: it
@@ -195,17 +194,16 @@ class LogicEditorView(QtWidgets.QWidget):
             "Open this node's plot panel when it starts"
         )
         self.preview_switch.toggled.connect(self.auto_preview_changed.emit)
-        # Start/Stop stays the rightmost control, where every edit page keeps
-        # its main action; the Plot setting sits to its left, ahead of Restart.
+        # The Plot setting sits immediately left of Start, as on the row.
         add_row_switch(actions, self.preview_switch, lead=False)
-        actions.addWidget(self.restart_button)
-        actions.addWidget(self.run_button)
+        actions.addWidget(self.start_button)
+        actions.addWidget(self.stop_button)
         # Clear of the help paragraph above, so the ghost Remove reads as a
         # command on the action row and not as one more red sentence.
         self._body_layout.addSpacing(scaled_px(12, minimum=8))
         self._body_layout.addLayout(actions)
         self._show_actions = bool(show_actions)
-        for button in (self.remove_button, self.restart_button, self.run_button, self.preview_switch):
+        for button in (self.remove_button, self.start_button, self.stop_button, self.preview_switch):
             button.setVisible(bool(show_actions))
         self._body_layout.addStretch(1)
         scroll.setWidget(body)
@@ -321,10 +319,15 @@ class LogicEditorView(QtWidgets.QWidget):
                 f"color: {colours[1]}; background: transparent; border: none;"
             )
 
-    def set_mutation_enabled(self, enabled: bool) -> None:
-        """Disable authored and lifecycle commands while a Task owns the console."""
+    def set_mutation_enabled(self, enabled: bool, *, owns_task: bool = False) -> None:
+        """Disable authored and lifecycle commands while a Task owns the console.
+
+        The owning Task's own page keeps its Stop, as its row does: the same
+        endpoint as the status strip's "Stop task".
+        """
 
         self._mutation_enabled = bool(enabled)
+        self._owns_task = not self._mutation_enabled and bool(owns_task)
         self._selector_frame.setEnabled(self._mutation_enabled)
         self.artifact_form.setEnabled(self._mutation_enabled)
         self.form.setEnabled(self._mutation_enabled)
@@ -387,23 +390,13 @@ class LogicEditorView(QtWidgets.QWidget):
                 setter(self._mutation_enabled)
         return frozenset(managed)
 
-    def _run_clicked(self) -> None:
-        if bool(self._projection.get("running")):
-            self.stop_requested.emit()
-        else:
-            self.start_requested.emit()
-
     def _project_commands(self) -> None:
         pending = bool(self._projection.get("pending"))
-        running = bool(self._projection.get("running"))
         can_start = bool(self._projection.get("can_start"))
         can_stop = bool(self._projection.get("can_stop"))
-        self.run_button.setText("Starting…" if pending else "Stop" if running else "Start")
-        self.run_button.setEnabled(
-            self._mutation_enabled and not pending and (can_stop if running else can_start)
-        )
-        self.restart_button.setVisible(self._show_actions and running)
-        self.restart_button.setEnabled(self._mutation_enabled and can_start and not pending)
+        self.start_button.setText(start_label(pending=pending, active=can_stop))
+        self.start_button.setEnabled(self._mutation_enabled and can_start and not pending)
+        self.stop_button.setEnabled(can_stop and (self._mutation_enabled or self._owns_task))
         # It says what the next Start will do, so it follows Start's own gate.
         self.preview_switch.setEnabled(self._mutation_enabled)
         self.remove_button.setEnabled(self._mutation_enabled)

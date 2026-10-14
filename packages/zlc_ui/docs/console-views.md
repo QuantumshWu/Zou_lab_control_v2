@@ -61,7 +61,7 @@ set_panel_intervals(intervals, default_interval); set_panel_sizes(sizes, default
 set_grid_cell_kinds(kinds)
 set_paused(paused); set_selectors(enabled); set_summary(text)
 show_status(text, severity)            # idle|warning|task|error
-set_task_takeover(active)
+set_task_takeover(owner)               # the running Task's node_id; "" when none
 # questions asked of the operator
 choose_signal(rows) -> str | None
 ask_save_path(caption, suggested, filter) -> str; ask_open_path(caption, start, filter) -> str
@@ -92,7 +92,7 @@ close_panel_publisher_editor(panel_id)
 # logic rows, by id
 add_logic_row(node_id, kind, offers_preview=True); remove_logic_row(node_id)
 set_logic_state(node_id, state, status_text="")          # idle|running|error
-set_logic_commands(node_id, *, can_start, can_stop)
+set_logic_commands(node_id, *, can_start, can_stop, pending=False)
 set_logic_auto_preview(node_id, enabled)
 set_logic_publishes(node_id, rows)     # ((name, shape_text, description), ...)
 open_logic_editor(node_id, projection); update_logic_editor(node_id, projection) -> bool
@@ -170,14 +170,22 @@ remove_requested = pyqtSignal()
 auto_preview_changed = pyqtSignal(bool)
 
 set_state(state: str, status_text: str = "") -> None  # idle|running|error
-set_commands(*, can_start: bool, can_stop: bool) -> None
+set_commands(*, can_start: bool, can_stop: bool, pending: bool = False) -> None
 set_preview_offered(offered: bool) -> None
 set_auto_preview(enabled: bool) -> None
-set_task_takeover(active: bool) -> None
+set_task_takeover(active: bool, *, owns_task: bool = False) -> None
 set_publishes(rows: tuple[tuple[str, str, str], ...]) -> None
 ```
 
 Each publish row is `(name, shape_text, description)`.
+
+Start and Stop are two fixed slots on the row and on the node's Edit page,
+both always shown.  Start reads `Starting…` while `pending`, `Restart` while
+`can_stop` (running, following a source, or queued) and `Start` otherwise,
+at the width of its widest word, so nothing beside it moves; Stop follows
+`can_stop`, not the row's state.  While a Task owns the console every
+command is disabled except the owning Task's own Stop (`owns_task`), which
+raises the same `stop_requested` as the status strip's "Stop task".
 
 ## `StatusStrip` (internal)
 

@@ -134,7 +134,7 @@ class _LogicRowView:
         self.edit_requested = _Signal()
         self.remove_requested = _Signal()
         self.state = ("idle", "")
-        self.commands = (False, False)
+        self.commands = (False, False, False)
         self.publishes: tuple = ()
         self.auto_preview = True
         self.preview_offered = True
@@ -151,8 +151,8 @@ class _LogicRowView:
     def set_publishes(self, rows) -> None:
         self.publishes = tuple(rows)
 
-    def set_commands(self, *, can_start: bool, can_stop: bool) -> None:
-        self.commands = (bool(can_start), bool(can_stop))
+    def set_commands(self, *, can_start: bool, can_stop: bool, pending: bool = False) -> None:
+        self.commands = (bool(can_start), bool(can_stop), bool(pending))
 
 
 class _ConsoleView:
@@ -271,8 +271,8 @@ class _ConsoleView:
             )
         self.status.append((str(severity), str(text)))
 
-    def set_task_takeover(self, active: bool) -> None:
-        self.task_takeover = bool(active)
+    def set_task_takeover(self, owner: str) -> None:
+        self.task_takeover = bool(owner)
 
     def choose_signal(self, rows) -> str | None:
         self.offered = tuple(rows)
@@ -463,10 +463,12 @@ class _ConsoleView:
         *,
         can_start: bool,
         can_stop: bool,
+        pending: bool = False,
     ) -> None:
         self._rows[str(node_id)].set_commands(
             can_start=can_start,
             can_stop=can_stop,
+            pending=pending,
         )
 
     def set_logic_auto_preview(self, node_id: str, enabled: bool) -> None:

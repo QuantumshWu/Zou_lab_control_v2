@@ -26,7 +26,8 @@ conflict with that instance.
 The formal virtual and physical path is Calibration artifact -> Camera frames
 signal -> Occupancy processor -> fixed-kind Plot Panel. Add Logic creates a
 stopped row and opens its non-modal Edit tab. Each row has one shared draft;
-Logic Edit uses Start/Restart, while Panel Edit's Producer Restart sends that same
+the row and Logic Edit both show Start (Restart while the node is active) and
+an always-present Stop, while Panel Edit's Producer Restart sends that same
 draft through the same restart endpoint. Setting and Panel Edit likewise
 project one immutable/replace-style `PanelState`, so signal, size, interval and
 plot parameters cannot drift between two copies.
