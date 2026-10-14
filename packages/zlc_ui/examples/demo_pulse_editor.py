@@ -250,7 +250,7 @@ def populate(editor) -> None:
         (schedule.reorder_items_requested, "reorder_items_requested"),
         (schedule.bracket_committed, "bracket_committed"),
         (schedule.bracket_add_requested, "bracket_add_requested"),
-        (schedule.bracket_remove_requested, "bracket_remove_requested"),
+        (schedule.remove_items_requested, "remove_items_requested"),
         (schedule.run_repeats_committed, "run_repeats_committed"),
         (schedule.visible_ports_committed, "visible_ports_committed"),
         (scan.scan_hold_requested, "scan_hold_requested"),

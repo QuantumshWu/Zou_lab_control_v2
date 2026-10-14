@@ -594,7 +594,9 @@ def update_pulse_timeline(
         text.set_text(label_value)
         text.set_ha("right")
         text.set_va("bottom")
-        text.set_alpha(pulse.repeat_alpha)
+        # The Run loop's count is read, not drawn: full strength in its
+        # muted ink.  A bracket's count keeps its bracket's quiet hue.
+        text.set_alpha(1.0 if series is None else pulse.repeat_alpha)
         text.set_clip_on(True)
         text.set_in_layout(False)
         text.set_zorder(pulse.repeat_label_zorder + index)
@@ -631,8 +633,13 @@ def update_pulse_timeline(
             style.fonts.tick_pt - pulse.ytick_font_delta_pt,
         ),
     )
-    for tick, key in zip(axis.get_yticklabels(), row_keys):
-        tick.set_color(row_colors[key])
+    # A channel's name is text and reads in the text ink; its colour -- the
+    # one its trace wears -- marks the tick beside it.  Names inked in the
+    # trace palette ran from 2:1 to 4:1 on white.
+    ink = axis.xaxis.label.get_color()
+    for tick, key in zip(axis.yaxis.get_major_ticks(), row_keys):
+        tick.tick1line.set_markeredgecolor(row_colors[key])
+        tick.label1.set_color(ink)
 
     display_factor, display_unit = pulse_time_scale(
         payload,

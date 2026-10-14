@@ -28,12 +28,14 @@ class _BindingButton(QtWidgets.QAbstractButton):
         painter = QtGui.QPainter(self)
         painter.setRenderHint(QtGui.QPainter.Antialiasing)
         badges = []
+        # Every badge wears its binding's colour at reading strength, so its
+        # white letter reads: S on ORANGE_DARK 7.2:1 (on ORANGE 2.4:1), A on
+        # API_VIOLET_DARK 7.8:1 (on API_VIOLET 3.2:1), C on CONFIG_GREEN_DARK
+        # 6.2:1 (on CONFIG_GREEN 2.0:1).
         if self.scan:
-            badges.append(("S", ORANGE))
+            badges.append(("S", ORANGE_DARK))
         if self.source != "default":
-            # The "C" badge wears the config green at reading strength: white
-            # on CONFIG_GREEN itself was 2.0:1, on CONFIG_GREEN_DARK it is 6.2:1.
-            badges.append((self.source[0].upper(), API_VIOLET if self.source == "api" else CONFIG_GREEN_DARK))
+            badges.append((self.source[0].upper(), API_VIOLET_DARK if self.source == "api" else CONFIG_GREEN_DARK))
         if not badges:
             badges.append(("", PLACEHOLDER))
         diameter = min(self.width() - 2, self.height() / len(badges) - 1)

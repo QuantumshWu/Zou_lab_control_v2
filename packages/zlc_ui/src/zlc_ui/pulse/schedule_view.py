@@ -598,7 +598,9 @@ class ChannelPanel(FluentGroupBox):
         mode_layout = QtWidgets.QHBoxLayout(mode_row)
         mode_layout.setContentsMargins(0, 0, 0, 0)
         mode_layout.setSpacing(px(4))
-        self.config_mode = FluentSwitch("Config")
+        # The row's "Config:" label names it; a switch saying "Config" again
+        # beside it read "Config: Config".
+        self.config_mode = FluentSwitch("")
         self.config_refresh_button = FluentButton("Refresh")
         self.config_refresh_button.setEnabled(False)
         mode_layout.addWidget(self.config_mode)
@@ -950,7 +952,7 @@ class ComponentCard(FluentGroupBox):
         top_layout.addWidget(unit_row)
         self.name_edit = FluentLineEdit(component.name)
         self.name_edit.setFixedWidth(control_width)
-        self.name_edit.setAlignment(QtCore.Qt.AlignCenter)
+        # A field like every other: its text starts at the field's inset.
         # The card shows no Name label: the placeholder carries it.
         self.name_edit.setPlaceholderText("Name")
         self.name_edit.editingFinished.connect(self._commit_name)
@@ -1036,8 +1038,7 @@ class ComponentCard(FluentGroupBox):
                          edge=CONFIG_GREEN if component.config_active else ACCENT)
         self.set_title_color(CONFIG_GREEN_DARK if component.config_active else ACCENT)
         # On the green card a light-blue face would lay a second hue on it:
-        # the commands go white with NO edge, so they are not mistaken for
-        # the white, edged name field above them.
+        # the commands go white with a hairline in the card's own green.
         for button in (self.expand_button, self.edit_button, self.ungroup_button):
             button.set_on_tint(component.config_active)
         self.source_button.source = component.source

@@ -282,7 +282,6 @@ class PulseEditorHandle(QtCore.QObject):
         panel = self._view.schedule_view.channel_panel
         with signals_blocked(panel.config_mode):
             panel.config_mode.setChecked(enabled)
-            panel.config_mode.setText("Config")
         panel.config_mode.setEnabled(not busy)
         panel.config_refresh_button.setEnabled(not busy and enabled)
         panel.config_mode.setToolTip(error or "Default uses authored content; Config uses saved sources")

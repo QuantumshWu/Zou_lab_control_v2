@@ -1140,12 +1140,13 @@ view.tabs.setCurrentWidget(view.schedule_view)
 app.processEvents()
 channel = view.schedule_view.channel_panel
 switch = channel.config_mode
-assert switch.text() == "Config" and switch.isVisible()
+# The row's "Config:" label names the switch; it says nothing more itself.
+assert switch.text() == "" and switch.isVisible()
 switch_width = switch.width()
 current_page = replace(record, entries=config._entries())
 handle.set_config_page(replace(current_page, active_path='C:/config/' + 'calibration_' * 30 + '.json'))
 app.processEvents()
-assert switch.width() == switch_width and switch.text() == "Config"
+assert switch.width() == switch_width and switch.text() == ""
 handle.set_config_page(current_page)
 view.tabs.setCurrentWidget(view.config_view)
 assert view.current_page == "Value Config"
@@ -1962,11 +1963,11 @@ modes, refreshes = [], []
 handle.config_mode_committed.connect(modes.append)
 handle.refresh_effective_requested.connect(lambda: refreshes.append(True))
 handle.set_config_mode(False)
-assert main.channel_panel.config_mode.text() == "Config"
+assert main.channel_panel.config_mode.text() == ""
 main.channel_panel.config_mode.click()
 assert modes == [True]
 handle.set_config_mode(True)
-assert main.channel_panel.config_mode.text() == "Config"
+assert main.channel_panel.config_mode.text() == ""
 main.channel_panel.config_refresh_button.click()
 assert refreshes == [True] and modes == [True]
 card = main._component_cards[("component", "mot")]

@@ -31,7 +31,6 @@ from zlc_ui.fluent import (
     FluentPageBody,
     ORANGE_TINT,
     FluentButton,
-    FluentCheckBox,
     FluentComboBox,
     FluentCycleComboBox,
     FluentFrame,
@@ -42,6 +41,7 @@ from zlc_ui.fluent import (
     FluentSectionLabel,
     FluentSettingRow,
     FluentSpinBox,
+    FluentSwitch,
     FluentTableView,
     FluentTabWidget,
     InfoPane,
@@ -460,14 +460,16 @@ class _DataEditorView(QtWidgets.QWidget):
         # slot rather than beside it in a box that would collapse it.
         self.component_combo = FluentComboBox()
         self.component_combo.setMinimumContentsLength(10)
-        self.sigma_check = FluentCheckBox("Enable sigma")
+        # A setting, so a switch -- the same control every on/off of
+        # these windows is -- named by what it turns on.
+        self.sigma_switch = FluentSwitch("Sigma")
         component_controls = QtWidgets.QWidget(data_group)
         component_controls.setStyleSheet("background: transparent;")
         component_layout = QtWidgets.QHBoxLayout(component_controls)
         component_layout.setContentsMargins(0, 0, 0, 0)
         component_layout.setSpacing(window_pad(0.5))
         component_layout.addWidget(self.component_combo)
-        component_layout.addWidget(self.sigma_check)
+        component_layout.addWidget(self.sigma_switch)
         component_layout.addStretch(1)
         data_layout.addWidget(
             FluentSettingRow(
@@ -514,7 +516,7 @@ class _DataEditorView(QtWidgets.QWidget):
         self.component_combo.activated.connect(
             lambda _index: self._emit("set_component", component=self.component_combo.currentData())
         )
-        self.sigma_check.toggled.connect(lambda enabled: self._emit("toggle_sigma", enabled=bool(enabled)))
+        self.sigma_switch.toggled.connect(lambda enabled: self._emit("toggle_sigma", enabled=bool(enabled)))
         self.value_model.edits_requested.connect(
             lambda cells: self._emit("set_cells", component=self.component_combo.currentData(), cells=cells)
         )
@@ -763,8 +765,8 @@ class _DataEditorView(QtWidgets.QWidget):
                 table.get("component_choices", ()),
                 table.get("component"),
             )
-            with signals_blocked(self.sigma_check):
-                self.sigma_check.setChecked(bool(table.get("sigma_enabled", False)))
+            with signals_blocked(self.sigma_switch):
+                self.sigma_switch.setChecked(bool(table.get("sigma_enabled", False)))
             self.value_model.set_projection(table)
             self.blank_help_label.setText(str(table.get("blank_help", "")))
             self.message_label.setText(str(data.get("message", "")))

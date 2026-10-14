@@ -195,7 +195,8 @@ class PaletteConfig:
     line_single: str
     pulse_cycle: tuple[str, ...]
     bracket_cycle: tuple[str, ...]
-    #: The ink of the Run loop that frames the whole pulse.  Every
+    #: The ink of the Run loop that frames the whole pulse -- the
+    #: interface's MUTED_INK, in which its count is written.  Every
     #: bracket takes its own from ``bracket_cycle`` by its number, and its
     #: posts in the editor wear the same, so the loop over the timeline
     #: and the frame around the cards read as one thing.
@@ -857,7 +858,7 @@ def build_plot_style() -> PlotStyleConfig:
         line_single="#808080",
         pulse_cycle=("#5D7583", "#C37D5A", "#6F8D73", "#A66E87", "#7A6FA4", "#B5A262", "#5E9A9A", "#9A765E", "#7890B5", "#8B8B8B", "#B97878", "#679174"),
         bracket_cycle=("#C96F3D", "#4F7EA8", "#8B6BB8", "#5B9A6B"),
-        pulse_run="#6A6A6A",
+        pulse_run="#6A6866",
         hist_fill="grey",
         bright="skyblue",
         fit_left="skyblue",
