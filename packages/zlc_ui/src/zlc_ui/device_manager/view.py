@@ -9,6 +9,8 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 from zlc_ui.fluent import (
     control_height,
     row_gap,
+    section_gap,
+    status_dot_gap,
     ACCENT,
     ACCENT_TINT,
     CARD_PAD,
@@ -38,7 +40,6 @@ from zlc_ui.fluent import (
     FluentStatusStrip,
     FluentSwitch,
     add_row_switch,
-    command_gap,
     FluentTabWidget,
     fluent_font_size,
     fluent_scrollbar_thickness,
@@ -66,6 +67,14 @@ from zlc_ui.console.status_strip import StatusStrip
 
 
 
+
+
+def _name_room() -> int:
+    """The room an eliding label sized to its text keeps beyond the text:
+    the scaled_px(2) ElidedLabel never writes into, and the pixel a
+    fractional advance rounds down."""
+
+    return scaled_px(2) + 1
 
 
 def _rule_gap() -> int:
@@ -245,7 +254,7 @@ class _DeviceCard(FluentFrame):
         # column -- as wide as the number boxes under it (set_columns), so
         # the type beside it starts where they end -- and the commands at
         # the row's end.
-        self.name_label = QtWidgets.QLabel("Role")
+        self.name_label = FluentLabel("Role")
         self.role_edit = FluentLineEdit()
         self.role_edit.setPlaceholderText("role")
         self.role_edit.set_placeholder_prompt()
@@ -396,9 +405,9 @@ class _LiveDeviceCard(FluentFrame):
         self.instance_id = str(instance_id)
         outer = QtWidgets.QHBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
-        # The row's commands stand the standard gap apart, as commands do
+        # The row's commands stand the row's one gap apart, as commands do
         # in every other row; packed tighter they read as one segmented bar.
-        outer.setSpacing(command_gap())
+        outer.setSpacing(row_gap())
         self.role_label = ElidedLabel("")
         self.detail_label = muted_note_label("")
         self.control_button = FluentButton("Control")
@@ -642,7 +651,7 @@ class DeviceControlView(QtWidgets.QWidget):
         status_host = QtWidgets.QWidget()
         status_layout = QtWidgets.QHBoxLayout(status_host)
         status_layout.setContentsMargins(0, 0, 0, 0)
-        status_layout.setSpacing(window_pad(0.2))
+        status_layout.setSpacing(status_dot_gap())
         status_layout.addWidget(dot)
         status_layout.addWidget(status, 1)
         timer = QtCore.QTimer(self)
@@ -1007,9 +1016,11 @@ class DeviceManagerView(QtWidgets.QWidget):
         header, self.heading_label = card_title_row(
             "Devices", self.status_dot, self.document_name
         )
-        # The dot stands as far from the name as the status line's dot from
-        # its words.
-        header.setSpacing(self.status_strip.layout().spacing())
+        # The dot stands as far from the name's words as the status line's
+        # dot from its own.  The name is right-aligned in a label that keeps
+        # a little room it never writes into (_name_room), and that room lies
+        # between the two, so the row's gap is short by it.
+        header.setSpacing(max(0, status_dot_gap() - _name_room()))
         header.setContentsMargins(0, 0, gutter, 0)
         self._fit_document_name()
         page.addLayout(header)
@@ -1017,7 +1028,11 @@ class DeviceManagerView(QtWidgets.QWidget):
 
         columns = QtWidgets.QHBoxLayout()
         columns.setContentsMargins(0, 0, 0, 0)
-        columns.setSpacing(window_pad(0.65))
+        # The two columns' cards stand one section gap apart.  The left
+        # column keeps its bar's gutter at its right whether or not the bar
+        # shows, so the gutter is part of that gap: the bar, when it shows,
+        # stands in the gap beside the cards it scrolls.
+        columns.setSpacing(max(0, section_gap() - gutter))
 
         self.left_scroll = FluentScrollArea()
         self.left_body = QtWidgets.QWidget()
@@ -1087,7 +1102,7 @@ class DeviceManagerView(QtWidgets.QWidget):
 
         actions = QtWidgets.QHBoxLayout()
         actions.setContentsMargins(0, 0, gutter, 0)
-        actions.setSpacing(command_gap())
+        actions.setSpacing(row_gap())
         # New is a command, a button among the file commands, whose menu
         # names the templates; a combo box in the row read as a setting.
         self.new_button = FluentButton("New…")
@@ -1122,8 +1137,7 @@ class DeviceManagerView(QtWidgets.QWidget):
         word's width away from it."""
 
         label = self.document_name
-        # ElidedLabel keeps scaled_px(2) of room it never writes into.
-        need = label.fontMetrics().horizontalAdvance(label.text()) + scaled_px(2) + 1
+        need = label.fontMetrics().horizontalAdvance(label.text()) + _name_room()
         width = min(need, window_pad(24))
         if label.minimumWidth() != width:
             label.setMinimumWidth(width)
@@ -1352,6 +1366,7 @@ class DeviceManagerView(QtWidgets.QWidget):
                 frame = FluentFrame(self.discovered_group, rule=True)
                 row = QtWidgets.QHBoxLayout(frame)
                 row.setContentsMargins(0, 0, 0, 0)
+                row.setSpacing(row_gap())
                 title = ElidedLabel("")
                 detail = muted_note_label("")
                 button = FluentButton("Add")
