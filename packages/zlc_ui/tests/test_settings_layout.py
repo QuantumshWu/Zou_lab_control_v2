@@ -1190,6 +1190,14 @@ seen = []; form.changed.connect(seen.append)
 
 editor.add_button.click(); app.processEvents()
 assert seen == ['expressions'], seen
+# Add stands on the field's own line, beside its label, and the rows follow
+# it at the form's one gap -- not a button alone on a line under them.
+from zlc_ui.form import form_gap
+top_of = lambda widget: widget.mapTo(form, QtCore.QPoint()).y()
+label = form._rows['expressions'].layout().itemAt(0).widget()
+assert (top_of(label), label.height()) == (top_of(editor.add_button), editor.add_button.height())
+lines = [editor.add_button, *(line for line, _cells, _remove in editor._rows)]
+assert [top_of(below) - top_of(above) - above.height() for above, below in zip(lines, lines[1:])] == [form_gap()] * 2
 _row, cells, remove = editor._rows[1]
 assert isinstance(cells['name'], FluentLineEdit)
 assert QtWidgets.QApplication.focusWidget() is cells['name']

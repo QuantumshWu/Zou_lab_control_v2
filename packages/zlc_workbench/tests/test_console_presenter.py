@@ -5012,7 +5012,7 @@ def test_a_derive_publishes_the_counts_of_the_occupied_sites(
     assert not incomplete["can_start"]
     assert incomplete["issues"][0] == "how_many · statistic: choose the axes it reduces over"
     assert presenter._logic_state(presenter.logic[derive_id]) == (
-        "idle", "Draft: how_many · statistic: choose the axes it reduces over"
+        "draft", "Draft: how_many · statistic: choose the axes it reduces over"
     )
     assert presenter.update_logic_draft(derive_id, values={"outputs": program})
     assert presenter.logic_editor_projection(derive_id)["can_start"]

@@ -9,37 +9,41 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-from PyQt5 import QtCore, QtWidgets
+from PyQt5 import QtCore, QtGui, QtWidgets
 
 from zlc_ui.fluent import (
-    GREEN,
     GREY,
     MUTED_INK,
-    ORANGE,
-    ORANGE_DARK,
-    RED,
-    RED_DARK,
     TEXT,
     FluentButton,
     FluentComboBox,
     FluentLabel,
     FluentReadoutEdit,
     FluentScrollArea,
+    FluentSectionLabel,
     FluentSettingRow,
     FluentStatusDot,
     FluentSwitch,
     add_row_switch,
     FluentTreeComboBox,
     FONT,
+    field_text_inset,
     fill_grouped_choice_combo,
     fluent_font_size,
     retire_widget,
     scaled_px,
     setting_label_width,
+    window_pad,
 )
-from zlc_ui.form import FluentParameterForm, FormSpec
+from zlc_ui.form import FluentParameterForm, FormSpec, form_gap
 from zlc_ui.form.qt_form import _form_label_width
-from .logic_row_view import fit_start_button, start_label
+from .logic_row_view import (
+    STATE_COLOURS,
+    STATUS_DOT,
+    fit_start_button,
+    mount_logic_page,
+    start_label,
+)
 
 
 class LogicEditorView(QtWidgets.QWidget):
@@ -83,13 +87,22 @@ class LogicEditorView(QtWidgets.QWidget):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
         scroll = FluentScrollArea()
-        scroll.setWidgetResizable(True)
         body = QtWidgets.QWidget()
         body.setStyleSheet("background: transparent;")
+        # ONE RHYTHM.  Selectors, both forms, a contribution's rows and the
+        # results are one run of rows, a form gap apart whichever widget
+        # holds them; a section gap sits after the header, before a
+        # contribution that opens with a section title and before the action
+        # bar.  The body spacing is the row gap and these spacers add the
+        # rest of a section gap, each sized by _space_sections from what is
+        # shown -- a block spacing of its own had put 9 between rows that
+        # stand 5 apart everywhere else, and 19 above the action bar.
         self._body_layout = QtWidgets.QVBoxLayout(body)
-        margin = scaled_px(14, minimum=8)
-        self._body_layout.setContentsMargins(margin, margin, margin, margin)
-        self._body_layout.setSpacing(scaled_px(10, minimum=6))
+        self._body_layout.setSpacing(form_gap())
+        self._lead_gap = QtWidgets.QSpacerItem(0, 0, QtWidgets.QSizePolicy.Minimum, QtWidgets.QSizePolicy.Fixed)
+        self._action_gap = QtWidgets.QSpacerItem(0, 0, QtWidgets.QSizePolicy.Minimum, QtWidgets.QSizePolicy.Fixed)
+        #: The spacer above each contribution, by its factory.
+        self._contribution_gaps: dict[object, QtWidgets.QSpacerItem] = {}
 
         # What this is on one line, how it stands on the next: the kind sat
         # a third of the way across and a long draft error wrapped into a
@@ -115,21 +128,26 @@ class LogicEditorView(QtWidgets.QWidget):
         header_layout.addLayout(title_row)
         status_row = QtWidgets.QHBoxLayout()
         status_row.setSpacing(scaled_px(8, minimum=5))
-        self.status_dot = FluentStatusDot(size=10, color=GREY)
+        self.status_dot = FluentStatusDot(size=STATUS_DOT, color=GREY)
         self.status_label = FluentLabel("stopped")
         self.status_label.setWordWrap(True)
         self.status_label.setMinimumWidth(0)
-        # The dot sits on the FIRST line of a status that wraps.
+        self.status_label.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop)
+        # The dot sits on the FIRST line of a status that wraps, centred on
+        # that line's capitals the way a row's dot is centred on its words:
+        # the line's top, down its ascent, back up half a capital.  Centred
+        # on the line box instead, it stood a pixel and a half high.
+        metrics = QtGui.QFontMetricsF(self.status_label.font())
+        dot_top = metrics.ascent() - metrics.capHeight() / 2 - self.status_dot.height() / 2
         dot_column = QtWidgets.QVBoxLayout()
-        dot_column.setContentsMargins(
-            0, max(0, (self.status_label.fontMetrics().height() - self.status_dot.height()) // 2), 0, 0
-        )
+        dot_column.setContentsMargins(0, max(0, round(dot_top)), 0, 0)
         dot_column.addWidget(self.status_dot)
         dot_column.addStretch(1)
         status_row.addLayout(dot_column)
         status_row.addWidget(self.status_label, 1)
         header_layout.addLayout(status_row)
         self._body_layout.addWidget(header)
+        self._body_layout.addItem(self._lead_gap)
 
         # The source and device choices are rows of the form, in its label
         # column -- not a separately boxed card with its own label style.
@@ -137,7 +155,7 @@ class LogicEditorView(QtWidgets.QWidget):
         self._selector_frame.setStyleSheet("background: transparent;")
         self._selector_layout = QtWidgets.QVBoxLayout(self._selector_frame)
         self._selector_layout.setContentsMargins(0, 0, 0, 0)
-        self._selector_layout.setSpacing(scaled_px(6, minimum=4))
+        self._selector_layout.setSpacing(form_gap())
         self.source_combo: FluentComboBox | None = None
         self._body_layout.addWidget(self._selector_frame)
 
@@ -166,7 +184,7 @@ class LogicEditorView(QtWidgets.QWidget):
             self._artifact_result_frame
         )
         self._artifact_result_layout.setContentsMargins(0, 0, 0, 0)
-        self._artifact_result_layout.setSpacing(scaled_px(6, minimum=4))
+        self._artifact_result_layout.setSpacing(form_gap())
         self._artifact_result_rows: dict[str, FluentSettingRow] = {}
         self._body_layout.addWidget(self._artifact_result_frame)
 
@@ -176,6 +194,7 @@ class LogicEditorView(QtWidgets.QWidget):
         # are always there, so nothing on this row moves when a run begins.
         # Remove keeps to the far side, away from the buttons pressed most.
         actions = QtWidgets.QHBoxLayout()
+        actions.setSpacing(form_gap())
         self.remove_button = FluentButton("Remove", role="destructive")
         self.remove_button.clicked.connect(self.remove_requested.emit)
         actions.addWidget(self.remove_button)
@@ -198,15 +217,15 @@ class LogicEditorView(QtWidgets.QWidget):
         add_row_switch(actions, self.preview_switch, lead=False)
         actions.addWidget(self.start_button)
         actions.addWidget(self.stop_button)
-        # Clear of the help paragraph above, so the ghost Remove reads as a
-        # command on the action row and not as one more red sentence.
-        self._body_layout.addSpacing(scaled_px(12, minimum=8))
+        # A section gap clear of the last section, so the ghost Remove reads
+        # as a command on the action row and not as one more red sentence.
+        self._body_layout.addItem(self._action_gap)
         self._body_layout.addLayout(actions)
         self._show_actions = bool(show_actions)
         for button in (self.remove_button, self.start_button, self.stop_button, self.preview_switch):
             button.setVisible(bool(show_actions))
         self._body_layout.addStretch(1)
-        scroll.setWidget(body)
+        mount_logic_page(scroll, body)
         outer.addWidget(scroll)
 
         self.update_projection(projection)
@@ -252,7 +271,7 @@ class LogicEditorView(QtWidgets.QWidget):
         # cheap half further down is what applies them.  ``error`` is not
         # among them: it changes only when a run fails or recovers, and a
         # contribution shows a failure beside the row that caused it.
-        volatile = ("running", "pending", "issues", "status",
+        volatile = ("running", "pending", "issues", "status", "state",
                     "auto_preview", "can_start", "can_stop")
         structure = {
             key: value for key, value in incoming.items() if key not in volatile
@@ -261,14 +280,18 @@ class LogicEditorView(QtWidgets.QWidget):
             self._applied_structure = structure
             for widget in self._contributions.values():
                 widget.update_projection(incoming)
-            # A contribution whose own rows are labelled (Occupancy's file
-            # names) says what column they need once it has drawn them; the
-            # form's labels and theirs then share the widest.
+            # THE ONE LABEL COLUMN, from the labels that are SHOWN: the
+            # visible form rows, the selectors and results, and every
+            # contribution that takes the column.  A field a contribution
+            # manages is not a form row, and its label -- Frame Survival's
+            # "Published pairs" -- had pushed every control right of a
+            # column nobody's words filled.
             label_width = max(
-                _form_label_width((*spec.fields, *artifact_spec.fields)),
+                _form_label_width((*visible_spec.fields, *artifact_spec.fields)),
                 setting_label_width(_row_labels(incoming)),
-                *(int(widget.label_width_hint()) for widget in self._contributions.values()
-                  if callable(getattr(widget, "label_width_hint", None))),
+                *(_contribution_label_width(widget, spec)
+                  for widget in self._contributions.values()
+                  if callable(getattr(widget, "set_label_width", None))),
             )
             self._label_width = label_width
             self.artifact_form.set_label_width(label_width)
@@ -286,6 +309,7 @@ class LogicEditorView(QtWidgets.QWidget):
             self.form.setVisible(bool(visible_spec.keys))
             self._reconcile_selectors(incoming)
             self._rebuild_artifact_results(incoming.get("artifact_results", ()))
+            self._space_sections()
 
         offered = bool(incoming["preview_offered"])
         self.preview_switch.setVisible(offered and bool(self._show_actions))
@@ -300,18 +324,22 @@ class LogicEditorView(QtWidgets.QWidget):
         error = str(incoming.get("error") or "")
         issues = tuple(str(issue) for issue in incoming.get("issues", ()) or ())
         self._project_commands()
-        state = "waiting for device release" if pending else ("running" if running else "stopped")
-        status = str(incoming.get("status") or state)
-        issue = issues[0] if issues else ""
-        self.status_label.setText(error or (f"Draft: {issue}" if issue else status))
+        # The row's own state, drawn from the row's own table; the page only
+        # puts the draft's first problem first, since a Restart is what this
+        # page edits for.
+        state = str(incoming.get("state") or "idle")
+        status = str(
+            incoming.get("status")
+            or ("waiting for device release" if pending else "running" if running else "stopped")
+        )
+        if error:
+            state, status = "error", error
+        elif issues:
+            state, status = "draft", f"Draft: {issues[0]}"
+        self.status_label.setText(status)
         # Written when they CHANGE: the sheet is re-parsed and the widget
         # repolished on every write.
-        colours = (
-            (RED, RED_DARK) if error
-            else (ORANGE, ORANGE_DARK) if issue
-            else (GREEN, TEXT) if running
-            else (GREY, MUTED_INK)
-        )
+        colours = STATE_COLOURS[state]
         if colours != self._status_colours:
             self._status_colours = colours
             self.status_dot.set_color(colours[0])
@@ -369,14 +397,16 @@ class LogicEditorView(QtWidgets.QWidget):
                 raise TypeError("logic UI contribution must update_projection")
             changed.connect(self.draft_changed.emit)
             self._contributions[factory] = widget
-            self._body_layout.insertWidget(
-                self._body_layout.indexOf(self._artifact_result_frame),
-                widget,
-            )
+            gap = QtWidgets.QSpacerItem(0, 0, QtWidgets.QSizePolicy.Minimum, QtWidgets.QSizePolicy.Fixed)
+            self._contribution_gaps[factory] = gap
+            at = self._body_layout.indexOf(self._artifact_result_frame)
+            self._body_layout.insertItem(at, gap)
+            self._body_layout.insertWidget(at + 1, widget)
         for factory in tuple(self._contributions):
             if factory in factories:
                 continue
             widget = self._contributions.pop(factory)
+            self._body_layout.removeItem(self._contribution_gaps.pop(factory))
             retire_widget(widget)
         managed: set[str] = set()
         for factory in factories:
@@ -389,6 +419,38 @@ class LogicEditorView(QtWidgets.QWidget):
             if callable(setter):
                 setter(self._mutation_enabled)
         return frozenset(managed)
+
+    def _space_sections(self) -> None:
+        """Size the spacers so each shown boundary gets one gap.
+
+        The body already puts a form gap between any two shown blocks; a
+        spacer adds the rest of a section gap where a section starts: after
+        the header (once, before whatever is shown first), before a
+        contribution that opens with a section title when rows come before
+        it, and before the action bar.  A hidden block takes no gap at all.
+        """
+
+        extra = window_pad() - form_gap()
+        rows_above = any(
+            not block.isHidden()
+            for block in (self._selector_frame, self.artifact_form, self.form)
+        )
+        for factory, widget in self._contributions.items():
+            opens = rows_above and not widget.isHidden() and _opens_section(widget)
+            self._contribution_gaps[factory].changeSize(
+                0, extra if opens else 0,
+                QtWidgets.QSizePolicy.Minimum, QtWidgets.QSizePolicy.Fixed,
+            )
+            rows_above = rows_above or not widget.isHidden()
+        shown = rows_above or not self._artifact_result_frame.isHidden()
+        self._lead_gap.changeSize(
+            0, extra if shown else 0,
+            QtWidgets.QSizePolicy.Minimum, QtWidgets.QSizePolicy.Fixed,
+        )
+        self._action_gap.changeSize(
+            0, extra, QtWidgets.QSizePolicy.Minimum, QtWidgets.QSizePolicy.Fixed
+        )
+        self._body_layout.invalidate()
 
     def _project_commands(self) -> None:
         pending = bool(self._projection.get("pending"))
@@ -604,6 +666,15 @@ class LogicEditorView(QtWidgets.QWidget):
             self._artifact_result_readouts.clear()
             for name, path, contract in results:
                 readout = FluentReadoutEdit(path)
+                # A value standing in the field column starts where the
+                # fields' text starts, not on the boxes' edge: a readout is
+                # flush with its own left edge, so it is indented by a
+                # field's text inset.
+                margins = readout.textMargins()
+                readout.setTextMargins(
+                    margins.left() + field_text_inset(), margins.top(),
+                    margins.right(), margins.bottom(),
+                )
                 self._artifact_result_readouts[name] = readout
                 row = FluentSettingRow(
                     _device_label(name), readout, label_width=self._label_width,
@@ -649,11 +720,61 @@ def _row_labels(projection: Mapping[str, object]) -> tuple[str, ...]:
     labels = [_device_label(name) for name in (projection.get("device_options") or {})]
     if projection.get("source_required"):
         labels.append(str(projection.get("source_label") or "Signal"))
+    acquisition_key = str(projection.get("acquisition_input") or "")
+    if acquisition_key:
+        labels.extend(
+            field.label for field in projection["form_spec"].fields
+            if field.key == acquisition_key
+        )
     labels.extend(
         _device_label(dict(raw).get("name") or "")
         for raw in tuple(projection.get("artifact_results", ()) or ())
     )
     return tuple(labels)
+
+
+def _contribution_label_width(widget: QtWidgets.QWidget, spec: FormSpec) -> int:
+    """The label column needed by a contribution that takes it.
+
+    A contribution names the words it puts in the column as ``row_labels``
+    (a tuple of words, or a callable answering one): its own rows' labels,
+    a grid's row names.  One that names none shows its managed fields as
+    form rows (Calibration, SLM rearrangement), so their labels are its
+    labels.  The editor measures every label by the one rule; no
+    contribution measures a column of its own.
+    """
+
+    declared = getattr(widget, "row_labels", None)
+    if callable(declared):
+        declared = declared()
+    if declared is not None:
+        return setting_label_width(tuple(str(label) for label in declared))
+    managed = set(getattr(widget, "managed_fields", ()) or ())
+    return _form_label_width(field for field in spec.fields if field.key in managed)
+
+
+def _opens_section(widget: QtWidgets.QWidget) -> bool:
+    """Whether ``widget`` begins with a section title.
+
+    Its first shown item, looked for through nested layouts, is the shared
+    section title (FluentSectionLabel): Occupancy's "Calibrations" header,
+    the SLM editor's "Target grid".  Hidden widgets and spacers are passed
+    over, as the layout passes over them.
+    """
+
+    layout = widget.layout()
+    while layout is not None:
+        item = next(
+            (layout.itemAt(index) for index in range(layout.count())
+             if not layout.itemAt(index).isEmpty()),
+            None,
+        )
+        if item is None:
+            return False
+        if item.widget() is not None:
+            return isinstance(item.widget(), FluentSectionLabel)
+        layout = item.layout()
+    return False
 
 
 __all__ = ["LogicEditorView"]

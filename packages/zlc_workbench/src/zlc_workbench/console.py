@@ -8463,6 +8463,7 @@ class ConsolePresenter:
             "can_stop": can_stop,
             "issues": finalization.issues,
             "error": status if state == "error" else "",
+            "state": state,
             "status": status,
             # The offer-relevant subset of what a start would bind: editors
             # project from these without the start-time side effects.
@@ -8977,7 +8978,14 @@ class ConsolePresenter:
         finalization: LogicDraftFinalization | None = None,
     ) -> tuple[str, str]:
         """(row state, status text); ``finalization`` is the caller's own
-        finalization of this row in the same turn, when it has one."""
+        finalization of this row in the same turn, when it has one.
+
+        The state is a word of the row's vocabulary -- idle, draft, running,
+        error -- and a draft whose issues refuse a Start is ``draft``, never
+        ``idle``.  The node's Edit page is told the same word, so the row
+        and the page draw one status one way: a draft drawn grey on one and
+        amber on the other was two looks for one status.
+        """
 
         def draft_issues() -> tuple[str, ...]:
             answer = (
@@ -8991,7 +8999,7 @@ class ConsolePresenter:
         if host is None:
             issues = draft_issues()
             error = binding.draft_error
-            state = "error" if error else "idle"
+            state = "error" if error else "draft" if issues else "idle"
             status = error or (f"Draft: {issues[0]}" if issues else "not started")
             if binding.following and not error and not issues:
                 signal = getattr(binding.finalization, "source_signal", "")
@@ -9012,7 +9020,7 @@ class ConsolePresenter:
             else:
                 issues = draft_issues()
                 if issues:
-                    state, status = "idle", f"Draft: {issues[0]}"
+                    state, status = "draft", f"Draft: {issues[0]}"
                 elif binding.following:
                     signal = getattr(
                         binding.finalization, "source_signal", ""
