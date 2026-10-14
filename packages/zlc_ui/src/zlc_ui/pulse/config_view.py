@@ -9,11 +9,20 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 from zlc_ui.fluent import (
     FluentButton, FluentComboBox,
     ElidedLabel, FluentGroupBox, FluentLabel, FluentReadoutEdit, FluentScrollArea,
-    FluentTableView, read_editable_combo, retire_widget, signals_blocked,
+    FluentSectionLabel, FluentTableView, field_text_inset, fluent_scrollbar_thickness,
+    read_editable_combo, retire_widget, signals_blocked,
 )
 
-from ._layout import px, row_height
+from ._layout import (
+    bound_field_width, card_pad, column_header, config_name_width, inline_gap, px, row_gap,
+    row_height, section_gap,
+)
 from .models import ConfigPageRecord
+
+#: The binding grid's columns, left to right: what it binds, the Config name
+#: chosen for it, its default and the Config value (columns 2 and 3), and the
+#: status, which takes the rest of the row.
+_FIELD, _NAME, _DEFAULT, _STATUS = 0, 1, 2, 4
 
 
 class PulseConfigView(QtWidgets.QWidget):
@@ -38,12 +47,19 @@ class PulseConfigView(QtWidgets.QWidget):
         self.scroll.set_width_bounded_widget(body)
         outer.addWidget(self.scroll)
         content = QtWidgets.QVBoxLayout(body)
-        content.setContentsMargins(px(8), px(8), px(8), px(8))
-        content.setSpacing(px(8))
+        # The cards end on every tab's right edge whether or not the bar
+        # shows: the scroll area keeps the bar's gutter at all times, and it
+        # stands inside the page's right inset rather than added to it.
+        page = section_gap()
+        content.setContentsMargins(page, page, max(0, page - fluent_scrollbar_thickness()), page)
+        content.setSpacing(section_gap())
+        pad = card_pad()
         file_box = FluentGroupBox("Value file")
         file_layout = QtWidgets.QVBoxLayout(file_box)
-        file_layout.setContentsMargins(px(10), px(8), px(10), px(10))
+        file_layout.setContentsMargins(pad, pad, pad, pad)
+        file_layout.setSpacing(row_gap())
         toolbar = QtWidgets.QHBoxLayout()
+        toolbar.setSpacing(inline_gap())
         self._file_buttons = []
         for name, text, role in (
             ("new", "New file", "standard"), ("load", "Open file", "standard"),
@@ -90,6 +106,7 @@ class PulseConfigView(QtWidgets.QWidget):
         self.values_model.itemChanged.connect(lambda _item: self._emit_entries())
         file_layout.addWidget(self.values_table)
         actions = QtWidgets.QHBoxLayout()
+        actions.setSpacing(inline_gap())
         self.add_button = FluentButton("Add parameter")
         self.remove_button = FluentButton("Remove selected", role="destructive")
         self.add_button.clicked.connect(self._add_entry)
@@ -102,25 +119,31 @@ class PulseConfigView(QtWidgets.QWidget):
 
         bindings_box = FluentGroupBox("Pulse bindings")
         bindings_layout = QtWidgets.QVBoxLayout(bindings_box)
-        bindings_layout.setContentsMargins(px(10), px(8), px(10), px(10))
+        bindings_layout.setContentsMargins(pad, pad, pad, pad)
+        bindings_layout.setSpacing(row_gap())
         self.mode_label = FluentLabel("Config is off. Pulse defaults are used.")
         self.mode_label.setWordWrap(True)
         bindings_layout.addWidget(self.mode_label)
         hint = ElidedLabel("Choose a value name for each field. Save the Pulse to keep these bindings.")
         bindings_layout.addWidget(hint)
+        # Each column as wide as what it holds, so a value name sits beside
+        # the field it binds: the field column is its widest label, the name
+        # and the two values have fixed widths, and the status takes the
+        # rest.  Stretch shares put a page width between them.
         self._binding_grid = QtWidgets.QGridLayout()
-        self._binding_grid.setHorizontalSpacing(px(8))
-        self._binding_grid.setVerticalSpacing(px(6))
-        for column, (title, stretch) in enumerate(zip(
-            ("Pulse field", "Value name", "Default", "Config value", "Status"),
-            (2, 2, 1, 1, 2),
-        )):
-            header = FluentLabel(title)
-            font = header.font()
-            font.setBold(True)
-            header.setFont(font)
+        self._binding_grid.setHorizontalSpacing(inline_gap())
+        self._binding_grid.setVerticalSpacing(row_gap())
+        self._binding_grid.setColumnStretch(_STATUS, 1)
+        self._grid_headers = tuple(
+            column_header(title)
+            for title in ("Pulse field", "Value name", "Default", "Config value", "Status")
+        )
+        # A header stands over its column's TEXT: the value names start a
+        # field's text inset inside their boxes; the read values start at
+        # their own edge.
+        self._grid_headers[_NAME].setIndent(field_text_inset())
+        for column, header in enumerate(self._grid_headers):
             self._binding_grid.addWidget(header, 0, column)
-            self._binding_grid.setColumnStretch(column, stretch)
         bindings_layout.addLayout(self._binding_grid)
         self.bindings_placeholder = FluentLabel("No value bindings yet. Choose Config from a field's source control in Edit.")
         self.bindings_placeholder.setWordWrap(True)
@@ -237,11 +260,7 @@ class PulseConfigView(QtWidgets.QWidget):
             if show_groups:
                 header = self._binding_headers.get(group_id)
                 if header is None:
-                    header = FluentLabel()
-                    font = header.font()
-                    font.setBold(True)
-                    header.setFont(font)
-                    header.setContentsMargins(0, px(6), 0, 0)
+                    header = FluentSectionLabel()
                     self._binding_headers[group_id] = header
                 header.setText(label or "Pulse")
                 index = self._binding_grid.indexOf(header)
@@ -264,6 +283,9 @@ class PulseConfigView(QtWidgets.QWidget):
                 widgets = (ElidedLabel(), combo, FluentReadoutEdit(), FluentReadoutEdit(), ElidedLabel())
                 for widget in widgets:
                     widget.setFixedHeight(row_height())
+                combo.setFixedWidth(config_name_width())
+                for widget in widgets[_DEFAULT:_STATUS]:
+                    widget.setFixedWidth(px(110, minimum=90))
                 self._binding_rows[field_id] = widgets
             for column, widget in enumerate(widgets):
                 index = self._binding_grid.indexOf(widget)
@@ -286,6 +308,10 @@ class PulseConfigView(QtWidgets.QWidget):
                 if draft is not None:
                     combo.lineEdit().setModified(True)
             combo.setEnabled(not record.busy)
+        labels = [widgets[_FIELD].text() for widgets in self._binding_rows.values()]
+        width = bound_field_width((self._grid_headers[_FIELD].text(), *labels))
+        for widget in (self._grid_headers[_FIELD], *(widgets[_FIELD] for widgets in self._binding_rows.values())):
+            widget.setFixedWidth(width)
 
 
 __all__ = ["PulseConfigView"]

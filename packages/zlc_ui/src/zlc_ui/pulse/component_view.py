@@ -5,12 +5,16 @@ from __future__ import annotations
 from PyQt5 import QtCore, QtWidgets
 
 from zlc_ui.fluent import (
-    ElidedLabel, FluentButton, FluentComboBox,
+    CARD_TITLE_PX, ElidedLabel, FluentButton, FluentComboBox,
     FluentFrame, FluentGroupBox, FluentLabel, FluentLineEdit, FluentScrollArea,
-    read_editable_combo, retire_widget, signals_blocked,
+    fluent_scrollbar_thickness, read_editable_combo, retire_widget, scaled_px,
+    setting_label_width, signals_blocked,
 )
 
-from ._layout import px, row_height
+from ._layout import (
+    bound_field_width, card_pad, config_name_width, inline_gap, panel_top_height, px, quiet, row_gap, row_height,
+    row_spacing, section_gap,
+)
 from .models import ScheduleVM
 from .schedule_view import PulseScheduleView
 
@@ -31,14 +35,35 @@ class PulseComponentView(QtWidgets.QWidget):
         self._sources: tuple[tuple[str, str, str, str, str], ...] = ()
         self._contexts: tuple[tuple[str, str], ...] = ()
         self.schedule_view: PulseScheduleView | None = None
+        # The page scrolls as one: the schedule keeps room for its header
+        # block and some port rows, and the references under it are reached
+        # by scrolling, instead of a nested list squeezing the schedule until
+        # no port row showed.  The cards end on every tab's right edge: the
+        # bar's gutter, kept at all times, stands inside the right inset.
         outer = QtWidgets.QVBoxLayout(self)
-        outer.setContentsMargins(px(8), px(8), px(8), px(8))
-        outer.setSpacing(px(8))
+        outer.setContentsMargins(0, 0, 0, 0)
+        scroll = FluentScrollArea()
+        page_body = QtWidgets.QWidget()
+        scroll.set_width_bounded_widget(page_body)
+        outer.addWidget(scroll)
+        self._page = QtWidgets.QVBoxLayout(page_body)
+        page = section_gap()
+        self._page.setContentsMargins(page, page, max(0, page - fluent_scrollbar_thickness()), page)
+        self._page.setSpacing(section_gap())
+        pad = card_pad()
         header = FluentFrame()
         head = QtWidgets.QVBoxLayout(header)
-        head.setContentsMargins(px(12), px(10), px(12), px(10))
+        head.setContentsMargins(pad, pad, pad, pad)
+        head.setSpacing(row_gap())
+        # The two rows are one form: one label column, so the Subpulse
+        # choice and the Config file start on one x, and both rows end on
+        # the card's right edge, Browse under the last command.
+        label_width = setting_label_width(("Subpulse", "Config file"), minimum=0)
         top = QtWidgets.QHBoxLayout()
-        top.addWidget(FluentLabel("Subpulse"))
+        top.setSpacing(inline_gap())
+        subpulse_label = FluentLabel("Subpulse")
+        subpulse_label.setFixedWidth(label_width)
+        top.addWidget(subpulse_label)
         self.context_combo = FluentComboBox()
         self.context_combo.setMinimumWidth(px(150))
         self.context_combo.currentIndexChanged.connect(self._context_changed)
@@ -64,7 +89,10 @@ class PulseComponentView(QtWidgets.QWidget):
         self.config_file_row.setStyleSheet("QWidget#subpulseConfigFileRow { background: transparent; }")
         file_row = QtWidgets.QHBoxLayout(self.config_file_row)
         file_row.setContentsMargins(0, 0, 0, 0)
-        file_row.addWidget(FluentLabel("Config file"))
+        file_row.setSpacing(inline_gap())
+        file_label = FluentLabel("Config file")
+        file_label.setFixedWidth(label_width)
+        file_row.addWidget(file_label)
         self.config_path_edit = FluentLineEdit("")
         self.config_path_edit.setPlaceholderText("Choose a Subpulse file")
         self.config_path_edit.editingFinished.connect(self._commit_source)
@@ -76,34 +104,35 @@ class PulseComponentView(QtWidgets.QWidget):
         file_row.addWidget(self.browse_source_button)
         head.addWidget(self.config_file_row)
         self.config_file_row.hide()
-        self.source_status = ElidedLabel("")
-        self.source_status.setFixedSize(px(130), row_height())
-        file_row.addWidget(self.source_status)
-        self.source_status.hide()
         self.path_label = ElidedLabel("")
         head.addWidget(self.path_label)
+        # What Save does here from the card's left edge, and the source's
+        # state at its right -- not squeezed in after Browse, where it ended
+        # the file row short of the commands above it.
+        hint = QtWidgets.QHBoxLayout()
+        hint.setSpacing(inline_gap())
         self.scope_label = ElidedLabel("")
-        head.addWidget(self.scope_label)
-        outer.addWidget(header)
+        hint.addWidget(self.scope_label, 1)
+        self.source_status = quiet(FluentLabel(""))
+        hint.addWidget(self.source_status)
+        self.source_status.hide()
+        head.addLayout(hint)
+        self._page.addWidget(header)
         self.placeholder = FluentLabel("Choose a Subpulse above, or create or open a Subpulse file.")
         self.placeholder.setWordWrap(True)
         self.placeholder.setAlignment(QtCore.Qt.AlignCenter)
-        outer.addWidget(self.placeholder, 1)
+        self._page.addWidget(self.placeholder, 1)
+        # The references read like Value Config's bindings: the field's
+        # label in a column as wide as the widest, the Config name beside it
+        # in a box of the same width as there.
         self.bindings_box = FluentGroupBox("Numeric Config references")
-        bindings_layout = QtWidgets.QVBoxLayout(self.bindings_box)
-        bindings_layout.setContentsMargins(px(10), px(8), px(10), px(10))
-        scroll = FluentScrollArea()
-        scroll.setMaximumHeight(px(180))
-        self._bindings_scroll = scroll
-        body = QtWidgets.QWidget()
-        self._binding_layout = QtWidgets.QGridLayout(body)
-        self._binding_layout.setContentsMargins(0, 0, 0, 0)
-        self._binding_layout.setColumnStretch(0, 2)
-        self._binding_layout.setColumnStretch(1, 1)
+        self._binding_layout = QtWidgets.QGridLayout(self.bindings_box)
+        self._binding_layout.setContentsMargins(pad, pad, pad, pad)
+        self._binding_layout.setHorizontalSpacing(inline_gap())
+        self._binding_layout.setVerticalSpacing(row_gap())
+        self._binding_layout.setColumnStretch(2, 1)
         self._binding_layout.setAlignment(QtCore.Qt.AlignTop)
-        scroll.set_width_bounded_widget(body)
-        bindings_layout.addWidget(scroll)
-        outer.addWidget(self.bindings_box)
+        self._page.addWidget(self.bindings_box)
         self.bindings_box.hide()
 
     def set_sources(
@@ -188,7 +217,13 @@ class PulseComponentView(QtWidgets.QWidget):
         ):
             getattr(schedule, signal).connect(lambda *args, a=action: self.edit_requested.emit(a, args))
         schedule.feedback_requested.connect(self.feedback_requested)
-        self.layout().insertWidget(1, schedule, 1)
+        # Room for the schedule's own header strip, a card's title band, its
+        # header block and four port rows; past that the page scrolls.
+        schedule.setMinimumHeight(
+            row_height() + row_gap() + scaled_px(CARD_TITLE_PX) + 2 * card_pad()
+            + panel_top_height() + 4 * (row_spacing() + row_height())
+        )
+        self._page.insertWidget(1, schedule, 1)
         return schedule
 
     def set_document(
@@ -247,8 +282,10 @@ class PulseComponentView(QtWidgets.QWidget):
         for row, (field_id, label, key) in enumerate(bindings):
             widgets = self._binding_rows.get(field_id)
             if widgets is None:
-                label_widget = FluentLabel(label)
+                label_widget = ElidedLabel(label)
+                label_widget.setFixedHeight(row_height())
                 combo = FluentComboBox()
+                combo.setFixedSize(config_name_width(), row_height())
                 combo.setEditable(True)
                 combo.lineEdit().setPlaceholderText("Config name")
                 combo.lineEdit().editingFinished.connect(lambda fid=field_id: self._commit_binding(fid))
@@ -268,8 +305,10 @@ class PulseComponentView(QtWidgets.QWidget):
                 combo.setEnabled(not busy)
             self._binding_layout.addWidget(label_widget, row, 0)
             self._binding_layout.addWidget(combo, row, 1)
+        width = bound_field_width([widgets[0].text() for widgets in self._binding_rows.values()])
+        for label_widget, _combo in self._binding_rows.values():
+            label_widget.setFixedWidth(width)
         self.bindings_box.setVisible(bool(bindings))
-        self._bindings_scroll.setFixedHeight(min(px(180), len(bindings) * (row_height() + px(6)) + px(4)))
 
     def _commit_binding(self, field_id: str) -> None:
         combo = self._binding_rows[field_id][1]

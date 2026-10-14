@@ -14,10 +14,11 @@ from PyQt5 import QtCore, QtWidgets
 from zlc_ui.form import being_edited
 from zlc_ui.fluent import (
     FluentButton, FluentFrame, FluentGroupBox, FluentLabel,
-    FluentLineEdit, FluentScrollArea, FluentSpinBox, signals_blocked,
+    FluentLineEdit, FluentScrollArea, FluentSpinBox, field_text_inset,
+    fluent_scrollbar_thickness, signals_blocked,
 )
 
-from ._layout import px, row_height
+from ._layout import card_pad, column_header, inline_gap, px, row_gap, row_height, section_gap
 from .models import TargetPortRecord, TargetWidthRule
 
 
@@ -50,13 +51,22 @@ class PulseTargetView(QtWidgets.QWidget):
         self._build_ui()
 
     def _build_ui(self) -> None:
+        # The page's edges and gaps are every tab's; a card's content stands
+        # the card pad inside it, where its title is painted.  The cards'
+        # scroll area keeps its bar's gutter at all times, inside the page's
+        # right inset, so the cards end where the header does whether or
+        # not the bar shows.
         layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(px(10), px(10), px(10), px(10))
-        layout.setSpacing(px(8))
+        page = section_gap()
+        gutter = min(page, fluent_scrollbar_thickness())
+        layout.setContentsMargins(page, page, page - gutter, page)
+        layout.setSpacing(section_gap())
+        pad = card_pad()
         header = FluentFrame()
         header.setFixedHeight(px(58, minimum=48))
         header_layout = QtWidgets.QHBoxLayout(header)
-        header_layout.setContentsMargins(px(12), px(8), px(12), px(8))
+        header_layout.setContentsMargins(pad, pad, pad, pad)
+        header_layout.setSpacing(inline_gap())
         self.status_label = FluentLabel("")
         self.status_label.setWordWrap(True)
         header_layout.addWidget(self.status_label, 1)
@@ -65,7 +75,10 @@ class PulseTargetView(QtWidgets.QWidget):
         self.apply_button = FluentButton("Apply target", role="primary")
         for button in (self.add_digital_button, self.add_dac_button, self.apply_button):
             header_layout.addWidget(button)
-        layout.addWidget(header)
+        header_row = QtWidgets.QHBoxLayout()
+        header_row.setContentsMargins(0, 0, gutter, 0)
+        header_row.addWidget(header)
+        layout.addLayout(header_row)
 
         self.cards_scroll = FluentScrollArea()
         self.cards_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
@@ -74,13 +87,13 @@ class PulseTargetView(QtWidgets.QWidget):
         self.cards_scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
         self.cards_body = QtWidgets.QWidget()
         self.cards_layout = QtWidgets.QVBoxLayout(self.cards_body)
-        self.cards_layout.setContentsMargins(px(4), px(4), px(4), px(8))
-        self.cards_layout.setSpacing(px(8))
+        self.cards_layout.setContentsMargins(0, 0, 0, 0)
+        self.cards_layout.setSpacing(section_gap())
         self.digital_card = FluentGroupBox("Digital outputs")
         self.digital_layout = QtWidgets.QGridLayout(self.digital_card)
-        self.digital_layout.setContentsMargins(px(12), px(10), px(12), px(12))
-        self.digital_layout.setHorizontalSpacing(px(10, minimum=6))
-        self.digital_layout.setVerticalSpacing(px(6, minimum=4))
+        self.digital_layout.setContentsMargins(pad, pad, pad, pad)
+        self.digital_layout.setHorizontalSpacing(inline_gap())
+        self.digital_layout.setVerticalSpacing(row_gap())
         self.digital_layout.setColumnStretch(0, 1)
         self.digital_layout.setColumnStretch(1, 2)
         for column, text in enumerate(("signal name", "endpoint", "")):
@@ -88,9 +101,9 @@ class PulseTargetView(QtWidgets.QWidget):
         self.cards_layout.addWidget(self.digital_card)
         self.dac_card = FluentGroupBox("DAC outputs")
         self.dac_layout = QtWidgets.QGridLayout(self.dac_card)
-        self.dac_layout.setContentsMargins(px(12), px(10), px(12), px(12))
-        self.dac_layout.setHorizontalSpacing(px(10, minimum=6))
-        self.dac_layout.setVerticalSpacing(px(6, minimum=4))
+        self.dac_layout.setContentsMargins(pad, pad, pad, pad)
+        self.dac_layout.setHorizontalSpacing(inline_gap())
+        self.dac_layout.setVerticalSpacing(row_gap())
         self.dac_layout.setColumnStretch(0, 1)
         self.dac_layout.setColumnStretch(2, 2)
         self.dac_layout.setColumnStretch(3, 1)
@@ -98,7 +111,7 @@ class PulseTargetView(QtWidgets.QWidget):
             self.dac_layout.addWidget(self._header_label(text), 0, column)
         self.cards_layout.addWidget(self.dac_card)
         self.cards_layout.addStretch(1)
-        self.cards_scroll.setWidget(self.cards_body)
+        self.cards_scroll.set_width_bounded_widget(self.cards_body)
         layout.addWidget(self.cards_scroll, 1)
         self.add_digital_button.clicked.connect(self._add_digital)
         self.add_dac_button.clicked.connect(self._add_dac)
@@ -106,10 +119,10 @@ class PulseTargetView(QtWidgets.QWidget):
 
     @staticmethod
     def _header_label(text: str) -> FluentLabel:
-        label = FluentLabel(text)
-        font = label.font()
-        font.setBold(True)
-        label.setFont(font)
+        """A column header over a column of fields: starts over their text."""
+
+        label = column_header(text)
+        label.setIndent(field_text_inset())
         label.setFixedHeight(row_height())
         return label
 

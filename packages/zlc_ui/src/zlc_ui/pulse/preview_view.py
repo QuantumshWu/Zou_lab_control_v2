@@ -15,7 +15,7 @@ from zlc_ui.fluent import (
     FluentReadoutEdit, FluentScrollArea, FluentSwitch, add_row_switch, signals_blocked,
 )
 
-from ._layout import px
+from ._layout import card_pad, px, row_height, section_gap
 
 
 class PulsePreviewView(QtWidgets.QWidget):
@@ -29,17 +29,19 @@ class PulsePreviewView(QtWidgets.QWidget):
         self.setStyleSheet("background: transparent;")
         self._content_widget: QtWidgets.QWidget | None = None
         self._wheel_target: QtWidgets.QWidget | None = None
+        # The page's edges and gaps are every tab's; the controls card's
+        # content stands the card pad inside it, at the one control height.
         layout = QtWidgets.QVBoxLayout(self)
-        margin = px(8, minimum=5)
-        layout.setContentsMargins(margin, margin, margin, margin)
-        layout.setSpacing(px(8, minimum=5))
+        page = section_gap()
+        layout.setContentsMargins(page, page, page, page)
+        layout.setSpacing(section_gap())
 
         controls = FluentFrame()
-        controls.setFixedHeight(px(48, minimum=40))
         row = QtWidgets.QHBoxLayout(controls)
-        row.setContentsMargins(px(12), px(6), px(12), px(6))
+        pad = card_pad()
+        row.setContentsMargins(pad, pad, pad, pad)
         row.setSpacing(px(10, minimum=6))
-        control_h = px(32, minimum=28)
+        control_h = row_height()
 
         # On/off settings are switches, the same as the console's Selectors.
         self.preview_include_off = FluentSwitch("Show off rows")
@@ -72,7 +74,7 @@ class PulsePreviewView(QtWidgets.QWidget):
         self.preview_scroll.viewport().installEventFilter(self)
         self.preview_body = QtWidgets.QWidget()
         self.preview_body_layout = QtWidgets.QVBoxLayout(self.preview_body)
-        self.preview_body_layout.setContentsMargins(px(8), px(8), px(8), px(8))
+        self.preview_body_layout.setContentsMargins(0, 0, 0, 0)
         self.preview_placeholder = FluentLabel("Open Preview to render the pulse plot.")
         self.preview_placeholder.setAlignment(QtCore.Qt.AlignCenter)
         self.preview_body_layout.addWidget(self.preview_placeholder)
