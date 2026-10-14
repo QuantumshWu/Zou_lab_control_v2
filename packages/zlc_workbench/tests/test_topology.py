@@ -137,10 +137,8 @@ def test_a_finished_measurement_is_offerable_and_says_it_is_finished(plane) -> N
     publication = plane.latest_publication(signal)
     title = panel_data_shape(description.schema, None, source=publication.value(signal))
     assert title["data_valid"] == (1, 1), "count this publication's written row, not planned row 49"
-    assert row.label == f"frames  [{format_signal_shape(description.schema)}]"
-    assert row.label == (
-        "frames  [(1 × 50) × (3 × 1) × (3)]"
-    )
+    assert row.label == f"frames · {format_signal_shape(description.schema)}"
+    assert row.label == "frames · (1 × 50) × (3 × 1) × (3)"
     scan_axis = description.schema.point_domain.axes[-1]
     assert (scan_axis.name, scan_axis.size, tuple(scan_axis.coordinate_values()), scan_axis.unit) == (
         "power", 1, (135.0,), "mVpp",
@@ -166,7 +164,7 @@ def test_a_reserved_output_waits_until_its_first_publication() -> None:
     )
     (row,) = project_signals(plane.describe_signals())
     assert row.state == "waiting"
-    assert row.label == "frames  [—]"
+    assert row.label == "frames · —"
     # A Figure Viewer's signal is not a logic key: it is called by the name
     # its file gave it, not by the whole qualified path.
     (row,) = project_signals((
@@ -180,7 +178,7 @@ def test_a_reserved_output_waits_until_its_first_publication() -> None:
             source_name=None,
         ),
     ))
-    assert row.label == "data  [—]"
+    assert row.label == "data · —"
 
 
 def test_a_live_monitor_is_offered_before_a_finished_run(session) -> None:

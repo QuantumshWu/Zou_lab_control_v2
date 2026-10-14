@@ -9206,24 +9206,24 @@ class ConsolePresenter:
         """The compatible sources' labels and groups, from ONE read.
 
         A Logic editor open beside a running scan re-projects on every 100 ms
-        beat -- ``_observation_status`` changes every tick -- and these three
-        answers were built from five full plane scans plus two projections,
-        every one of them the same question about a plane that had not moved.
-        ``options`` is the compatible set the caller already walked.
+        beat, so the three answers come from one read of the plane's
+        projection.  ``options`` is the compatible set the caller already
+        walked.
+
+        A source is named by its producer (the group) and its output name,
+        the same words before and after it publishes: the closed combo reads
+        ``occupancy · occupied`` whether or not a shape is known yet.  The
+        shape is the editor's to show where it matters (Derive's inputs,
+        Occupancy's frame count, Frame Survival's grid).
         """
 
         descriptions, _by_name, projected, _families = self._signal_projection()
         compatible = set(options)
-        rows = tuple(
-            row
-            for row in projected
-            if row.name in compatible
-        )
-        labels = {row.name: row.label for row in rows}
+        labels = {key: signal_output_name(key) for key in options}
         # Which producer each compatible source belongs under: the plane's
         # projection for published signals, and the declaring node's id for a
         # compatible output that has not published yet.
-        groups = {row.name: row.producer for row in rows}
+        groups = {row.name: row.producer for row in projected if row.name in compatible}
         for binding in self.logic.values():
             for output in self._logic_outputs(binding):
                 key = stable_signal_key(binding.node_id, output.name)

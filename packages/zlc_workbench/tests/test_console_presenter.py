@@ -2773,9 +2773,7 @@ def test_committed_selection_outputs_enter_the_real_occupancy_input(
     for row in fit_signals:
         if row.name in projection["source_options"]:
             leaf = row.name.rsplit("/", 1)[-1]
-            assert projection["source_labels"][row.name] == (
-                f"{leaf}  [{format_signal_shape(row.schema)}]"
-            )
+            assert projection["source_labels"][row.name] == leaf
 
     presenter.set_deriving(True)
     _commit_area(binding.host)
@@ -2787,14 +2785,7 @@ def test_committed_selection_outputs_enter_the_real_occupancy_input(
 
     projection = presenter.view.logic_editors[consumer_id]
     assert roi_signal in projection["source_options"]
-    roi_description = next(
-        row
-        for row in session.signal_plane.describe_signals()
-        if row.name == roi_signal
-    )
-    assert projection["source_labels"][roi_signal] == (
-        f"roi_frame  [{format_signal_shape(roi_description.schema)}]"
-    )
+    assert projection["source_labels"][roi_signal] == "roi_frame"
     presenter.beat()
     shown_rows = presenter.view._rows[producer_id].publishes
     shown_in_logic_tab = {name for name, _shape, _detail in shown_rows}
@@ -2965,7 +2956,7 @@ def test_every_control_on_a_card_is_answered(presenter, session) -> None:
     }
     assert binding.signal in offered
     shape_text = format_signal_shape(snapshot.block.schema)
-    assert offered[binding.signal] == f"frames  [{shape_text}]"
+    assert offered[binding.signal] == f"frames · {shape_text}"
     assert card.chosen == binding.signal
 
     card.edit_requested.emit()
