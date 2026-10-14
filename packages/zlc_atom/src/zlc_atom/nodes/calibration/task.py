@@ -849,6 +849,17 @@ def _save_report_images(
     site_axis = site_map.site_axis
     site_axis_id = site_axis.axis_id
     labels_valid = np.asarray(result.report["labels_valid"], dtype=bool)
+    label_axis = AxisSpec(
+        AxisId("calibration.reference_label"),
+        "Reference",
+        COMPONENT,
+        2,
+        coordinate_labels=("Empty", "Occupied"),
+    )
+    reference_groups = np.stack((
+        np.asarray(result.report["labels_dark"], dtype=bool),
+        np.asarray(result.report["labels_occupied"], dtype=bool),
+    ), axis=-1)
     model_reports = result.report["models"]
 
     model_names = tuple(model.kind.value for model in calibration.models)
@@ -916,21 +927,21 @@ def _save_report_images(
             & model.usable_sites
             & np.isfinite(model.thresholds)
         )
-        # The repeats ARE the repeat axis -- same conditions, measured again --
-        # and the sites are the cell.  No independent variable was swept, so
-        # there is no point axis to invent one on.
+        # Each readout belongs to exactly one valid reference-label group.
+        # Keep the original cycle/site coordinates; do not classify by this
+        # model's threshold to choose colours, or duplicate scientific fits.
         samples = _snapshot(
-            short_signals,
+            np.broadcast_to(short_signals[..., np.newaxis], (*short_signals.shape, 2)),
             signal=f"{model.kind.value}_readout_samples",
-            cell_axes=(site_axis,),
+            cell_axes=(site_axis, label_axis),
             generation=generation,
             revision=revision,
-            validity_axis_ids=(site_axis_id,),
+            validity_axis_ids=(site_axis_id, label_axis.axis_id),
             validity_mask=(
-                labels_valid
-                & np.isfinite(short_signals)
-                & site_valid[np.newaxis, :]
-            )[:, np.newaxis, :],
+                reference_groups
+                & (labels_valid & np.isfinite(short_signals)
+                   & site_valid[np.newaxis, :])[..., np.newaxis]
+            )[:, np.newaxis, ...],
         )
         site_ref = AxisRef.cell_data("calibration.site")
         gaussian_fields = tuple(
@@ -986,7 +997,10 @@ def _save_report_images(
             samples,
             FacetGridPlot(
                 AxisRef.cell_data("calibration.site"),
-                HistogramPlot(labels=PlotLabels(x="Readout signal", y="Count")),
+                HistogramPlot(
+                    group=AxisRef.cell_data("calibration.reference_label"),
+                    labels=PlotLabels(x="Readout signal", y="Count"),
+                ),
                 labels=PlotLabels(title=title),
             ),
             parameters={"threshold_classifier": True},

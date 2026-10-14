@@ -151,13 +151,7 @@ class _ViewerView:
         self.panel_plot_error = _Signal()
         self.save_screenshot_requested = _Signal()
         self.info_action_requested = _Signal()
-        self.pulse_tab_closed = _Signal()
-        self.pulse_include_off_toggled = _Signal()
-        self.pulse_selectors_toggled = _Signal()
-        self.pulse_size_committed = _Signal()
-        self.pulse_save_requested = _Signal()
         self.close_requested = _Signal()
-        self.pulse_tabs: dict[str, dict] = {}
         self.tabs: tuple = ()
         self.flow: object = {"nodes": (), "edges": ()}
         self.surface = None
@@ -286,55 +280,6 @@ class _ViewerView:
     def set_archive_info(self, tabs, graph) -> None:
         self.tabs = tuple(tabs)
         self.flow = graph
-
-    def open_pulse_tab(self, key, title) -> None:
-        self.pulse_tabs.setdefault(
-            str(key),
-            {"title": str(title), "host": None, "placeholder": "", "mounts": 0,
-             "size_names": (), "size": "", "status": ""},
-        )
-
-    def set_pulse_size_names(self, key, names) -> bool:
-        tab = self.pulse_tabs.get(str(key))
-        if tab is None:
-            return False
-        tab["size_names"] = tuple(names)
-        return True
-
-    def set_pulse_size(self, key, size) -> bool:
-        tab = self.pulse_tabs.get(str(key))
-        if tab is None:
-            return False
-        tab["size"] = str(size)
-        return True
-
-    def set_pulse_status(self, key, text) -> bool:
-        tab = self.pulse_tabs.get(str(key))
-        if tab is None:
-            return False
-        tab["status"] = str(text)
-        return True
-
-    def has_pulse_tab(self, key) -> bool:
-        return str(key) in self.pulse_tabs
-
-    def show_pulse(self, key, host) -> bool:
-        tab = self.pulse_tabs.get(str(key))
-        if tab is None:
-            return False
-        tab["host"] = host
-        tab["mounts"] += 1
-        return True
-
-    def show_pulse_placeholder(self, key, text) -> bool:
-        tab = self.pulse_tabs.get(str(key))
-        if tab is None:
-            return False
-        tab["placeholder"] = str(text)
-        return True
-
-    def close_pulse_tab(self, key) -> bool:
-        return self.pulse_tabs.pop(str(key), None) is not None
 
     def set_title(self, text: str) -> None:
         self.title = str(text)
@@ -1239,15 +1184,8 @@ def test_a_copy_its_preview_kind_cannot_hold_gets_a_new_preview_or_keeps_the_old
     finally:
         _close_presenter(presenter)
 
-def test_a_played_pulse_is_offered_on_the_device_tab_and_drawn_on_its_own(saved) -> None:
-    """The Devices page names the pulse a run played and offers to draw it;
-    the tab draws the recorded document through the editor's own preview
-    builder and takes its host down with it.
-
-    The document itself is hundreds of rows of timing: the Devices page
-    says which pulse and how many periods, the picture is where a pulse is
-    read.
-    """
+def test_a_played_pulse_opens_in_the_ordinary_editor_without_a_device_or_source_path(saved, tmp_path, monkeypatch) -> None:
+    """Recorded played content opens as an editable, independent Pulse copy."""
 
     from zlc_pulse import sequence_to_tree
 
@@ -1284,95 +1222,76 @@ def test_a_played_pulse_is_offered_on_the_device_tab_and_drawn_on_its_own(saved)
         "the record itself is untouched"
     )
 
-    from threading import Event
+    from PyQt5 import QtCore, QtTest
+    from zlc_data.figure_archive import write_figure_archive
+    from zlc_ui.fluent import FluentButton
+    from zlc_workbench.apps import pulse_editor as pulse_app
+    from zlc_workbench.session import read_pulse
 
-    view = _ViewerView()
-    presenter = _built_presenter(view)
+    archived = tmp_path / "recorded.npz"
+    with archived.open("wb") as stream:
+        write_figure_archive(stream, info["name"], arrays=datasets, sections={
+            key: value for key, value in info["sections"].items() if key != "dataset"
+        })
+    original = archived.read_bytes()
+    editors = []
+    create_editor = pulse_app.create_window
+
+    def open_editor(**kwargs):
+        editor = create_editor(**kwargs)
+        editors.append(editor)
+        return editor
+
+    monkeypatch.setattr(pulse_app, "create_window", open_editor)
+    _application, _QtCore, window, _owner_turns, timer = _formal_viewer_window(
+        (archived, _snapshot), build_figure_host
+    )
     try:
-        built: list[tuple[object, str]] = []
-        resized: list[tuple[object, str]] = []
-        started, drawing = Event(), Event()
+        _wait_until(lambda: window.presenter.description is not None)
+        tabs = window._view.info_pane.info_tabs
+        devices_index = next(index for index in range(tabs.count()) if tabs.tabText(index) == "Devices")
+        QtTest.QTest.mouseClick(tabs.tabBar(), QtCore.Qt.LeftButton,
+                               pos=tabs.tabBar().tabRect(devices_index).center())
+        buttons = window._view.info_pane.findChildren(FluentButton)
+        button = next(button for button in buttons if button.text() == "imaging")
+        QtTest.QTest.mouseClick(button, QtCore.Qt.LeftButton)
+        _wait_until(lambda: bool(editors))
+        editor = editors[0]
+        assert editor.is_visible()
+        assert editor.presenter.sequence == played_sequence
+        assert editor.presenter.path == ""
+        assert editor.presenter.sequencer is None
+        assert not editor.presenter.dirty
+        first = played_sequence.periods[0]
+        card = editor._view.schedule_view._cards[first.period_id]
+        card.duration_edit.setFocus()
+        card.duration_edit.selectAll()
+        QtTest.QTest.keyClicks(card.duration_edit, "25")
+        QtTest.QTest.keyClick(card.duration_edit, QtCore.Qt.Key_Return)
+        assert editor.presenter.sequence.period_by_id[first.period_id].duration == 25
+        assert editor.presenter.dirty
+        target = tmp_path / "edited-pulse.json"
+        monkeypatch.setattr(editor, "ask_save_path", lambda *_args: str(target))
+        monkeypatch.setattr(editor, "show_done", lambda _text: None)
+        QtTest.QTest.mouseClick(editor._view.schedule_view.save_button, QtCore.Qt.LeftButton)
+        _wait_until(target.exists)
+        assert read_pulse(target).sequence == editor.presenter.sequence
+        assert archived.read_bytes() == original
 
-        class _Host:
-            closed = False
-            interaction = None
-            saved: list[Path] = []
-            logical_size = (300, 200)
-
-            def close(self, *, timeout=None) -> bool:
-                self.closed = True
-                return True
-
-            def set_interaction_enabled(self, enabled: bool) -> None:
-                self.interaction = bool(enabled)
-
-            def save(self, target) -> None:
-                Path(target).write_bytes(b"png")
-                self.saved.append(Path(target))
-
-        def make(timeline, *, size):
-            started.set()
-            drawing.wait(5.0)
-            built.append((timeline, size))
-            return _Host()
-
-        def resize(host, timeline, *, size):
-            resized.append((timeline, size))
-            return host.logical_size
-
-        presenter._make_pulse_preview = make
-        presenter._resize_pulse_preview = resize
-        presenter.description = description
-        presenter.path = path
-        presenter.info_action(f"pulse:{played.key}")
-        tab = view.pulse_tabs[played.key]
-        assert tab["title"] == "Pulse · imaging"
-        assert tab["size_names"], "the tab offers the same sizes the editor's preview does"
-        # Show off rows ticked while the first drawing is made, when there is
-        # no host yet to redraw: the drawing that lands is redrawn with them.
-        assert started.wait(5.0)
-        presenter.set_pulse_include_off(played.key, True)
-        drawing.set()
-        _wait_until(lambda: tab["mounts"] == 2 and not presenter._busy)
-        ((timeline, size),) = built
-        assert timeline.total_duration > 0 and size
-        assert [channel.label for channel in timeline.channels]
-        assert [mark.name for mark in timeline.periods] == [
-            period.name or period.period_id for period in played_sequence.periods
-        ]
-        assert len(resized) == 1 and len(resized[0][0].channels) >= len(timeline.channels)
-        host = tab["host"]
-        assert host.interaction is False
-        presenter.info_action(f"pulse:{played.key}")
-        assert built == [(timeline, size)], "a second open focuses the tab, it does not redraw"
-
-        # The controls act on the drawing: size redraws the standing host,
-        # selectors gate its interaction, Save writes it.
-        presenter.set_pulse_size(played.key, "4x4")
-        _wait_until(lambda: tab["mounts"] == 3 and not presenter._busy)
-        assert resized[-1][1] == "4x4" and tab["size"] == "4x4"
-        presenter.set_pulse_selectors(played.key, True)
-        assert host.interaction is True
-        presenter.save_pulse_image(played.key)
-        # A size asked for while the Save holds the worker is drawn once it
-        # is free -- it was refused, leaving the control and the drawing apart.
-        assert presenter._busy
-        presenter.set_pulse_size(played.key, "2x2")
-        _wait_until(lambda: host.saved and tab["mounts"] == 4 and not presenter._busy)
-        assert resized[-1][1] == "2x2" and tab["size"] == "2x2"
-        assert host.saved[0].parent == path.parent.resolve() and host.saved[0].suffix == ".png"
-        saved_name = next(
-            text[len("saved "):] for text, _error in view.status if text.startswith("saved ")
-        )
-        assert saved_name == f"{path.stem}-pulse-imaging.png"
-        assert (path.parent / saved_name).read_bytes() == b"png"
-
-        assert presenter.close_pulse_tab(played.key)
-        assert host.closed and played.key not in view.pulse_tabs
-        presenter.info_action("pulse:nobody")
-        assert any("played no pulse" in text for text, _error in view.status)
+        # The new ordinary window owns its own lifetime and render reference;
+        # loading or closing the Figure must not discard this Pulse copy.
+        window.close()
+        _wait_until(lambda: not window.is_visible())
+        assert editor.is_visible()
     finally:
-        _close_presenter(presenter)
+        timer.stop()
+        for editor in editors:
+            monkeypatch.setattr(editor, "confirm_pulse_discard", lambda: True)
+            editor.close()
+            _wait_until(lambda: not editor.is_visible())
+        if window.is_visible():
+            window.close()
+            _wait_until(lambda: not window.is_visible())
 
 
 def test_the_description_reports_only_facts_saved_in_the_archive(saved, monkeypatch) -> None:
@@ -1786,7 +1705,6 @@ def test_formal_window_slow_failed_open_keeps_turning_and_retains_the_last_figur
         )
         window.info_action_requested.emit("pulse:old")
         assert statuses[-1][1] and "unknown pulse field" in statuses[-1][0]
-        assert not window.presenter._pulse_tabs
 
         def refused(*_args):
             raise ValueError("action refused visibly")

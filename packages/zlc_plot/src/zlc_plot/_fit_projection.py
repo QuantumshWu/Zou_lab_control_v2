@@ -1609,6 +1609,29 @@ class FitProjection:
         semantic = self._semantic_spec()
         return isinstance(semantic, HistogramPlot) and semantic.group is not None
 
+    def _pooled_histogram_groups(self) -> "FitProjection":
+        """View the already-counted bins as one distribution per axes.
+
+        Classifier scope can pool visual Groups without re-projecting samples
+        or changing the displayed Histogram. Ordinary fits retain their groups.
+        """
+
+        if not self._has_grouped_histogram():
+            return self
+        selected = copy(self)
+        def pooled(payload):
+            return replace(payload, counts=np.sum(payload.counts, axis=0, keepdims=True),
+                           group_keys=((),))
+        if isinstance(self._spec, FacetGridPlot):
+            selected._spec = replace(self._spec, cell=replace(self._spec.cell, group=None))
+            selected._payload = replace(self._payload, spec=selected._spec, cells=tuple(
+                replace(cell, payload=pooled(cell.payload)) for cell in self._payload.cells
+            ))
+        else:
+            selected._spec = replace(self._spec, group=None)
+            selected._payload = pooled(self._payload)
+        return selected
+
     def _fit_sample_axes(self, targets: tuple) -> tuple[tuple[str, AxisSpec], ...]:
         """The real retained coordinates, in the same order as flattened fits."""
         axes = []

@@ -309,14 +309,18 @@ def create_window(
     *,
     workspace=None,
     pulse: str | None = None,
+    sequence: object | None = None,
     connect: str | None = None,
     window_ratio: float | None = None,
+    render: object | None = None,
 ):
     """Open the editor the way a human does, and return its window.
 
     The non-blocking public entry.  It is what the launchers run, what a
     notebook cell calls, and what zlc_ui's acceptance capture opens -- one
     entry means the window under inspection is the window that ships.
+    An in-memory sequence opens an independent, pathless draft, as used by
+    FigureViewer for the actual played Pulse retained in an archive.
     """
 
     import zlc_plot as plot
@@ -324,10 +328,19 @@ def create_window(
     from ..board import attach_qt, attach_qt_owner_turn, attach_qt_worker
 
     connection = None if not connect else connection_argument(connect)
+    if sequence is not None and pulse:
+        raise ValueError("choose either a Pulse file or an in-memory sequence")
     space, state, path = resolve(workspace, pulse)
+    if sequence is not None:
+        from ..pulse_state import PulseEditorState
+
+        state = PulseEditorState(sequence=sequence)
     # The preview's render child, started before the window so it warms
     # while the window builds and the operator reads the Edit page.
-    render = plot.RenderProcess("zlc-pulse-preview-render")
+    if render is None:
+        render = plot.RenderProcess("zlc-pulse-preview-render")
+    else:
+        render.retain()
     # One call, one handle.  This layer never names a widget class: what comes
     # back has signals to hear and methods to call, and nothing to assemble.
     try:
@@ -335,7 +348,7 @@ def create_window(
             title="PulseGUI@Zou lab", window_ratio=window_ratio
         )
     except BaseException:
-        render.close(timeout=0.0)
+        render.release(timeout=0.0)
         raise
     run_off_thread, close_preview_worker = attach_qt_worker("zlc-pulse-preview")
     run_device_work, close_device_worker = attach_qt_worker("zlc-pulse-command")
@@ -359,7 +372,7 @@ def create_window(
     except BaseException:
         for close_worker in close_workers:
             close_worker()
-        render.close(timeout=0.0)
+        render.release(timeout=0.0)
         window.close()
         raise
     # The same board-status beat as the bound window.  Without it this window

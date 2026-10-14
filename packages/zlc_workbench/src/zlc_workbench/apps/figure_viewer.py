@@ -56,7 +56,7 @@ def build(
     from ..device_use import DeviceUseCoordinator
     from functools import partial
 
-    from ..pulse_preview import build_pulse_preview_host, resize_pulse_preview_host
+    from .pulse_editor import create_window as open_pulse_editor
     from ..viewer import FigureViewerPresenter
     from .task_console import panel_host_factories
 
@@ -93,8 +93,9 @@ def build(
         build_figure_host=editor_render.build_host,
         save_figure_artifact=editor_render.save_figure_artifact,
         confirm_discard=getattr(view, "confirm_discard", None),
-        make_pulse_preview=partial(build_pulse_preview_host, build_host=editor_render.build_host),
-        resize_pulse_preview=resize_pulse_preview_host,
+        open_pulse_editor=partial(
+            open_pulse_editor, workspace=workspace.root, render=editor_render,
+        ),
     )
 
 

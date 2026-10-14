@@ -410,28 +410,36 @@ class PeriodCard(FluentGroupBox):
         edit = self.bus_value_edits.get(port)
         if combo is None or edit is None:
             return
-        if not combo.isEnabled() or edit.isReadOnly():
-            return
-        if edit.property("numericError"):
-            self.feedback_requested.emit(str(edit.property("numericError")))
+        if not combo.isEnabled():
             return
         mode = combo.currentData()
         if not isinstance(mode, str) or not mode:
             raise ValueError("the selected analog mode has no domain value")
+        previous_mode, field = next(
+            (previous_mode, field) for key, previous_mode, field in self._period.analog if key == port
+        )
+        if edit.isReadOnly():
+            if mode == previous_mode:
+                return
+            # Hold's inherited level is read-only; its mode is not. Start
+            # the new step from the accepted held level, not widget edits.
+            text = field.text
+        else:
+            if edit.property("numericError"):
+                self.feedback_requested.emit(str(edit.property("numericError")))
+                return
+            text = edit.text()
         try:
-            value = int(float(edit.text()))
+            value = int(float(text))
         except ValueError:
             return
         # Only the accepted projection says what is unchanged. A previous
         # intent may have been refused, or superseded by Load/Sync/Clear.
-        for key, previous_mode, field in self._period.analog:
-            if key == port:
-                try:
-                    if (mode, value) == (previous_mode, int(float(field.text))):
-                        return
-                except ValueError:
-                    pass
-                break
+        try:
+            if (mode, value) == (previous_mode, int(float(field.text))):
+                return
+        except ValueError:
+            pass
         self.analog_committed.emit(self.period_id, port, mode, value)
 
     def set_port_label(self, port: str, label: str) -> None:
@@ -759,7 +767,7 @@ class BracketPost(FluentGroupBox):
     feedback_requested = QtCore.pyqtSignal(str)
 
     def __init__(
-        self, bracket_id: str, kind: str, *, count: int = 2, minimum: int = 2,
+        self, bracket_id: str, kind: str, *, count: int = 2, minimum: int = 1,
         ordinal: int = 1, color: str = "", count_field: FieldVM | None = None, parent=None,
     ) -> None:
         super().__init__("", parent)
@@ -770,7 +778,9 @@ class BracketPost(FluentGroupBox):
         self.ordinal = 1
         self.color = ""
         self.set_bracket_style(ordinal, color)
+        self.count_spin = fluent_count_box(minimum=minimum)
         self.count_edit = FluentScanLineEdit("", tooltip="Edit repeat value source")
+        self.count_spin.setLineEdit(self.count_edit)
         self.count_edit.setAlignment(QtCore.Qt.AlignCenter)
         self.count_edit.textChanged.connect(self._size_count_editor)
         self.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Expanding)
@@ -793,25 +803,24 @@ class BracketPost(FluentGroupBox):
         # The count belongs to the end post: a span is closed by saying how
         # many times.  The start post keeps an empty line of the same height so
         # the two posts stay level with each other and with the cards.
-        self.count_edit.setFixedHeight(row_height())
+        self.count_spin.setFixedHeight(row_height())
         self.set_count_field(count_field or FieldVM(
             str(count), can_scan=False, validator_kind=VALIDATOR_INT,
             validator_lo=minimum, validator_hi=(1 << 32) - 1,
         ))
-        self.count_edit.editingFinished.connect(self._commit_count)
-        self.count_edit.valueNormalized.connect(self._commit_count)
+        self.count_spin.valueChanged.connect(self._commit_count)
         self.count_edit.binding_committed.connect(self.binding_committed)
         self.count_edit.config_key_committed.connect(
             lambda key: self.config_binding_committed.emit(self.count_edit.property("pulse_field_id"), key)
         )
         if kind == "start":
-            self.count_edit.hide()
+            self.count_spin.hide()
             spacer = QtWidgets.QWidget()
             spacer.setStyleSheet("background: transparent;")
             spacer.setFixedHeight(row_height())
             top_layout.addWidget(spacer)
         else:
-            top_layout.addWidget(self.count_edit)
+            top_layout.addWidget(self.count_spin)
         top_layout.addStretch(1)
         column.addWidget(top)
         row_top, _row_gap = row_region_vmetrics()
@@ -821,25 +830,34 @@ class BracketPost(FluentGroupBox):
     def set_count_field(self, field: FieldVM) -> None:
         self._count_field = field
         self._size_count_editor(field.text)
-        _apply_field(self.count_edit, field)
+        with signals_blocked(self.count_spin, self.count_edit):
+            _apply_field(self.count_edit, field)
+            self.count_spin.setReadOnly(not field.editable or field.config_active)
+            self.count_spin.setEnabled(field.editable or field.config_active)
+            self.count_spin.setRange(float(field.validator_lo), float(field.validator_hi))
+            self.count_spin.setValue(float(int(field.text)))
 
     def _size_count_editor(self, text: str) -> None:
+        # Measure the spin chrome without resizing it: width_for() explicitly
+        # delivers a resize, which would rewrite a half-typed line's text.
+        option = QtWidgets.QStyleOptionSpinBox()
+        self.count_spin.initStyleOption(option)
+        area = self.count_spin.style().subControlRect(
+            QtWidgets.QStyle.CC_SpinBox, option, QtWidgets.QStyle.SC_SpinBoxEditField, self.count_spin)
+        chrome = self.count_spin.width() - area.width()
         width = max(self.count_edit.width_for(self.COUNT_SAMPLE),
-                    self.count_edit.width_for(text))
-        self.count_edit.setFixedWidth(width)
+                    self.count_edit.width_for(text)) + chrome
+        self.count_spin.setFixedWidth(width)
         self.setFixedWidth(width + 2 * px(7))
 
     def _commit_count(self) -> None:
-        if self.count_edit.isReadOnly():
+        if self.count_spin.isReadOnly():
             return
-        error = self.count_edit.property("numericError")
+        error = self.count_spin.property("numericError") or self.count_edit.property("numericError")
         if error:
             self.feedback_requested.emit(str(error))
             return
-        try:
-            value = int(self.count_edit.text())
-        except ValueError:
-            return
+        value = int(self.count_spin.value())
         if value != int(self._count_field.text):
             self.count_committed.emit(value)
 
@@ -1152,14 +1170,14 @@ class PulseDragContainer(QtWidgets.QWidget):
                     post.set_bracket_style(bracket.ordinal, bracket.color)
                 posts.append(post)
                 widgets[("bracket", key)] = post
-                post.set_count_field(bracket.count_field or FieldVM(
+                count_field = bracket.count_field or FieldVM(
                     str(bracket.count), can_scan=False, validator_kind=VALIDATOR_INT,
                     validator_lo=minimum_bracket, validator_hi=(1 << 32) - 1,
-                ))
-                post.setProperty("readonly_content", bracket.readonly)
+                )
                 if bracket.readonly:
-                    post.count_edit.setReadOnly(True)
-                    post.count_edit.binding_button.setEnabled(False)
+                    count_field = replace(count_field, editable=False, binding_editable=False)
+                post.set_count_field(count_field)
+                post.setProperty("readonly_content", bracket.readonly)
         self._posts = tuple(posts)
         desired = tuple(widgets[key] for key in order)
         for widget in previous:

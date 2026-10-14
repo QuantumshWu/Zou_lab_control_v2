@@ -1205,6 +1205,60 @@ class FitSessionMixin:
             self.display_state.values,
         )
 
+    def _classifier_targets(self, projection=None, authored=None) -> tuple:
+        """Distributions named by authored scope, otherwise the visual groups."""
+
+        projection = self._projected if projection is None else projection
+        targets = projection._fit_targets()
+        if not projection._has_grouped_histogram():
+            return targets
+        keys = (self._classifier_thresholds.keys() | self._classifier_gaussian_components.keys()
+                if authored is None else authored)
+        if not keys:
+            return targets
+        result, shared, facet_keys = [], set(), {}
+        subject = projection._view.selection_subject(projection._spec, projection._payload)
+        for facet, group, key in targets:
+            common = (facet, None, ())
+            if facet not in facet_keys:
+                facet_keys[facet] = _classifier_threshold_key(
+                    self._classifier_threshold_target(common, None, projection, subject=subject))
+            identity = facet_keys[facet]
+            if identity in keys:
+                if facet not in shared:
+                    result.append(common)
+                    shared.add(facet)
+            else:
+                result.append((facet, group, key))
+        return tuple(result)
+
+    def _classifier_keys(self, targets, projection=None) -> tuple:
+        projection = self._projected if projection is None else projection
+        subject = projection._view.selection_subject(projection._spec, projection._payload)
+        return tuple(_classifier_threshold_key(self._classifier_threshold_target(target, None, projection, subject=subject))
+                     for target in targets)
+
+    def _solve_classifier_distributions(self, projection, model, targets, requested, cancelled):
+        """Reuse the same batch fit for explicit group scopes and pooled scopes."""
+
+        answers = {}
+        for pooled in (False, True):
+            selected = tuple(index for index in requested if
+                             (projection._has_grouped_histogram() and not targets[index][2]) == pooled)
+            if not selected:
+                continue
+            view = projection._pooled_histogram_groups() if pooled else projection
+            lookup = {(facet, key): index for index, (facet, _group, key) in enumerate(view._fit_targets())}
+            indices = {index: lookup[(targets[index][0], targets[index][2])] for index in selected}
+            batch, _selections = self._fit_batch(
+                view, model, initial=None, bounds=None, options=None, cancelled=cancelled,
+                request_generation=_CLASSIFIER_REQUEST_GENERATION,
+                distribution_indices=tuple(indices.values()),
+            )
+            answers.update({index: (batch.results[original], batch.overlays[original])
+                            for index, original in indices.items()})
+        return answers
+
     def _authored_classifier_result(
         self,
         model: FitModelSpec,
@@ -1266,7 +1320,7 @@ class FitSessionMixin:
         self,
         projection: FitProjection,
         cancelled: Callable[[], bool],
-    ) -> tuple[tuple[Mapping[str, float] | None, ...], FacetFitBatchResult] | None:
+    ) -> tuple[object, dict] | None:
         """Solve a prepared frame's automatic classifier distributions.
 
         Runs where the frame is prepared, on the analysis executor against
@@ -1281,33 +1335,23 @@ class FitSessionMixin:
         ):
             return None
         components = self._classifier_gaussian_components
-        count = len(projection._fit_targets())
-        if len(components) != count:
-            components = (None,) * count
+        threshold_keys = tuple(self._classifier_thresholds)
+        targets = self._classifier_targets(projection, set(threshold_keys) | components.keys())
+        keys = self._classifier_keys(targets, projection)
         automatic = tuple(
-            index for index, component in enumerate(components) if component is None
+            index for index, key in enumerate(keys) if components.get(key) is None
         )
         if not automatic:
             return None
-        batch, _selections = self._fit_batch(
-            projection,
-            self._resolve_fit_model("bimodal_gaussian"),
-            initial=None,
-            bounds=None,
-            options=None,
-            cancelled=cancelled,
-            request_generation=_CLASSIFIER_REQUEST_GENERATION,
-            distribution_indices=automatic,
-        )
-        return components, batch
+        solved = self._solve_classifier_distributions(
+            projection, self._resolve_fit_model("bimodal_gaussian"), targets, automatic, cancelled)
+        return (threshold_keys, components), solved
 
     def _refresh_threshold_classifier(
         self,
         *,
         indices: set[int] | None = None,
-        prepared: (
-            tuple[tuple[Mapping[str, float] | None, ...], FacetFitBatchResult] | None
-        ) = None,
+        prepared: tuple[object, dict] | None = None,
     ) -> None:
         """Present caller-owned models; solve only distributions that need one.
 
@@ -1320,7 +1364,7 @@ class FitSessionMixin:
             self._classifier_results = ()
             self._classifier_overlays = ()
             self._classifier_thresholds = {}
-            self._classifier_gaussian_components = ()
+            self._classifier_gaussian_components = {}
             try:
                 self._selector_controller.remove(SelectorKind.THRESHOLD)
             except KeyError:
@@ -1329,12 +1373,10 @@ class FitSessionMixin:
 
         projection = self._projected
         model = self._resolve_fit_model("bimodal_gaussian")
-        targets = projection._fit_targets()
+        targets = self._classifier_targets(projection)
+        keys = self._classifier_keys(targets, projection)
         count = len(targets)
         components = self._classifier_gaussian_components
-        if len(components) != count:
-            components = self._classifier_gaussian_components = (None,) * count
-            self._classifier_thresholds = {}
         if len(self._classifier_results) != count:
             indices = None
             results = [None] * count
@@ -1346,32 +1388,28 @@ class FitSessionMixin:
             results = list(self._classifier_results)
             overlays = list(self._classifier_overlays)
         requested = set(range(count)) if indices is None else indices
-        automatic = tuple(index for index in requested if components[index] is None)
+        automatic = tuple(index for index in requested if components.get(keys[index]) is None)
         if automatic:
-            if prepared is not None and indices is None and prepared[0] == components:
-                batch = prepared[1]
+            if prepared is not None and indices is None and prepared[0] == (tuple(self._classifier_thresholds), components):
+                solved = prepared[1]
             else:
-                batch, _selections = self._fit_batch(
-                    projection,
-                    model,
-                    initial=None,
-                    bounds=None,
-                    options=None,
-                    cancelled=None,
-                    request_generation=_CLASSIFIER_REQUEST_GENERATION,
-                    distribution_indices=automatic,
-                )
+                solved = self._solve_classifier_distributions(projection, model, targets, automatic, None)
             for index in automatic:
-                results[index] = batch.results[index]
-                overlays[index] = batch.overlays[index]
+                results[index], overlays[index] = solved[index]
+        pooled_projection = None
         for index in requested:
-            authored = components[index]
+            authored = components.get(keys[index])
             if authored is None:
                 continue
             facet_index, group_index, group_key = targets[index]
             if authored:
                 try:
-                    selection = projection.fit_selection(model, facet_index=facet_index, group_index=group_index)
+                    view = projection
+                    if group_index is None and projection._has_grouped_histogram():
+                        if pooled_projection is None:
+                            pooled_projection = projection._pooled_histogram_groups()
+                        view = pooled_projection
+                    selection = view.fit_selection(model, facet_index=facet_index, group_index=group_index)
                     result = self._authored_classifier_result(model, selection, authored)
                     results[index] = result
                     overlays[index] = projection._make_fit_overlay(result, selection)
@@ -1429,11 +1467,12 @@ class FitSessionMixin:
         results = self._classifier_results
         if not results:
             return ()
+        keys = self._classifier_keys(self._classifier_targets())
         return tuple(
-            self._classifier_thresholds[index]
-            if index in self._classifier_thresholds
+            self._classifier_thresholds[key]
+            if key in self._classifier_thresholds
             else self._fitted_classifier_threshold(result)
-            for index, result in enumerate(results)
+            for key, result in zip(keys, results, strict=True)
         )
 
     def _classifier_thresholds_for_render(self) -> tuple[float | None, ...]:
@@ -1453,7 +1492,7 @@ class FitSessionMixin:
         if isinstance(self._spec, FacetGridPlot) and facet_index is None:
             facet_index = self._focused_facet_index or 0
         candidates = tuple((index, key) for index, (facet, _group, key)
-                           in enumerate(self._projected._fit_targets()) if facet == facet_index)
+                           in enumerate(self._classifier_targets()) if facet == facet_index)
         locked = self.display_state.interaction.get("series_lock")
         if locked is not None and locked["facet_index"] == self._focused_facet_index:
             for index, key in candidates:
@@ -1473,13 +1512,11 @@ class FitSessionMixin:
             display_thresholds,
             strict=True,
         ):
-            if (
-                result is None
-                or threshold is None
-                or displayed is None
-                or not result.success
-            ):
+            if threshold is None or displayed is None:
                 labels.append("")
+                continue
+            if result is None or not result.success:
+                labels.append(f"Threshold {displayed:.4g}")
                 continue
             _threshold, left, _right, fidelity = _bimodal_classifier_metrics(
                 result,
@@ -1513,7 +1550,7 @@ class FitSessionMixin:
         return SelectorState(
             SelectorKind.THRESHOLD,
             float(threshold),
-            facet_index=self._projected._fit_targets()[index][0],
+            facet_index=self._classifier_targets()[index][0],
         )
 
     def _set_classifier_thresholds_state(
@@ -1526,49 +1563,46 @@ class FitSessionMixin:
         if not self._threshold_classifier_enabled():
             raise RuntimeError("threshold classifier is not enabled")
         selected = normalize_classifier_threshold_targets(thresholds)
-        expected: dict[tuple[object, ...], int] = {}
-        count = len(self._projected._fit_targets())
-        for index in range(count):
-            target = self._classifier_threshold_target_for_index(
-                index,
-                None,
-            )
-            identity = _classifier_threshold_key(target)
-            if identity in expected:
-                raise ValueError(
-                    "classifier distributions are not uniquely coordinate-addressed"
-                )
-            expected[identity] = index
-        normalized: dict[int, float | None] = {}
-        components: list[Mapping[str, float] | None] = [None] * count
+        current = self._classifier_targets()
+        raw = self._projected._fit_targets()
+        full_keys = self._classifier_keys(raw)
+        shared_keys = self._classifier_keys(tuple((facet, None, ()) for facet, _group, _key in raw))
+        provided = {_classifier_threshold_key(target) for target in selected}
+        allowed = set(full_keys) | set(shared_keys)
+        if not discard_unmatched and provided - allowed:
+            raise ValueError("classifier threshold target does not match a current distribution")
+        for full, shared in zip(full_keys, shared_keys, strict=True):
+            if full != shared and full in provided and shared in provided:
+                raise ValueError("shared and independent classifier scopes overlap in one facet")
+        normalized: dict[tuple, float | None] = {}
+        components: dict[tuple, Mapping[str, float] | None] = {}
         for target in selected:
             identity = _classifier_threshold_key(target)
-            index = expected.get(identity)
-            if index is None:
-                if discard_unmatched:
-                    continue
-                raise ValueError(
-                    "classifier threshold target does not match a current distribution"
-                )
-            normalized[index] = (
+            if identity not in allowed:
+                continue
+            normalized[identity] = (
                 None if target["value"] is None else float(target["value"])
             )
+            # The scope remains authored even after clearing its chosen level;
+            # None still asks the same (possibly pooled) distribution to fit.
+            components[identity] = None
             if "gaussian_components" in target:
                 gaussian = target["gaussian_components"]
-                components[index] = (
+                components[identity] = (
                     MappingProxyType({})
                     if gaussian is None
                     else MappingProxyType(dict(gaussian))
                 )
         previous_components = self._classifier_gaussian_components
         self._classifier_thresholds = normalized
-        self._classifier_gaussian_components = tuple(components)
-        if refresh or len(self._classifier_results) != count:
+        self._classifier_gaussian_components = components
+        targets = self._classifier_targets()
+        if refresh or current != targets or len(self._classifier_results) != len(targets):
             self._refresh_threshold_classifier()
         else:
             changed = {
-                index for index, current in enumerate(components)
-                if index >= len(previous_components) or current != previous_components[index]
+                index for index, key in enumerate(self._classifier_keys(targets))
+                if components.get(key) != previous_components.get(key)
             }
             if changed:
                 self._refresh_threshold_classifier(indices=changed)
@@ -1582,29 +1616,26 @@ class FitSessionMixin:
         *,
         settled: bool = False,
     ) -> tuple[Mapping[str, object], ...]:
-        targets: list[Mapping[str, object]] = []
-        values = (
-            enumerate(self._classifier_thresholds_settled())
-            if settled else sorted(self._classifier_thresholds.items())
-        )
-        for index, value in values:
-            if value is None and index not in self._classifier_thresholds:
+        if not self._threshold_classifier_enabled():
+            return ()
+        records: list[Mapping[str, object]] = []
+        targets = self._classifier_targets()
+        keys = self._classifier_keys(targets)
+        values = self._classifier_thresholds_settled() if settled else tuple(
+            self._classifier_thresholds.get(key) for key in keys)
+        subject = self._view.selection_subject(self._spec, self._payload)
+        for index, (key, value) in enumerate(zip(keys, values, strict=True)):
+            if value is None and key not in self._classifier_thresholds:
                 continue
             target = dict(
-                self._classifier_threshold_target_for_index(
-                    index,
-                    value,
-                )
+                self._classifier_threshold_target(targets[index], value, subject=subject)
             )
-            if index < len(self._classifier_gaussian_components):
-                gaussian = self._classifier_gaussian_components[index]
-                if gaussian is not None:
-                    target["gaussian_components"] = (
-                        None if not gaussian else dict(gaussian)
-                    )
-            targets.append(target)
+            gaussian = self._classifier_gaussian_components.get(key)
+            if gaussian is not None:
+                target["gaussian_components"] = None if not gaussian else dict(gaussian)
+            records.append(target)
         return normalize_classifier_threshold_targets(
-            tuple(targets)
+            tuple(records)
         )
 
     def _schedule_fit_completion(

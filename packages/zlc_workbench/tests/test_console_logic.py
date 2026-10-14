@@ -1426,6 +1426,10 @@ def test_an_occupancys_frame_claims_survive_its_camera_changing_frame_count(pres
         node_id, {"source_signal": stable_signal_key(camera_id, "frames")}
     )
     assert presenter.view.logic_editors[node_id]["source_frames"] == ("0", "1", "2")
+    survival_id = presenter.add_logic("frame_survival", source_signal=stable_signal_key(node_id, "occupied"))
+    assert presenter.view.logic_editors[survival_id]["source_frames"] == ("0", "1", "2")
+    selection = {"selection": "from_first", "pairs": ({"start": "0", "end": "last", "selected": False},)}
+    presenter.view.logic_draft_changed.emit(survival_id, {"values": selection})
     claims = (
         {"path": "load.json", "frames": (2,)},
         {"path": "readout.json", "frames": ("last",)},
@@ -1433,20 +1437,41 @@ def test_an_occupancys_frame_claims_survive_its_camera_changing_frame_count(pres
     )
     presenter.view.logic_draft_changed.emit(node_id, {"artifact_inputs": {"calibrations": claims}})
     editor = presenter.view.logic_editors[node_id]["artifact_claims"]["calibrations"]
-    assert editor["problems"] == ("frame 2 is read by both load.json (2) and readout.json (last)",)
+    assert editor["problems"] == (
+        "load.json names frame 2, but the source carries 3 frames (0-2); "
+        "numbered middle frames cannot stand for the last frame",)
+    assert editor["reads"] == ((), (2,), (0, 1))
     presenter.view.logic_draft_changed.emit(camera_id, {"values": {"frames_per_cycle": 2}})
+    assert presenter.view.logic_editors[survival_id]["source_frames"] == ("0", "1")
     editor = presenter.view.logic_editors[node_id]["artifact_claims"]["calibrations"]
-    assert editor["problems"] == ("load.json names frame 2, but the source carries 2 frames (0-1)",)
+    assert editor["problems"] == (
+        "load.json names frame 2, but the source carries 2 frames (0-1); "
+        "numbered middle frames cannot stand for the last frame",)
     assert editor["reads"] == ((), (1,), (0,))
     assert presenter.logic[node_id].draft.artifact_inputs == {"calibrations": claims}, (
         "a frame count never edits the draft"
     )
     issues = presenter.logic_editor_projection(node_id)["issues"]
-    assert "load.json names frame 2, but the source carries 2 frames (0-1)" in issues
+    assert any("load.json names frame 2, but the source carries 2 frames (0-1)" in issue for issue in issues)
     presenter.view.logic_draft_changed.emit(camera_id, {"values": {"frames_per_cycle": 4}})
     editor = presenter.view.logic_editors[node_id]["artifact_claims"]["calibrations"]
     assert editor["problems"] == ()
     assert editor["reads"] == ((2,), (3,), (0, 1))
+    assert presenter.logic[node_id].draft.artifact_inputs == {"calibrations": claims}
+    assert presenter.view.logic_editors[survival_id]["source_frames"] == ("0", "1", "2", "3")
+    for count in (22, 25, 1, 22):
+        presenter.view.logic_draft_changed.emit(camera_id, {"values": {"frames_per_cycle": count}})
+        expected = tuple(map(str, range(count)))
+        assert presenter.view.logic_editors[node_id]["source_frames"] == expected
+        assert presenter.view.logic_editors[survival_id]["source_frames"] == expected
+        assert presenter.logic[survival_id].draft.values == selection
+    assert all(binding.host is None for binding in presenter.logic.values())
+    path = presenter.session.workspace.data / "frame-choices.json"
+    assert presenter.save_layout(str(path))
+    assert presenter.load_layout(str(path))
+    assert presenter.edit_logic(survival_id)
+    assert presenter.logic[survival_id].draft.values == selection
+    assert presenter.view.logic_editors[survival_id]["source_frames"] == tuple(map(str, range(22)))
     assert presenter.logic[node_id].draft.artifact_inputs == {"calibrations": claims}
 
 

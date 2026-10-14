@@ -10,17 +10,21 @@ from zlc_atom.nodes._framework.frames import (
     canonical_frames,
     check_claims,
     describe_frames,
+    frame_identity,
     frame_problems,
     reach_frames,
 )
 
 
 def test_claimed_frames_have_one_spelling_and_one_order() -> None:
-    assert canonical_frames(["rest", 2, "0", "LAST"]) == (0, 2, "last", "rest")
+    # Frame 0 IS the first frame: one claim, one spelling.
+    assert canonical_frames(["rest", 2, "0", "LAST"]) == (2, "first", "last", "rest")
     assert canonical_frames(["rest", "last", 3, " First "]) == (3, "first", "last", "rest")
     assert describe_frames((0, 2, "last")) == "0, 2, last"
     assert describe_frames((1, "first", "rest")) == "1, first, rest"
     assert describe_frames(()) == "no frame"
+    assert tuple(frame_identity(index, 4) for index in range(4)) == (0, 1, 2, "last")
+    assert frame_identity(0, 1) == 0
     for bad in ([True], [-1], ["second"], [1.5], "rest"):
         with pytest.raises(ValueError):
             canonical_frames(bad)
@@ -85,19 +89,21 @@ def test_last_and_rest_follow_the_count(count: int, expected: tuple[int, ...]) -
 def test_one_entry_may_reach_a_frame_twice() -> None:
     assert assign_frames(((0, "last"), ("rest",)), 1, ("A", "B")) == (0,)
     reach = reach_frames(((0, "last"), ("rest",)), 1)
-    assert reach.readers == (((0, "0"),),)
+    assert reach.readers == (((0, "0"),),), "how each reader wrote it"
     assert reach.frames_of(1) == ()
 
 
 def test_every_problem_is_named_and_none_is_settled_silently() -> None:
     assert frame_problems(((5,),), 3, ("late",)) == (
-        "late names frame 5, but the source carries 3 frames (0-2)",
+        "late names middle frame 5, but the source carries 3 frames (0-2); "
+        "a numbered middle frame never stands for the first or the last",
         "frames 0, 1, 2 have no entry: give them to one, or let one read the rest",
     )
     assert frame_problems(((0,),), 2, ("load",), what="calibration") == (
         "frame 1 has no calibration: give it to one, or let one read the rest",
     )
-    with pytest.raises(ValueError, match="frame 2 is read by both"):
+    # In three frames 2 is the LAST frame: a middle 2 is absent, never the last.
+    with pytest.raises(ValueError, match="names middle frame 2"):
         assign_frames((("last",), (2,)), 3, ("A", "B"))
     # The same claims are fine again once the count that suits them returns.
     assert assign_frames((("last",), (2,), ("rest",)), 4, ("A", "B", "C")) == (2, 2, 1, 0)
@@ -106,19 +112,18 @@ def test_every_problem_is_named_and_none_is_settled_silently() -> None:
 def test_claims_are_checked_among_themselves_before_any_count() -> None:
     with pytest.raises(ValueError, match="'rest' is claimed by both A and B"):
         check_claims((("rest",), ("rest",)), ("A", "B"))
-    with pytest.raises(ValueError, match="frame 0 is claimed by both A and B"):
+    with pytest.raises(ValueError, match="'first' is claimed by both A and B"):
         check_claims(((0,), (0, "last")), ("A", "B"))
     with pytest.raises(ValueError, match="'first' is claimed by both A and B"):
         check_claims((("first",), ("first", "rest")), ("A", "B"))
-    # First and 0 are one frame in every cycle: that collision needs no count,
-    # and is named as a frame's, with how each entry reaches it.
-    with pytest.raises(ValueError, match=r"frame 0 is read by both A \(first\) and B \(0\)"):
+    # 0 IS First: written either way, it is one claim and one owner.
+    with pytest.raises(ValueError, match="'first' is claimed by both A and B"):
         check_claims((("first",), (0, "last")), ("A", "B"))
-    with pytest.raises(ValueError, match=r"frame 0 is read by both A \(0\) and B \(first\)"):
+    with pytest.raises(ValueError, match="'first' is claimed by both A and B"):
         check_claims(((0, "rest"), ("first",)), ("A", "B"))
-    # One entry naming frame 0 both ways is one reader; First against Last
+    # One entry naming frame 0 both ways is one claim; First against Last
     # collides only in a one-frame cycle, so only a count refuses it.
-    assert check_claims(((0, "first"), ("rest",)), ("A", "B")) == ((0, "first"), ("rest",))
+    assert check_claims(((0, "first"), ("rest",)), ("A", "B")) == (("first",), ("rest",))
     assert check_claims((("first",), ("last",)), ("A", "B")) == (("first",), ("last",))
     with pytest.raises(ValueError, match="B reads no frame"):
         check_claims((("rest",), ()), ("A", "B"))
@@ -126,7 +131,7 @@ def test_claims_are_checked_among_themselves_before_any_count() -> None:
 
 def test_a_draft_value_is_rows_of_path_and_frames() -> None:
     assert frame_claim_entries([{"path": " a.json ", "frames": ["rest", 0]}]) == (
-        {"path": "a.json", "frames": (0, "rest")},
+        {"path": "a.json", "frames": ("first", "rest")},
     )
     for bad in ("a.json", {"path": "a", "frames": []}, [{"path": "a"}],
                 [{"path": 1, "frames": []}], [{"path": "a", "frames": [], "x": 1}]):

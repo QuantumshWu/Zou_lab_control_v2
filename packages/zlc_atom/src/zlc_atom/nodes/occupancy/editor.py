@@ -2,20 +2,22 @@
 
 The operator says which file reads which frames the way they think it --
 this one the first frame, that one the last, another the rest -- by marking
-cells: "First" is frame 0 whatever the count, "Last" and "Rest" follow the
-frame count, a frame number keeps its position.  A frame reached through
-First, Last or Rest shows as a dashed card in its file's row, and as an
-empty dashed outline in the other rows when it is a First or a Last (only
-that column moves it: a click there says so); a frame nobody reads is an
-empty red card in every row, and one two files reach, or a number the source
-does not carry, is a red-edged card with the reason below.  Nothing here changes a claim
+cells.  The ends of the cycle are named by what they are: "First" is frame
+0 whatever the count and "Last" follows the count, so they have their own
+columns and no numbered column repeats them; the numbered columns are the
+MIDDLE frames, which keep their number.  "Rest" takes whatever no file
+names.  A frame reached through Rest shows as a dashed card in its file's
+row (on First or Last when it is an end); a frame nobody reads is an empty
+red card in every row, and one two files reach, or a middle number the
+source no longer has between its ends, is a red-edged card with the reason
+below.  Nothing here changes a claim
 because the frame count changed: what was authored stays until the operator
 edits it.  A file is removed by the × that ends its row and replaced by
 clicking its name.  The readout model -- which model each file is read
-with -- is chosen under the files it applies to.  The file names are the
+with, set once -- is a dropdown under the files it applies to.  The file names are the
 editor's label column, shared with the form: the title, the model's label
 and the names end where the form's labels do (the longest name widens the
-column for all of them), so Add, the first card, the model buttons and the
+column for all of them), so Add, the first card, the model dropdown and the
 form's fields start on one edge.  The console resolves the
 files and projects how the source's frames read them; this widget only
 draws that and writes the edits back.
@@ -31,9 +33,9 @@ from zlc_ui.fluent import (
     RED_DARK,
     TEXT,
     FluentButton,
+    FluentComboBox,
     FluentLabel,
     FluentSectionLabel,
-    FluentSegmentedButtons,
     FluentSelectionGrid,
     fluent_open_path,
     muted_note_label,
@@ -47,7 +49,8 @@ from zlc_atom.nodes.calibration import READOUT_MODEL_CHOICES
 CALIBRATIONS = "calibrations"
 _NAMED = ((FIRST, "First"), (LAST, "Last"), (REST, "Rest"))
 _GAP = None
-_HINT = "Click a cell to give that frame to a file · Last and Rest follow the frame count"
+_HINT = ("Click a cell to give that frame to a file · First and Last follow the cycle's ends, "
+         "middle frames keep their number")
 _EMPTY = "Add a calibration file; the first one reads every frame"
 
 
@@ -101,10 +104,11 @@ class CalibrationsEditor(QtWidgets.QWidget):
         self.model_label = FluentLabel("Readout model")
         self.model_label.setStyleSheet(f"color: {TEXT}; background: transparent; border: none;")
         model_layout.addWidget(self.model_label)
-        self.model = FluentSegmentedButtons(
-            tuple((choice.value, choice.label) for choice in READOUT_MODEL_CHOICES), self.model_row)
+        self.model = FluentComboBox(self.model_row)
+        for choice in READOUT_MODEL_CHOICES:
+            self.model.addItem(choice.label, choice.value)
         self.model.activated.connect(
-            lambda value: self.draft_changed.emit({"values": {"model_kind": value}}))
+            lambda _index: self.draft_changed.emit({"values": {"model_kind": self.model.currentData()}}))
         model_layout.addWidget(self.model)
         model_layout.addStretch(1)
         layout.addWidget(self.model_row)
@@ -138,7 +142,13 @@ class CalibrationsEditor(QtWidgets.QWidget):
         self._base_dir = str(claims["base_dir"])
         self._filter = str(claims["file_filter"])
         frames = projection.get("source_frames")
-        self.model.set_current(projection["form_values"]["model_kind"])
+        index = self.model.findData(projection["form_values"]["model_kind"])
+        if index != self.model.currentIndex():
+            blocked = self.model.blockSignals(True)
+            try:
+                self.model.setCurrentIndex(index)
+            finally:
+                self.model.blockSignals(blocked)
         self._draw(frames, claims["files"], claims["problems"])
 
     def _draw(self, frames, files, problems) -> None:
@@ -147,14 +157,18 @@ class CalibrationsEditor(QtWidgets.QWidget):
         claimed = sorted({
             token for entry in entries for token in entry["frames"] if isinstance(token, int)
         })
-        present = () if count is None else tuple(range(count))
-        # A number the source does not carry keeps a column of its own, so
-        # the claim stays visible -- and one click away from being removed.
-        ghosts = tuple(number for number in claimed if count is None or number >= count)
-        self._columns = (*(token for token, _label in _NAMED), _GAP, *present, *ghosts)
+        # The numbered columns are the middle frames; the ends are First and Last.
+        middle = () if count is None else tuple(range(1, count - 1))
+        # A middle number the source does not carry between its ends keeps a
+        # column of its own, so the claim stays visible -- and one click away
+        # from being removed.
+        ghosts = tuple(number for number in claimed if number not in middle)
+        self._columns = (*(token for token, _label in _NAMED), _GAP, *middle, *ghosts)
+        ends = {FIRST: 0, LAST: None if count is None else count - 1}
         labels = (
-            *(label for _token, label in _NAMED), "",
-            *(frames[number] for number in present), *(str(number) for number in ghosts),
+            *(label if count is None else f"{label} · {frames[ends[token]]}"
+              if token in ends else label for token, label in _NAMED), "",
+            *(frames[number] for number in middle), *(str(number) for number in ghosts),
         )
         reach = None if count is None or not entries else reach_frames(
             tuple(entry["frames"] for entry in entries), count)
@@ -168,38 +182,30 @@ class CalibrationsEditor(QtWidgets.QWidget):
                 if token is _GAP:
                     continue
                 label = labels[column]
-                if isinstance(token, int) and token not in present:
+                frame = (ends[token] if token in ends else
+                         token if isinstance(token, int) and token in middle else None)
+                if isinstance(token, int) and token not in middle:
                     if token not in entry["frames"]:
                         continue
                     states[(row, column)] = "warning"
                     tips[(row, column)] = (
-                        f"frame {token} is not in this source; click to drop the claim"
+                        f"middle frame {token} is not in this source; click to drop the claim"
                         if count is not None else f"frame {token}"
                     )
-                elif isinstance(token, int) and reach is not None:
-                    readers = reach.readers[token]
+                elif frame is not None and reach is not None:
+                    readers = reach.readers[frame]
                     mine = next((how for reader, how in readers if reader == row), None)
-                    end = None if mine is not None else _held_by(entries, row, token, count)
-                    if end is not None:
-                        # Another file's First or Last: that column moves it,
-                        # the number does not.
-                        holder, how = end
-                        word = how.capitalize()
-                        states[(row, column)] = "held"
-                        tips[(row, column)] = (
-                            f"{names[holder]} reads frame {token} as {word}; click {word} "
-                            "in this row to read it here")
-                    elif len(readers) > 1 and mine is not None:
+                    if len(readers) > 1 and mine is not None:
                         states[(row, column)] = "warning"
                         tips[(row, column)] = "read by " + " and ".join(
                             f"{names[reader]} ({how})" for reader, how in readers)
                     elif not readers:
                         states[(row, column)] = "missing"
                         tips[(row, column)] = (
-                            f"frame {token} has no calibration; click to give it to this file")
-                    elif mine in (FIRST, LAST, REST):
+                            f"frame {frame} has no calibration; click to give it to this file")
+                    elif mine == REST and token not in entry["frames"]:
                         states[(row, column)] = "derived"
-                        tips[(row, column)] = f"read as {mine}"
+                        tips[(row, column)] = f"frame {frame} is read as rest"
                 cells[(row, column)] = label
                 if token in entry["frames"]:
                     selected.append((row, column))
@@ -252,16 +258,11 @@ class CalibrationsEditor(QtWidgets.QWidget):
                 frames[row].remove(token)
         for row, column in sorted(after - before):
             token = self._columns[column]
-            # A frame, First, Last or Rest belongs to one file: taking it here takes
-            # it from whichever file had it.  First and 0 are one frame in every
-            # cycle, so taking either takes both.
-            same = (FIRST, 0) if token in (FIRST, 0) else (token,)
+            # A middle frame, First, Last or Rest belongs to one file: taking
+            # it here takes it from whichever file had it.
             for index, other in enumerate(frames):
-                if index == row:
-                    continue
-                for taken in same:
-                    if taken in other:
-                        other.remove(taken)
+                if index != row and token in other:
+                    other.remove(token)
             frames[row].append(token)
         self._write(tuple(
             {"path": entry["path"], "frames": tuple(claimed)}
@@ -315,23 +316,6 @@ class CalibrationsEditor(QtWidgets.QWidget):
 
     def set_mutation_enabled(self, enabled: bool) -> None:
         self.setEnabled(bool(enabled))
-
-
-def _held_by(entries, row: int, frame: int, count: int) -> tuple[int, str] | None:
-    """The other file reading ``frame`` as its First or Last, and which.
-
-    Read from the raw claims: a file that also names the frame by number
-    still holds it through First or Last, and only that column moves it.
-    """
-
-    for holder, entry in enumerate(entries):
-        if holder == row:
-            continue
-        if frame == 0 and FIRST in entry["frames"]:
-            return holder, FIRST
-        if frame == count - 1 and LAST in entry["frames"]:
-            return holder, LAST
-    return None
 
 
 def _name(entry) -> str:

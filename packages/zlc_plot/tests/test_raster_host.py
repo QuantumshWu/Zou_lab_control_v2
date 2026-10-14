@@ -1314,6 +1314,75 @@ def test_threshold_classifier_is_independent_and_covers_every_facet(monkeypatch,
         assert (tmp_path / "known-model.npz").is_file()
         assert unnecessary_solves == []
 
+        # Visual reference-label Groups share the caller's ONE classifier
+        # when its explicit scope names only the facet. Keep an empty group,
+        # and do not fit or repeat its Gaussian pair for either label.
+        from dataclasses import replace
+        from zlc_data import ValidityContract
+        grouped_schema = make_dataset_schema(
+            repeat_domain(size=80), mapped_domain_from_columns({"site": (0.0, 1.0)}),
+            cell_axes=(axis("label", values=(0, 1)),), dtype=np.float64,
+        )
+        grouped_schema = replace(grouped_schema, value_schema=replace(
+            grouped_schema.value_schema,
+            validity_contract=ValidityContract.components(grouped_schema.cell_domain.axes[0].axis_id),
+        ))
+        grouped_values = np.repeat(np.asarray(snapshot.block.values), 2, axis=-1)
+        marks = np.zeros_like(grouped_values, dtype=bool)
+        marks[:40, :, 0] = True
+        marks[40:, 0, 1] = True
+        grouped_source = make_snapshot(grouped_schema, grouped_values, revision=0, validity=marks)
+        grouped_spec = FacetGridPlot(AxisRef.point("site"), HistogramPlot(group=AxisRef.cell_data("label")))
+        grouped_targets = (targets[0], dict(targets[1], value=3.5))
+        grouped = PlotSession(grouped_source, grouped_spec, parameters={"threshold_classifier": True},
+                              initial_configuration={"classifier_thresholds": grouped_targets})
+        try:
+            assert len(grouped._classifier_results) == 2
+            assert grouped._classifier_results[0].parameters["ratio"] == pytest.approx(.3)
+            assert grouped._payload.cells[1].payload.counts.shape[0] == 2
+            assert grouped._payload.cells[1].payload.counts[1].sum() == 0
+            assert set(grouped._renderer._classifier_artists) == {(0, ()), (1, ())}
+            fallback_lines, fallback_threshold, fallback_label = grouped._renderer._classifier_artists[(1, ())]
+            assert fallback_threshold.get_visible()
+            assert all(not line.get_visible() and not len(line.get_xdata()) for line in fallback_lines)
+            assert "Threshold 3.5" in fallback_label.get_text() and "Fidelity" not in fallback_label.get_text()
+            conflicting = dict(targets[0], scope=tuple(targets[0]["scope"]) + (
+                {"domain": "cell_data", "axis_id": "label", "coordinate": 0},))
+            with pytest.raises(ValueError, match="overlap"):
+                grouped.configure(classifier_thresholds=(*grouped_targets, conflicting))
+            grouped.focus_facet(0)
+            renderer = grouped._renderer
+            lines = renderer._series_lines[id(renderer.primary_axes)]
+            colors = tuple(tuple(line.get_facecolor()[0, :3]) for line, _identity, _label in lines)
+            assert colors[0] != colors[1]
+            edges, heights = lines[1][0]._zlc_bars
+            peak = int(np.argmax(heights))
+            px, py = renderer.primary_axes.transData.transform((
+                float(np.mean(edges[peak:peak + 2])), float(heights[peak]) * .8))
+            assert renderer.series_focus("move", renderer.primary_axes, px, py, hit_radius=10)
+            reading = renderer._histogram_threshold_text(grouped.selector_state(SelectorKind.THRESHOLD))
+            assert lines[1][2] in reading and "shared classifier" in reading
+            grouped.configure(interaction={"series_lock": {"key": lines[1][1], "facet_index": 0}})
+            assert (0, ()) in renderer._classifier_artists
+            assert all(line.get_visible() for line in renderer._classifier_artists[(0, ())][0])
+            assert grouped.selector_state(SelectorKind.THRESHOLD, display=False).value == weighted_crossing
+            assert tuple(tuple(line.get_facecolor()[0, :3]) for line, _identity, _label in lines) == colors
+            assert grouped.describe_display().classifier_thresholds == grouped_targets
+        finally:
+            grouped.close()
+        save_figure_artifact(tmp_path / "grouped-known-model.png", plot_input=grouped_source,
+                             spec=grouped_spec, size="2x2", parameters={"threshold_classifier": True},
+                             classifier_thresholds=grouped_targets)
+        grouped_recipe = decode_plot_recipe(encode_plot_recipe(
+            grouped_spec, parameters={"threshold_classifier": True}, size="2x2", classifier_thresholds=grouped_targets))
+        grouped_recipe.pop("overlay")
+        reopened = open_figure_host(grouped_source, grouped_recipe)
+        try:
+            assert reopened.describe_display().result(timeout=10).value.classifier_thresholds == grouped_targets
+        finally:
+            reopened.close(timeout=10)
+        assert unnecessary_solves == []
+
         # The file a Save writes is, pixel for pixel, what a screen session
         # prepared with the same thresholds draws -- every cell frame and
         # title included.

@@ -18,6 +18,7 @@ from zlc_atom.nodes.camera.measurement import (
     CAMERA_FRAMES_OUTPUT,
     CameraMeasurementNode,
     CameraMeasurementRequest,
+    describe_camera_frames,
 )
 
 
@@ -69,6 +70,7 @@ LOGIC_NODE = LogicNodeDescriptor(
     # READOUT_EVENT axis, so the signal vocabulary no longer changes with
     # the acquisition configuration.
     outputs=(CAMERA_FRAMES_OUTPUT,),
+    describe_output_frames=describe_camera_frames,
     node_previews=(NodePreviewSpec(CAMERA_FRAMES_OUTPUT, "facet_grid"),),
     device_requirements=(
         DeviceRequirement("camera.adapter", "camera", CAMERA_PROTECTED_FIELDS),

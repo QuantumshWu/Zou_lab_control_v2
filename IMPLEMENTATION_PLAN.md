@@ -433,12 +433,16 @@
 
 ### 2.4 Domain Task artifacts
 
+- 2026-10-14 Calibration报告分布按参考标签分组：BOX/PSF/Uniform PSF的第2帧读出以第1/3帧一致且有效的Empty/Occupied标签作为普通Group，未一致仍invalid，每个有效sample只入一组。Gaussian科学拟合仍用全部finite短帧，不改阈值与actual fidelity。公共Histogram classifier用canonical scope作为唯一身份：显式facet-only scope汇总已有各Group bins并共用一套模型/阈值，完整group scope保留独立分类；Group颜色与hover/lock、Focus、空组和typed Figure重开均沿原路径。修正无Gaussian组件时漏画最终经验阈值线，只有阈值读数、不伪造模型/fidelity。Calibration实际保存读回用例通过7.79s，分组与原classifier相关4项通过，最后共享/fallback roundtrip通过6.27s；已查看公共导出PNG并从原NPZ重新渲染确认，未开硬件/GUI，研究图片不入Git。
+
+- 2026-10-14 用户报告同一光斑被列成多个近重合site，修订此前只合并相邻整数像素的高召回取舍：保留原候选准入，在Review前利用既有原始图像定位拟合的实测横纵PSF宽度做保守同核心去重；保留强代表、不链式吞并，删除候选后沿原定位重新拟合。无可信宽度时不使用设定值代替测量；最终读出PSF、阈值、保存格式仍沿原流程。固定单个pixel-integrated PSF、逐帧Poisson噪声的生产detect_sites红例原输出3点，修复后1点、定位误差0.00226px；窄PSF的2.2px双点与椭圆PSF短轴2.4px双点均保留2点。8项直接检测用例通过，涵盖弱点、罕见装载、密集阵列与边缘；保存帧→Review→完整读出分析/保存用例通过。用户未提供本次实机数据，以上为合成/虚拟路径验证，未重采硬件或重写旧Calibration。
+
 - 2026-10-13 新批次calibration-21证实先累加再找峰仍漏掉14次独立出现的真实峰。时间路径改为每次帧差先确定3×3峰及相对同次spot外环的局部对比，再原位累计有效峰次数/最大证据；删除total_change、汇总图峰否决及邻域借证据。保留原平均图、原始光子定位和固定尺寸统计；未扩大全局合并半径，也未降低作者sigma。真实21、20均恢复35个已知站点，但分别有19、18个额外候选，主要在强光斑近旁；旧8平均图仍35点，8项直接检测测试通过。这是偏重高召回并配合现有Review的明确取舍，不宣称零误检或未来绝不漏点；Review仍显示平均图，提示稀有站点可能不显眼，实际参考帧查看沿现有保存Figure。
 - 高召回的额外候选会影响联合定位，故Review删点后仅以保留名单复用原始平均图定位，再进入BOX/PSF，不重采/重检测；名单未减少不重复拟合，重新定位不能破坏原读出边界。真实21保留35点后原34点相对旧结果RMS0.0346px/max0.151px；20保留35点后RMS0.0130px/max0.0366px。新增弱点在平均图下仍存在定位不确定性，不把几何匹配当精确真值。既有保存帧→Review→完整分析/保存用例通过，并核实删除前后使用各自名单定位。
 - 2026-10-13 实验交接复核：calibration-20的200张真实长参考基线为31点，四个稀有装载点被average共同峰门槛否决。时间证据改用Gaussian平滑原图相邻差值（transition median去共同漂移），避免abs(带通差值)把负环变伪峰；两图独立峰合并同一像素核，删除average吸附函数。修改后35个已知站点全部匹配、零额外；原31点最大位移0.0268px，旧calibration-8平均图仍35点。8项直接检测用例通过，包括原图输入的近邻稀有装载回归。未修改Calibration保存格式或旧文件，未进行新硬件采集；原始证据与前后JSON/对照图只留ignored research。
 - Calibration密集站点整改：保留带通/相邻差分admission，原始reference均值在同一遍历中累加供亚像素定位；像素积分局部多峰模型显式包含邻居贡献。BOX仍是原真实窗口总和，PSF读出的邻居耦合单独核查，不以窗口重叠拒绝站点、不自动挪成理想网格或修改旧artifact阈值。
 - 2026-10-13 按实验机弱邻峰反馈，将候选身份最大值窗口固定为3×3；原spot尺度窗口明确改名change_window，只用于帧差外环，不再负责峰间竞争。加入强邻点尾部8.178、独立弱峰2.611/7.224σ的合成回归，平均图与帧差路径均保留弱峰。仅改窗口曾令原有3项测试出现伪点，已确认旧窗口下对应测试通过；根因为变化凹底通过邻域max借入邻居的帧差证据，改为候选自身同时满足原change_peak外环判断。阈值、滤波、环尺度及定位不变，全部8项site detection测试通过；未取得/重算现场归档，不宣称现场35点复验。
-- PSF生成改为reference图对自身占据的联合回归及局部最小范数去混；复用signed psf_weights合同，在线无新矩阵求解。原短曝光的阈值/fidelity仍使用同一稳定cycle标签，模板学习不要求所有邻居在前后均保持占据。保存可辨识性与数值条件事实，不静默重解释旧Calibration。
+- PSF生成改为reference图对自身占据的联合回归及局部最小范数去混；复用signed psf_weights合同，在线无新矩阵求解。短曝光Gaussian阈值使用全部finite数据，Empirical阈值与actual fidelity使用稳定cycle标签；模板学习不要求所有邻居在前后均保持占据。保存可辨识性与数值条件事实，不静默重解释旧Calibration。
 - 回归和有效帧选择按各模板的实际空间邻居局部进行，避免大阵列被不必要的全局秩/全局valid_rows限制；不可辨识相关邻居的联合光响应仍进入去混，互不相交的光斑不因同占据而互相失效。
 
 - Calibration：每run一个folder，final Calibration JSON、summary JSON/text、精选报告Figure
@@ -463,6 +467,10 @@
   记录错误；只有封存写不出时才restore起始phase。未测phase不得成为final。
 
 ### 2.5 Device Control与settings provenance
+
+- 2026-10-14 三项交互修复：Bracket Repeats复用公共count spinbox，最小1/步长1/uint32上限，原Slot与Config/Subpulse只读语义保留；3项直接Qt与正式窗口点击4→5/保存截图通过并关闭。节点describe_output_frames纯元数据与Console多跳刷新使Camera草稿立即到Occupancy/Survival，无采集或假发布；统一0首/last尾/中间index，Survival保留规则＋稀疏例外，22→25时From first排除首尾而自动含新增中间帧。相关33项通过，Console草稿更新及Layout保存重开直接用例通过，所有测试窗关闭。Viewer Open载入实际played Pulse到普通未连接Editor，删除旧专属预览；真实Qt编辑/另存且不改原NPZ、Viewer与Editor独立关闭及错误入口3项通过。MCP说明与寿命配方按当前端点/规则语义更新；不猜旧custom列表曾来自哪个preset。
+
+- 2026-10-14 Pulse Hold→Edge/Ramp数值不可编辑回归修复：UI提交错误地把旧Hold数值框的readonly作为模式切换禁令，造成Combo变了而Pulse未变。原Period card改为分别判断模式与数值准入，Hold切换用accepted继承值，不读取被动widget改值；Config/Subpulse/Spacer保护不变。扩展既有正式Editor Qt点击用例先红后绿，连同只读/控件复用直接用例共2 passed（3.94s），窗口正常关闭，未连接真实硬件或改编译/通信。
 
 - 2026-10-13 处理实验机寿命反馈（资料包标记2026-10-14、基线6c4599c0）：真实Qt/HTTP复现首次多点正常，单点试采后改同一Scan为多点仍保留scan=reduce并报缺X。现有recipe原生字段绑定增加必填panel_semantic，显式保留实际Scan X；没有新增解析/执行框架或改变通用Plot默认。原同一用例两路径均通过actual fate、原生fit success与当前generation/revision核对。panel.update目录与原校验共享允许字段，guide补全2x2平均、4x4逐site、2x2 tau误差三图调用、Fit输出Site域、非停止显示/保存和科学解释边界；配方示例关闭坐标网格但保留facet。临时真实Qt/HTTP三图验收确认Site转Point域、三张PNG与三份原生NPZ的plot/dataset读回、Frozen ref及Layout preset/display一致，未调用Stop；测试进程及临时workspace已清理。未改solver、实验机扫描点/次数、系数约束或原始数据；验收仅虚拟设备。
 

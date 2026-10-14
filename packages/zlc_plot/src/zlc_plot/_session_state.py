@@ -89,7 +89,7 @@ class _PreparedLiveFrame:
     #: frame, with the authored components it assumed; None when the
     #: classifier is off or every distribution is authored.
     classifier: (
-        "tuple[tuple[Mapping[str, float] | None, ...], FacetFitBatchResult] | None"
+        "tuple[object, dict] | None"
     ) = None
 
 @dataclass(frozen=True, slots=True)
@@ -163,10 +163,8 @@ class _ProjectionPresentation:
     previous_accepted_fit: _AcceptedFit | None
     previous_classifier_results: tuple["FitResult | None", ...]
     previous_classifier_overlays: tuple[FitOverlay, ...]
-    previous_classifier_thresholds: dict[int, float | None]
-    previous_classifier_gaussian_components: tuple[
-        Mapping[str, float] | None, ...
-    ]
+    previous_classifier_thresholds: dict[tuple, float | None]
+    previous_classifier_gaussian_components: dict[tuple, Mapping[str, float] | None]
     previous_focused_facet_index: int | None
     previous_facet_focus_index: int | None
     previous_viewport: Viewport | None

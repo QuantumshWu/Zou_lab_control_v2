@@ -158,11 +158,8 @@ app.processEvents()
     )
 
 
-def test_a_played_pulse_gets_a_read_only_tab_beside_board_and_edit(run_qt) -> None:
-    """A Devices row's action opens one preview tab per played pulse -- the
-    editor's preview page, controls and all, each control speaking with the
-    tab's key; a second open focuses it, and closing the tab tells the
-    presenter which one went."""
+def test_a_played_pulse_offers_its_open_action_on_the_devices_page(run_qt) -> None:
+    """The pure Viewer shell emits the recorded Pulse identity for its owner."""
 
     run_qt(
         """
@@ -170,16 +167,11 @@ from PyQt5 import QtWidgets
 from zlc_ui.figure_viewer import FigureViewerHandle, FigureViewerView
 from zlc_ui.fluent import FluentButton
 from zlc_ui.qt import ensure_qt_app
-app = ensure_qt_app(['pulse-tab'])
+app = ensure_qt_app(['pulse-open'])
 view = FigureViewerView()
 handle = FigureViewerHandle(None, view)
-actions, closed, controls = [], [], []
+actions = []
 handle.info_action_requested.connect(actions.append)
-handle.pulse_tab_closed.connect(closed.append)
-handle.pulse_include_off_toggled.connect(lambda key, on: controls.append(('off', key, on)))
-handle.pulse_selectors_toggled.connect(lambda key, on: controls.append(('selectors', key, on)))
-handle.pulse_size_committed.connect(lambda key, size: controls.append(('size', key, size)))
-handle.pulse_save_requested.connect(lambda key: controls.append(('save', key)))
 view.set_archive_info(
     (('Devices', (('sequencer pulse (scan)', {'text': 'Open scan', 'action': 'pulse:k'}),)), ('Flow', ())),
     {'nodes': (), 'edges': ()},
@@ -194,41 +186,6 @@ buttons = [b for b in view.info_pane.findChildren(FluentButton) if b.text() == '
 assert len(buttons) == 1, [b.text() for b in view.info_pane.findChildren(FluentButton)]
 buttons[0].click()
 assert actions == ['pulse:k']
-before = view.tabs.count()
-handle.open_pulse_tab('k', 'Pulse · scan')
-assert view.tabs.count() == before + 1
-assert view.tabs.tabText(view.tabs.currentIndex()) == 'Pulse · scan'
-assert handle.has_pulse_tab('k')
-page = view._pulse_tabs['k']
-assert page.preview_size_combo.isVisibleTo(page) and page.preview_selectors_switch.isVisibleTo(page)
-assert handle.set_pulse_size_names('k', ('2x2', '4x4')) and handle.set_pulse_size('k', '4x4')
-assert page.preview_size == '4x4'
-assert handle.set_pulse_status('k', '4x4 · 3 periods') and page.preview_status.text() == '4x4 · 3 periods'
-page.preview_include_off.setChecked(True)
-page.preview_selectors_switch.setChecked(True)
-page.preview_size_combo.setCurrentText('2x2')
-page.preview_size_combo.activated[int].emit(page.preview_size_combo.currentIndex())
-page.preview_save_figure_button.click()
-assert controls == [('off', 'k', True), ('selectors', 'k', True), ('size', 'k', '2x2'), ('save', 'k')], controls
-class _Host:
-    logical_size = (120, 80)
-    def __init__(self):
-        self.widget = QtWidgets.QWidget()
-    def qt_widget(self):
-        return self.widget
-    def wheel_target(self):
-        return self.widget
-host = _Host()
-assert handle.show_pulse('k', host)
-assert page.preview_placeholder.isHidden()
-assert host.widget.parent() is page.preview_body
-handle.open_pulse_tab('k', 'Pulse · scan')
-assert view.tabs.count() == before + 1, 'a second open focuses, never duplicates'
-view._tab_close_clicked(page)
-assert closed == ['k']
-assert handle.close_pulse_tab('k')
-assert view.tabs.count() == before and not handle.has_pulse_tab('k')
-assert handle.show_pulse_placeholder('k', 'gone') is False
 """
     )
 

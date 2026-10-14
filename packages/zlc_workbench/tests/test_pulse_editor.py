@@ -2121,6 +2121,25 @@ def test_formal_config_refresh_keeps_dac_codes_readable_at_small_scale(sequence,
         assert edit.text() == "100" and not edit.property("numericError")
         assert not warnings, warnings
 
+        # Hold has a read-only inherited value, not a read-only mode.
+        combo = card.bus_mode_combos[dac.key]
+        def choose_mode(mode):
+            QtTest.QTest.mouseClick(combo, QtCore.Qt.LeftButton)
+            option = combo.model().index(combo.findData(mode), 0)
+            combo.view().scrollTo(option)
+            QtTest.QTest.mouseClick(combo.view().viewport(), QtCore.Qt.LeftButton,
+                                   pos=combo.view().visualRect(option).center())
+            app.processEvents()
+        for mode in ("edge", "ramp"):
+            choose_mode("hold")
+            assert edit.isReadOnly() and combo.isEnabled()
+            assert not any(step.port == dac.key for step in
+                           window.presenter.sequence.period_by_id[first.period_id].analog_steps)
+            choose_mode(mode)
+            assert not edit.isReadOnly() and edit.isEnabled()
+            assert next(step for step in window.presenter.sequence.period_by_id[
+                first.period_id].analog_steps if step.port == dac.key).mode == mode
+
         # The same retained row must fit its complete signed range, even
         # after Config refresh while Edit is hidden and then shown again.
         edit.setFocus()

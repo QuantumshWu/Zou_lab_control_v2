@@ -2786,7 +2786,7 @@ class MatplotlibRenderer:
         self._last_fit_overlay: FitOverlay | None = None
         self._last_fit_overlays: tuple[FitOverlay, ...] = ()
         self._classifier_artists: dict[tuple[object, object], tuple[tuple[Any, ...], Any, Any]] = {}
-        self._classifier_labels: tuple[str, ...] = ()
+        self._classifier_labels: dict[tuple, str] = {}
         self._fit_source_scatter: Any | None = None
         self._fit_hidden_source_lines: tuple[tuple[Any, bool], ...] = ()
         self._data_revision: int | None = None
@@ -3336,7 +3336,7 @@ class MatplotlibRenderer:
         self._last_fit_overlay = None
         self._last_fit_overlays = ()
         self._classifier_artists.clear()
-        self._classifier_labels = ()
+        self._classifier_labels = {}
         self._fit_source_scatter = None
         self._fit_hidden_source_lines = ()
         self._image_ranges.clear()
@@ -3502,7 +3502,10 @@ class MatplotlibRenderer:
             if not scene_3d:
                 for _key, axes, _index in painted:
                     self._apply_requested_view(axes, frame.view_limits)
-            self._classifier_labels = frame.classifier_labels
+            self._classifier_labels = {
+                (overlay.facet_index, _series_identity(overlay.group_key)): label
+                for overlay, label in zip(frame.classifier_overlays, frame.classifier_labels, strict=True)
+            }
             self._update_classifier(
                 () if scene_3d else frame.classifier_overlays,
                 frame.classifier_thresholds,
@@ -6553,7 +6556,7 @@ class MatplotlibRenderer:
         frames: a threshold drag moves the bar without presenting a frame, and
         the bar's own reading moves with it."""
 
-        self._classifier_labels = tuple(map(str, labels))
+        self._classifier_labels = dict(zip(self._classifier_labels, map(str, labels), strict=True))
 
     def preview_selector(self, state: SelectorState) -> bool:
         """Paint the current selector candidate as one complete frame."""
@@ -12599,6 +12602,8 @@ class MatplotlibRenderer:
 
     def _classifier_series(self, axis: Any) -> tuple[Any, object, str] | None:
         """The authoring group: the accepted lock, otherwise the first group."""
+        if (self.facet_index_for_axes(axis), ()) in self._classifier_labels:
+            return None  # One scope owns the pooled distribution, not its visual groups.
         records = self._series_lines.get(id(axis), ())
         if not records:
             return None
@@ -12625,23 +12630,32 @@ class MatplotlibRenderer:
             hover = self._series_hover
             if not locked and hover is not None and hover[0] == id(axis) and hover[1] != selected[1]:
                 caption = f"{_literal_text(hover[2])} (hover)\n{_literal_text(selected[2])}: "
+        elif selected is None:
+            # Shared classification still leaves the ordinary visual Group
+            # discoverable. Its hover/lock labels do not select another model.
+            active = self._series_locked or self._series_hover
+            if active is not None and active[0] == id(axis) and active[1]:
+                marker = "* " if self._series_locked is not None else ""
+                caption = f"{marker}{_literal_text(active[2])} (shared classifier)\n"
         payload = self._last_payload
-        label_index = group_index
+        facet_index = None
         if isinstance(self.spec, FacetGridPlot):
             cells = tuple(getattr(payload, "cells", ()))
             index = self._focused_facet_index if state.facet_index is None else state.facet_index
             if index is None or index < 0 or index >= len(cells):
                 return ""
-            label_index += sum(len(getattr(cell, "payload", cell).group_keys) for cell in cells[:index])
+            facet_index = index
             payload = getattr(cells[index], "payload", cells[index])
-        if 0 <= label_index < len(self._classifier_labels):
-            return caption + self._classifier_labels[label_index]
+        label_key = (facet_index, () if selected is None else selected[1])
+        if label_key in self._classifier_labels:
+            return caption + self._classifier_labels[label_key]
         edges = getattr(getattr(payload, "edges", None), "display", None)
         counts = getattr(payload, "counts", None)
         if edges is None or counts is None:
             return ""
         edges = np.asarray(edges, dtype=float).reshape(-1)
-        weights = np.asarray(counts, dtype=float)[group_index].reshape(-1)
+        counts = np.asarray(counts, dtype=float)
+        weights = (counts.sum(axis=0) if selected is None else counts[group_index]).reshape(-1)
         if edges.size != weights.size + 1 or not weights.size:
             return ""
         total = float(np.sum(weights))
@@ -13588,7 +13602,7 @@ class MatplotlibRenderer:
             interactive = not isinstance(self.spec, FacetGridPlot) or self._facet_focus_index == facet_index
             selected_series = self._classifier_series(axis)
             authoring_group = () if selected_series is None else selected_series[1]
-            chosen = authoring_group == identity
+            chosen = not identity or authoring_group == identity
             threshold_line.set_visible(not interactive or not chosen)
             label.set_visible(not interactive and chosen and bool(label.get_text()))
             if label.get_visible():
@@ -13716,10 +13730,10 @@ class MatplotlibRenderer:
                 ) + tuple(
                     polyline for polyline in overlay.polylines if polyline.role == "total"
                 )
+                if not overlay.success or len(curves) != 3:
+                    curves = ()
                 if (
-                    overlay.success
-                    and threshold is not None
-                    and len(curves) == 3
+                    threshold is not None
                     and (
                         not isinstance(self.spec, FacetGridPlot)
                         or index is not None and 0 <= index < self._visible_facet_count
@@ -13769,8 +13783,13 @@ class MatplotlibRenderer:
                 artists = (lines, threshold_line, label)
                 self._classifier_artists[key] = artists
             lines, threshold_line, label = artists
-            for line, polyline in zip(lines, curves, strict=True):
-                self._set_fit_line(line, polyline)
+            for position, line in enumerate(lines):
+                if position < len(curves):
+                    self._set_fit_line(line, curves[position])
+                    line.set_visible(True)
+                else:
+                    line.set_data((), ())
+                    line.set_visible(False)
             y_low, y_high = axis.get_ylim()
             threshold_line.set_data((threshold, threshold), (y_low, y_high))
             # A cell's marks are drawn at the cell's scale, like its text.

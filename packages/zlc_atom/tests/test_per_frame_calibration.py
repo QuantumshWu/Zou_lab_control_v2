@@ -114,16 +114,20 @@ def test_last_and_rest_follow_the_frame_count_and_numbers_keep_their_place() -> 
         CalibrationReading(shared, ("rest",), Path("load.json")),
         CalibrationReading(strict, (3,), Path("late.json")),
     ))
-    with pytest.raises(ValueError, match=r"late\.json names frame 3, but the source carries 2 frames \(0-1\)"):
+    with pytest.raises(ValueError, match=r"late\.json names middle frame 3, but the source carries 2 frames \(0-1\)"):
         beyond.process(_cycle(10.0, 10.0))
-    assert beyond.process(_cycle(10.0, 10.0, 10.0, 10.0)).occupied.tolist() == [
-        [[True], [True], [True], [False]]
+    # In four frames 3 is the last frame, not a middle one: still absent.
+    with pytest.raises(ValueError, match=r"late\.json names middle frame 3"):
+        beyond.process(_cycle(10.0, 10.0, 10.0, 10.0))
+    assert beyond.process(_cycle(10.0, 10.0, 10.0, 10.0, 10.0)).occupied.tolist() == [
+        [[True], [True], [True], [False], [True]]
     ]
     twice = OccupancyProcessor((
         CalibrationReading(strict, ("last",), Path("readout.json")),
         CalibrationReading(shared, (0, 2), Path("load.json")),
     ))
-    with pytest.raises(ValueError, match=r"frame 2 is read by both readout\.json \(last\) and load\.json \(2\)"):
+    # In three frames 2 is the last: load's middle 2 is absent, not a second reader.
+    with pytest.raises(ValueError, match=r"load\.json names middle frame 2"):
         twice.process(_cycle(10.0, 10.0, 10.0))
     with pytest.raises(ValueError, match="frame 1 has no calibration"):
         twice.process(_cycle(10.0, 10.0, 10.0, 10.0))
@@ -149,8 +153,8 @@ def test_first_reads_frame_zero_whatever_the_count() -> None:
     assert ends.process(_cycle(10.0, 10.0)).occupied.tolist() == [[[False], [True]]]
     with pytest.raises(ValueError, match=r"frame 0 is read by both load\.json \(first\) and readout\.json \(last\)"):
         ends.process(_cycle(10.0))
-    # First and 0 are one frame in every cycle: refused before any cycle arrives.
-    with pytest.raises(ValueError, match=r"frame 0 is read by both load\.json \(first\) and readout\.json \(0\)"):
+    # 0 IS First: one claim, refused before any cycle arrives.
+    with pytest.raises(ValueError, match="'first' is claimed by both load.json and readout.json"):
         OccupancyProcessor((
             CalibrationReading(strict, ("first",), Path("load.json")),
             CalibrationReading(shared, (0, "rest"), Path("readout.json")),
@@ -335,9 +339,18 @@ def test_the_calibrations_editor_gives_frames_to_files_by_clicking(monkeypatch) 
         editor.update_projection(_claims_projection(entries, frames))
         app.processEvents()
 
+    def header(column):
+        return grid.model().headerData(column, QtCore.Qt.Horizontal)
+
+    def state(row, column):
+        return grid.model().index(row, column).data(QtCore.Qt.UserRole + 1)
+
     def press(row, column):
+        index = grid.model().index(row, column)
+        grid.scrollTo(index)
+        app.processEvents()
         QtTest.QTest.mouseClick(grid.viewport(), QtCore.Qt.LeftButton, QtCore.Qt.NoModifier,
-                                grid.visualRect(grid.model().index(row, column)).center())
+                                grid.visualRect(index).center())
         app.processEvents()
         return drafts[-1]["artifact_inputs"]["calibrations"]
 
@@ -345,17 +358,18 @@ def test_the_calibrations_editor_gives_frames_to_files_by_clicking(monkeypatch) 
         assert grid.model().index(row, column).flags() & QtCore.Qt.ItemIsSelectable, (row, column)
         return press(row, column)
 
-    load = {"path": "C:/data/load.json", "frames": (0,)}
+    load = {"path": "C:/data/load.json", "frames": ("first",)}
     readout = {"path": "C:/data/readout.json", "frames": ("rest",)}
     try:
         editor.resize(900, 300)
         editor.show()
         project((load, readout))
-        # Columns: First, Last, Rest, a gap, then the source's frames 0..2.
-        assert [grid.model().headerData(c, QtCore.Qt.Horizontal) for c in range(7)] == [
-            "First", "Last", "Rest", "", "0", "1", "2"]
-        assert grid.selected_cells() == ((0, 4), (1, 2))
-        assert grid.model().index(1, 5).data(QtCore.Qt.UserRole + 1) == "derived", "read as rest"
+        # The ends are named by what they are; the numbered columns are the
+        # middle frames only, so no column repeats First or Last.
+        assert [header(column) for column in range(5)] == ["First · 0", "Last · 2", "Rest", "", "1"]
+        assert grid.selected_cells() == ((0, 0), (1, 2))
+        assert state(1, 4) == "derived", "a middle frame read as rest"
+        assert state(1, 1) == "derived", "the last frame read as rest"
         assert drafts == [], "showing claims is not an edit"
         assert "3 frames · each read once" in editor.summary.text()
         # The file names are the label column: with it, Add and the first
@@ -364,62 +378,30 @@ def test_the_calibrations_editor_gives_frames_to_files_by_clicking(monkeypatch) 
         app.processEvents()
         card = grid.viewport().mapTo(editor, grid.visualRect(grid.model().index(0, 0)).topLeft())
         assert abs(card.x() + scaled_px(2, minimum=1) - editor.add_button.x()) <= 1
-        # Last moves to the readout file; frame 2 is then its, and not
-        # offered to the load file at all.
+        # Last moves to the readout file; First taken here leaves the load file.
         claims = click(1, 1)
         assert claims == (load, {"path": readout["path"], "frames": ("last", "rest")})
         project(claims)
-        assert not grid.model().index(0, 6).flags() & QtCore.Qt.ItemIsSelectable
-        assert grid.model().index(0, 6).data(QtCore.Qt.UserRole + 1) == "held", "an outline, not a hole"
-        # A frame taken here is taken from whichever file had it.
-        claims = click(1, 4)
-        assert claims == ({"path": load["path"], "frames": ()},
-                          {"path": readout["path"], "frames": (0, "last", "rest")})
-        # First is Last's mirror: frame 0 read as First is a dashed card in its
-        # file's row and held in every other row; clicking First moves it.
-        first = {"path": load["path"], "frames": ("first",)}
-        project((first, readout))
-        assert grid.selected_cells() == ((0, 0), (1, 2))
-        assert grid.model().index(0, 4).data(QtCore.Qt.UserRole + 1) == "derived", "read as first"
-        assert not grid.model().index(1, 4).flags() & QtCore.Qt.ItemIsSelectable
-        assert grid.model().index(1, 4).data(QtCore.Qt.UserRole + 1) == "held"
-        assert grid.model().index(1, 4).data(QtCore.Qt.ToolTipRole) == (
-            "load.json reads frame 0 as First; click First in this row to read it here")
-        assert "3 frames · each read once" in editor.summary.text()
         claims = click(1, 0)
         assert claims == ({"path": load["path"], "frames": ()},
-                          {"path": readout["path"], "frames": ("first", "rest")})
-        project(({"path": load["path"], "frames": (1,)}, claims[1]))
-        assert not grid.model().index(0, 4).flags() & QtCore.Qt.ItemIsSelectable
-        assert grid.model().index(0, 4).data(QtCore.Qt.UserRole + 1) == "held"
-        assert grid.model().index(0, 4).data(QtCore.Qt.ToolTipRole) == (
-            "readout.json reads frame 0 as First; click First in this row to read it here")
-        # A file naming frame 0 both as First and by number still holds it
-        # through First; so does Last with the last frame's number.
-        project(({"path": load["path"], "frames": ("rest",)},
-                 {"path": readout["path"], "frames": (0, "first")}))
-        assert not grid.model().index(0, 4).flags() & QtCore.Qt.ItemIsSelectable
-        assert grid.model().index(0, 4).data(QtCore.Qt.UserRole + 1) == "held"
-        assert grid.model().index(0, 4).data(QtCore.Qt.ToolTipRole) == (
-            "readout.json reads frame 0 as First; click First in this row to read it here")
-        project((load, {"path": readout["path"], "frames": (1, 2, "last")}))
-        assert not grid.model().index(0, 6).flags() & QtCore.Qt.ItemIsSelectable
-        assert grid.model().index(0, 6).data(QtCore.Qt.UserRole + 1) == "held"
-        # First is frame 0 in every cycle: taking First takes frame 0 too.
-        project((load, readout))
-        assert click(1, 0) == ({"path": load["path"], "frames": ()},
-                               {"path": readout["path"], "frames": ("first", "rest")})
-        # A number the source no longer carries keeps a red column, one click from removal.
-        project(({"path": load["path"], "frames": (2,)}, readout), frames=("0", "1"))
-        assert grid.model().headerData(6, QtCore.Qt.Horizontal) == "2"
-        assert grid.model().index(0, 6).data(QtCore.Qt.UserRole + 1) == "warning"
-        assert "load.json names frame 2" in editor.note.text()
-        claims = click(0, 6)
-        assert claims[0] == {"path": load["path"], "frames": ()}
+                          {"path": readout["path"], "frames": ("first", "last", "rest")})
+        # A middle frame keeps its number while the ends follow the cycle: with
+        # five frames the middle is 1-3; back at three frames, 2 is the LAST
+        # frame, so the claim on middle frame 2 is absent -- never the last.
+        middle = {"path": load["path"], "frames": (2, "first")}
+        project((middle, readout), frames=("0", "1", "2", "3", "4"))
+        assert [header(column) for column in range(7)] == [
+            "First · 0", "Last · 4", "Rest", "", "1", "2", "3"]
+        assert grid.selected_cells() == ((0, 0), (0, 5), (1, 2))
+        project((middle, readout))
+        assert header(5) == "2" and state(0, 5) == "warning"
+        assert "load.json names middle frame 2" in editor.note.text()
+        assert state(1, 1) == "derived", "the new last frame is read as rest, not as middle 2"
+        assert click(0, 5)[0] == {"path": load["path"], "frames": ("first",)}
         # Each row ends, after a gap, with its own remove cell: never a claim.
         project((load, readout))
         remove = grid.model().columnCount() - 1
-        assert grid.model().headerData(remove - 1, QtCore.Qt.Horizontal) is None
+        assert header(remove - 1) is None
         assert not grid.model().index(0, remove).flags() & QtCore.Qt.ItemIsSelectable
         assert grid.model().index(0, remove).data(QtCore.Qt.ToolTipRole) == "Remove this calibration"
         before = grid.selected_cells()
@@ -427,13 +409,15 @@ def test_the_calibrations_editor_gives_frames_to_files_by_clicking(monkeypatch) 
         assert grid.selected_cells() == before, "removing is not marking"
         # Clicking a file's name chooses another file for that row.
         monkeypatch.setattr(editor_module, "fluent_open_path", lambda *args: "C:/data/other.json")
-        header = grid.verticalHeader()
-        QtTest.QTest.mouseClick(header.viewport(), QtCore.Qt.LeftButton, QtCore.Qt.NoModifier,
-                                QtCore.QPoint(10, header.sectionViewportPosition(1) + 10))
+        rows = grid.verticalHeader()
+        QtTest.QTest.mouseClick(rows.viewport(), QtCore.Qt.LeftButton, QtCore.Qt.NoModifier,
+                                QtCore.QPoint(10, rows.sectionViewportPosition(1) + 10))
         assert drafts[-1]["artifact_inputs"]["calibrations"] == (
             load, {"path": "C:/data/other.json", "frames": ("rest",)})
-        # The readout model is chosen under the files it reads them with.
-        editor.model.button("box").click()
+        # The readout model, set once, is a dropdown under the files.
+        index = editor.model.findData("box")
+        editor.model.setCurrentIndex(index)
+        editor.model.activated.emit(index)
         assert drafts[-1] == {"values": {"model_kind": "box"}}
         editor.add_file("C:/data/extra.json")
         assert drafts[-1]["artifact_inputs"]["calibrations"][-1] == {

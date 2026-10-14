@@ -93,9 +93,10 @@ def test_claims_are_refused_by_name_and_against_a_known_frame_count(workspace) -
         claims = ({"path": str(load), "frames": [2]}, {"path": str(readout), "frames": ["rest"]})
         assert _finalize(workspace, plane, claims).can_start, "no count known: nothing to check yet"
         assert _finalize(workspace, plane, claims, source_frames=2).issues == (
-            "load.json names frame 2, but the source carries 2 frames (0-1)",
+            "load.json names frame 2, but the source carries 2 frames (0-1); "
+            "numbered middle frames cannot stand for the last frame",
         )
-        assert _finalize(workspace, plane, claims, source_frames=3).can_start
+        assert _finalize(workspace, plane, claims, source_frames=4).can_start
         empty_row = _finalize(workspace, plane, ({"path": "", "frames": ["rest"]},))
         assert "Calibrations row 1 has no file yet" in empty_row.issues
         shape = _finalize(workspace, plane, "load.json")

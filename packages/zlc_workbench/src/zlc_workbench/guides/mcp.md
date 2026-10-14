@@ -138,15 +138,17 @@ remain requires_human and cannot be answered by the scientific review tool.
 
 Occupancy reads Camera frames plus the chosen Calibrations and publishes counts,
 occupied and judgement validity. Its `calibrations` artifact input is a list of
-rows, each a Calibration file and the frames it reads: frame numbers from 0,
-`first` (frame 0), `last`, and `rest` (every frame no other row names). One row
-with `["rest"]` reads every frame; frames taken at another exposure get their
-own row, e.g.
+rows, each a Calibration file and the frames it reads: `first` (frame 0; a 0 is
+stored as `first`), `last`, positive numbers for middle frames between them, and
+`rest` (every frame no other row names). One row with `["rest"]` reads every
+frame; frames taken at another exposure get their own row, e.g.
 `lab_action('logic.update', {'node_id': OCC, 'artifact_inputs': {'calibrations':
 [{'path': LOAD, 'frames': ['first']}, {'path': READOUT, 'frames': ['rest']}]}})`.
 Each frame is read by exactly one row; a collision, a frame nobody reads or a
 number the source does not carry is reported by name, never resolved silently,
-and the rows are never rewritten when the frame count changes.
+and the rows are never rewritten when the frame count changes. A middle index
+that no longer exists stays in the draft; it cannot become the new last frame.
+Clicking the last column authors `last`, not its temporary numeric index.
 `lab_catalog(node_id=OCC).node.artifact_claims.calibrations` returns the rows,
 the frames each actually reads (`reads`) and any `problems`. Frame Survival consumes occupied, not counts.
 It publishes the later occupancy verdict with validity equal to earlier occupied
@@ -154,9 +156,15 @@ AND both frames judgeable. Mean over trials is therefore conditional survival;
 the site axis remains available for per-site analysis. Its `selection` field
 chooses the published forward pairs: `all`, `consecutive` (k→k+1), `from_first`
 (0→k) and `to_last` (k→last) are resolved against the frames the source carries,
-so they survive a Pulse that adds or removes a photograph; `custom` publishes
-exactly the `pairs` rows, e.g. `{"selection":"custom","pairs":[{"start":0,"end":1}]}`.
-Pairs rows given with any other selection are refused, not ignored.
+so they survive a Pulse that adds or removes a photograph. Grid edits retain that
+rule and store only exceptions, e.g. `{"selection":"from_first","pairs":[
+{"start":"0","end":"last","selected":false}]}` selects every first-to-middle
+pair, including newly added middle frames, but excludes first-to-last. `custom`
+starts with no pairs and explicitly selects rows, e.g. `{"selection":"custom",
+"pairs":[{"start":"0","end":"last","selected":true}]}`. Endpoints are text:
+`0` is first, `last` is last, and positive indices name middle frames. Camera
+draft changes update Occupancy and Frame Survival editors before new data arrives;
+runtime data still follows the actual acquired source schema.
 
 Derive is within-shot algebra on one producer's bundle; averages over shots,
 per-site probabilities and fits belong in a plot panel. Read the exact member,

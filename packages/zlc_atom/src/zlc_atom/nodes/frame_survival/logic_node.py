@@ -8,8 +8,12 @@ from zlc_atom.nodes._framework.descriptor import (
     LogicNodeDescriptor,
     NodeKind,
 )
+from zlc_atom.nodes._framework.frames import frame_identity
 
-from .processor import SURVIVAL_OUTPUTS, FrameSurvivalProcessor, _checked_pairs
+from .processor import (
+    SURVIVAL_OUTPUTS, FrameSurvivalProcessor, _checked_pairs, _checked_overrides,
+    _rule_pairs, _selected_pairs,
+)
 
 #: What the operator picks: a question that follows the frames the source
 #: carries, or the pairs they marked themselves.
@@ -23,18 +27,21 @@ _SELECTIONS = (
 
 
 def _validate(values):
+    overrides = _checked_overrides(tuple((row["start"], row["end"], row["selected"])
+                                        for row in values["pairs"]))
     if values["selection"] == "custom":
-        _checked_pairs(tuple((row["start"], row["end"]) for row in values["pairs"]))
-    elif values["pairs"]:
-        raise ValueError("Selected pairs apply only to the 'Selected pairs' choice; choose it or clear them")
+        _checked_pairs(tuple((start, end) for start, end, selected in overrides if selected))
+        if any(not selected for _start, _end, selected in overrides):
+            raise ValueError("Selected pairs lists only included pairs")
 
 FRAME_SURVIVAL_SCHEMA = AuthoringSchema((
     AuthoringField("selection", "choice", "Published pairs", "all", required=True, choices=_SELECTIONS,
                    description="A named choice follows the frames the source carries; "
-                               "Selected pairs publishes exactly the marked pairs."),
-    AuthoringField("pairs", "rows", "Selected pairs", (), columns=(
-        AuthoringField("start", "int", "Start frame", 0, required=True, minimum=0),
-        AuthoringField("end", "int", "End frame", 1, required=True, minimum=0),
+                               "Grid edits override only the changed pairs; first/last follow the cycle."),
+    AuthoringField("pairs", "rows", "Pair selections", (), columns=(
+        AuthoringField("start", "text", "Start frame", "0", required=True),
+        AuthoringField("end", "text", "End frame", "last", required=True),
+        AuthoringField("selected", "bool", "Selected", True),
     )),
 ), validator=_validate)
 
@@ -45,10 +52,12 @@ def _build(*, source_signal: str, **values: object) -> FrameSurvivalProcessor:
     if not selected_source:
         raise ValueError("source_signal must be non-empty")
     selection = authored["selection"]
+    overrides = tuple((row["start"], row["end"], row["selected"]) for row in authored["pairs"])
     return FrameSurvivalProcessor(
         source_signal=selected_source,
         pairs=selection if selection != "custom" else tuple(
-            (row["start"], row["end"]) for row in authored["pairs"]),
+            (start, end) for start, end, _selected in overrides),
+        pair_overrides=overrides if selection != "custom" else (),
     )
 
 
@@ -57,7 +66,7 @@ def _editor_factory(parent=None):
     from zlc_ui.fluent import (
         FluentLabel, FluentSegmentedButtons, FluentSelectionGrid, muted_note_label,
     )
-    from .processor import PAIR_RULES, _rule_pairs
+    from .processor import PAIR_RULES
 
     labels = {choice.value: choice.label for choice in _SELECTIONS}
     short = {"all": "All", "consecutive": "Consecutive", "from_first": "From first", "to_last": "To last"}
@@ -67,8 +76,8 @@ def _editor_factory(parent=None):
 
         The grid takes the ordinary table gestures: a click selects one pair,
         a drag a rectangle, Ctrl adds or removes, a row or column header every
-        pair from or to that frame.  Marking anything makes the selection
-        explicit; a preset returns to a rule.
+        pair from or to that frame. Edits retain the current rule and record
+        only exceptions; None starts an explicit list.
         """
 
         draft_changed = QtCore.pyqtSignal(object)
@@ -96,6 +105,9 @@ def _editor_factory(parent=None):
             self.note.setWordWrap(True)
             layout.addWidget(self.note)
             self._frames = None
+            self._selection = "all"
+            self._overrides = ()
+            self._wanted = ()
 
         @property
         def model(self):
@@ -104,9 +116,21 @@ def _editor_factory(parent=None):
         def _marked(self, cells):
             if self._frames is None:
                 return
+            count = len(self._frames)
+            previous = set(self._wanted)
+            current = {(row, column + 1) for row, column in cells}
+            edits = {(start, end): selected for start, end, selected in self._overrides}
+            baseline = set() if self._selection == "custom" else set(_rule_pairs(self._selection, count))
+            for pair in previous ^ current:
+                identity = tuple(frame_identity(index, count) for index in pair)
+                if (pair in current) == (pair in baseline):
+                    edits.pop(identity, None)
+                else:
+                    edits[identity] = pair in current
             self.draft_changed.emit({"values": {
-                "selection": "custom",
-                "pairs": tuple({"start": row, "end": column + 1} for row, column in cells),
+                "selection": self._selection,
+                "pairs": tuple({"start": str(start), "end": str(end), "selected": selected}
+                               for (start, end), selected in edits.items()),
             }})
 
         def update_projection(self, projection):
@@ -124,24 +148,28 @@ def _editor_factory(parent=None):
                      for start in range(count - 1) for end in range(start + 1, count)},
                 )
             selection = values["selection"]
-            explicit = tuple((row["start"], row["end"]) for row in values["pairs"]
-                             if row["start"] is not None and row["end"] is not None)
-            self.presets.set_current("none" if selection == "custom" and not explicit else selection)
+            self._selection = selection
+            self._overrides = _checked_overrides(tuple(
+                (row["start"], row["end"], row.get("selected", True)) for row in values["pairs"]
+                if row["start"] not in (None, "") and row["end"] not in (None, "")))
+            self.presets.set_current("none" if selection == "custom" and not self._overrides else selection)
             self.table.setEnabled(frames is not None)
             if frames is None:
                 self.summary.setText(labels[selection])
                 self.note.setText("Waiting for the source frames")
                 return
             count = len(frames)
-            wanted = (_rule_pairs(selection, count) if selection != "custom"
-                      else tuple(pair for pair in explicit if pair[1] < count))
-            absent = () if selection != "custom" else tuple(pair for pair in explicit if pair[1] >= count)
+            wanted, absent = _selected_pairs(
+                selection if selection != "custom" else tuple(
+                    (start, end) for start, end, selected in self._overrides if selected),
+                self._overrides if selection != "custom" else (), count)
+            self._wanted = wanted
             cells = tuple(sorted((start, end - 1) for start, end in wanted))
             if self.table.selected_cells() != cells:
                 self.table.set_selected(cells)
             self.summary.setText(f"{labels[selection]} · {len(wanted)} of {count * (count - 1) // 2} pairs")
             self.note.setText("" if not absent else "Not in this source: " + ", ".join(
-                f"{start}-{end}" for start, end in absent))
+                f"{start}-{end}" for start, end, _selected in absent))
 
         def set_mutation_enabled(self, enabled):
             self.setEnabled(enabled)
@@ -159,7 +187,9 @@ LOGIC_NODE = LogicNodeDescriptor(
         "validity requires the earlier frame occupied and both frames judgeable, so "
         "Mean over repeats gives conditional survival. Choose the pairs with selection: "
         "all, consecutive (k->k+1), from_first (0->k) and to_last (k->last) follow the "
-        "frames the source carries; custom publishes exactly the listed pairs rows. "
+        "frames the source carries. Pair rows override the rule with selected=true/false; "
+        "custom lists only included pairs. Endpoints use text '0'/'last'; numbered "
+        "middle frames keep their index when the cycle changes. "
         "Feed survival to Seamless Scan and use a site Facet with native Exponential "
         "fitting for per-site lifetimes."
     ),

@@ -40,6 +40,7 @@ that trap, and averaging it away is how you never find out.
 from __future__ import annotations
 
 import numpy as np
+from zlc_atom.nodes._framework.frames import LAST, REST, frame_token, resolve_frame
 from zlc_data import (
     READOUT_EVENT,
     AxisId,
@@ -101,7 +102,7 @@ def _rule_pairs(rule: str, frames: int) -> tuple[tuple[int, int], ...]:
     raise ValueError(f"frame survival selection must be one of {', '.join(PAIR_RULES)} or explicit pairs")
 
 
-def _checked_selection(selection) -> str | tuple[tuple[int, int], ...]:
+def _checked_selection(selection) -> str | tuple[tuple[int, int | str], ...]:
     """A named rule, or validated explicit pairs."""
 
     if isinstance(selection, str):
@@ -111,8 +112,8 @@ def _checked_selection(selection) -> str | tuple[tuple[int, int], ...]:
     return _checked_pairs(selection)
 
 
-def _checked_pairs(pairs) -> tuple[tuple[int, int], ...]:
-    """Validate authored frame indices."""
+def _checked_pairs(pairs) -> tuple[tuple[int, int | str], ...]:
+    """Validate authored indices and the last-frame identity, without a count."""
 
     if not isinstance(pairs, (tuple, list)) or not pairs:
         raise ValueError("frame survival pairs must contain at least one pair")
@@ -120,18 +121,47 @@ def _checked_pairs(pairs) -> tuple[tuple[int, int], ...]:
     for pair in pairs:
         if not isinstance(pair, (tuple, list)) or len(pair) != 2:
             raise ValueError("frame survival pairs must contain start/end frame indices")
-        if any(isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer))
-               for value in pair):
-            raise ValueError("frame survival pair indices must be non-negative integers")
-        start, end = map(int, pair)
-        if start < 0 or end < 0:
-            raise ValueError("frame survival pair indices must be non-negative integers")
-        if start >= end:
+        try:
+            start, end = (frame_token(int(value) if isinstance(value, np.integer)
+                                      and not isinstance(value, np.bool_) else value)
+                          for value in pair)
+        except ValueError as error:
+            raise ValueError("frame survival pair endpoints must be frame numbers or 'last'") from error
+        if start in (LAST, REST) or end == REST or (isinstance(end, int) and start >= end):
             raise ValueError("frame survival pairs require start < end")
         checked.append((start, end))
     if len(set(checked)) != len(checked):
         raise ValueError("frame survival pairs must not contain duplicates")
     return tuple(checked)
+
+
+def _checked_overrides(overrides):
+    if not overrides:
+        return ()
+    pairs = _checked_pairs(tuple((start, end) for start, end, _selected in overrides))
+    if any(not isinstance(selected, bool) for _start, _end, selected in overrides):
+        raise ValueError("frame survival pair selected must be boolean")
+    return tuple((*pair, selected) for pair, (_start, _end, selected) in zip(pairs, overrides))
+
+
+def _selected_pairs(selection, overrides, count):
+    """One projection for the editor and runtime; unresolved edits remain authored."""
+
+    named = isinstance(selection, str)
+    wanted = dict.fromkeys(_rule_pairs(selection, count) if named else ())
+    edits = overrides if named else tuple((*pair, True) for pair in selection)
+    absent = []
+    for start, end, selected in edits:
+        first, last = resolve_frame(start, count), resolve_frame(end, count)
+        if first is None or last is None:
+            absent.append((start, end, selected))
+            continue
+        pair = (first, last)
+        if selected:
+            wanted[pair] = None
+        else:
+            wanted.pop(pair, None)
+    return tuple(sorted(wanted) if named else wanted), tuple(absent)
 
 
 def _frame_rows(schema: DatasetSchema, frame_axis: AxisSpec) -> np.ndarray:
@@ -166,7 +196,8 @@ class FrameSurvivalProcessor:
         *,
         producer: str = "frame_survival",
         source_signal: str | None = None,
-        pairs: str | tuple[tuple[int, int], ...] = "all",
+        pairs: str | tuple[tuple[int, int | str], ...] = "all",
+        pair_overrides: tuple[tuple[int, int | str, bool], ...] = (),
     ) -> None:
         self.instance_id = str(producer).strip()
         if not self.instance_id:
@@ -175,6 +206,9 @@ class FrameSurvivalProcessor:
             None if source_signal is None else str(source_signal).strip()
         )
         self.pairs = _checked_selection(pairs)
+        self.pair_overrides = _checked_overrides(pair_overrides)
+        if not isinstance(self.pairs, str) and self.pair_overrides:
+            raise ValueError("explicit frame survival pairs cannot also have rule overrides")
         # Event and canonical geometry coexist; neither evicts the other's plan.
         self._plans: dict[bool, tuple[DatasetSchema, tuple]] = {}
 
@@ -278,12 +312,15 @@ class FrameSurvivalProcessor:
         if saved is not None and (saved[0] is schema or saved[0] == schema):
             return saved[1]
         frame_axis, _site_axis = self._source_axes(schema)
-        pairs = _rule_pairs(self.pairs, frame_axis.size) if isinstance(self.pairs, str) else self.pairs
-        if any(end >= frame_axis.size for _start, end in pairs):
+        pairs, absent = _selected_pairs(self.pairs, self.pair_overrides, frame_axis.size)
+        if any(selected for _start, _end, selected in absent):
             raise ValueError(
-                f"frame survival selected pairs need frame {max(end for _, end in pairs)} "
+                "frame survival selected pairs need frame "
+                + ", ".join(str(end) for _start, end, selected in absent if selected) + " "
                 f"but the source carries {frame_axis.size} frames"
             )
+        if not pairs:
+            raise ValueError("frame survival pairs must contain at least one pair for this source")
         rows = _frame_rows(schema, frame_axis)
         output = self._output_schema(schema, frame_rows=rows, pairs=pairs)
         if canonical:

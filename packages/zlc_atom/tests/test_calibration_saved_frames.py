@@ -428,6 +428,22 @@ def test_nothing_is_written_unless_the_operator_asks(tmp_path: Path) -> None:
         snapshot = getattr(reopened, "snapshot", reopened)
         assert snapshot.block.values.size
         assert recipe["spec"].kind.value in {"curve", "image", "facet_grid"}
+        if preview.stem in {"box", "psf", "uniform_psf"}:
+            assert recipe["spec"].cell.group.axis_id == "calibration.reference_label"
+            label_axis = snapshot.block.schema.cell_domain.axes[-1]
+            assert label_axis.coordinate_labels == ("Empty", "Occupied")
+            model = next(item for item in result.calibration.models if item.kind.value == preview.stem)
+            signals = result.report["models"][preview.stem]["short_signals"]
+            groups = np.stack((result.report["labels_dark"],
+                               result.report["labels_occupied"]), axis=-1)
+            valid = (result.report["labels_valid"] & np.isfinite(signals)
+                     & (result.calibration.site_map.valid_sites & model.usable_sites
+                        & np.isfinite(model.thresholds))[None, :])
+            np.testing.assert_array_equal(
+                snapshot.block.validity.mask[:, 0], groups & valid[..., None])
+            np.testing.assert_array_equal(snapshot.block.values[:, 0, :, 0], signals)
+            np.testing.assert_array_equal(snapshot.block.values[:, 0, :, 1], signals)
+            np.testing.assert_array_equal(snapshot.block.validity.mask[:, 0].sum(axis=-1), valid)
 
     box_info, box_arrays, box_datasets = read_archive(figures / "box.npz")
     _box_figure, box_recipe = read_figure_plot(box_info, box_arrays, box_datasets, "data")

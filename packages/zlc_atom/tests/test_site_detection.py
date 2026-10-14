@@ -348,3 +348,38 @@ def test_average_peak_identity_preserves_close_lattices_without_duplicates() -> 
     )
     stack[rng.random(100) < 0.5] += 1100.0 * one_spot
     assert detect_sites(stack, spot_sigma=1.2).n_sites == 1
+
+    # One physical PSF still has photon noise on each loaded frame. Its
+    # different temporal maxima must not become several nearby final sites.
+    rng = np.random.default_rng(37)
+    grid_y, grid_x = np.mgrid[:48, :48]
+    center = np.asarray((24.45, 23.55))
+    qx = .5 * (erf((grid_x + .5 - center[0]) / (np.sqrt(2) * 1.2))
+               - erf((grid_x - .5 - center[0]) / (np.sqrt(2) * 1.2)))
+    qy = .5 * (erf((grid_y + .5 - center[1]) / (np.sqrt(2) * 1.2))
+               - erf((grid_y - .5 - center[1]) / (np.sqrt(2) * 1.2)))
+    loaded = rng.random(120) < .5
+    photons = rng.poisson(100.0 + loaded[:, None, None] * 30000.0 * qx * qy)
+    found = detect_sites(photons, spot_sigma=1.2, detection_sigma=6.0)
+    assert found.n_sites == 1, found.centers_xy
+    assert np.linalg.norm(found.centers_xy[0] - center) < .05
+
+    # Resolved narrow spots stay separate. For an elliptical PSF, separation
+    # along its narrow axis must not be judged using the broad-axis width.
+    grid_y, grid_x = np.mgrid[:56, :56]
+    for sx, sy, centers, spot_sigma in (
+        (.45, .45, ((25.4, 26.5), (27.6, 26.5)), .6),
+        (3., .8, ((26.4, 25.3), (26.4, 27.7)), 1.),
+    ):
+        rng = np.random.default_rng(19)
+        stack = rng.normal(100., 3., (120, 56, 56))
+        for x, y in centers:
+            qx = .5 * (erf((grid_x + .5 - x) / (np.sqrt(2) * sx))
+                       - erf((grid_x - .5 - x) / (np.sqrt(2) * sx)))
+            qy = .5 * (erf((grid_y + .5 - y) / (np.sqrt(2) * sy))
+                       - erf((grid_y - .5 - y) / (np.sqrt(2) * sy)))
+            stack[rng.random(120) < .5] += 30000. * qx * qy
+        found = detect_sites(stack, spot_sigma=spot_sigma, detection_sigma=6.)
+        assert found.n_sites == 2, (sx, sy, found.centers_xy)
+        distances = np.linalg.norm(found.centers_xy[:, None] - np.asarray(centers)[None], axis=2)
+        assert np.max(np.min(distances, axis=0)) < .05, (sx, sy, distances)

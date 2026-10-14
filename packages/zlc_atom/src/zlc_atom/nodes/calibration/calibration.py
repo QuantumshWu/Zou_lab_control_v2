@@ -1560,13 +1560,16 @@ def _background_scatter(
     )
 
 
-def _refine_center_subpixel(image: np.ndarray, peaks_xy: np.ndarray, index: int, spot_sigma: float) -> tuple[float, float]:
-    """Fit one detected identity and its local neighbours on raw photon data.
+def _refine_center_subpixel(
+    image: np.ndarray, peaks_xy: np.ndarray, index: int, spot_sigma: float,
+) -> tuple[tuple[float, float], tuple[float, float] | None]:
+    """Fit a centre and the local PSF widths on raw photon data.
 
     The band-pass locates candidates, not Gaussian centres: its neighbouring
     positive lobes and negative rings are not the camera PSF. Neighbours here
     are measured candidates, never an inferred lattice. Only this site's
     centre is returned; local nuisance fits do not replace other identities.
+    Widths are measurements only when the fit succeeds away from their bounds.
     """
     from scipy.optimize import least_squares
     from scipy.special import erf
@@ -1581,7 +1584,7 @@ def _refine_center_subpixel(image: np.ndarray, peaks_xy: np.ndarray, index: int,
     anchors = peaks_xy[local].astype(float)
     count = len(local)
     if cut.size <= 3 * count + 3 or not np.isfinite(cut).all():
-        return _core_centroid(image, x_int, y_int)
+        return _core_centroid(image, x_int, y_int), None
     yy, xx = np.mgrid[y0:y1, x0:x1]
     background = float(np.median(cut))
     sigma = float(np.clip(spot_sigma, .2, 4.))
@@ -1611,18 +1614,24 @@ def _refine_center_subpixel(image: np.ndarray, peaks_xy: np.ndarray, index: int,
             (weighted * qx * (eyl - eyu) / sy).reshape(count, -1).T))
         return (offset + np.sum(weighted * shape, axis=0) - cut).ravel(), jacobian
 
+    measured_sigma = None
     try:
         fit = least_squares(lambda p: model(p)[0], initial, jac=lambda p: model(p)[1],
                             bounds=(lower, upper), x_scale="jac", max_nfev=100)
+        if (fit.success and np.all(np.isfinite(fit.x[1:3]))
+                and not np.any(fit.active_mask[1:3])):
+            # A duplicate's centre can hit its anchor bound while the shared
+            # local PSF is still measured well; do not discard that width.
+            measured_sigma = (float(fit.x[1]), float(fit.x[2]))
         own = int(np.flatnonzero(local == index)[0])
         columns = np.asarray((3 + count + own, 3 + 2 * count + own))
         centre = fit.x[columns]
         if (fit.success and np.all(np.isfinite(centre))
                 and not fit.active_mask[3 + own] and not np.any(fit.active_mask[columns])):
-            return float(centre[0]), float(centre[1])
+            return (float(centre[0]), float(centre[1])), measured_sigma
     except (ValueError, RuntimeError, np.linalg.LinAlgError):
         pass
-    return _core_centroid(image, x_int, y_int)
+    return _core_centroid(image, x_int, y_int), measured_sigma
 
 
 def _core_centroid(image: np.ndarray, x_int: int, y_int: int) -> tuple[float, float]:
@@ -1974,10 +1983,10 @@ def _place_candidates(
 ) -> tuple[list, list]:
     """Where each admitted place is, and one answer per trap.
 
-    Temporal and average peaks can differ by one raster pixel. Merge only
-    that same-core offset, retaining the strongest evidence's anchor. Never
-    snap a temporal identity back to the average, where it may have no peak.
-    Refine all identities with the same raw-photon, neighbour-aware fit.
+    First merge one-pixel raster offsets. Then compare refined centres in
+    the measured PSF core of each stronger retained representative. A core
+    is the one-sigma ellipse, not a circular readout box or the full FWHM.
+    Refit after duplicates leave the neighbour roster, before review/readout.
     """
 
 
@@ -1986,12 +1995,29 @@ def _place_candidates(
         peak = (int(row), int(column))
         if not any(max(abs(peak[0] - old[0]), abs(peak[1] - old[1])) <= 1 for old in peaks):
             peaks.append(peak)
-    peaks_xy = np.asarray(peaks).reshape(-1, 2)[:, ::-1]
+    while peaks:
+        peaks_xy = np.asarray(peaks).reshape(-1, 2)[:, ::-1]
+        fitted = [_refine_center_subpixel(image, peaks_xy, index, spot_sigma)
+                  for index in range(len(peaks))]
+        kept = []
+        for index, (centre, _widths) in enumerate(fitted):
+            # Compare with representatives, never with an already suppressed
+            # neighbour: proximity must not chain across distinct spots.
+            if any(
+                fitted[other][1] is not None
+                and np.sum(((np.asarray(centre) - fitted[other][0]) / fitted[other][1]) ** 2) < 1.0
+                for other in kept
+            ):
+                continue
+            kept.append(index)
+        if len(kept) == len(peaks):
+            break
+        peaks = [peaks[index] for index in kept]
     selected: list[tuple[int, int]] = []
     centers_list: list[np.ndarray] = []
     dropped_at_border = 0
     for index, (row, column) in enumerate(peaks):
-        centre = _refine_center_subpixel(image, peaks_xy, index, spot_sigma)
+        centre, _widths = fitted[index]
         # Checked on the PUBLISHED centre: refinement moves it by up to a
         # pixel, so the margin its integer peak passed is not the margin it
         # keeps.  What cannot be measured is not a site.
@@ -2598,7 +2624,7 @@ def calibrate(
             anchors = np.rint(site_map.centers_xy)
             centers = np.array(site_map.centers_xy, copy=True)
             for index in range(site_map.n_sites):
-                center = _refine_center_subpixel(
+                center, _widths = _refine_center_subpixel(
                     reference_average, anchors, index, detection_spot_sigma
                 )
                 if box_fits(center, measurement_radius, reference_average.shape):
