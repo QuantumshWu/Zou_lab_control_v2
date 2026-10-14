@@ -355,3 +355,196 @@ def test_a_button_disabled_or_hidden_with_the_focus_hands_it_to_nobody(app, host
         app.processEvents()
         assert not stop.hasFocus(), "hidden" if hide else "disabled"
         assert QtWidgets.QApplication.focusWidget() is None
+
+
+def _ink_rows(widget, test, left: float = 0.0, right: float | None = None) -> list[int]:
+    """The device rows of ``widget``'s own grab, between logical ``left``
+    and ``right``, that hold a pixel ``test`` accepts."""
+
+    from PyQt5 import QtGui
+
+    image = widget.grab().toImage()
+    ratio = image.devicePixelRatio() or 1.0
+    right = widget.width() if right is None else right
+    return [
+        y for y in range(image.height())
+        if any(test(QtGui.QColor(image.pixel(x, y)))
+               for x in range(int(left * ratio), min(image.width(), int(right * ratio))))
+    ]
+
+
+def test_the_step_chip_is_centred_on_the_frame(app, host) -> None:
+    """The pill and its text stand as far from the top edge as from the
+    bottom -- on the frame's inner rect, not on the digits' baseline."""
+
+    from PyQt5 import QtCore
+    from zlc_ui.fluent import FluentDoubleSpinBox, frame_inner_rect
+    from zlc_ui.fluent.style import ACCENT_TINT
+
+    box = FluentDoubleSpinBox(host)
+    box.setDecimals(3)
+    box.setSingleStep(0.1)
+    box.setValue(1.5)
+    box.resize(170, box.sizeHint().height())
+    _shown(app, host, box)
+    chip = box._step_chip
+    assert chip.isVisible()
+    inner = frame_inner_rect(box)
+    pill = chip.pill().translated(chip.pos())
+    ratio = box.devicePixelRatioF()
+    assert abs(pill.center().y() - inner.center().y()) * ratio <= 0.5, (pill, inner)
+
+    chip.setAttribute(QtCore.Qt.WA_UnderMouse, True)
+    chip.update()
+    app.processEvents()
+    tint = ACCENT_TINT.upper()
+    washed = _ink_rows(box, lambda c: c.name().upper() == tint, chip.x(), chip.x() + chip.width())
+    top, bottom = inner.top() * ratio, inner.bottom() * ratio
+    assert washed and abs((washed[0] - top) - (bottom - 1 - washed[-1])) <= 1, (washed, top, bottom)
+    inked = _ink_rows(box, lambda c: c.lightness() < 150, chip.x(), chip.x() + chip.width())
+    assert abs((inked[0] - washed[0]) - (washed[-1] - inked[-1])) <= 1, "the text is centred in the pill"
+
+
+def _badge_box(frame, button, colours) -> tuple[list[int], list[int]]:
+    """The device columns and rows of ``frame``'s grab, inside ``button``,
+    painted in one of ``colours``."""
+
+    image = frame.grab().toImage()
+    ratio = image.devicePixelRatio() or 1.0
+    inked = [
+        (x, y)
+        for x in range(int(button.x() * ratio), int((button.x() + button.width()) * ratio))
+        for y in range(image.height())
+        if image.pixelColor(x, y).name().upper() in colours
+    ]
+    return [p[0] for p in inked], [p[1] for p in inked]
+
+
+def test_a_binding_badge_keeps_one_gap_in_a_field_and_in_a_repeat_box(app, host) -> None:
+    """The badge stands as far from the stepper of a box that adopted the
+    field as from the edge of a plain field, centred on the frame, with the
+    digits clear of it; two badges stack inside the frame with room above
+    and below."""
+
+    from zlc_ui.fluent import field_room_end, fluent_count_box, frame_inner_rect
+    from zlc_ui.fluent.style import CONFIG_GREEN_DARK, ORANGE_DARK
+    from zlc_ui.pulse.scan_line_edit import FluentScanLineEdit
+
+    plain = FluentScanLineEdit("12", host)
+    plain.resize(130, plain.sizeHint().height())
+    box = fluent_count_box(minimum=1, parent=host)
+    box.setLineEdit(FluentScanLineEdit(""))
+    box.move(0, 50)
+    box.resize(130, plain.height())
+    box.setValue(5)
+    for edit in (plain, box.lineEdit()):
+        edit.set_field_state(editable=True, source="config")
+    _shown(app, host, plain, box)
+    green = {CONFIG_GREEN_DARK.upper()}
+
+    def gaps(frame, edit):
+        button = edit.binding_button
+        assert button.parentWidget() is frame, "seated in the frame that is drawn"
+        xs, ys = _badge_box(frame, button, green)
+        ratio = frame.devicePixelRatioF()
+        inner = frame_inner_rect(frame)
+        return (field_room_end(frame) * ratio - (max(xs) + 1),
+                min(ys) - inner.top() * ratio, inner.bottom() * ratio - (max(ys) + 1), min(xs))
+
+    plain_gap, plain_top, plain_bottom, _left = gaps(plain, plain)
+    box_gap, box_top, box_bottom, box_left = gaps(box, box.lineEdit())
+    assert plain_gap == box_gap, (plain_gap, box_gap)
+    assert abs(plain_top - plain_bottom) <= 1 and abs(box_top - box_bottom) <= 1
+    edit = box.lineEdit()
+    ratio = box.devicePixelRatioF()
+    text_end = (edit.x() + edit.width() - edit.textMargins().right()) * ratio
+    assert text_end <= box_left, "the digits end before the badge"
+
+    edit.set_field_state(editable=True, scan=True, source="config")
+    app.processEvents()
+    _xs, rows = _badge_box(box, edit.binding_button, green | {ORANGE_DARK.upper()})
+    inner = frame_inner_rect(box)
+    above, below = rows[0] - inner.top() * ratio, inner.bottom() * ratio - 1 - rows[-1]
+    assert above >= 1 and below >= 1 and abs(above - below) <= 1, (above, below)
+
+
+def test_segments_are_rounded_fills_with_no_outline(app, host) -> None:
+    """The track is DIVIDER with no edge, the current face SELECTED with no
+    outline, both rounded; a withheld choice is quiet and skipped, and a
+    disabled control keeps its current face as a neutral fill."""
+
+    from zlc_ui.fluent import FluentSegmentedButtons
+    from zlc_ui.fluent import fluent as F
+    from zlc_ui.fluent.style import BG, DIVIDER, SELECTED
+
+    segments = FluentSegmentedButtons((("default", "Default"), ("api", "API"), ("config", "Config")), host)
+    segments.set_current("config")
+    segments.button("api").setEnabled(False)
+    _shown(app, host, segments)
+    assert segments.current() == "config"
+    current = segments.button("config")
+    assert _at(segments, segments.width() / 2.0, 0) == DIVIDER.upper(), "the track has no edge"
+    assert _at(segments, 0, 0) != DIVIDER.upper(), "and is rounded"
+    assert _at(current, current.width() / 2.0, 0) == SELECTED.upper(), "no outline on the current"
+    assert _at(current, 0, 0) != SELECTED.upper(), "its corner is rounded"
+    radius = F._radius()
+    assert _at(current, radius, radius) == SELECTED.upper(), "at the field radius, not a near-square"
+    withheld = segments.button("api")
+    assert not withheld.isEnabled()
+    assert _at(withheld, 4, withheld.height() / 2.0) == DIVIDER.upper(), "a withheld choice has no face"
+    segments.setEnabled(False)
+    app.processEvents()
+    assert _at(segments, segments.width() / 2.0, 0) == BG.upper()
+    assert _at(current, 4, current.height() / 2.0) == DIVIDER.upper()
+    segments.set_current(None)
+    assert segments.current() is None
+
+
+def test_the_tri_switch_is_gone() -> None:
+    import zlc_ui.fluent as fluent
+    from zlc_ui.fluent import fluent as module
+
+    assert "FluentTriSwitch" not in fluent.__all__
+    assert not hasattr(module, "FluentTriSwitch")
+
+
+def test_parts_inside_a_field_are_centred_on_its_ink_and_frame(app, host) -> None:
+    """A tab's close x on its disk, and a spin box's two chevrons about the
+    middle of an inner rect of either parity."""
+
+    from PyQt5 import QtCore, QtWidgets
+    from zlc_ui.fluent import FluentSpinBox, FluentTabWidget, frame_inner_rect, stepper_column
+
+    tabs = FluentTabWidget(host)
+    tabs.add_permanent_tab(QtWidgets.QLabel("a"), "Monitor")
+    tabs.add_closable_tab(QtWidgets.QLabel("b"), "Edit")
+    tabs.resize(300, 100)
+    _shown(app, host, tabs)
+    close = tabs.tabBar().tabButton(1, QtWidgets.QTabBar.RightSide)
+    close.setAttribute(QtCore.Qt.WA_UnderMouse, True)
+    close.update()
+    app.processEvents()
+    image = close.grab().toImage()
+    ratio = image.devicePixelRatio() or 1.0
+    dark = [(x, y) for x in range(image.width()) for y in range(image.height())
+            if image.pixelColor(x, y).lightness() < 150]
+    disk = close._size * ratio
+    xs, ys = [p[0] for p in dark], [p[1] for p in dark]
+    assert abs(min(ys) - (disk - 1 - max(ys))) <= 1 and abs(min(xs) - (disk - 1 - max(xs))) <= 1
+    tabs.hide()
+
+    for height in (30, 29):
+        spin = FluentSpinBox(host)
+        spin.setRange(0, 10)
+        spin.setValue(5)
+        spin.setFixedSize(90, height)
+        _shown(app, host, spin)
+        column = stepper_column(spin)
+        inner = frame_inner_rect(spin)
+        ratio = spin.devicePixelRatioF()
+        top, bottom = inner.top() * ratio, inner.bottom() * ratio - 1
+        rows = [y for y in _ink_rows(spin, lambda c: c.lightness() < 190 and abs(c.red() - c.blue()) < 12,
+                                     column.left() + 2, column.right() - 2)
+                if top <= y <= bottom]
+        assert rows[0] - top == bottom - rows[-1], (height, rows[0] - top, bottom - rows[-1])
+        spin.hide()

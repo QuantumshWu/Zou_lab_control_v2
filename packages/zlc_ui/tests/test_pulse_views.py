@@ -330,9 +330,8 @@ for field in (duration, dac, delay):
     assert not field._popup.isVisible()
     QtTest.QTest.mouseClick(field.binding_button, QtCore.Qt.LeftButton)
     assert field._popup.isVisible()
-    switch = field.source_switch
-    QtTest.QTest.mouseClick(switch, QtCore.Qt.LeftButton,
-                          pos=switch._segment_rect(2).center().toPoint())
+    # Source is one segmented choice; Config is clicked, not cycled to.
+    QtTest.QTest.mouseClick(field.source_switch.button("config"), QtCore.Qt.LeftButton)
     assert field._popup.isVisible(), "source choice must not close the binding popup"
     field._popup.hide()
 app.processEvents()
@@ -848,9 +847,9 @@ bindings = []
 end.binding_committed.connect(lambda scan, source: bindings.append((scan, source)))
 end.count_edit.binding_button.click(); app.processEvents()
 assert not end.count_edit.scan_toggle.isEnabled()
-end.count_edit.source_switch.setState(1)
+end.count_edit.source_switch.button("api").click()
 assert bindings[-1] == (False, "api")
-end.count_edit.source_switch.setState(2)
+end.count_edit.source_switch.button("config").click()
 assert bindings[-1] == (False, "config")
 end.count_edit._popup.close()
 

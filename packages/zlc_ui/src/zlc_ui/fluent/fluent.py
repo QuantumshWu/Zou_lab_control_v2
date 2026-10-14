@@ -222,16 +222,19 @@ def scaled_even_px(value: float, *, minimum: int = 2) -> int:
 
 
 def device_snap(
-    widget: QtWidgets.QWidget, value: float, mode: str = "round", *, axis: str = "x"
+    widget: QtWidgets.QWidget, value: float, mode: str = "round", *, axis: str = "x",
+    grid: float = 1.0,
 ) -> float:
     """``value`` (a logical ``axis`` coordinate in ``widget``) moved onto a
-    device-pixel boundary of the window it is painted into.
+    device-pixel boundary of the window it is painted into -- or, with
+    ``grid=0.5``, onto a boundary or a pixel's middle, where a part with
+    an odd number of device pixels is centred.
 
     At a whole device-pixel ratio every logical pixel is one; at a
     fractional one (1.25, 1.5) a widget's own origin can fall inside a
     device pixel, so the boundary is found in window coordinates."""
 
-    ratio = float(widget.devicePixelRatioF())
+    ratio = float(widget.devicePixelRatioF()) / float(grid)
     snap = {"round": lambda v: math.floor(v + 0.5), "floor": math.floor, "ceil": math.ceil}[mode]
     offset = 0.0
     if ratio != int(ratio):
@@ -313,7 +316,10 @@ def paint_chevron(
 ) -> None:
     """The one chevron a spin box and a combo draw: one size, one pen, its
     ink centred on ``centre`` (x on a device pixel, or on a pixel's middle
-    when the stroke is an odd number of device pixels wide)."""
+    when the stroke is an odd number of device pixels wide; y on a device
+    pixel or a pixel's middle, so a chevron centred on a frame with an odd
+    number of device rows inside it is centred on them, not half a pixel
+    low)."""
 
     ratio = float(widget.devicePixelRatioF())
     half = scaled_px(COMBO_TRI_SIZE) / 2.0
@@ -321,7 +327,7 @@ def paint_chevron(
     cx = device_snap(widget, centre.x())
     if round(width * ratio) % 2:
         cx += 0.5 / ratio
-    cy = device_snap(widget, centre.y(), axis="y")
+    cy = device_snap(widget, centre.y(), axis="y", grid=0.5)
     sign = -1.0 if up else 1.0
     pen = QtGui.QPen(colour)
     pen.setWidthF(width)
@@ -1753,6 +1759,18 @@ def _line_edit_text_line(edit: QtWidgets.QLineEdit) -> QtCore.QRect:
     return QtCore.QRect(
         area.x() + _QLINEEDIT_HMARGIN, top, max(0, area.width() - 2 * _QLINEEDIT_HMARGIN), line
     )
+
+
+def line_edit_text_right(edit: QtWidgets.QLineEdit) -> int:
+    """Where the text of ``edit`` may end with NO right text margin, in its
+    own coordinates: its contents (inside a sheet's border and padding)
+    less Qt's own inset.  A part laid over a field's right end asks this
+    for the margin that keeps the text clear of it."""
+
+    option = QtWidgets.QStyleOptionFrame()
+    option.initFrom(edit)
+    contents = edit.style().subElementRect(QtWidgets.QStyle.SE_LineEditContents, option, edit)
+    return contents.right() + 1 - _QLINEEDIT_HMARGIN
 
 
 def _numeric_text_width(edit: QtWidgets.QLineEdit, right_edge: int | None = None) -> int:
@@ -3613,10 +3631,11 @@ class FluentComboBox(QtWidgets.QAbstractButton):
             )
             painter.drawText(text_rect, QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop, text)
 
-        # The one chevron, on the stepper column a spin box below would use.
+        # The one chevron, on the stepper column a spin box below would use,
+        # centred on the frame's inner rect like every part inside a field.
         paint_chevron(
             painter, self,
-            QtCore.QPointF(stepper_column(self).center().x(), self.height() / 2.0),
+            QtCore.QPointF(stepper_column(self).center().x(), frame_inner_rect(self).center().y()),
             up=False,
             colour=QtGui.QColor(TEXT if current else GRAPHITE if enabled else PLACEHOLDER),
         )
@@ -4719,14 +4738,20 @@ def _tab_font() -> QtGui.QFont:
 class _FluentTabCloseButton(QtWidgets.QToolButton):
     """The close affordance for a closable tab: a small "x" glyph on a round
     hover wash -- ACCENT_TINT, SELECTED while pressed, as every hover and
-    press is.
+    press is.  Quiet MUTED_INK at rest (a near-white "x" disappears on the
+    tab bar), TEXT on the wash -- closing a view is not removing anything,
+    so it does not turn red.
 
-    It draws the "x" as TEXT (``QToolButton``), not a custom ``paintEvent`` on a
-    ``QAbstractButton`` -- the latter does not composite as a ``QTabBar`` tab
-    button (it renders blank), so the close mark was invisible.  A QToolButton's
-    text is centred and the hover background is the button rect rounded to a
-    circle, so glyph and highlight are concentric by construction.  Frontend-
-    owned, reused via :meth:`FluentTabWidget.add_closable_tab`.
+    The button paints itself: the disk on whole device pixels, an even
+    number of them across, and the x centred on its INK on the disk's
+    centre (:func:`paint_centred_ink`).  Drawn as a QToolButton's text, the
+    x was centred on its line box and sat a pixel below the middle of its
+    disk.  It stays a ``QToolButton``: a ``QAbstractButton`` subclass does not
+    composite as a ``QTabBar`` tab button (it rendered blank).  The glyph's
+    font is the button's own, never ``self.font()``: a window-level
+    ``QWidget { font }`` sheet overrode setFont and drew a larger x in one
+    window than another.  Frontend-owned, reused via
+    :meth:`FluentTabWidget.add_closable_tab`.
 
     The x has to end as far before its underline's end as the label's ink
     starts after the underline's start.  The button carries the difference
@@ -4740,25 +4765,27 @@ class _FluentTabCloseButton(QtWidgets.QToolButton):
         super().__init__(parent)
         # Even, so the hover disk (radius size / 2) is round.
         self._size = scaled_even_px(18, minimum=14)
-        self._pixels = max(9, int(self._size * 0.62))
+        self._glyph = QtGui.QFont(FONT)
+        self._glyph.setPixelSize(max(9, int(self._size * 0.62)))
+        self._glyph.setBold(True)
         self._trail = -1
         self.setText("✕")                       # heavy multiplication x
+        self.setAttribute(QtCore.Qt.WA_Hover, True)
         self.setCursor(QtCore.Qt.PointingHandCursor)
         self.setFocusPolicy(QtCore.Qt.NoFocus)
         self.setToolTip("Close this tab")
         self.set_trail(0)
 
-    def glyph_ink_right(self) -> float:
-        """Where the x's ink ends, from the left of its disk: the text is
-        centred on its advance in the disk, and the ink ends at its tight
-        box's right inside that advance."""
+    def _ink(self) -> QtCore.QRectF:
+        path = QtGui.QPainterPath()
+        path.addText(0.0, 0.0, self._glyph, self.text())
+        return path.boundingRect()
 
-        glyph = QtGui.QFont(FONT)
-        glyph.setPixelSize(self._pixels)
-        glyph.setBold(True)
-        metrics = QtGui.QFontMetricsF(glyph)
-        left = (self._size - metrics.horizontalAdvance(self.text())) / 2.0
-        return left + metrics.tightBoundingRect(self.text()).right()
+    def glyph_ink_right(self) -> float:
+        """Where the x's ink ends, from the left of its disk: the ink is
+        centred on the disk."""
+
+        return (self._size + self._ink().width()) / 2.0
 
     def trail(self) -> int:
         return self._trail
@@ -4768,22 +4795,31 @@ class _FluentTabCloseButton(QtWidgets.QToolButton):
         if trail == self._trail:
             return
         self._trail = trail
-        size = self._size
-        self.setFixedSize(size + trail, size)
-        radius = size // 2
-        # Quiet MUTED_INK at rest (a near-white "x" disappears on the tab
-        # bar), TEXT on the round hover wash -- closing a view is not
-        # removing anything, so it does not turn red.  The glyph's size is in
-        # the button's OWN sheet: a window-level ``QWidget { font }``
-        # overrode setFont and drew a larger x in one window than another.
-        self.setStyleSheet(
-            f"""
-            QToolButton {{ border: none; background: transparent; color: {MUTED_INK}; padding: 0px;
-                           margin-right: {trail}px; font: bold {self._pixels}px "{FONT}"; }}
-            QToolButton:hover {{ background: {ACCENT_TINT}; border-radius: {radius}px; color: {TEXT}; }}
-            QToolButton:pressed {{ background: {SELECTED}; border-radius: {radius}px; color: {TEXT}; }}
-            """
-        )
+        self.setFixedSize(self._size + trail, self._size)
+        self.update()
+
+    def enterEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        self.update()
+        super().leaveEvent(event)
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        del event
+        ratio = float(self.devicePixelRatioF())
+        across = max(2, int(round(self._size * ratio)) & ~1) / ratio
+        disk = QtCore.QRectF(device_snap(self, 0.0), device_snap(self, 0.0, axis="y"), across, across)
+        washed = self.isEnabled() and (self.isDown() or self.underMouse())
+        painter = QtGui.QPainter(self)
+        if washed:
+            painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
+            painter.setPen(QtCore.Qt.NoPen)
+            painter.setBrush(QtGui.QColor(SELECTED if self.isDown() else ACCENT_TINT))
+            painter.drawEllipse(disk)
+        paint_centred_ink(painter, self, disk, self._glyph, self.text(), TEXT if washed else MUTED_INK)
+        painter.end()
 
 
 class _FluentTabBar(QtWidgets.QTabBar):
@@ -5370,163 +5406,6 @@ def add_row_switch(
         layout.addSpacing(gap)
 
 
-class FluentTriSwitch(QtWidgets.QAbstractButton):
-    """Three mutually exclusive labelled positions on one capsule track."""
-
-    stateChanged = QtCore.pyqtSignal(int)
-
-    def __init__(self, labels: tuple[str, str, str], parent=None) -> None:
-        super().__init__(parent)
-        if len(labels) != 3 or any(not str(label) for label in labels):
-            raise ValueError("a tri-switch needs three non-empty labels")
-        self._labels = tuple(str(label) for label in labels)
-        self._state = 0
-        self._offered = [True, True, True]
-        self._position = 0.0
-        self._animation = QtCore.QPropertyAnimation(self, b"position", self)
-        self._animation.setDuration(150)
-        self.setCursor(QtCore.Qt.PointingHandCursor)
-        self.setFocusPolicy(QtCore.Qt.StrongFocus)
-        self.setFont(QtGui.QFont(FONT, fluent_font_size()))
-        self._measure_segments()
-        self.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
-        self.clicked.connect(lambda: self.setState(self._offered_after(self._state, 1)))
-
-    def set_position_offered(self, index: int, offered: bool) -> None:
-        """Offer or withhold one position.  A withheld one is skipped by
-        clicks and keys and drawn muted; the current position stays offered."""
-
-        if index not in (0, 1, 2):
-            raise ValueError("tri-switch position must be 0, 1 or 2")
-        if not offered and index == self._state:
-            raise ValueError("the current tri-switch position cannot be withheld")
-        if self._offered[index] != bool(offered):
-            self._offered[index] = bool(offered)
-            self.update()
-
-    def _offered_after(self, state: int, step: int) -> int:
-        """The next offered position from ``state`` in ``step`` direction, wrapping."""
-
-        candidate = state
-        for _ in range(3):
-            candidate = (candidate + step) % 3
-            if self._offered[candidate]:
-                return candidate
-        return state
-
-    def _measure_segments(self) -> None:
-        metrics = self.fontMetrics()
-        height = max(metrics.height() + scaled_px(10), scaled_px(30, minimum=24))
-        # Even: the capsule's ends and the thumb's are half-height circles.
-        height += height & 1
-        # No narrower than tall: a one-letter position squeezed the thumb
-        # into an upright oval, nearer the capsule's end than its top.
-        self._segment_widths = tuple(
-            max(height, fluent_text_width(metrics, label) + scaled_px(16)) for label in self._labels
-        )
-        self.setFixedSize(sum(self._segment_widths), height)
-
-    def changeEvent(self, event) -> None:
-        super().changeEvent(event)
-        if event.type() in (QtCore.QEvent.FontChange, QtCore.QEvent.StyleChange) and hasattr(self, "_segment_widths"):
-            self._measure_segments()
-
-    def _segment_rect(self, index: int) -> QtCore.QRectF:
-        return QtCore.QRectF(sum(self._segment_widths[:index]), 0, self._segment_widths[index], self.height())
-
-    def sizeHint(self) -> QtCore.QSize:
-        return self.minimumSize()
-
-    def state(self) -> int:
-        return self._state
-
-    def setState(self, state: int) -> None:
-        if state not in (0, 1, 2):
-            raise ValueError("tri-switch state must be 0, 1 or 2")
-        if state == self._state:
-            return
-        self._state = int(state)
-        self._animation.stop()
-        if self.isVisible() and self.isEnabled():
-            self._animation.setStartValue(self._position)
-            self._animation.setEndValue(float(state))
-            self._animation.start()
-        else:
-            self._position = float(state)
-            self.update()
-        self.stateChanged.emit(self._state)
-
-    def mouseReleaseEvent(self, event) -> None:
-        if event.button() == QtCore.Qt.LeftButton and self.isDown():
-            self.setDown(False)
-            if self.rect().contains(event.pos()):
-                for index in range(3):
-                    if self._offered[index] and self._segment_rect(index).contains(
-                        QtCore.QPointF(event.pos())
-                    ):
-                        self.setState(index)
-                        break
-            event.accept()
-            return
-        super().mouseReleaseEvent(event)
-
-    def keyPressEvent(self, event) -> None:
-        offered = [index for index in range(3) if self._offered[index]]
-        changes = {
-            QtCore.Qt.Key_Left: max([index for index in offered if index < self._state], default=self._state),
-            QtCore.Qt.Key_Right: min([index for index in offered if index > self._state], default=self._state),
-            QtCore.Qt.Key_Home: offered[0], QtCore.Qt.Key_End: offered[-1],
-        }
-        if event.key() in changes:
-            self.setState(changes[event.key()])
-            event.accept()
-            return
-        super().keyPressEvent(event)
-
-    def paintEvent(self, event) -> None:
-        del event
-        painter = QtGui.QPainter(self)
-        painter.setRenderHint(QtGui.QPainter.Antialiasing)
-        height = self.height()
-        # The capsule on device pixels, an even number of them tall, and the
-        # thumb a whole-device-pixel margin inside it on every side -- so at
-        # an end it stands as far from the capsule's end as from its top
-        # and bottom, concentric with the round end, at any ratio.
-        ratio = float(self.devicePixelRatioF())
-        tall = max(2, int(round(height * ratio)))
-        tall -= tall & 1
-        capsule = QtCore.QRectF(device_snap(self, 0.0), device_snap(self, 0.0, axis="y"),
-                                round(self.width() * ratio) / ratio, tall / ratio)
-        margin = round(scaled_px(3, minimum=2) * ratio) / ratio
-        painter.setPen(QtCore.Qt.NoPen)
-        painter.setBrush(QtGui.QColor(PLACEHOLDER if self.isEnabled() else BG))
-        painter.drawRoundedRect(capsule, capsule.height() / 2, capsule.height() / 2)
-        painter.setBrush(QtGui.QColor(SURFACE))
-        index = min(2, int(self._position))
-        start = self._segment_rect(index)
-        end = self._segment_rect(min(2, index + 1))
-        fraction = self._position - index
-        left = start.left() + fraction * (end.left() - start.left())
-        right = left + start.width() + fraction * (end.width() - start.width())
-        left = max(capsule.left() + margin, device_snap(self, left + margin))
-        right = min(capsule.right() - margin, device_snap(self, right - margin))
-        thumb = QtCore.QRectF(left, capsule.top() + margin, right - left, capsule.height() - 2 * margin)
-        painter.drawRoundedRect(thumb, thumb.height() / 2, thumb.height() / 2)
-        painter.setFont(self.font())
-        for index, label in enumerate(self._labels):
-            painter.setPen(QtGui.QColor(TEXT if self.isEnabled() and self._offered[index] else PLACEHOLDER))
-            painter.drawText(self._segment_rect(index), QtCore.Qt.AlignCenter, label)
-
-    def _get_position(self) -> float:
-        return self._position
-
-    def _set_position(self, value: float) -> None:
-        self._position = value
-        self.update()
-
-    position = QtCore.pyqtProperty(float, fget=_get_position, fset=_set_position)
-
-
 def fluent_spinbox_stylesheet(
     selector: str,
     *,
@@ -5606,6 +5485,20 @@ def _spin_stepper_cells(widget: QtWidgets.QAbstractSpinBox) -> tuple[float, QtCo
     return left, up, down
 
 
+def field_room_end(widget: QtWidgets.QWidget) -> float:
+    """Where the room inside a field's frame ends on the right, in logical
+    px: the frame's inner edge, or the left of a spin box's stepper cells.
+
+    A part seated at a field's right end (a binding badge) keeps ONE gap
+    from this, so it stands as far from the stepper in a spin box as from
+    the edge in a plain field."""
+
+    if (isinstance(widget, QtWidgets.QAbstractSpinBox)
+            and widget.buttonSymbols() != QtWidgets.QAbstractSpinBox.NoButtons):
+        return _spin_stepper_cells(widget)[1].left()
+    return frame_inner_rect(widget).right()
+
+
 def _paint_fluent_spin_buttons(widget: QtWidgets.QAbstractSpinBox) -> None:
     """Paint the stepper: the hovered cell's tint and two chevrons.
 
@@ -5613,10 +5506,13 @@ def _paint_fluent_spin_buttons(widget: QtWidgets.QAbstractSpinBox) -> None:
     chevrons and the tint under the pointer -- no line divides it from the
     digits: a divider was one more line in a field already edged.  The tint
     fills exactly the hovered cell to the frame's inner edge, concentric at
-    the corner; the chevrons sit on the cells' centres.  A direction the
-    box cannot move in (``stepEnabled``: a bound, or no grid point left
-    inside it) has its chevron dimmed and takes no tint.  Nothing is offset
-    from a sub-control rectangle.
+    the corner.  The two chevrons are mirror images about the centre of
+    the frame's inner rect, each in the middle of its half: placed on the
+    cells' own centres, an odd number of rows inside the frame gave one
+    cell a row more and put one chevron a pixel further from the middle
+    than the other.  A direction the box cannot move in (``stepEnabled``: a
+    bound, or no grid point left inside it) has its chevron dimmed and
+    takes no tint.  Nothing is offset from a sub-control rectangle.
     """
 
     if widget.buttonSymbols() == QtWidgets.QAbstractSpinBox.NoButtons:
@@ -5650,9 +5546,13 @@ def _paint_fluent_spin_buttons(widget: QtWidgets.QAbstractSpinBox) -> None:
         painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
         painter.fillPath(inner.intersected(tile), QtGui.QColor(ACCENT_TINT))
         painter.restore()
+    inner = frame_inner_rect(widget)
+    middle = inner.center().y()
+    rise = device_snap(widget, middle - inner.height() / 4.0, axis="y", grid=0.5)
     for up, cell in ((True, up_cell), (False, down_cell)):
         ink = QtGui.QColor(GRAPHITE if movable[up] else PLACEHOLDER)
-        paint_chevron(painter, widget, cell.center(), up=up, colour=ink)
+        centre = QtCore.QPointF(cell.center().x(), rise if up else 2.0 * middle - rise)
+        paint_chevron(painter, widget, centre, up=up, colour=ink)
     painter.end()
 
 
@@ -6029,10 +5929,14 @@ class _StepChip(QtWidgets.QAbstractButton):
     there the step came out the digits' size on their baseline -- ``0.001
     ±1`` read as a value and its uncertainty.
 
-    The smaller text stands ON THE DIGITS' BASELINE (``baseline``), so the
-    two read as one line; centred on its own ink in the frame it rose two
-    pixels above the larger digits and read as a superscript.  The hover
-    pill is centred on that ink, so it is concentric with the text.
+    THE CHIP IS CENTRED ON THE FRAME, like every part inside a field (a
+    chevron, a badge).  The pill is centred on the box's inner rect, its
+    height of that rect's device-pixel parity, so it stands exactly as far
+    from the top edge as from the bottom; the text is centred on its own
+    ink inside the pill, at rest and under the pointer alike.  It used to
+    stand on the digits' baseline, which put the pill two pixels below the
+    middle of the field -- the one thing in a row of centred parts that
+    was not.
     """
 
     def __init__(self, box: "FluentDoubleSpinBox"):
@@ -6059,31 +5963,18 @@ class _StepChip(QtWidgets.QAbstractButton):
         path.addText(0.0, 0.0, self._ink_font, self.text() if text is None else text)
         return path.boundingRect()
 
-    def baseline(self) -> float:
-        """The digits' baseline in this chip, on a device pixel.
-
-        Laid out the way QLineEdit lays out its line: the line box centred
-        (integer division, Qt's own rounding) in the edit's contents less
-        its text margins, the baseline one ascent below its top."""
-
-        edit = self.parentWidget().lineEdit()
-        line = _line_edit_text_line(edit)
-        return device_snap(self, edit.y() + line.top() + edit.fontMetrics().ascent() - self.y(), axis="y")
-
     def pill(self) -> QtCore.QRectF:
-        """The hover pill: the text's ink plus even padding, centred on that
-        ink as it stands on the baseline, its top and height on whole device
-        pixels and inside the chip."""
+        """The hover pill, in this chip: the chip's width, the text's ink
+        plus even padding tall -- made the parity of the box's inner rect
+        in device pixels and no taller than it -- centred on that rect."""
 
         ratio = float(self.devicePixelRatioF())
-        ink = self.ink()
-        pad_v = scaled_px(3, minimum=2)
-        height = math.ceil((ink.height() + 2 * pad_v) * ratio / 2.0) * 2.0 / ratio
-        height = min(height, float(self.height()))
-        centre = self.baseline() + ink.center().y()
-        top = device_snap(self, centre - height / 2.0, axis="y")
-        top = min(max(top, 0.0), float(self.height()) - height)
-        return QtCore.QRectF(0.0, top, float(self.width()), height)
+        inner = frame_inner_rect(self.parentWidget())
+        room = max(1, int(round(inner.height() * ratio)))
+        tall = min(room, int(math.ceil((self.ink().height() + 2 * scaled_px(3, minimum=2)) * ratio)))
+        tall += (room - tall) & 1
+        top = inner.top() - self.y() + (room - tall) // 2 / ratio
+        return QtCore.QRectF(0.0, top, float(self.width()), tall / ratio)
 
     def set_live(self, live: bool) -> None:
         """Whether the box can be edited: a read-only box shows its step
@@ -6116,13 +6007,8 @@ class _StepChip(QtWidgets.QAbstractButton):
             painter.setPen(QtCore.Qt.NoPen)
             painter.setBrush(QtGui.QColor(ACCENT_TINT))
             painter.drawRoundedRect(pill, pill.height() / 2.0, pill.height() / 2.0)
-        painter.setPen(QtGui.QColor(TEXT if hovered else MUTED_INK if live else DISABLED_INK))
-        painter.setFont(self._ink_font)
-        ink = self.ink()
-        painter.drawText(
-            QtCore.QPointF(device_snap(self, pill.center().x() - ink.center().x()), self.baseline()),
-            self.text(),
-        )
+        paint_centred_ink(painter, self, pill, self._ink_font, self.text(),
+                          TEXT if hovered else MUTED_INK if live else DISABLED_INK)
         painter.end()
 
 
@@ -6745,18 +6631,16 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
         shown = _decimal_text(step) if -4 <= step.adjusted() <= 6 else f"{float(step):g}"
         return f"±{shown}"
 
-    def _step_chip_metrics(self, text: str | None = None) -> tuple[int, int, int, int]:
-        """``(chip width, gap to the stepper, vertical gap, gap to the
-        digits)`` in logical px for ``text`` (default: the step shown now):
-        the chip is the text's ink plus its padding, measured with the
-        chip's own font."""
+    def _step_chip_metrics(self, text: str | None = None) -> tuple[int, int, int]:
+        """``(chip width, gap to the stepper, gap to the digits)`` in
+        logical px for ``text`` (default: the step shown now): the chip is
+        the text's ink plus its padding, measured with the chip's own font,
+        and as tall as the frame's inner rect (its pill is centred there)."""
 
         ink = self._step_chip.ink(self._step_chip_text() if text is None else text)
         pad = scaled_px(6, minimum=4)
         width = int(math.ceil(ink.width())) + 2 * pad
-        # One pixel off the frame vertically: the chip is a hit area, and the
-        # pill inside it follows the digits' baseline, a little below centre.
-        return width, scaled_px(3, minimum=2), scaled_px(1), scaled_px(4, minimum=2)
+        return width, scaled_px(3, minimum=2), scaled_px(4, minimum=2)
 
     def _offers_step_chip(self) -> bool:
         return (
@@ -6775,7 +6659,7 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
 
         if not self._offers_step_chip():
             return 0
-        width, gap, _vertical, text_gap = self._step_chip_metrics(text)
+        width, gap, text_gap = self._step_chip_metrics(text)
         before_stepper = FIELD_BORDER_PX + scaled_px(EDIT_PADDING_H)
         return max(0, width + gap + text_gap - before_stepper)
 
@@ -6832,6 +6716,16 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
         self._number_geometry = None
         self._refresh_step_chip()
 
+    def edit_field(self) -> QtCore.QRect:
+        """Where this box lays its line edit out, asked of its style: the
+        edit's own geometry catches up only when a hidden box is shown, and
+        a part placed over the edit (a binding badge) is placed before."""
+
+        option = QtWidgets.QStyleOptionSpinBox()
+        self.initStyleOption(option)
+        return self.style().subControlRect(
+            QtWidgets.QStyle.CC_SpinBox, option, QtWidgets.QStyle.SC_SpinBoxEditField, self)
+
     def _place_step_chip(self) -> None:
         chip = self._step_chip
         if chip is None:
@@ -6847,11 +6741,11 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
             chip.hide()
             self._set_chip_margin(0)
             return
-        width, gap, vertical, _text_gap = self._step_chip_metrics()
+        width, gap, _text_gap = self._step_chip_metrics()
         stepper, _up, _down = _spin_stepper_cells(self)
         inner = frame_inner_rect(self)
-        top = int(math.ceil(inner.top())) + vertical
-        bottom = int(math.floor(inner.bottom())) - vertical
+        top = int(math.ceil(inner.top()))
+        bottom = int(math.floor(inner.bottom()))
         right = int(math.floor(stepper)) - gap
         text = self._step_chip_text()
         if chip.text() != text:
@@ -8627,23 +8521,32 @@ class FluentSegmentedButtons(QtWidgets.QWidget):
     """One of a closed set of named choices: ONE control, the current marked.
 
     For a set the OWNER declares closed -- an enumeration, the modes of a
-    setting -- however many it holds, as long as the labels fit; a choice
-    among data (frame labels, an axis's events) or a set that grows or is
-    filtered is a :class:`FluentComboBox`.  A neutral rounded track holds
-    the choices flush, each a transparent face in TEXT ink; the pointer
-    lays the ACCENT_TINT hover wash on a choice, a press the SELECTED fill,
-    and the current one IS the SELECTED fill with a semibold label --
-    SELECTED_HOVER under the pointer -- and no outline.  The current face is
-    rounded and concentric with the track: the track's radius is the
-    face's plus the rim.  Every choice is as wide as its semibold label, so
-    marking one never shifts the others.  A row of separate tinted buttons
-    read as a row of commands, which these are not.  A choice is reached by
-    Tab, never focused by a click, and focus paints nothing on it: a click
-    makes it current, and a focus face left behind would be one more state
-    on the track.
+    setting, a binding's Default / API / Config -- however many it holds, as
+    long as the labels fit; a choice among data (frame labels, an axis's
+    events) or a set that grows or is filtered is a :class:`FluentComboBox`.
 
-    ``activated`` carries the value an operator clicked; :meth:`set_current`
-    marks a value (or none) without emitting it.
+    A DIVIDER track with no edge holds the choices flush, each a
+    transparent face in TEXT ink.  The pointer lays the ACCENT_TINT hover
+    wash on a choice and a press the SELECTED fill; the current one IS the
+    SELECTED fill with a semibold label -- SELECTED_HOVER under the pointer
+    -- and no outline.  Every face is rounded at the field radius and the
+    track at that radius plus its rim, so the current face is concentric
+    with the track rather than a near-square block in a rounded one.  Every
+    choice is as wide as its semibold label, so marking one never shifts
+    the others.  A row of separate tinted buttons read as a row of
+    commands, which these are not.
+
+    A choice the owner WITHHOLDS (``button(value).setEnabled(False)``) keeps
+    its place in DISABLED_INK and takes neither the pointer nor Tab.  The
+    whole control disabled is a BG track whose current face is the DIVIDER
+    grey, every label DISABLED_INK: what is chosen still reads, nothing
+    invites a click.  A choice is reached by Tab, never focused by a click,
+    and focus paints nothing on it: a click makes it current, and a focus
+    face left behind would be one more state on the track.
+
+    ``activated`` carries the value an operator clicked -- the owner decides
+    and marks it; :meth:`set_current` marks a value (or none) without
+    emitting it, and :meth:`current` says which is marked.
     """
 
     activated = QtCore.pyqtSignal(object)
@@ -8684,18 +8587,18 @@ class FluentSegmentedButtons(QtWidgets.QWidget):
                 font: {fluent_font_size()}pt "{FONT}";
                 outline: none;
             }}
-            QPushButton:hover {{ background: {ACCENT_TINT}; border-color: {ACCENT_TINT}; }}
-            QPushButton:pressed {{ background: {SELECTED}; border-color: {SELECTED}; }}
+            QPushButton:enabled:hover {{ background: {ACCENT_TINT}; border-color: {ACCENT_TINT}; }}
+            QPushButton:enabled:pressed {{ background: {SELECTED}; border-color: {SELECTED}; }}
             QPushButton[current="true"] {{
                 background: {SELECTED}; border-color: {SELECTED}; font-weight: 600;
             }}
-            QPushButton[current="true"]:hover, QPushButton[current="true"]:pressed {{
+            QPushButton[current="true"]:enabled:hover, QPushButton[current="true"]:enabled:pressed {{
                 background: {SELECTED_HOVER}; border-color: {SELECTED_HOVER};
             }}
             QPushButton:disabled {{
                 background: transparent; border-color: transparent; color: {DISABLED_INK};
             }}
-            QPushButton[current="true"]:disabled {{ background: {SURFACE}; border-color: {SURFACE}; }}
+            QPushButton[current="true"]:disabled {{ background: {DIVIDER}; border-color: {DIVIDER}; }}
             """
         )
 
@@ -8714,6 +8617,11 @@ class FluentSegmentedButtons(QtWidgets.QWidget):
 
     def button(self, value) -> QtWidgets.QPushButton:
         return self._buttons[value]
+
+    def current(self):
+        """The marked value, or None when none is."""
+
+        return next((value for value, button in self._buttons.items() if button.property("current")), None)
 
     def set_current(self, value) -> None:
         for choice, button in self._buttons.items():

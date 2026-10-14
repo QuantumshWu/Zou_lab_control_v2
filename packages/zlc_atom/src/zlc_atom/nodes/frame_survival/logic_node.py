@@ -16,12 +16,14 @@ from .processor import (
 )
 
 #: What the operator picks: a question that follows the frames the source
-#: carries, or the pairs they marked themselves.
+#: carries, or the pairs they marked themselves.  The labels are the words
+#: on the editor's preset strip and in its summary, so they are short; what
+#: each rule pairs (k→k+1, 0→k, k→last) is in the field's description.
 _SELECTIONS = (
-    AuthoringChoice("all", "All forward pairs"),
-    AuthoringChoice("consecutive", "Consecutive frames (k→k+1)"),
-    AuthoringChoice("from_first", "From the first frame (0→k)"),
-    AuthoringChoice("to_last", "To the last frame (k→last)"),
+    AuthoringChoice("all", "All"),
+    AuthoringChoice("consecutive", "Consecutive"),
+    AuthoringChoice("from_first", "From first"),
+    AuthoringChoice("to_last", "To last"),
     AuthoringChoice("custom", "Selected pairs"),
 )
 
@@ -36,8 +38,10 @@ def _validate(values):
 
 FRAME_SURVIVAL_SCHEMA = AuthoringSchema((
     AuthoringField("selection", "choice", "Published pairs", "all", required=True, choices=_SELECTIONS,
-                   description="A named choice follows the frames the source carries; "
-                               "Grid edits override only the changed pairs; first/last follow the cycle."),
+                   description="A named choice follows the frames the source carries: All forward pairs, "
+                               "Consecutive (k→k+1), From first (0→k) or To last (k→last); Selected pairs "
+                               "lists them. Grid edits override only the changed pairs; first/last follow "
+                               "the cycle."),
     AuthoringField("pairs", "rows", "Pair selections", (), columns=(
         AuthoringField("start", "text", "Start frame", "0", required=True),
         AuthoringField("end", "text", "End frame", "last", required=True),
@@ -69,7 +73,6 @@ def _editor_factory(parent=None):
     from .processor import PAIR_RULES
 
     labels = {choice.value: choice.label for choice in _SELECTIONS}
-    short = {"all": "All", "consecutive": "Consecutive", "from_first": "From first", "to_last": "To last"}
 
     class SurvivalForm(QtWidgets.QWidget):
         """Mark pairs on a start x end grid, or pick a named selection.
@@ -78,6 +81,14 @@ def _editor_factory(parent=None):
         a drag a rectangle, Ctrl adds or removes, a row or column header every
         pair from or to that frame. Edits retain the current rule and record
         only exceptions; None starts an explicit list.
+
+        The grid reads the way Occupancy's does: a pair the RULE selects is
+        a derived card (the light wash, dashed), a pair the operator added
+        against the rule is a chosen card, and one they left out is an
+        empty card -- so what the rule decided and what was decided by hand
+        are told apart at a glance.  The preset strip marks the rule in
+        force, None an explicit list still empty, and nothing an explicit
+        list with pairs in it (the summary names it).
         """
 
         draft_changed = QtCore.pyqtSignal(object)
@@ -90,7 +101,7 @@ def _editor_factory(parent=None):
             header = QtWidgets.QHBoxLayout()
             # None clears every mark: an explicit, still-empty selection to mark pairs into.
             self.presets = FluentSegmentedButtons(
-                (*((rule, short[rule]) for rule in PAIR_RULES), ("none", "None")), self)
+                (*((rule, labels[rule]) for rule in PAIR_RULES), ("none", "None")), self)
             self.presets.activated.connect(lambda rule: self.draft_changed.emit(
                 {"values": {"selection": "custom" if rule == "none" else rule, "pairs": ()}}))
             header.addWidget(self.presets)
@@ -155,6 +166,7 @@ def _editor_factory(parent=None):
             self.presets.set_current("none" if selection == "custom" and not self._overrides else selection)
             self.table.setEnabled(frames is not None)
             if frames is None:
+                self.table.set_cell_states({})
                 self.summary.setText(labels[selection])
                 self.note.setText("Waiting for the source frames")
                 return
@@ -164,6 +176,17 @@ def _editor_factory(parent=None):
                     (start, end) for start, end, selected in self._overrides if selected),
                 self._overrides if selection != "custom" else (), count)
             self._wanted = wanted
+            # What the rule selects by itself is derived; what is selected
+            # beyond it was marked by hand and stays a chosen card.  Either
+            # way the pair is in the table's selection, so the gestures
+            # (and the draft they edit) are the table's own.
+            rule = set() if selection == "custom" else set(_rule_pairs(selection, count))
+            derived = tuple(pair for pair in wanted if pair in rule)
+            self.table.set_cell_states(
+                {(start, end - 1): "derived" for start, end in derived},
+                {(start, end - 1): f"{frames[start]}→{frames[end]} follows {labels[selection]}; "
+                                   "Ctrl-click to leave it out" for start, end in derived},
+            )
             cells = tuple(sorted((start, end - 1) for start, end in wanted))
             if self.table.selected_cells() != cells:
                 self.table.set_selected(cells)
