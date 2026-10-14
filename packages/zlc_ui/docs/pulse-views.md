@@ -110,13 +110,15 @@ commits period order and bracket anchors atomically in the new `ScheduleVM`.
 Empty brackets remain editable; running or saving requires nonempty content.
 `bracket_committed(bracket_id, start_period_id, end_period_id, count)` moves or
 recounts one bracket; `bracket_add_requested(start_period_id, end_period_id,
-count)` asks for a new one (the presenter names it) and
-`bracket_remove_requested(bracket_id)` deletes one. The schedule page
+count)` asks for a new one (the presenter names it). Removing is one
+signal for every kind of item: `remove_items_requested(items)` carries the
+selected `(kind, id)` items (periods, spacers, brackets) in visual order. The
+schedule page
 also emits `document_name_committed`, `port_label_committed`,
 `period_name_committed`, `duration_committed`, `digital_committed`,
 `analog_committed`, `delay_committed`, `binding_committed`,
 `insert_period_requested`, `insert_spacer_requested`,
-`reorder_items_requested`, `remove_period_requested`,
+`reorder_items_requested`, `remove_items_requested`,
 `run_repeats_committed`, `visible_ports_committed`, `fill_port_requested`,
 `clear_port_requested`, `run_requested`, `stop_requested`, `sync_requested`,
 `save_requested`, `load_requested`, `config_requested`,

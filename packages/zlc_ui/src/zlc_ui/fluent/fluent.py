@@ -1603,8 +1603,9 @@ class FluentButton(QtWidgets.QPushButton):
         """Whether the button sits on a TINTED card (a config Subpulse).
 
         There a light-blue face laid a second hue on the card's; it wears a
-        white face with no edge instead, which the card's fields (white AND
-        edged) do not.
+        white face with a 1 px hairline in the card's own green
+        (``_ON_TINT_EDGE``, #478572, 3.4:1 on the card) instead, so it keeps a
+        boundary without bringing blue onto green.
         """
 
         value = bool(on_tint)
