@@ -192,7 +192,7 @@ def _bound_text(number: float, unit: str, binding_unit: str) -> str:
 
     A DAC code and a bracket count are bare numbers, as their boxes show
     them: 'value' and 'count' are the model's tokens, not units.  A time is
-    said in the binding's unit, so a Config file's 'us' reads 'μs' beside
+    said in the binding's unit, so a Config file's 'us' reads 'µs' beside
     the default.  A Config value whose unit cannot feed the binding is shown
     as written; its row says Config error.
     """

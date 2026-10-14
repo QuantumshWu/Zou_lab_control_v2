@@ -57,7 +57,8 @@ class PulseEditorState:
             unknown = frozenset(visible).difference(self.sequence.target.by_key)
             if unknown:
                 raise ValueError(
-                    f"visible_ports names unknown port(s): {', '.join(sorted(unknown))}"
+                    f"visible_ports names unknown {'port' if len(unknown) == 1 else 'ports'}: "
+                    f"{', '.join(sorted(unknown))}"
                 )
         object.__setattr__(
             self,
