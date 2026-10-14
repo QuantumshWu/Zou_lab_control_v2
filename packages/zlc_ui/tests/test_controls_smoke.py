@@ -561,7 +561,7 @@ def test_a_data_table_opens_a_cell_on_one_click_and_every_direction_walks_the_gr
         """
 from PyQt5 import QtCore, QtGui, QtTest, QtWidgets
 from zlc_ui import ensure_qt_app
-from zlc_ui.fluent import ACCENT, FluentTableView
+from zlc_ui.fluent import FluentTableView
 
 class Model(QtCore.QAbstractTableModel):
     def __init__(self, size, value):
@@ -602,7 +602,9 @@ table.resize(420, 200); table.show(); app.processEvents()
 
 assert not table.alternatingRowColors(), 'a Fluent table is not striped'
 assert 'alternate-background-color' not in table.styleSheet()
-assert f'selection-background-color: {ACCENT}' in table.styleSheet()
+# The cells paint no selection of their own: the view lays one rounded
+# SELECTED block under a selected run (test_fluent_visual_language).
+assert 'selection-background-color: transparent' in table.styleSheet()
 assert table.selectionBehavior() == QtWidgets.QAbstractItemView.SelectRows, 'a data table selects rows'
 
 target = table.model().index(1, 2)
@@ -718,9 +720,10 @@ def test_a_widget_named_twice_is_unblocked_when_the_block_ends() -> None:
 def test_one_save_rule_one_destructive_look_and_a_flush_readout(run_qt) -> None:
     """Every Save is standard when clean and the primary with a star when
     unsaved; every labelled destructive command sits on the red tint while a
-    one-glyph row remover stays a ghost; a command on a tinted card is white
-    with a hairline in the card's green; a readout starts where the text
-    above it starts."""
+    one-glyph row remover stays a ghost; a command on a tinted card is a
+    plain white face; a pressed command is SELECTED and a disabled one a
+    flat DIVIDER face, neither with a frame of another colour; a readout
+    starts where the text above it starts."""
 
     run_qt(
         """
@@ -766,8 +769,20 @@ app.processEvents()
 image = on_tint.grab().toImage()
 assert face(on_tint).name().upper() == SURFACE.upper(), face(on_tint).name()
 edge = image.pixelColor(image.width() // 2, 0).name().upper()
-from zlc_ui.fluent.fluent import _ON_TINT_EDGE
-assert edge == _ON_TINT_EDGE.upper(), ('a command on a tint keeps a boundary in its green', edge)
+assert edge == SURFACE.upper(), ('no green hairline round a command on a tint', edge)
+from zlc_ui.fluent.style import DIVIDER, SELECTED
+pressed = FluentButton('Held')
+row.addWidget(pressed)
+pressed.setDown(True)
+app.processEvents()
+assert face(pressed).name().upper() == SELECTED.upper(), face(pressed).name()
+idle = FluentButton('Idle')
+idle.setEnabled(False)
+row.addWidget(idle)
+app.processEvents()
+image = idle.grab().toImage()
+for x, y in ((image.width() // 2, 0), (image.width() // 2, image.height() // 5)):
+    assert image.pixelColor(x, y).name().upper() == DIVIDER.upper(), ('a disabled face has no frame', x, y)
 
 column = QtWidgets.QWidget()
 column.setStyleSheet('background: white;')
@@ -797,9 +812,9 @@ for widget in (single, multi):
 
 def test_a_setting_is_a_switch_beside_its_label_in_a_row_of_buttons(run_qt) -> None:
     """A switch is a control's height with its track centred, so it lines
-    up with the buttons of its row; on is the accent with a rimmed white
-    thumb; keyboard focus rings the TRACK from outside; a field's
-    placeholder is information unless it is marked a pure prompt."""
+    up with the buttons of its row; on is the solid accent track with a
+    white thumb and no outline; keyboard focus paints nothing on it; a
+    field's placeholder is information unless it is marked a pure prompt."""
 
     run_qt(
         """
@@ -824,7 +839,8 @@ app.processEvents()
 assert start.x() - switch.geometry().right() - 1 >= 2 * row.spacing(), 'a switch is its own group'
 assert switch.height() == start.height(), (switch.height(), start.height())
 assert abs(switch.geometry().center().y() - start.geometry().center().y()) <= 1
-track, radius = switch.focus_frame()
+track = switch._track_box()
+radius = track.height() / 2.0
 assert abs(track.center().y() - switch.rect().center().y()) <= 1, track
 assert track.right() < switch.width() - 1, 'the label sits beside the track, not in it'
 
@@ -837,15 +853,18 @@ def at(x, y):
 assert at(track.left() + radius, track.center().y()) == ACCENT.upper(), 'on is the accent track'
 thumb_x = track.right() - radius
 assert at(thumb_x, track.center().y()) == SURFACE.upper(), 'with a white thumb'
+assert at(track.center().x(), track.top()) == ACCENT.upper(), 'and no outline round the track'
 
-# The offscreen platform has no active window to give focus; deliver the
-# focus a Tab would.
+# The focus a Tab would give paints nothing: no ring, no overlay.
+before = host.grab().toImage()
+children = set(host.findChildren(QtWidgets.QWidget))
 QtWidgets.QApplication.sendEvent(
     switch, QtGui.QFocusEvent(QtCore.QEvent.FocusIn, QtCore.Qt.TabFocusReason))
+QtWidgets.QApplication.sendEvent(
+    start, QtGui.QFocusEvent(QtCore.QEvent.FocusIn, QtCore.Qt.TabFocusReason))
 app.processEvents()
-ring = switch._zlc_focus_ring
-assert ring.isVisible()
-assert ring.geometry().width() < switch.width(), 'the ring goes round the track only'
+assert set(host.findChildren(QtWidgets.QWidget)) == children, 'a focused control grows no overlay'
+assert host.grab().toImage() == before, 'focus by keyboard draws no ring'
 
 segments = FluentSegmentedButtons((('range', 'Range'), ('values', 'Values')))
 segments.set_current('range')

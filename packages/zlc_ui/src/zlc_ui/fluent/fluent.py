@@ -32,13 +32,14 @@ from ..status import STATUS_SEVERITIES
 from .style import (
     ACCENT,
     ACCENT_HOVER,
-    ACCENT_PRESSED,
     ACCENT_STRONG,
     ACCENT_TINT,
-    DERIVED_EDGE,
     DERIVED_INK,
     DISABLED_INK,
     MUTED_INK,
+    NEUTRAL_FILL,
+    SELECTED,
+    SELECTED_HOVER,
     SELECTION_EDGE,
     AUTO_SCALE_BASIS,
     BUTTON_PADDING_H,
@@ -260,28 +261,10 @@ def frame_inner_rect(widget: QtWidgets.QWidget) -> QtCore.QRectF:
     return QtCore.QRectF(left, top, right - left, bottom - top)
 
 
-#: The edge a field sheet gives a resting / focused field.  The field sheets
-#: (``fluent_spinbox_stylesheet``, ``FluentLineEdit``) are written from these,
-#: and a part painted as a segment of that edge reads them back.
+#: The edge a field sheet gives a resting / focused field: the field sheets
+#: (``fluent_spinbox_stylesheet``, ``FluentLineEdit``) are written from these.
 _FIELD_EDGE_REST = PLACEHOLDER
 _FIELD_EDGE_FOCUS = ACCENT
-
-
-def frame_edge_colour(
-    option: QtWidgets.QStyleOption,
-    *,
-    rest: str = _FIELD_EDGE_REST,
-    focus: str = _FIELD_EDGE_FOCUS,
-) -> QtGui.QColor:
-    """The colour the field sheet paints the edge in for this state.
-
-    The same predicate the style sheet uses for ``:focus`` --
-    ``State_HasFocus`` as ``initStyleOption`` sets it -- so a painted segment
-    of the edge can never disagree with the edge it continues.
-    """
-
-    focused = bool(option.state & QtWidgets.QStyle.State_HasFocus)
-    return QtGui.QColor(focus if focused else rest)
 
 
 def frame_stroke_rect(widget: QtWidgets.QWidget, rect: QtCore.QRectF | None = None) -> QtCore.QRectF:
@@ -301,28 +284,6 @@ def frame_pen(widget: QtWidgets.QWidget, colour) -> QtGui.QPen:
     return pen
 
 
-def paint_frame_divider(
-    painter: QtGui.QPainter,
-    widget: QtWidgets.QWidget,
-    x: float,
-    colour: QtGui.QColor,
-) -> QtCore.QRectF:
-    """Fill one vertical frame segment at logical ``x`` (snapped) and return
-    it, so a neighbouring fill starts exactly at its right edge.
-
-    It runs from the first device row below the top edge to the last one
-    above the bottom edge: the edge's rows at its column are the edge's own,
-    the same pixels as either side of the joint at any ratio."""
-
-    inner = frame_inner_rect(widget)
-    rect = QtCore.QRectF(device_snap(widget, x), inner.top(), frame_border_px(widget), inner.height())
-    painter.save()
-    painter.setRenderHint(QtGui.QPainter.Antialiasing, False)
-    painter.fillRect(rect, colour)
-    painter.restore()
-    return rect
-
-
 def stepper_column(widget: QtWidgets.QWidget) -> QtCore.QRectF:
     """The right-hand stepper / drop cell inside the edge.
 
@@ -337,8 +298,7 @@ def stepper_column(widget: QtWidgets.QWidget) -> QtCore.QRectF:
 
 def fluent_stepper_extent() -> int:
     """The logical width a spin box's stepper adds over a plain field: the
-    divider (the margin column its sheet reserves), the cell and the edge
-    beside it."""
+    margin column its sheet reserves, the cell and the edge beside it."""
 
     return scaled_px(COMBO_WIDTH) + 2 * FIELD_BORDER_PX
 
@@ -377,6 +337,41 @@ def paint_chevron(
         QtCore.QPointF(cx + half, cy - sign * half / 2.0),
     ]))
     painter.restore()
+
+
+def paint_centred_ink(
+    painter: QtGui.QPainter,
+    widget: QtWidgets.QWidget,
+    rect: QtCore.QRectF,
+    font: QtGui.QFont,
+    text: str,
+    colour,
+) -> QtCore.QRectF:
+    """Fill ``text`` so its INK is centred on ``rect``; return the ink's box.
+
+    The one way a small symbol or label is centred inside a part of a
+    field, a card or a button (a ×, a ⋯, a step, a badge letter).  Drawn
+    with ``AlignCenter`` it is centred on the font's LINE BOX, which puts a
+    × 2.5 px and a ⋯ 1.2 px below the middle of its face, and a digit or a
+    capital a pixel low.  The text is laid out as a path and moved so the
+    centre of its own bounding box lands on ``rect``'s, by a translation
+    snapped to the device pixels of ``widget`` (the surface the painter
+    paints on) -- the same glyph then renders alike wherever it is, and the
+    eye sees it centred to the pixel.
+    """
+
+    path = QtGui.QPainterPath()
+    path.addText(0.0, 0.0, font, str(text))
+    ink = path.boundingRect()
+    centre = QtCore.QRectF(rect).center()
+    dx = device_snap(widget, centre.x() - ink.center().x())
+    dy = device_snap(widget, centre.y() - ink.center().y(), axis="y")
+    painter.save()
+    painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
+    painter.translate(dx, dy)
+    painter.fillPath(path, QtGui.QColor(colour))
+    painter.restore()
+    return ink.translated(dx, dy)
 
 
 def _available_geometry_at(
@@ -645,7 +640,7 @@ def fluent_scrollbar_stylesheet(
         margin: 0px;
     }}
     {selector}::handle:vertical, {selector}::handle:horizontal {{
-        background: #C8C6C4;
+        background: {NEUTRAL_FILL};
         border: none;
         border-radius: {radius}px;
         margin: {scaled_px(2)}px;
@@ -1313,9 +1308,10 @@ class FluentGroupBox(QtWidgets.QGroupBox):
         """Mark this card as the one the next edit acts on, or unmark it.
 
         Selection is a FILL, not a frame: the body takes the accent tint and
-        the edge a softer accent, the way a picked item in a Fluent list
-        reads.  A 2 px accent border was tried first and read as an outline
-        drawn around the card rather than as the card being picked.  Painted
+        the edge stays the card's own (a spacer's dashes, a bracket's
+        colour, the divider grey).  A 2 px accent border was tried first and
+        read as an outline drawn around the card rather than as the card
+        being picked; a softer accent edge was still a second line.  Painted
         in paintEvent, never via stylesheet -- an unscoped ``border:``
         cascades to every CHILD widget, so each inner checkbox/lineedit grew
         its own box.
@@ -1343,7 +1339,8 @@ class FluentGroupBox(QtWidgets.QGroupBox):
         whether its edge is dashed, and the edge's own colour (the divider
         grey when None).  A spacer card is the page's own grey with a dashed
         edge, so it reads as something to look past; a bracket post wears
-        its bracket's colour on the edge; selection paints over all of it."""
+        its bracket's colour on the edge; selection fills the body and
+        keeps the edge."""
 
         state = (
             None if fill is None else str(fill),
@@ -1366,8 +1363,8 @@ class FluentGroupBox(QtWidgets.QGroupBox):
         painter.setPen(QtCore.Qt.NoPen)
         painter.setBrush(QtGui.QColor(ACCENT_TINT if selected else (fill or "white")))
         painter.drawRoundedRect(QtCore.QRectF(self.rect()), radius, radius)
-        pen = frame_pen(self, SELECTION_EDGE if selected else (edge or DIVIDER))
-        if dashed and not selected:
+        pen = frame_pen(self, edge or DIVIDER)
+        if dashed:
             pen.setStyle(QtCore.Qt.DashLine)
         painter.setPen(pen)
         painter.setBrush(QtCore.Qt.NoBrush)
@@ -1390,64 +1387,63 @@ class FluentGroupBox(QtWidgets.QGroupBox):
 #: ``primary`` is a surface's ONE run or commit action (the deep
 #: ACCENT_STRONG fill, white ink) -- at most one per surface; ``standard``
 #: every other command (the light-blue tint); ``destructive`` a command that
-#: takes something away (a labelled one sits on the RED_TINT face; a
-#: one-glyph remover repeated down rows is a ghost in quiet ink that turns
-#: red only under the pointer, since red at rest marks problems); and
-#: ``destructive_primary`` the confirm of a destructive question -- the one
-#: white-on-red fill.
+#: takes something away or stops or shuts something down -- Remove, Delete,
+#: Clear, Unload, a device's Close, Shutdown devices, every Stop (a labelled
+#: one sits on the RED_TINT face; a one-glyph remover repeated down rows is
+#: a ghost in quiet ink that turns red only under the pointer, since red at
+#: rest marks problems); and ``destructive_primary`` the confirm of a
+#: destructive question -- the one white-on-red fill.
 BUTTON_ROLES = ("primary", "standard", "destructive", "destructive_primary")
 
-#: The keyboard-focus ring: its stroke, and the clear space between it and
-#: the control (logical pixels).  The stroke is a whole number of logical
-#: pixels on a whole-pixel inset, so it is whole device pixels at every
-#: integer ratio -- a 1.5 px pen smeared into a two-tone ring at 1x and 3x.
-FOCUS_RING_PX = 2.0
-FOCUS_RING_GAP = 2.0
-
 _BUTTON_STYLE_CACHE: tuple[float, str] | None = None
-#: The edge of a command on a green config card: the card's dark green
-#: lifted a third of the way to its light one, 3.4:1 on CONFIG_GREEN_TINT
-#: and 4.3:1 against the white face -- a boundary in the card's own hue.
-_ON_TINT_EDGE = "#478572"
+
+
+def _destructive_glyph_faces() -> tuple[str, str]:
+    """The faces of a one-glyph remover under the pointer and held down.
+
+    One source for FluentButton's ghost × and the × a selection grid paints
+    at the end of a row, so the two are the same object to the eye."""
+
+    return RED_TINT, _mixed(RED_TINT, RED, 0.3).name()
 
 
 def _button_stylesheet() -> str:
     """The one sheet every FluentButton wears; role and state pick the rules.
 
-    The layers are told apart by FILL.  Standard is the light-blue
-    BUTTON_TINT with HOVER ink (7.7:1); primary the deep ACCENT_STRONG with
-    white ink (5.2:1), the one dark face on its surface.  Destructive has ONE
-    look for every labelled command -- Remove, Delete, Clear, Unload: the
-    RED_TINT face, no edge, RED_DARK ink (5.4:1), as far from white as the
-    light-blue face is -- so a Remove reads the same in a toolbar, a button
-    grid or alone; a one-glyph remover repeated down a list of rows (x)
-    stays a ghost with the red wash only under the pointer, because a column
-    of red faces shouted louder than the rows it removed.
-    destructive_primary is the RED_DARK fill with white ink.  A command ON A
-    TINTED CARD (``on_tint``, the green config Subpulse) is a white face
-    with HOVER ink (9.9:1) and a hairline edge in the card's own green
-    (_ON_TINT_EDGE, 3.4:1 on the green card): white alone stood only
-    CIEDE2000 11.8 off the card, and with no edge a command lost its
-    boundary; the edge is the card's hue, so no blue is laid on green.  Pointer and press
-    each step the face a shade.  Dirty (something new to save) is ONE rule for every save or
+    The layers are told apart by FILL, never by an edge: every face's
+    border is its own fill, kept one edge-width wide so a state change
+    never moves a label.  Standard is the light-blue BUTTON_TINT with HOVER
+    ink (7.7:1), and held down it is SELECTED, the one colour that means
+    "picked"; primary the deep ACCENT_STRONG with white ink (5.2:1), the one
+    dark face on its surface.  Destructive has ONE look for every labelled
+    command -- Remove, Delete, Clear, Close, Stop: the RED_TINT face,
+    RED_DARK ink (5.4:1), as far from white as the light-blue face is -- so
+    a Remove reads the same in a toolbar, a button grid or alone; a
+    one-glyph remover repeated down a list of rows (x) stays a ghost with
+    the red wash only under the pointer, because a column of red faces
+    shouted louder than the rows it removed.  destructive_primary is the
+    RED_DARK fill with white ink.  A command ON A TINTED CARD (``on_tint``,
+    the green config Subpulse) is a white face with HOVER ink (9.9:1): no
+    blue is laid on green, and the white face against the card is the
+    command's whole boundary.  Pointer and press each step the face a
+    shade.  Dirty (something new to save) is ONE rule for every save or
     commit: clean it is the role it was given, unsaved it is the primary
-    with a trailing star.  Disabled is an outline on the page grey with
-    DISABLED_INK; a disabled ghost stays a ghost.
+    with a trailing star.  Disabled is a flat DIVIDER face with DISABLED_INK
+    and no frame; a disabled ghost stays a ghost.
     """
 
     global _BUTTON_STYLE_CACHE
     if _BUTTON_STYLE_CACHE is not None and _BUTTON_STYLE_CACHE[0] == _FLUENT_SCALE:
         return _BUTTON_STYLE_CACHE[1]
     tint_hover = _mixed(BUTTON_TINT, ACCENT, 0.25).name()
-    tint_pressed = _mixed(BUTTON_TINT, ACCENT, 0.45).name()
     strong_hover = QtGui.QColor(ACCENT_STRONG).darker(110).name()
     strong_pressed = QtGui.QColor(ACCENT_STRONG).darker(122).name()
     red_hover = _mixed(RED_TINT, RED, 0.19).name()
-    red_tint_pressed = _mixed(RED_TINT, RED, 0.3).name()
+    # A labelled destructive command and a ghost × are pressed alike.
+    glyph_hover, red_tint_pressed = _destructive_glyph_faces()
     red_strong_hover = QtGui.QColor(RED_DARK).darker(112).name()
     red_strong_pressed = QtGui.QColor(RED_DARK).darker(126).name()
     on_tint_pressed = _mixed(BG, DIVIDER, 0.6).name()
-    on_tint_edge = _ON_TINT_EDGE
     style = f"""
     QPushButton {{
         background: {BUTTON_TINT};
@@ -1459,12 +1455,14 @@ def _button_stylesheet() -> str:
         outline: none;
     }}
     QPushButton:hover {{ background: {tint_hover}; border-color: {tint_hover}; }}
-    QPushButton:pressed {{ background: {tint_pressed}; border-color: {tint_pressed}; }}
+    QPushButton:pressed {{ background: {SELECTED}; border-color: {SELECTED}; }}
     QPushButton[on_tint="true"] {{
-        background: {SURFACE}; border-color: {on_tint_edge}; color: {HOVER};
+        background: {SURFACE}; border-color: {SURFACE}; color: {HOVER};
     }}
-    QPushButton[on_tint="true"]:hover {{ background: {BG}; }}
-    QPushButton[on_tint="true"]:pressed {{ background: {on_tint_pressed}; }}
+    QPushButton[on_tint="true"]:hover {{ background: {BG}; border-color: {BG}; }}
+    QPushButton[on_tint="true"]:pressed {{
+        background: {on_tint_pressed}; border-color: {on_tint_pressed};
+    }}
     QPushButton[role="primary"] {{
         background: {ACCENT_STRONG}; border-color: {ACCENT_STRONG}; color: white;
     }}
@@ -1500,7 +1498,7 @@ def _button_stylesheet() -> str:
         background: transparent; border-color: transparent; color: {MUTED_INK};
     }}
     QPushButton[role="destructive"][glyph="true"]:hover {{
-        background: {RED_TINT}; border-color: {RED_TINT}; color: {RED_DARK};
+        background: {glyph_hover}; border-color: {glyph_hover}; color: {RED_DARK};
     }}
     QPushButton[role="destructive"][glyph="true"]:pressed {{
         background: {red_tint_pressed}; border-color: {red_tint_pressed}; color: {RED_DARK};
@@ -1508,7 +1506,7 @@ def _button_stylesheet() -> str:
     QPushButton:disabled, QPushButton[role="primary"]:disabled,
     QPushButton[role="destructive"]:disabled, QPushButton[on_tint="true"]:disabled,
     QPushButton[role="destructive_primary"]:disabled {{
-        background: {BG}; border-color: {DIVIDER}; color: {DISABLED_INK};
+        background: {DIVIDER}; border-color: {DIVIDER}; color: {DISABLED_INK};
     }}
     QPushButton[role="destructive"][glyph="true"]:disabled {{
         background: transparent; border-color: transparent; color: {DISABLED_INK};
@@ -1576,11 +1574,9 @@ class FluentButton(QtWidgets.QPushButton):
         return HOVER
 
     def paintEvent(self, event) -> None:  # noqa: N802 - Qt naming
-        """A one-symbol label is centred on its INK, not on its line box.
-
-        The font's line box puts × 2.5 px and ⋯ 1.2 px below the middle of
-        the face; the face is drawn by the style, the glyph as a path whose
-        own bounding box sits on the button's centre."""
+        """A one-symbol label is centred on its INK, not on its line box
+        (see :func:`paint_centred_ink`): the face is drawn by the style, the
+        glyph as a path on the face's centre."""
 
         if not self.property("glyph"):
             super().paintEvent(event)
@@ -1589,14 +1585,32 @@ class FluentButton(QtWidgets.QPushButton):
         self.initStyleOption(option)
         painter = QtWidgets.QStylePainter(self)
         painter.drawControl(QtWidgets.QStyle.CE_PushButtonBevel, option)
-        path = QtGui.QPainterPath()
-        path.addText(0.0, 0.0, self.font(), option.text)
-        ink = path.boundingRect()
-        centre = QtCore.QRectF(self.rect()).center()
-        painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
-        painter.translate(centre.x() - ink.center().x(), centre.y() - ink.center().y())
-        painter.fillPath(path, QtGui.QColor(self._glyph_ink()))
+        paint_centred_ink(painter, self, QtCore.QRectF(self.rect()), self.font(), option.text,
+                          self._glyph_ink())
         painter.end()
+
+    def setEnabled(self, enabled: bool) -> None:  # noqa: N802 - Qt API name
+        """Disabling a button that holds the focus lets the focus go first.
+
+        Qt hands the focus of a widget being disabled to the next one in the
+        tab chain: a clicked On Pulse disabled while it runs passed it to
+        Stop Pulse, and the next Space stopped the pulse the operator had
+        just started.  Cleared here, the focus goes nowhere.  (A button is
+        still focused by a click: a field commits what was typed into it
+        when the focus leaves, so a command that took no focus would act on
+        the number from before the typing.)"""
+
+        if not enabled and self.hasFocus():
+            self.clearFocus()
+        super().setEnabled(enabled)
+
+    def setVisible(self, visible: bool) -> None:  # noqa: N802 - Qt API name
+        """Hiding a focused button lets the focus go first, for the reason
+        :meth:`setEnabled` gives."""
+
+        if not visible and self.hasFocus():
+            self.clearFocus()
+        super().setVisible(visible)
 
     def enterEvent(self, event) -> None:  # noqa: N802 - Qt naming
         super().enterEvent(event)
@@ -1624,9 +1638,8 @@ class FluentButton(QtWidgets.QPushButton):
         """Whether the button sits on a TINTED card (a config Subpulse).
 
         There a light-blue face laid a second hue on the card's; it wears a
-        white face with a 1 px hairline in the card's own green
-        (``_ON_TINT_EDGE``, #478572, 3.4:1 on the card) instead, so it keeps a
-        boundary without bringing blue onto green.
+        plain white face instead, whose contrast with the card is its whole
+        boundary, so no blue is brought onto green.
         """
 
         value = bool(on_tint)
@@ -1680,172 +1693,6 @@ class FluentButton(QtWidgets.QPushButton):
 
     def is_dirty(self) -> bool:
         return self._dirty
-
-    def focusInEvent(self, event) -> None:  # noqa: N802 - Qt naming
-        super().focusInEvent(event)
-        _show_keyboard_focus(self, event)
-
-    def focusOutEvent(self, event) -> None:  # noqa: N802 - Qt naming
-        super().focusOutEvent(event)
-        _show_keyboard_focus(self, event)
-
-
-class _FocusRing(QtWidgets.QWidget):
-    """Keyboard focus drawn OUTSIDE a control, never on its own edge.
-
-    A ring on the control's edge was a second edge -- the very thing a
-    selection or a field already draws -- so a focused chip read as a chosen
-    one.  The ring is an overlay laid over the control: a stroke
-    FOCUS_RING_PX wide, FOCUS_RING_GAP clear of the control all round,
-    following it as it moves and gone when it hides.
-
-    It lives in the nearest ancestor that has ROOM for it.  Laid in the
-    control's own parent, a control flush with a zero-margin parent (a
-    path's Browse, a form row, a card's command box) had its ring cut off
-    on that side.  The search stops at a scroll viewport: a ring clipped at
-    a scroll edge is what scrolled content looks like.
-    """
-
-    def __init__(self, target: QtWidgets.QWidget):
-        super().__init__(target.parentWidget())
-        self._target = target
-        self._chain: list[QtWidgets.QWidget] = []
-        self._corner = float(_radius())
-        self.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents)
-        self.setFocusPolicy(QtCore.Qt.NoFocus)
-        self.hide()
-        target.installEventFilter(self)
-        target.destroyed.connect(self.deleteLater)
-
-    @staticmethod
-    def _reach() -> int:
-        return math.ceil(FOCUS_RING_GAP + FOCUS_RING_PX)
-
-    def _frame(self) -> tuple[QtCore.QRect, float]:
-        """What the ring goes round, in the target's coordinates, and its
-        corner radius: the whole control, unless the control names a part
-        (a switch rings its track, not its label)."""
-
-        frame = getattr(self._target, "focus_frame", None)
-        if frame is None:
-            return self._target.rect(), float(_radius())
-        return frame()
-
-    def _rect_in(self, ancestor: QtWidgets.QWidget) -> QtCore.QRect:
-        rect, _corner = self._frame()
-        reach = self._reach()
-        origin = self._target.mapTo(ancestor, rect.topLeft())
-        return QtCore.QRect(origin, rect.size()).adjusted(-reach, -reach, reach, reach)
-
-    def _host(self) -> QtWidgets.QWidget | None:
-        candidate = self._target.parentWidget()
-        while candidate is not None:
-            if candidate.rect().contains(self._rect_in(candidate)) or candidate.isWindow():
-                return candidate
-            owner = candidate.parentWidget()
-            if isinstance(owner, QtWidgets.QAbstractScrollArea) and owner.viewport() is candidate:
-                return candidate
-            candidate = owner
-        return None
-
-    def _rehome(self) -> None:
-        host = self._host()
-        if host is None:
-            return
-        chain = []
-        widget = self._target.parentWidget()
-        while widget is not None and widget is not host:
-            chain.append(widget)
-            widget = widget.parentWidget()
-        for widget in self._chain:
-            if widget not in chain:
-                widget.removeEventFilter(self)
-        for widget in chain:
-            if widget not in self._chain:
-                widget.installEventFilter(self)
-        self._chain = chain
-        if self.parentWidget() is not host:
-            shown = self.isVisible()
-            self.setParent(host)
-            if shown:
-                self.show()
-
-    def follow(self) -> None:
-        self._rehome()
-        host = self.parentWidget()
-        if host is None:
-            return
-        _rect, self._corner = self._frame()
-        self.setGeometry(self._rect_in(host))
-        self.raise_()
-
-    def eventFilter(self, watched, event):  # noqa: N802 - Qt naming
-        kind = event.type()
-        if kind in (QtCore.QEvent.Move, QtCore.QEvent.Resize) and self.isVisible():
-            self.follow()
-        elif watched is self._target and kind == QtCore.QEvent.Hide:
-            self.hide()
-        elif watched is self._target and kind == QtCore.QEvent.ParentChange:
-            self.hide()
-            self._rehome()
-        return False
-
-    def paintEvent(self, event) -> None:  # noqa: N802 - Qt naming
-        """The ring as the band between two concentric rounded rects whose
-        straight edges lie on device pixels and are a whole number of device
-        pixels apart, so it is crisp at a fractional ratio as well."""
-
-        del event
-        ratio = float(self.devicePixelRatioF())
-        stroke = max(1, round(FOCUS_RING_PX * ratio)) / ratio
-        reach = self._reach()
-        inner = QtCore.QRectF(
-            QtCore.QPointF(device_snap(self, reach - FOCUS_RING_GAP),
-                           device_snap(self, reach - FOCUS_RING_GAP, axis="y")),
-            QtCore.QPointF(device_snap(self, self.width() - reach + FOCUS_RING_GAP),
-                           device_snap(self, self.height() - reach + FOCUS_RING_GAP, axis="y")),
-        )
-        outer = inner.adjusted(-stroke, -stroke, stroke, stroke)
-        corner = self._corner + FOCUS_RING_GAP
-        band = QtGui.QPainterPath()
-        band.setFillRule(QtCore.Qt.OddEvenFill)
-        band.addRoundedRect(outer, corner + stroke, corner + stroke)
-        band.addRoundedRect(inner, corner, corner)
-        painter = QtGui.QPainter(self)
-        painter.setRenderHint(QtGui.QPainter.Antialiasing)
-        painter.fillPath(band, QtGui.QColor(HOVER))
-        painter.end()
-
-
-def _show_keyboard_focus(target: QtWidgets.QWidget, event: QtGui.QFocusEvent) -> None:
-    """Ring ``target`` while it holds focus the KEYBOARD gave it.
-
-    Only a Tab, a Backtab or a shortcut draws it: a ring left by every click
-    would outline whichever control was pressed last.  A window coming back
-    to the front restores the ring when Qt recorded that its focus last moved
-    by keyboard -- the flag its own styles read before they draw a focus
-    frame.
-    """
-
-    ring = getattr(target, "_zlc_focus_ring", None)
-    reason = event.reason()
-    keyboard = event.gotFocus() and (
-        reason in (QtCore.Qt.TabFocusReason, QtCore.Qt.BacktabFocusReason,
-                   QtCore.Qt.ShortcutFocusReason)
-        or (reason == QtCore.Qt.ActiveWindowFocusReason
-            and target.window().testAttribute(QtCore.Qt.WA_KeyboardFocusChange))
-    )
-    if not keyboard:
-        if ring is not None:
-            ring.hide()
-        return
-    if target.parentWidget() is None:
-        return
-    if ring is None:
-        ring = _FocusRing(target)
-        target._zlc_focus_ring = ring
-    ring.follow()
-    ring.show()
 
 
 def _apply_fluent_context_menu(widget, event, *, extra=()) -> None:
@@ -3245,7 +3092,7 @@ QAbstractItemView {{
     border: none;
     padding: {gap}px;
     color: {TEXT};
-    selection-background-color: {ACCENT};
+    selection-background-color: {SELECTED};
     selection-color: {TEXT};
     font: {fluent_font_size()}pt "{FONT}";
     outline: none;
@@ -3261,8 +3108,11 @@ QAbstractItemView::item:hover {{
     color: {TEXT};
 }}
 QAbstractItemView::item:selected {{
-    background-color: {ACCENT};
+    background-color: {SELECTED};
     color: {TEXT};
+}}
+QAbstractItemView::item:selected:hover {{
+    background-color: {SELECTED_HOVER};
 }}
 QAbstractItemView::corner {{
     background: transparent;
@@ -3729,10 +3579,11 @@ class FluentComboBox(QtWidgets.QAbstractButton):
         """A field like a line edit beside it, with a chevron and no block.
 
         The solid accent block every combo carried repeated down a whole
-        form, and an open combo filled with tint.  The field now says its
-        states the way an edit does -- the accent edge under the pointer or
-        while it is open -- and only a cycle choice whose wheel is ACTIVE
-        wears the selection's look, because that is a state it holds.
+        form, and an open combo filled with tint.  The field says its states
+        the way an edit does -- the accent edge under the pointer or while it
+        is open -- and only a cycle choice whose wheel is ACTIVE takes the
+        SELECTED fill, because that is a state it holds; its edge stays the
+        field's own.
         """
 
         del event
@@ -3747,8 +3598,8 @@ class FluentComboBox(QtWidgets.QAbstractButton):
             or (self._line_edit is not None and self._line_edit.hasFocus())
             or self.underMouse()
         )
-        fill = ACCENT if current else SURFACE if enabled else BG
-        edge = ACCENT_HOVER if current and engaged else ACCENT if current or engaged else PLACEHOLDER
+        fill = SELECTED if current else SURFACE if enabled else BG
+        edge = ACCENT if engaged else PLACEHOLDER
         painter.setPen(frame_pen(self, edge))
         painter.setBrush(QtGui.QColor(fill))
         painter.drawRoundedRect(outer, radius, radius)
@@ -3770,14 +3621,6 @@ class FluentComboBox(QtWidgets.QAbstractButton):
             colour=QtGui.QColor(TEXT if current else GRAPHITE if enabled else PLACEHOLDER),
         )
         painter.end()
-
-    def focusInEvent(self, event) -> None:  # noqa: N802 - Qt API name
-        super().focusInEvent(event)
-        _show_keyboard_focus(self, event)
-
-    def focusOutEvent(self, event) -> None:  # noqa: N802 - Qt API name
-        super().focusOutEvent(event)
-        _show_keyboard_focus(self, event)
 
     def enterEvent(self, event) -> None:  # noqa: N802 - Qt API name
         self.update()
@@ -4874,8 +4717,9 @@ def _tab_font() -> QtGui.QFont:
 
 
 class _FluentTabCloseButton(QtWidgets.QToolButton):
-    """The close affordance for a closable tab: a small "x" glyph that darkens on
-    hover with a subtle round highlight.
+    """The close affordance for a closable tab: a small "x" glyph on a round
+    hover wash -- ACCENT_TINT, SELECTED while pressed, as every hover and
+    press is.
 
     It draws the "x" as TEXT (``QToolButton``), not a custom ``paintEvent`` on a
     ``QAbstractButton`` -- the latter does not composite as a ``QTabBar`` tab
@@ -4927,17 +4771,17 @@ class _FluentTabCloseButton(QtWidgets.QToolButton):
         size = self._size
         self.setFixedSize(size + trail, size)
         radius = size // 2
-        # Clearly-visible grey at rest (a near-white "x" disappears on the tab
-        # bar), darkening to TEXT on hover/press with a concentric round
-        # highlight -- subtle, not the harsh native red X.  The glyph's size
-        # is in the button's OWN sheet: a window-level ``QWidget { font }``
+        # Quiet MUTED_INK at rest (a near-white "x" disappears on the tab
+        # bar), TEXT on the round hover wash -- closing a view is not
+        # removing anything, so it does not turn red.  The glyph's size is in
+        # the button's OWN sheet: a window-level ``QWidget { font }``
         # overrode setFont and drew a larger x in one window than another.
         self.setStyleSheet(
             f"""
-            QToolButton {{ border: none; background: transparent; color: #6E6E6E; padding: 0px;
+            QToolButton {{ border: none; background: transparent; color: {MUTED_INK}; padding: 0px;
                            margin-right: {trail}px; font: bold {self._pixels}px "{FONT}"; }}
-            QToolButton:hover {{ background: rgba(0, 0, 0, 38); border-radius: {radius}px; color: {TEXT}; }}
-            QToolButton:pressed {{ background: rgba(0, 0, 0, 64); border-radius: {radius}px; color: {TEXT}; }}
+            QToolButton:hover {{ background: {ACCENT_TINT}; border-radius: {radius}px; color: {TEXT}; }}
+            QToolButton:pressed {{ background: {SELECTED}; border-radius: {radius}px; color: {TEXT}; }}
             """
         )
 
@@ -5177,8 +5021,8 @@ class FluentTabWidget(QtWidgets.QTabWidget):
             f"""
             QToolButton {{ border: none; background: transparent; color: {MUTED_INK};
                            border-radius: {radius}px; padding: 0px; }}
-            QToolButton:hover {{ background: rgba(0, 0, 0, 18); color: {TEXT}; }}
-            QToolButton:pressed {{ background: rgba(0, 0, 0, 34); color: {TEXT}; }}
+            QToolButton:hover {{ background: {ACCENT_TINT}; color: {TEXT}; }}
+            QToolButton:pressed {{ background: {SELECTED}; color: {TEXT}; }}
             QToolButton::menu-indicator {{ image: none; width: 0px; }}
             """
         )
@@ -5330,17 +5174,15 @@ class FluentSwitch(QtWidgets.QAbstractButton):
     Remote -- including one that sits in a row of commands: a checkable
     button there read as one more command, and on was told from off by a
     shade.  The label used to be painted across the track, under the thumb,
-    which covered a letter of every word it carried.  Every state graphic
-    holds 3:1 against what it sits on: off is a white track ringed in
-    GRAPHITE (3.9:1 on white) with a GRAPHITE thumb; on is the ACCENT track
-    outlined in DERIVED_EDGE (3.4:1 on white -- the light accent alone was
-    2.45:1) with a white thumb rimmed in DERIVED_EDGE (3.4:1 against the
-    thumb).  Under the pointer the on track steps to ACCENT_HOVER and the
-    off ring to TEXT.  The widget is a control's height (30 design px) with
-    the track centred in it, so a switch lines up with the buttons of its
-    row; keyboard focus is the same ring outside the track that a button
-    wears outside its face.  The whole width, label included, takes the
-    click.  In a row of commands a switch and its label are their own group:
+    which covered a letter of every word it carried.  The track is a solid
+    fill with a white thumb and no outline anywhere: off is the neutral
+    PLACEHOLDER grey, on the ACCENT; under the pointer the track steps one
+    shade deeper; disabled it is the DIVIDER grey with a BG thumb.  Rings
+    round the track and rims round the thumb were lines laid round a shape
+    its fill already drew.  The widget is a control's height (30 design px)
+    with the track centred in it, so a switch lines up with the buttons of
+    its row.  The whole width, label included, takes the click.  In a row
+    of commands a switch and its label are their own group:
     :func:`add_row_switch` puts the air of two button gaps either side.
     """
 
@@ -5398,8 +5240,8 @@ class FluentSwitch(QtWidgets.QAbstractButton):
         return QtCore.QRect(0, (self.height() - track_h) // 2, track_w, track_h)
 
     def _track_outer(self) -> QtCore.QRectF:
-        """The track's outer edge on device pixels, an even number of device
-        pixels tall, so its ring is whole pixels and its thumb centred."""
+        """The track on device pixels, an even number of device pixels tall,
+        so its thumb is centred."""
 
         box = self._track_box()
         ratio = float(self.devicePixelRatioF())
@@ -5409,46 +5251,28 @@ class FluentSwitch(QtWidgets.QAbstractButton):
         top = device_snap(self, box.top(), axis="y")
         return QtCore.QRectF(left, top, round(box.width() * ratio) / ratio, tall / ratio)
 
-    def _track_rect(self) -> QtCore.QRectF:
-        """The ring's centre line: one edge-width inside the outer edge."""
-
-        half = frame_border_px(self) / 2.0
-        return self._track_outer().adjusted(half, half, -half, -half)
-
-    def focus_frame(self) -> tuple[QtCore.QRect, float]:
-        """The keyboard-focus ring goes round the track, not the label."""
-
-        box = self._track_box()
-        return box, box.height() / 2.0
-
     def paintEvent(self, event) -> None:
         del event
         painter = QtGui.QPainter(self)
         painter.setRenderHint(QtGui.QPainter.Antialiasing)
-        track = self._track_rect()
-        radius = track.height() / 2.0
+        outer = self._track_outer()
+        radius = outer.height() / 2.0
         on, enabled = self.isChecked(), self.isEnabled()
         hovered = enabled and (self.underMouse() or self.isDown())
-        rim = None
-        if on:
-            fill = QtGui.QColor(
-                ACCENT_HOVER if hovered else ACCENT if enabled else PLACEHOLDER)
-            edge, thumb = QtGui.QColor(DERIVED_EDGE if enabled else PLACEHOLDER), QtGui.QColor(SURFACE)
-            if enabled:
-                rim = QtGui.QColor(DERIVED_EDGE)
+        if not enabled:
+            fill, thumb = QtGui.QColor(DIVIDER), QtGui.QColor(BG)
+        elif on:
+            fill, thumb = QtGui.QColor(ACCENT_HOVER if hovered else ACCENT), QtGui.QColor(SURFACE)
         else:
-            fill = QtGui.QColor(SURFACE if enabled else BG)
-            edge = QtGui.QColor(TEXT if hovered else GRAPHITE if enabled else DIVIDER)
-            thumb = QtGui.QColor(GRAPHITE if enabled else PLACEHOLDER)
-        stroke = frame_border_px(self)
-        painter.setPen(QtGui.QPen(edge, stroke))
+            fill = _mixed(PLACEHOLDER, TEXT, 0.2) if hovered else QtGui.QColor(PLACEHOLDER)
+            thumb = QtGui.QColor(SURFACE)
+        painter.setPen(QtCore.Qt.NoPen)
         painter.setBrush(fill)
-        painter.drawRoundedRect(track, radius, radius)
+        painter.drawRoundedRect(outer, radius, radius)
 
         # The thumb sits the same inset from the track's end as from its top
         # and bottom, an even number of device pixels across, on device
         # pixels -- round, and one gap all round, at any ratio.
-        outer = self._track_outer()
         ratio = float(self.devicePixelRatioF())
         gap = round(self._thumb_inset() * ratio) / ratio
         diameter = outer.height() - 2 * gap
@@ -5459,14 +5283,8 @@ class FluentSwitch(QtWidgets.QAbstractButton):
             left = outer.right() - gap - diameter
         else:
             left = outer.left() + gap
-        thumb_rect = QtCore.QRectF(left, top, diameter, diameter)
-        if rim is None:
-            painter.setPen(QtCore.Qt.NoPen)
-        else:
-            painter.setPen(QtGui.QPen(rim, stroke))
-            thumb_rect.adjust(stroke / 2.0, stroke / 2.0, -stroke / 2.0, -stroke / 2.0)
         painter.setBrush(thumb)
-        painter.drawEllipse(thumb_rect)
+        painter.drawEllipse(QtCore.QRectF(left, top, diameter, diameter))
 
         if self.text():
             track_w, _track_h = _switch_track_size()
@@ -5479,14 +5297,6 @@ class FluentSwitch(QtWidgets.QAbstractButton):
                 self.text(),
             )
         painter.end()
-
-    def focusInEvent(self, event) -> None:  # noqa: N802 - Qt naming
-        super().focusInEvent(event)
-        _show_keyboard_focus(self, event)
-
-    def focusOutEvent(self, event) -> None:  # noqa: N802 - Qt naming
-        super().focusOutEvent(event)
-        _show_keyboard_focus(self, event)
 
     def mouseReleaseEvent(self, event) -> None:
         # QAbstractButton already gates toggling on the left button + enabled state,
@@ -5729,11 +5539,10 @@ def fluent_spinbox_stylesheet(
     # (Config, Scan, API) wears its binding's colours on the frame.
     #
     # The steppers are BORDER-origin boxes whose ``margin`` is the edge
-    # width: the margin box starts one edge-width left of the cell, and that
-    # margin column is where the divider is painted, so neither the digits
-    # nor the cell move.  They are transparent and serve geometry and hit
-    # testing only -- the tint, the divider and the chevrons are painted
-    # from the frame by _paint_fluent_spin_buttons.
+    # width: the margin box starts one edge-width left of the cell, a quiet
+    # column between the digits and the stepper.  They are transparent and
+    # serve geometry and hit testing only -- the tint and the chevrons are
+    # painted from the frame by _paint_fluent_spin_buttons.
     return f"""
     {selector} {{
         background: {fill};
@@ -5780,50 +5589,58 @@ def _spin_field_chrome() -> int:
 
 
 def _spin_stepper_cells(widget: QtWidgets.QAbstractSpinBox) -> tuple[float, QtCore.QRectF, QtCore.QRectF]:
-    """``(divider x, up cell, down cell)`` in logical px, from the frame.
+    """``(stepper left, up cell, down cell)`` in logical px, from the frame.
 
-    The divider fills the margin column one edge-width left of the stepper
-    column; the cells tile the room from its far side to the right edge,
-    split at a device pixel."""
+    The stepper begins at the margin column one edge-width left of the
+    stepper column (what a part placed beside it, the step chip, keeps
+    clear of); the cells tile the room from that column's far side to the
+    right edge, split at a device pixel."""
 
     cell = stepper_column(widget)
-    divider = device_snap(widget, cell.left() - FIELD_BORDER_PX)
-    start = divider + frame_border_px(widget)
+    left = device_snap(widget, cell.left() - FIELD_BORDER_PX)
+    start = left + frame_border_px(widget)
     right = frame_inner_rect(widget).right()
     mid = device_snap(widget, cell.center().y(), axis="y")
     up = QtCore.QRectF(start, cell.top(), right - start, mid - cell.top())
     down = QtCore.QRectF(start, mid, right - start, cell.bottom() - mid)
-    return divider, up, down
+    return left, up, down
 
 
 def _paint_fluent_spin_buttons(widget: QtWidgets.QAbstractSpinBox) -> None:
-    """Paint the stepper: a frame segment, the hovered cell's tint, two chevrons.
+    """Paint the stepper: the hovered cell's tint and two chevrons.
 
-    The field is a two-cell frame, the classic numeric up-down.  The divider
-    is a segment OF the frame -- from the top edge to the bottom one, in the
-    edge's own colour for the state (the accent while focused) -- so its
-    joints with the top and bottom edge are one colour and cannot show a
-    seam at any scale.  The
-    tint under the pointer fills exactly the hovered cell, from the
-    divider's far side to the inner edge, concentric at the corner; the
-    chevrons sit on the cells' centres.  Nothing is offset from a
-    sub-control rectangle.
+    The field is a two-cell frame, the classic numeric up-down, shown by its
+    chevrons and the tint under the pointer -- no line divides it from the
+    digits: a divider was one more line in a field already edged.  The tint
+    fills exactly the hovered cell to the frame's inner edge, concentric at
+    the corner; the chevrons sit on the cells' centres.  A direction the
+    box cannot move in (``stepEnabled``: a bound, or no grid point left
+    inside it) has its chevron dimmed and takes no tint.  Nothing is offset
+    from a sub-control rectangle.
     """
 
     if widget.buttonSymbols() == QtWidgets.QAbstractSpinBox.NoButtons:
         return
     option = QtWidgets.QStyleOptionSpinBox()
     widget.initStyleOption(option)
-    divider, up_cell, down_cell = _spin_stepper_cells(widget)
+    _left, up_cell, down_cell = _spin_stepper_cells(widget)
     live = widget.isEnabled() and not widget.isReadOnly()
+    # Asked of the box itself: the style copies it into the option only
+    # where the platform style says spin controls dim at a bound.
+    directions = widget.stepEnabled() if live else QtWidgets.QAbstractSpinBox.StepNone
+    movable = {
+        True: bool(directions & QtWidgets.QAbstractSpinBox.StepUpEnabled),
+        False: bool(directions & QtWidgets.QAbstractSpinBox.StepDownEnabled),
+    }
     painter = QtGui.QPainter(widget)
     hovered = (
         live and bool(option.state & QtWidgets.QStyle.State_MouseOver)
         and int(option.activeSubControls)
         & int(QtWidgets.QStyle.SC_SpinBoxUp | QtWidgets.QStyle.SC_SpinBoxDown)
     )
-    if hovered:
-        cell = up_cell if option.activeSubControls & QtWidgets.QStyle.SC_SpinBoxUp else down_cell
+    up_hovered = bool(option.activeSubControls & QtWidgets.QStyle.SC_SpinBoxUp)
+    if hovered and movable[up_hovered]:
+        cell = up_cell if up_hovered else down_cell
         corner = max(0.0, _radius() - FIELD_BORDER_PX)
         inner = QtGui.QPainterPath()
         inner.addRoundedRect(frame_inner_rect(widget), corner, corner)
@@ -5833,11 +5650,9 @@ def _paint_fluent_spin_buttons(widget: QtWidgets.QAbstractSpinBox) -> None:
         painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
         painter.fillPath(inner.intersected(tile), QtGui.QColor(ACCENT_TINT))
         painter.restore()
-    rest, focus = widget._frame_edges
-    paint_frame_divider(painter, widget, divider, frame_edge_colour(option, rest=rest, focus=focus))
-    ink = QtGui.QColor(GRAPHITE if live else PLACEHOLDER)
-    paint_chevron(painter, widget, up_cell.center(), up=True, colour=ink)
-    paint_chevron(painter, widget, down_cell.center(), up=False, colour=ink)
+    for up, cell in ((True, up_cell), (False, down_cell)):
+        ink = QtGui.QColor(GRAPHITE if movable[up] else PLACEHOLDER)
+        paint_chevron(painter, widget, cell.center(), up=up, colour=ink)
     painter.end()
 
 
@@ -5864,8 +5679,6 @@ class FluentSpinBox(_WheelFocusGuardMixin, QtWidgets.QSpinBox):
     valueNormalized = QtCore.pyqtSignal()
     _normalization_pending = False
     _number_geometry = None
-    #: The frame's edge at rest and focused; the stepper divider continues it.
-    _frame_edges = (_FIELD_EDGE_REST, _FIELD_EDGE_FOCUS)
 
     def sizeHint(self) -> QtCore.QSize:  # noqa: N802
         size = super().sizeHint()
@@ -6332,10 +6145,20 @@ def _step_chip_font() -> QtGui.QFont:
 class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
     """One bounded Decimal value, rounded to the digits the operator can see.
 
-    Interior stepping retains the Decimal grid; an exceeded bound clamps to
-    the actual endpoint. Prefix changes stay exact decimal shifts. Display
-    normalization updates the draft separately from a user edit, so resizing
-    a device control cannot be mistaken for a hardware Apply.
+    A STEP STAYS ON THE GRID.  The wheel, the arrow keys and the stepper
+    move along the multiples of the step in the unit on screen: from a value
+    on the grid one notch is one step, from one off it the next grid point
+    in that direction.  A notch that would leave the owner's range stops at
+    the last grid point inside it and never lands on a bound that is off
+    the grid -- down from 1 in steps of 1 with a floor of 0.0001 stays 1,
+    it does not become 0.0001 -- so down-then-up returns where it started.
+    A notch never moves against its direction, and where no grid point
+    inside the range lies that way it does not move at all (that direction
+    is shown dimmed).  Only a NAMED value -- typed, or set by the owner --
+    is clamped to the bound: that is someone naming a number and the bound
+    refusing it.  Prefix changes stay exact decimal shifts.  Display
+    normalization updates the draft separately from a user edit, so
+    resizing a device control cannot be mistaken for a hardware Apply.
     """
 
     #: CLASS attributes, not instance ones.  Qt asks this widget for its text
@@ -6347,8 +6170,6 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
 
     _normalization_pending = False
     _step_chip = None
-    #: The frame's edge at rest and focused; the stepper divider continues it.
-    _frame_edges = (_FIELD_EDGE_REST, _FIELD_EDGE_FOCUS)
     #: The right text margin the step chip added: an owner's line edit may
     #: keep a margin of its own (a binding badge), which the chip never takes.
     _chip_margin = 0
@@ -6382,7 +6203,6 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
         resized in place first; the chrome does not depend on the width.
         """
 
-        edit = self.lineEdit()
         QtWidgets.QApplication.sendEvent(
             self, QtGui.QResizeEvent(self.size(), self.size())
         )
@@ -6696,25 +6516,27 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
 
     # ------------------------------------------------------------- stepping
 
+    def _notch(self, steps: int) -> Decimal | None:
+        """Where ``steps`` notches would take the value, in the unit on
+        screen, or None when they do not move it (see the class: the grid
+        inside the range, never against the notch's direction)."""
+
+        try:
+            shown = self._shown_from_value(self._value)
+            low, high = self._shown_bound(self._low), self._shown_bound(self._high)
+            if low is not None and high is not None and low > high:
+                low, high = high, low
+            moved = _grid_step_inside(shown, self._step, steps, low, high)
+        except (UnitError, ValueError, ArithmeticError):
+            return None
+        return None if moved == shown else moved
+
     def stepBy(self, steps: int) -> None:  # noqa: N802 - Qt API name
         """One notch is one step of the unit on screen, on that step's grid."""
 
         steps = int(steps)
-        if not steps:
-            return
-        try:
-            shown = self._shown_from_value(self._value)
-            moved = _grid_step(shown, self._step, steps)
-        except (UnitError, ValueError, ArithmeticError):
-            return
-        low, high = self._shown_bound(self._low), self._shown_bound(self._high)
-        if low is not None and high is not None and low > high:
-            low, high = high, low
-        if low is not None:
-            moved = max(moved, low)
-        if high is not None:
-            moved = min(moved, high)
-        if moved == shown:
+        moved = self._notch(steps) if steps else None
+        if moved is None:
             return
         try:
             self._commit(self._quantized(self._value_from_shown(moved)), user_edit=True)
@@ -6722,6 +6544,20 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
             return
         if self.hasFocus():
             self.lineEdit().selectAll()
+
+    def stepEnabled(self):  # noqa: N802 - Qt API name
+        """The directions a notch would move the value in -- asked by Qt's
+        wheel, arrow keys and auto-repeating stepper before each step, and
+        read by the stepper's paint to dim a direction that cannot move."""
+
+        enabled = QtWidgets.QAbstractSpinBox.StepNone
+        if self.isReadOnly():
+            return enabled
+        if self._notch(1) is not None:
+            enabled |= QtWidgets.QAbstractSpinBox.StepUpEnabled
+        if self._notch(-1) is not None:
+            enabled |= QtWidgets.QAbstractSpinBox.StepDownEnabled
+        return enabled
 
     # ----------------------------------------------------------- the text
 
@@ -6910,7 +6746,7 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
         return f"±{shown}"
 
     def _step_chip_metrics(self, text: str | None = None) -> tuple[int, int, int, int]:
-        """``(chip width, gap to the divider, vertical gap, gap to the
+        """``(chip width, gap to the stepper, vertical gap, gap to the
         digits)`` in logical px for ``text`` (default: the step shown now):
         the chip is the text's ink plus its padding, measured with the
         chip's own font."""
@@ -6933,15 +6769,15 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
         """How much the chip showing ``text`` (default: the step now) takes
         from the digits: the right text margin.
 
-        The edit field ends at the frame's padding before the divider; the
-        chip sits ``gap`` left of the divider, and the digits stop ``text
+        The edit field ends at the frame's padding before the stepper; the
+        chip sits ``gap`` left of the stepper, and the digits stop ``text
         gap`` before the chip.  None of it depends on the box's width."""
 
         if not self._offers_step_chip():
             return 0
         width, gap, _vertical, text_gap = self._step_chip_metrics(text)
-        before_divider = FIELD_BORDER_PX + scaled_px(EDIT_PADDING_H)
-        return max(0, width + gap + text_gap - before_divider)
+        before_stepper = FIELD_BORDER_PX + scaled_px(EDIT_PADDING_H)
+        return max(0, width + gap + text_gap - before_stepper)
 
     def _step_chip_reserve(self) -> int:
         """The chip's share of every width rule: the room of the canonical
@@ -6959,8 +6795,7 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
         and ink -- or, with no ``edge``, the plain field's.  A bound edge
         keeps its colour under focus, as a bound line edit's does."""
 
-        self._frame_edges = (_FIELD_EDGE_REST, _FIELD_EDGE_FOCUS) if edge is None else (edge, edge)
-        rest, focus = self._frame_edges
+        rest, focus = (_FIELD_EDGE_REST, _FIELD_EDGE_FOCUS) if edge is None else (edge, edge)
         self.setStyleSheet(fluent_spinbox_stylesheet(
             "QDoubleSpinBox", edge=rest, focus_edge=focus, fill=fill, ink=ink))
 
@@ -7013,11 +6848,11 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
             self._set_chip_margin(0)
             return
         width, gap, vertical, _text_gap = self._step_chip_metrics()
-        divider, _up, _down = _spin_stepper_cells(self)
+        stepper, _up, _down = _spin_stepper_cells(self)
         inner = frame_inner_rect(self)
         top = int(math.ceil(inner.top())) + vertical
         bottom = int(math.floor(inner.bottom())) - vertical
-        right = int(math.floor(divider)) - gap
+        right = int(math.floor(stepper)) - gap
         text = self._step_chip_text()
         if chip.text() != text:
             chip.setText(text)
@@ -7170,6 +7005,32 @@ def _grid_step(value: Decimal, step: Decimal, steps: int) -> Decimal:
     return (Decimal(index) * step).normalize() + Decimal(0)
 
 
+def _grid_step_inside(
+    value: Decimal, step: Decimal, steps: int, low: Decimal | None, high: Decimal | None,
+) -> Decimal:
+    """``steps`` notches from ``value`` on the grid of multiples of ``step``,
+    inside ``[low, high]`` (None: no bound on that side).
+
+    A notch past a bound stops at the last grid point inside it -- never on
+    the bound itself when the bound is off the grid.  The result never lies
+    against the notches' direction: where no grid point inside the range
+    lies that way (a value already at, or below, the lowest one, or a step
+    wider than the whole range), the value is returned unchanged.
+    """
+
+    moved = _grid_step(value, step, steps)
+    if low is not None and moved < low:
+        moved = (low / step).to_integral_value(rounding=ROUND_CEILING) * step
+    if high is not None and moved > high:
+        moved = (high / step).to_integral_value(rounding=ROUND_FLOOR) * step
+    moved = moved.normalize() + Decimal(0)
+    if (low is not None and moved < low) or (high is not None and moved > high):
+        return value
+    if (steps < 0 and moved >= value) or (steps > 0 and moved <= value):
+        return value
+    return moved
+
+
 def fluent_integer_box(
     *, minimum: int | None = None, maximum: int | None = None, parent=None
 ) -> FluentDoubleSpinBox:
@@ -7205,15 +7066,19 @@ class FluentCheckBox(QtWidgets.QCheckBox):
     """A square box with a painted tick.
 
     It was a circle, and a round box reads as a radio button -- one choice
-    of several -- which an independent on/off is not.  Unchecked, its edge
-    is GRAPHITE (3.9:1 on white; the field PLACEHOLDER was 2.6:1); checked,
-    the ACCENT box is outlined in DERIVED_EDGE (3.4:1), the selection's
-    second cue, since the accent alone is 2.45:1.
+    of several -- which an independent on/off is not.  The box is a solid
+    fill whose edge is that fill, never an outline: unticked it is
+    NEUTRAL_FILL, dark enough to read on a white card and on the BG face of
+    a Spacer card; ticked it is ACCENT with a white tick.  Under the pointer
+    the fill steps one shade toward blue; disabled it is DIVIDER, a ticked
+    one with a BG tick.  The tick is centred on the box's device-pixel
+    centre.
     """
 
     def __init__(self, text: str = "", parent=None):
         super().__init__(text, parent)
         self.setMinimumHeight(scaled_px(30, minimum=22))
+        rest_hover = _mixed(NEUTRAL_FILL, ACCENT, 0.4).name()
         self.setStyleSheet(
             f"""
             QCheckBox {{
@@ -7227,18 +7092,15 @@ class FluentCheckBox(QtWidgets.QCheckBox):
                 width: {scaled_even_px(16)}px;
                 height: {scaled_even_px(16)}px;
                 border-radius: {_radius()}px;
-                border: {FIELD_BORDER_PX}px solid {GRAPHITE};
-                background: {SURFACE};
+                border: {FIELD_BORDER_PX}px solid {NEUTRAL_FILL};
+                background: {NEUTRAL_FILL};
             }}
-            QCheckBox::indicator:hover {{ border: {FIELD_BORDER_PX}px solid {ACCENT}; }}
-            QCheckBox::indicator:checked, QCheckBox::indicator:checked:hover {{
-                background: {ACCENT};
-                border: {FIELD_BORDER_PX}px solid {DERIVED_EDGE};
-            }}
-            QCheckBox:disabled {{ color: {PLACEHOLDER}; }}
-            QCheckBox::indicator:disabled {{ border: {FIELD_BORDER_PX}px solid {DIVIDER}; background: {BG}; }}
-            QCheckBox::indicator:checked:disabled {{
-                background: {PLACEHOLDER}; border: {FIELD_BORDER_PX}px solid {PLACEHOLDER};
+            QCheckBox::indicator:hover {{ border-color: {rest_hover}; background: {rest_hover}; }}
+            QCheckBox::indicator:checked {{ border-color: {ACCENT}; background: {ACCENT}; }}
+            QCheckBox::indicator:checked:hover {{ border-color: {ACCENT_HOVER}; background: {ACCENT_HOVER}; }}
+            QCheckBox:disabled {{ color: {DISABLED_INK}; }}
+            QCheckBox::indicator:disabled, QCheckBox::indicator:checked:disabled {{
+                border-color: {DIVIDER}; background: {DIVIDER};
             }}
             """
         )
@@ -7249,33 +7111,33 @@ class FluentCheckBox(QtWidgets.QCheckBox):
         return self.style().subElementRect(QtWidgets.QStyle.SE_CheckBoxIndicator, option, self)
 
     def paintEvent(self, event) -> None:  # noqa: N802 - Qt naming
-        # The sheet draws the box; the tick is drawn here, white on the
-        # filled box, because a sheet can only fill it.
+        # The sheet draws the box; the tick is drawn here, because a sheet
+        # can only fill it.  Its shape is laid out about the box's centre
+        # on a device pixel, so the tick sits in the middle of the box at
+        # any ratio instead of half a pixel low.
         super().paintEvent(event)
+        if not self.isChecked():
+            return
         box = QtCore.QRectF(self._indicator_rect())
-        if self.isChecked():
-            painter = QtGui.QPainter(self)
-            painter.setRenderHint(QtGui.QPainter.Antialiasing)
-            pen = QtGui.QPen(QtGui.QColor(SURFACE))
-            pen.setWidthF(max(1.5, box.width() / 8.0))
-            pen.setCapStyle(QtCore.Qt.RoundCap)
-            pen.setJoinStyle(QtCore.Qt.RoundJoin)
-            painter.setPen(pen)
-            w, h = box.width(), box.height()
-            painter.drawPolyline(QtGui.QPolygonF([
-                QtCore.QPointF(box.left() + 0.26 * w, box.top() + 0.52 * h),
-                QtCore.QPointF(box.left() + 0.43 * w, box.top() + 0.68 * h),
-                QtCore.QPointF(box.left() + 0.75 * w, box.top() + 0.34 * h),
-            ]))
-            painter.end()
-
-    def focusInEvent(self, event) -> None:  # noqa: N802 - Qt naming
-        super().focusInEvent(event)
-        _show_keyboard_focus(self, event)
-
-    def focusOutEvent(self, event) -> None:  # noqa: N802 - Qt naming
-        super().focusOutEvent(event)
-        _show_keyboard_focus(self, event)
+        cx = device_snap(self, box.center().x())
+        cy = device_snap(self, box.center().y(), axis="y")
+        w, h = box.width(), box.height()
+        # The tick's own extent: 0.26..0.75 of the box across, 0.34..0.68
+        # down -- centred on the box, its corners keep those proportions.
+        points = ((0.26, 0.52), (0.43, 0.68), (0.75, 0.34))
+        dx = cx - (0.26 + 0.75) / 2.0 * w
+        dy = cy - (0.34 + 0.68) / 2.0 * h
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing)
+        pen = QtGui.QPen(QtGui.QColor(SURFACE if self.isEnabled() else BG))
+        pen.setWidthF(max(1.5, w / 8.0))
+        pen.setCapStyle(QtCore.Qt.RoundCap)
+        pen.setJoinStyle(QtCore.Qt.RoundJoin)
+        painter.setPen(pen)
+        painter.drawPolyline(QtGui.QPolygonF([
+            QtCore.QPointF(dx + x * w, dy + y * h) for x, y in points
+        ]))
+        painter.end()
 
 
 class FluentPageBody(QtWidgets.QWidget):
@@ -7399,24 +7261,6 @@ class FluentScrollArea(QtWidgets.QScrollArea):
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         self._reserve_scrollbar_gutter()
-
-
-class _RowHoverDelegate(QtWidgets.QStyledItemDelegate):
-    """Marks every cell of the hovered ROW as under the pointer.
-
-    A table view hovers one cell; a data table's unit is the row, so the
-    view says which row the pointer is on and each of its cells draws the
-    hover wash.  The rules and the selection outline belong to the GRID,
-    not to a cell -- FluentTableView paints them across the viewport.
-    """
-
-    def initStyleOption(self, option, index) -> None:  # noqa: N802 - Qt naming
-        super().initStyleOption(option, index)
-        view = self.parent()
-        if index.row() == getattr(view, "_hover_row", -1):
-            option.state |= QtWidgets.QStyle.State_MouseOver
-        else:
-            option.state &= ~QtWidgets.QStyle.State_MouseOver
 
 
 class _RuledRowHeader(QtWidgets.QHeaderView):
@@ -7589,7 +7433,6 @@ class FluentTableView(QtWidgets.QTableView):
         self.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
         self._hover_row = -1
         self.setMouseTracking(True)
-        self.setItemDelegate(_RowHoverDelegate(self))
         # Model dimensions never participate in page/window size hints.  A
         # million-cell scientific table is still one viewport with its own
         # scrollbars, not a million-row request to the surrounding layout.
@@ -7623,7 +7466,8 @@ class FluentTableView(QtWidgets.QTableView):
         # The header RULES are painted by _TableRules, one pass for both,
         # placed from the frame; the headers and the corner draw no border
         # and no radius (a FluentFrame's ``QFrame`` rule would otherwise
-        # round a QHeaderView's ends).
+        # round a QHeaderView's ends).  A cell paints no background of its
+        # own: the hover and selection washes are the view's (paintEvent).
         self.setStyleSheet(
             f"""
             QTableView {{
@@ -7631,7 +7475,7 @@ class FluentTableView(QtWidgets.QTableView):
                 color: {TEXT};
                 border: {FIELD_BORDER_PX}px solid {DIVIDER};
                 border-radius: {_radius()}px;
-                selection-background-color: {ACCENT};
+                selection-background-color: transparent;
                 selection-color: {TEXT};
                 font: {fluent_font_size()}pt "{FONT}";
                 outline: none;
@@ -7640,14 +7484,10 @@ class FluentTableView(QtWidgets.QTableView):
                 padding: {scaled_px(3, minimum=2)}px {scaled_px(6, minimum=4)}px;
                 border: none;
             }}
-            QTableView::item:selected {{
-                background: {ACCENT};
+            QTableView::item:selected, QTableView::item:hover {{
+                background: transparent;
                 color: {TEXT};
                 border: none;
-            }}
-            QTableView::item:hover:!selected {{
-                background: {ACCENT_TINT};
-                color: {TEXT};
             }}
             QTableView QLineEdit {{
                 background: white;
@@ -7810,35 +7650,124 @@ class FluentTableView(QtWidgets.QTableView):
             hint.setHeight(self.minimumHeight())
         return hint
 
-    def paintEvent(self, event) -> None:  # noqa: N802 - Qt naming
-        """The cells, then the grid's own lines over them.
+    def _selected_runs(self, low_row: int, high_row: int) -> list[tuple[int, int, int, int]]:
+        """``(first row, last row, left, right)`` of every run of selected
+        rows between ``low_row`` and ``high_row``: neighbouring shown rows
+        whose selected cells span the same columns.
 
-        A row's rule is one hairline across the WHOLE viewport, frame to
-        frame -- drawn as a cell border it stopped where the last column
-        did.  A selected run of rows is outlined in DERIVED_EDGE (3.4:1 on
-        the white rows; the ACCENT fill alone is 2.45:1): one box per run
-        whose top and bottom REPLACE the rules that bound it, so the edge
-        is one edge-width thick on every side instead of a rule and an
-        outline stacked into two tones.
+        Only the rows asked about, so the cost follows the viewport, not
+        the selection: the selection's RANGES are cut to them -- Select All
+        on a camera frame is millions of indexes, and this runs on every
+        hover."""
+
+        selection = self.selectionModel()
+        if selection is None or not selection.hasSelection():
+            return []
+        root = self.rootIndex()
+        spans: dict[int, tuple[int, int]] = {}
+        for block in selection.selection():
+            if block.parent() != root:
+                continue
+            left = self.columnViewportPosition(block.left())
+            right = self.columnViewportPosition(block.right()) + self.columnWidth(block.right())
+            if right <= left:
+                continue
+            for row in range(max(block.top(), low_row), min(block.bottom(), high_row) + 1):
+                if self.isRowHidden(row):
+                    continue
+                start, end = spans.get(row, (left, right))
+                spans[row] = (min(start, left), max(end, right))
+        runs: list[tuple[int, int, int, int]] = []
+        previous = None
+        for row in range(low_row, high_row + 1):
+            if self.isRowHidden(row):
+                continue
+            span = spans.get(row)
+            if span is not None and runs and previous == runs[-1][1] and span == runs[-1][2:]:
+                runs[-1] = (runs[-1][0], row, *span)
+            elif span is not None:
+                runs.append((row, row, *span))
+            previous = row
+        return runs
+
+    def _row_band(self, first: int, last: int, left: float, right: float) -> QtCore.QRectF:
+        """The wash of rows ``first``..``last`` between ``left`` and
+        ``right``: from the top of the first to the rule under the last (or
+        to the frame, where no rule is drawn), a hair inside the columns'
+        ends so its rounded corners stand clear of the frame and the header
+        rule."""
+
+        viewport = self.viewport()
+        edge = frame_border_px(viewport)
+        top = self.rowViewportPosition(first)
+        bottom = self.rowViewportPosition(last) + self.rowHeight(last)
+        y0 = device_snap(viewport, top, axis="y")
+        if bottom >= viewport.height():
+            y1 = device_snap(viewport, viewport.height(), axis="y")
+        else:
+            y1 = device_snap(viewport, bottom, axis="y") - edge
+        inset = scaled_px(2, minimum=1)
+        x0 = device_snap(viewport, left + inset)
+        x1 = device_snap(viewport, right - inset)
+        return QtCore.QRectF(x0, y0, max(0.0, x1 - x0), max(0.0, y1 - y0))
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        """The washes, the cells over them, then the grid's own lines.
+
+        The hovered row is an ACCENT_TINT band; a selected run of rows is ONE
+        rounded SELECTED block -- the row under the pointer inside it in
+        SELECTED_HOVER -- with no outline: a fill says "picked", and a box
+        drawn round it was one more line.  A row's rule is one hairline
+        across the WHOLE viewport, frame to frame -- drawn as a cell border
+        it stopped where the last column did -- except inside a selected
+        run, which it would cut into stripes; a block ends on the rule
+        under its last row, so the rules either side stay whole.
         """
 
-        super().paintEvent(event)
         model = self.model()
         if model is None:
+            super().paintEvent(event)
             return
         viewport = self.viewport()
-        width = float(viewport.width())
-        edge = frame_border_px(viewport)
         header = self.verticalHeader()
         first = max(0, header.visualIndexAt(0))
         last = header.visualIndexAt(viewport.height() - 1)
         last = model.rowCount(self.rootIndex()) - 1 if last < 0 else last
+        # One row past each side of the screen, to know whether a run goes on.
+        low_row, high_row = max(0, first - 1), min(last + 1, model.rowCount(self.rootIndex()) - 1)
+        runs = self._selected_runs(low_row, high_row)
+        radius = float(_radius())
+        hover = self._hover_row
+        painter = QtGui.QPainter(viewport)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
+        painter.setPen(QtCore.Qt.NoPen)
+        hover_in_run = False
+        for top_row, bottom_row, left, right in runs:
+            block = QtGui.QPainterPath()
+            block.addRoundedRect(self._row_band(top_row, bottom_row, left, right), radius, radius)
+            painter.fillPath(block, QtGui.QColor(SELECTED))
+            if top_row <= hover <= bottom_row and not self.isRowHidden(hover):
+                hover_in_run = True
+                band = QtGui.QPainterPath()
+                band.addRect(self._row_band(hover, hover, left, right))
+                painter.fillPath(block.intersected(band), QtGui.QColor(SELECTED_HOVER))
+        if 0 <= hover < model.rowCount(self.rootIndex()) and not hover_in_run and not self.isRowHidden(hover):
+            columns = self.horizontalHeader()
+            left = columns.sectionViewportPosition(columns.logicalIndex(0))
+            wash = QtGui.QPainterPath()
+            wash.addRoundedRect(self._row_band(hover, hover, left, left + columns.length()), radius, radius)
+            painter.fillPath(wash, QtGui.QColor(ACCENT_TINT))
+        painter.end()
+        super().paintEvent(event)
+        inside = {row for top_row, bottom_row, _left, _right in runs for row in range(top_row, bottom_row)}
+        width = float(viewport.width())
+        edge = frame_border_px(viewport)
         painter = QtGui.QPainter(viewport)
         painter.setRenderHint(QtGui.QPainter.Antialiasing, False)
         divider = QtGui.QColor(DIVIDER)
         for visual in range(first, last + 1):
             row = header.logicalIndex(visual)
-            if header.isSectionHidden(row):
+            if header.isSectionHidden(row) or row in inside:
                 continue
             bottom = self.rowViewportPosition(row) + self.rowHeight(row)
             if bottom >= viewport.height():
@@ -7847,49 +7776,6 @@ class FluentTableView(QtWidgets.QTableView):
                 continue
             y = device_snap(viewport, bottom, axis="y") - edge
             painter.fillRect(QtCore.QRectF(0.0, y, width, edge), divider)
-        selection = self.selectionModel()
-        if selection is not None and selection.hasSelection():
-            # Only the rows on screen, and one each side to know whether a
-            # run continues past the edge: the selection's RANGES are cut
-            # to them, so the cost follows the viewport, not the selection
-            # -- Select All on a camera frame is millions of indexes, and
-            # this runs on every hover.
-            root = self.rootIndex()
-            low_row, high_row = max(0, first - 1), last + 1
-            spans: dict[int, tuple[int, int]] = {}
-            for block in selection.selection():
-                if block.parent() != root:
-                    continue
-                left = self.columnViewportPosition(block.left())
-                right = self.columnViewportPosition(block.right()) + self.columnWidth(block.right())
-                if right <= left:
-                    continue
-                for row in range(max(block.top(), low_row), min(block.bottom(), high_row) + 1):
-                    if self.isRowHidden(row):
-                        continue
-                    start, end = spans.get(row, (left, right))
-                    spans[row] = (min(start, left), max(end, right))
-            outline = QtGui.QColor(DERIVED_EDGE)
-            for row, (left, right) in spans.items():
-                top = self.rowViewportPosition(row)
-                bottom = top + self.rowHeight(row)
-                above = spans.get(row - 1) == (left, right)
-                below = spans.get(row + 1) == (left, right)
-                x0 = device_snap(viewport, left)
-                x1 = device_snap(viewport, right)
-                y0 = max(0.0, device_snap(viewport, top, axis="y") - edge)
-                # A table fitted to its rows clips the last rule under its
-                # frame; the outline's bottom then sits on the last row.
-                y1 = min(device_snap(viewport, bottom, axis="y"),
-                         device_snap(viewport, viewport.height(), axis="y")) - edge
-                if not above:
-                    painter.fillRect(QtCore.QRectF(x0, y0, x1 - x0, edge), outline)
-                if not below:
-                    painter.fillRect(QtCore.QRectF(x0, y1, x1 - x0, edge), outline)
-                side_top = y0 if not above else device_snap(viewport, top, axis="y")
-                side_bottom = y1 + edge
-                painter.fillRect(QtCore.QRectF(x0, side_top, edge, side_bottom - side_top), outline)
-                painter.fillRect(QtCore.QRectF(x1 - edge, side_top, edge, side_bottom - side_top), outline)
         painter.end()
 
     def viewportEvent(self, event) -> bool:  # noqa: N802 - Qt naming
@@ -8086,9 +7972,10 @@ _GRID_STATE_ROLE = QtCore.Qt.UserRole + 1
 _GRID_NOTE_ROLE = QtCore.Qt.UserRole + 2
 #: The value a trailing action cell reports; None on every other cell.
 _GRID_ACTION_ROLE = QtCore.Qt.UserRole + 3
-#: Cell states besides chosen/unchosen: reached by a rule rather than marked;
-#: marked but not honoured; wanted by nobody (an empty red card, so a name in
-#: a cell still means it was chosen); held by another row (an empty dashed
+#: Cell states besides chosen/unchosen: reached by a rule rather than marked
+#: (a cell may be chosen AND derived: a pair a rule chose); marked but not
+#: honoured; wanted by nobody (an empty card in red dashes, so a name in a
+#: cell still means it was chosen); held by another row (an empty dashed
 #: outline that cannot be chosen here).
 GRID_CELL_STATES = ("derived", "warning", "missing", "held")
 
@@ -8193,18 +8080,17 @@ def _paint_grid_card(
     surface: QtWidgets.QWidget,
     cell: QtCore.QRect,
     fill: str | None,
-    edge: str,
-    *,
-    dashed: bool = False,
+    edge: str | None = None,
 ) -> QtCore.QRectF:
     """One small card in a grid cell, and the rect its label goes in.
 
     Every card -- chosen, empty, derived, held -- has the SAME outer extent:
-    the cell inset by the gutter, snapped to device pixels.  The face fills
-    that extent; the edge is a whole-device-pixel stroke laid INSIDE it,
-    concentric with it.  A stroke centred on the extent's boundary
-    straddled two device pixels, and a chosen face stood half a pixel
-    smaller than its outlined neighbours, so the gutters looked uneven."""
+    the cell inset by the gutter, snapped to device pixels, rounded like
+    every other face.  The face fills that extent.  An ``edge`` is drawn
+    only where it says something, and always DASHED (a rule reached it,
+    nobody has it, another row holds it): a whole-device-pixel stroke laid
+    INSIDE the extent, concentric with it, so an edged card is exactly as
+    large as its plain neighbours and the gutters stay even."""
 
     inset = scaled_px(2, minimum=1)
     # QRectF(QRect) is exclusive at the right and bottom already: the cell's
@@ -8222,12 +8108,13 @@ def _paint_grid_card(
         painter.setPen(QtCore.Qt.NoPen)
         painter.setBrush(QtGui.QColor(fill))
         painter.drawRoundedRect(outer, radius, radius)
+    if edge is None:
+        return outer
     pen = QtGui.QPen(QtGui.QColor(edge), stroke)
-    if dashed:
-        # Flat caps, 3 on and 3 off: Qt's square cap grew every dash by a
-        # pen width into the gap and the edge read as a solid line at 1x.
-        pen.setCapStyle(QtCore.Qt.FlatCap)
-        pen.setDashPattern([3.0, 3.0])
+    # Flat caps, 3 on and 3 off: Qt's square cap grew every dash by a pen
+    # width into the gap and the edge read as a solid line at 1x.
+    pen.setCapStyle(QtCore.Qt.FlatCap)
+    pen.setDashPattern([3.0, 3.0])
     painter.setPen(pen)
     painter.setBrush(QtCore.Qt.NoBrush)
     half = stroke / 2.0
@@ -8238,22 +8125,20 @@ def _paint_grid_card(
 class _SelectionGridDelegate(QtWidgets.QStyledItemDelegate):
     """A cell is a small card: blank until chosen, named once it is.
 
-    A chosen cell wears the selection's look -- the ACCENT fill, TEXT ink --
-    outlined in solid DERIVED_EDGE, because the fill alone is 2.45:1 on the
-    white card.  A DERIVED cell -- reached by a rule rather than marked -- is
-    clearly weaker: the ACCENT_TINT wash, a dashed DERIVED_EDGE, its name in
-    DERIVED_INK.  What tells a derived cell from an EMPTY one is its LABEL
-    and its blue dashed EDGE, not the fill: the wash is 1.17:1 from white,
-    there only to say "this belongs with the chosen ones".  The dashes are
-    flat-capped, 3 on and 3 off -- Qt's default square cap grew every dash by
-    a pen width into the gap, and the edge read as a solid line at 1x.  An
-    empty cell is white, edged like a field (PLACEHOLDER, 2.6:1): somewhere a
-    choice can go; under the pointer its edge turns ACCENT and it names
-    itself in MUTED_INK.  A WARNING cell is edged in red, chosen or not; a
-    MISSING cell is an empty red-edged card and a HELD one an empty dashed
-    outline (somebody else's frame).  A disabled grid wears a disabled
-    button's look -- grey face, hairline edge, faint ink -- on every card, so
-    what is chosen still reads but nothing invites a click.
+    Every state is a FILL; no solid edge outlines a card.  An empty cell is
+    a neutral BG card -- somewhere a choice can go; under the pointer it
+    takes the ACCENT_TINT hover wash and names itself in MUTED_INK.  A
+    chosen cell is SELECTED with its name in TEXT (SELECTED_HOVER under the
+    pointer).  A DERIVED cell -- reached by a rule rather than marked, chosen
+    or not -- is the lighter ACCENT_TINT wash with a dashed SELECTION_EDGE
+    and its name in DERIVED_INK: the dashes say "a rule put this here".  A
+    WARNING cell -- chosen but not honoured -- is RED_TINT with its name in
+    RED_DARK, chosen or not, so the problem is never hidden under the
+    selection; a MISSING cell is an empty card in red dashes and a HELD one
+    an empty dashed outline (somebody else's frame).  A disabled grid shows
+    every card on the BG face with the chosen names in DISABLED_INK, so
+    what is chosen still reads but nothing invites a click.  Labels are
+    centred on their ink (:func:`paint_centred_ink`).
     """
 
     def paint(self, painter, option, index) -> None:
@@ -8264,60 +8149,68 @@ class _SelectionGridDelegate(QtWidgets.QStyledItemDelegate):
         held = state == "held"
         if not held and not index.flags() & QtCore.Qt.ItemIsSelectable:
             return
-        live = self.parent().isEnabled()
+        grid = self.parent()
+        live = grid.isEnabled()
         selected = bool(option.state & QtWidgets.QStyle.State_Selected)
         hovered = bool(option.state & QtWidgets.QStyle.State_MouseOver) and not held and live
-        derived = state == "derived" and not selected
-        if not live or held:
-            edge, dashed = DIVIDER, held
-        elif selected and state not in ("warning", "missing"):
-            edge, dashed = DERIVED_EDGE, False
+        derived = state == "derived"
+        warning = state == "warning"
+        edge = None
+        if held:
+            fill, edge = None, DIVIDER
+        elif not live:
+            fill = BG
+        elif warning:
+            fill = _mixed(RED_TINT, RED, 0.19).name() if hovered else RED_TINT
+        elif derived:
+            fill, edge = (_mixed(ACCENT_TINT, SELECTED, 0.4).name() if hovered else ACCENT_TINT), SELECTION_EDGE
+        elif selected:
+            fill = SELECTED_HOVER if hovered else SELECTED
         else:
-            edge = (RED if state in ("warning", "missing") else ACCENT if hovered
-                    else DERIVED_EDGE if derived else PLACEHOLDER)
-            dashed = derived and not hovered
-        fill = (
-            None if held
-            else BG if not live
-            else ACCENT if selected else ACCENT_TINT if derived else SURFACE
-        )
+            fill = ACCENT_TINT if hovered else BG
+            if state == "missing":
+                edge = RED
         painter.save()
-        rect = _paint_grid_card(painter, self.parent().viewport(), option.rect, fill, edge, dashed=dashed)
+        rect = _paint_grid_card(painter, grid.viewport(), option.rect, fill, edge)
         # A name says the row has the cell; the empty states say nobody, or
         # somebody else, has it -- named only as the preview under the pointer.
-        if selected or hovered or state in ("derived", "warning"):
-            ink = QtGui.QColor(
+        if selected or hovered or derived or warning:
+            ink = (
                 DISABLED_INK if not live
-                else RED_DARK if state == "warning" else TEXT if selected
-                else DERIVED_INK if derived else MUTED_INK
+                else RED_DARK if warning else DERIVED_INK if derived
+                else TEXT if selected else MUTED_INK
             )
-            painter.setPen(ink)
-            painter.drawText(rect, QtCore.Qt.AlignCenter, str(index.data() or ""))
+            # The font the grid sizes its columns with (set_grid).
+            font = QtGui.QFont(FONT)
+            font.setPointSize(fluent_font_size())
+            paint_centred_ink(painter, grid.viewport(), rect, font, str(index.data() or ""), ink)
         painter.restore()
 
     def _paint_action(self, painter, option, index) -> None:
-        """The quiet destructive glyph every remove-row x in the console is:
-        a white card, hairline edge and quiet ink at rest, red ink and a red
-        edge only under the pointer -- red at rest belongs to problems.  As
-        tall as the row's cells, so it lines up with them."""
+        """The quiet destructive glyph every remove-row x is -- the same
+        object as FluentButton's ghost ×: no face and no edge at rest, its
+        glyph in MUTED_INK; under the pointer the RED_TINT face and RED_DARK
+        ink, held down one shade deeper -- red at rest belongs to problems.
+        As tall as the row's cells, so it lines up with them, and centred on
+        its ink."""
 
         grid = self.parent()
         cell = (index.row(), index.column())
         live = grid.isEnabled()
         hovered = live and grid.hovered_action() == cell
         pressed = live and grid.pressed_action() == cell
+        hover_face, pressed_face = _destructive_glyph_faces()
         painter.save()
         rect = _paint_grid_card(
             painter, grid.viewport(), option.rect,
-            BG if pressed or not live else SURFACE,
-            RED if hovered or pressed else DIVIDER,
+            pressed_face if pressed else hover_face if hovered else None,
         )
         font = QtGui.QFont(FONT)
         font.setPointSize(round(fluent_font_size() * 1.35))
-        painter.setFont(font)
-        painter.setPen(QtGui.QColor(
-            DISABLED_INK if not live else RED_DARK if hovered or pressed else MUTED_INK))
-        painter.drawText(rect, QtCore.Qt.AlignCenter, str(index.data()))
+        paint_centred_ink(
+            painter, grid.viewport(), rect, font, str(index.data()),
+            DISABLED_INK if not live else RED_DARK if hovered or pressed else MUTED_INK,
+        )
         painter.restore()
 
 
@@ -8383,10 +8276,28 @@ class _SelectionGridRowHeader(QtWidgets.QHeaderView):
         inner = rect.adjusted(0 if self._left() else pad, 0, -pad, 0)
         align = QtCore.Qt.AlignLeft if self._left() else QtCore.Qt.AlignRight
         painter.save()
+        if self.activatable and hovered:
+            # A label that acts is a row like any other under the pointer:
+            # the hover wash behind it, its words still in TEXT.
+            # As tall as the row's cards (the same gutter), the width of
+            # the label column.
+            inset = scaled_px(2, minimum=1)
+            surface = self.viewport()
+            area = QtCore.QRectF(rect)
+            left = device_snap(surface, area.left())
+            top = device_snap(surface, area.top() + inset, axis="y")
+            band = QtCore.QRectF(
+                left, top,
+                device_snap(surface, area.right() - inset) - left,
+                device_snap(surface, area.bottom() - inset, axis="y") - top,
+            )
+            painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
+            painter.setPen(QtCore.Qt.NoPen)
+            painter.setBrush(QtGui.QColor(ACCENT_TINT))
+            painter.drawRoundedRect(band, _radius(), _radius())
         painter.setFont(label_font)
         painter.setPen(QtGui.QColor(
             DISABLED_INK if not self.isEnabled()
-            else ACCENT if self.activatable and hovered
             else TEXT if self.activatable or hovered else MUTED_INK
         ))
         if not note:
@@ -8712,35 +8623,24 @@ class FluentSelectionGrid(QtWidgets.QTableView):
         return self.sizeHint()
 
 
-class _SegmentButton(QtWidgets.QPushButton):
-    """One choice inside a FluentSegmentedButtons track.
-
-    Reached by Tab, never by a click -- a click makes it current, and a
-    focus face left behind would be one more state on the track -- and the
-    keyboard ring goes round the whole control, which is one thing.
-    """
-
-    def focusInEvent(self, event) -> None:  # noqa: N802 - Qt naming
-        super().focusInEvent(event)
-        _show_keyboard_focus(self.parentWidget(), event)
-
-    def focusOutEvent(self, event) -> None:  # noqa: N802 - Qt naming
-        super().focusOutEvent(event)
-        _show_keyboard_focus(self.parentWidget(), event)
-
-
 class FluentSegmentedButtons(QtWidgets.QWidget):
-    """One of a few named choices: ONE control, the current choice marked.
+    """One of a closed set of named choices: ONE control, the current marked.
 
-    A neutral rounded track holds the choices flush, each a transparent face
-    in TEXT ink; the pointer darkens a choice a neutral step, and the
-    current one wears the selection's look (the ACCENT fill, TEXT ink) with
-    two more cues, because the fill alone is 1.84:1 on the track: a
-    DERIVED_INK outline (4.4:1 on the track; DERIVED_EDGE was 2.5:1) and a
-    semibold label.  The current face is concentric with the track: its
-    radius is the track's less the rim.  Every choice is as wide as
-    its semibold label, so marking one never shifts the others.  A row of
-    separate tinted buttons read as a row of commands, which these are not.
+    For a set the OWNER declares closed -- an enumeration, the modes of a
+    setting -- however many it holds, as long as the labels fit; a choice
+    among data (frame labels, an axis's events) or a set that grows or is
+    filtered is a :class:`FluentComboBox`.  A neutral rounded track holds
+    the choices flush, each a transparent face in TEXT ink; the pointer
+    lays the ACCENT_TINT hover wash on a choice, a press the SELECTED fill,
+    and the current one IS the SELECTED fill with a semibold label --
+    SELECTED_HOVER under the pointer -- and no outline.  The current face is
+    rounded and concentric with the track: the track's radius is the
+    face's plus the rim.  Every choice is as wide as its semibold label, so
+    marking one never shifts the others.  A row of separate tinted buttons
+    read as a row of commands, which these are not.  A choice is reached by
+    Tab, never focused by a click, and focus paints nothing on it: a click
+    makes it current, and a focus face left behind would be one more state
+    on the track.
 
     ``activated`` carries the value an operator clicked; :meth:`set_current`
     marks a value (or none) without emitting it.
@@ -8760,7 +8660,7 @@ class FluentSegmentedButtons(QtWidgets.QWidget):
         strong.setWeight(QtGui.QFont.DemiBold)
         strong_metrics = QtGui.QFontMetrics(strong)
         for value, label in choices:
-            button = _SegmentButton(label, self)
+            button = QtWidgets.QPushButton(label, self)
             button.setCursor(QtCore.Qt.PointingHandCursor)
             button.setFocusPolicy(QtCore.Qt.TabFocus)
             button.setMinimumHeight(scaled_px(30, minimum=22) - 2 * rim)
@@ -8770,40 +8670,46 @@ class FluentSegmentedButtons(QtWidgets.QWidget):
             layout.addWidget(button)
             self._buttons[value] = button
         self.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
-        hover = _mixed(DIVIDER, GRAPHITE, 0.22).name()
-        pressed = _mixed(DIVIDER, GRAPHITE, 0.36).name()
+        self._rim = rim
+        # Every face's edge is its own fill (kept one edge-width wide so a
+        # state never moves a label): no state is told by a line.
         self.setStyleSheet(
             f"""
             QPushButton {{
                 background: transparent;
                 color: {TEXT};
                 border: {FIELD_BORDER_PX}px solid transparent;
-                border-radius: {max(0, _radius() - rim)}px;
+                border-radius: {_radius()}px;
                 padding: 0px {pad - FIELD_BORDER_PX}px;
                 font: {fluent_font_size()}pt "{FONT}";
                 outline: none;
             }}
-            QPushButton:hover, QPushButton:focus {{ background: {hover}; }}
-            QPushButton:pressed {{ background: {pressed}; }}
+            QPushButton:hover {{ background: {ACCENT_TINT}; border-color: {ACCENT_TINT}; }}
+            QPushButton:pressed {{ background: {SELECTED}; border-color: {SELECTED}; }}
             QPushButton[current="true"] {{
-                background: {ACCENT}; border-color: {DERIVED_INK}; font-weight: 600;
+                background: {SELECTED}; border-color: {SELECTED}; font-weight: 600;
             }}
-            QPushButton[current="true"]:hover {{ background: {ACCENT_HOVER}; }}
-            QPushButton[current="true"]:pressed {{ background: {ACCENT_PRESSED}; }}
-            QPushButton:disabled {{ background: transparent; color: {DISABLED_INK}; }}
-            QPushButton[current="true"]:disabled {{ background: {SURFACE}; border-color: {DIVIDER}; }}
+            QPushButton[current="true"]:hover, QPushButton[current="true"]:pressed {{
+                background: {SELECTED_HOVER}; border-color: {SELECTED_HOVER};
+            }}
+            QPushButton:disabled {{
+                background: transparent; border-color: transparent; color: {DISABLED_INK};
+            }}
+            QPushButton[current="true"]:disabled {{ background: {SURFACE}; border-color: {SURFACE}; }}
             """
         )
 
     def paintEvent(self, event) -> None:  # noqa: N802 - Qt naming
-        """The track: one neutral rounded face the choices sit in."""
+        """The track: one neutral rounded face the choices sit in, its
+        corners concentric with theirs."""
 
         del event
         painter = QtGui.QPainter(self)
         painter.setRenderHint(QtGui.QPainter.Antialiasing)
         painter.setPen(QtCore.Qt.NoPen)
         painter.setBrush(QtGui.QColor(DIVIDER if self.isEnabled() else BG))
-        painter.drawRoundedRect(QtCore.QRectF(self.rect()), _radius(), _radius())
+        radius = float(_radius() + self._rim)
+        painter.drawRoundedRect(QtCore.QRectF(self.rect()), radius, radius)
         painter.end()
 
     def button(self, value) -> QtWidgets.QPushButton:

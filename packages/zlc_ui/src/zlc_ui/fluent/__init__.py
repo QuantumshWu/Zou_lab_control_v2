@@ -15,8 +15,7 @@ for _name in (
     "ensure_fluent_scale",
     "set_fluent_scale", "scaled_px", "screen_fit_window_size",
     "FIELD_BORDER_PX", "scaled_even_px", "device_snap", "frame_border_px", "frame_inner_rect",
-    "frame_edge_colour", "paint_frame_divider", "stepper_column", "fluent_stepper_extent",
-    "paint_chevron",
+    "stepper_column", "fluent_stepper_extent", "paint_chevron", "paint_centred_ink",
     "center_window_on_primary_screen", "release_window", "retain_window",
     "fluent_font_size", "fluent_text_width", "popup_gap", "fluent_widget_stylesheet",
     "fluent_scrollbar_thickness", "fluent_scrollbar_stylesheet", "status_dot_stylesheet",
@@ -40,15 +39,15 @@ for _name in (
 ):
     _EXPORTS[_name] = ("zlc_ui.fluent.fluent", _name)
 for _name in (
-    "ACCENT", "ACCENT_HOVER", "ACCENT_PRESSED", "ACCENT_STRONG", "ACCENT_TINT", "SELECTION_EDGE",
-    "DERIVED_EDGE", "DERIVED_INK", "DISABLED_INK", "MUTED_INK", "API_VIOLET", "API_VIOLET_DARK", "AXIS_GROUP_COLORS", "BG",
+    "ACCENT", "ACCENT_HOVER", "ACCENT_STRONG", "ACCENT_TINT", "SELECTED", "SELECTED_HOVER",
+    "SELECTION_EDGE", "DERIVED_INK", "DISABLED_INK", "MUTED_INK", "NEUTRAL_FILL", "API_VIOLET", "API_VIOLET_DARK", "AXIS_GROUP_COLORS", "BG",
     "BUTTON_PADDING_H",
     "CONFIG_GREEN", "CONFIG_GREEN_DARK", "CONFIG_GREEN_TINT",
     "CARD_PAD", "CARD_TITLE_PAD", "CARD_TITLE_PX",
     "COMBO_TRI_SIZE", "COMBO_WIDTH", "DIVIDER", "EDIT_PADDING_H", "FLUENT_SCALE_MAX",
     "FLUENT_SCALE_MIN", "FONT", "FONT_SIZE", "GREEN", "GRAPHITE", "GREY",
     "HOVER", "MUTED_LABEL_STYLE", "ORANGE", "ORANGE_DARK", "ORANGE_TINT",
-    "PADDING_V", "PLACEHOLDER", "RADIUS", "RED", "RED_DARK", "SURFACE", "TEXT",
+    "PADDING_V", "PLACEHOLDER", "RADIUS", "RED", "RED_DARK", "RED_TINT", "SURFACE", "TEXT",
     "TITLE_LEFT_INSET", "WINDOW_PAD", "WINDOW_SCREEN_FRACTION",
 ):
     _EXPORTS[_name] = ("zlc_ui.fluent.style", _name)
