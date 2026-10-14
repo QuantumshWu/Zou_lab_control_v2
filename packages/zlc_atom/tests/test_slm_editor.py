@@ -445,7 +445,7 @@ def test_toggle_is_binary_while_brush_uses_authored_intensity(
         _pump(app, lambda: control.solver_idle)
         control.set_target(np.zeros(control.shape, dtype=np.float32))
         control._intensity.setValue(7.5)
-        control._mode.setCurrentText("Toggle")
+        control._mode.button("toggle").click()
         assert control._paint(point)
         _pump(app, lambda: control.solver_idle)
         assert objectives[-1] == "spots"
@@ -457,7 +457,7 @@ def test_toggle_is_binary_while_brush_uses_authored_intensity(
         assert control._paint(point)
         assert not np.any(control._target)
 
-        control._mode.setCurrentText("Brush")
+        control._mode.button("brush").click()
         assert control._paint(point)
         _pump(app, lambda: control.solver_idle)
         assert objectives[-1] == "spots"

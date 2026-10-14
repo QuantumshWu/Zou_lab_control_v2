@@ -13,9 +13,12 @@ from .solver import compute_rearrangement
 REARRANGEMENT_FIELDS = (
     AuthoringField("target_rows", "int", "Target rows", 3, minimum=1),
     AuthoringField("target_columns", "int", "Target columns", 3, minimum=1),
+    # Labels short enough to sit side by side; the row below each names the
+    # number that mode is given.
     AuthoringField("frame_mode", "choice", "Frame count", "fixed",
-                   choices=(AuthoringChoice("fixed", "Fixed frames"),
-                            AuthoringChoice("camera_step", "Maximum camera step"))),
+                   choices=(AuthoringChoice("fixed", "Fixed"),
+                            AuthoringChoice("camera_step", "By camera step")),
+                   segmented=True),
     AuthoringField("motion_frames", "int", "Total frames", 16, minimum=1, maximum=256,
                    enabled_when=("frame_mode", ("fixed",)),
                    description="Total displayed maps, including one initial map removing unused traps (when needed) and the destination; excludes the already displayed source. Movement follows without an additional hold."),

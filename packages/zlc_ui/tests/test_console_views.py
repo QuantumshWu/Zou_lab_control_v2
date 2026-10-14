@@ -191,9 +191,7 @@ title = card._settings_form.widget_for('title')
 title.setText('Card changed')
 title.editingFinished.emit()
 assert card._settings_drag_handle.text() == 'Setting · panel-1'
-interval = card._settings_form.widget_for('interval_ms')
-interval.setCurrentIndex(interval.findData(800))
-interval.activated.emit(interval.currentIndex())
+card._settings_form.widget_for('interval_ms').button(800).click()
 app.processEvents()
 assert popup.isVisible()
 # Closing never delays the next open: no wait between them.
@@ -1114,7 +1112,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from PyQt5 import QtCore, QtGui, QtTest, QtWidgets
 from zlc_ui.console import TaskConsoleHandle, TaskConsoleView
-from zlc_ui.fluent import FluentComboBox, FluentTreeComboBox
+from zlc_ui.fluent import FluentComboBox, FluentSegmentedButtons, FluentTreeComboBox
 from zlc_ui.form import FormFieldProps, FormSpec
 from zlc_ui.qt import ensure_qt_app
 app = ensure_qt_app(['panel-editor'])
@@ -1250,9 +1248,7 @@ stable_geometry = {
     )
     for key in card._settings_form.spec.keys
 }
-interval_control = card._settings_form.widget_for('interval_ms')
-interval_control.setCurrentIndex(interval_control.findData(800))
-interval_control.activated.emit(interval_control.currentIndex())
+card._settings_form.widget_for('interval_ms').button(800).click()
 state = dict(state, interval_ms=800)
 handle.set_panel_projection('panel-1', state, surface)
 app.processEvents()
@@ -1268,6 +1264,10 @@ assert projected_geometry == stable_geometry, {
     for key in stable_geometry
     if stable_geometry[key] != projected_geometry[key]
 }
+# Marking a segment re-polishes it, and the layout requests that follow
+# settle over a few turns of the loop; the probe below is about the
+# projection, not the click before it.
+QtTest.QTest.qWait(50)
 class LayoutProbe(QtCore.QObject):
     def __init__(self):
         super().__init__()
@@ -1360,11 +1360,14 @@ assert not card._settings_form.widget_for('display__title').isEnabled()
 assert card._settings_form.read_all()['semantic__x'] == 'sensor_x'
 assert card._settings_form.widget_for('fit__model').currentText() == '(none)'
 assert card._settings_form.read_all()['overlay_signal'] == '@logic/occ/site_overlay'
-interval_combo = card._settings_form.widget_for('interval_ms')
-assert isinstance(interval_combo, FluentComboBox)
-assert tuple(interval_combo.itemData(index) for index in range(interval_combo.count())) == (
-    100, 200, 400, 800,
-)
+# The scheduler's refresh policy is a closed set: every interval at once,
+# each segment just its number, the unit said once by the row.
+interval_choice = card._settings_form.widget_for('interval_ms')
+assert isinstance(interval_choice, FluentSegmentedButtons)
+assert [interval_choice.button(value).text() for value in (100, 200, 400, 800)] == [
+    '100', '200', '400', '800',
+]
+assert card._settings_form.read_value('interval_ms') == state['interval_ms']
 # The cell kind is a grid panel PARAMETER: an enabled choice whose empty
 # entry means the data decides, emitting the same cell_kind state patch the
 # presenter accepts.
@@ -1689,21 +1692,19 @@ fit_combo = editor.parameter_forms['fit'].widget_for('model')
 fit_combo.setCurrentIndex(1)
 fit_combo.activated.emit(1)
 editor_interval = editor.panel_form.widget_for('interval_ms')
-assert isinstance(editor_interval, FluentComboBox)
-editor_interval.setCurrentIndex(editor_interval.findData(800))
-editor_interval.activated.emit(editor_interval.currentIndex())
+assert isinstance(editor_interval, FluentSegmentedButtons)
+editor_interval.button(800).click()
 editor.refresh_button.click()
 editor.open_producer_button.click()
 assert editor.save_directory.text() == save_directory
-assert tuple(
-    editor.save_format.itemData(index)
-    for index in range(editor.save_format.count())
-) == ('png', 'pdf', 'svg')
+assert [editor.save_format.button(extension).text() for extension in ('png', 'pdf', 'svg')] == [
+    'PNG', 'PDF', 'SVG',
+]
 assert editor.save_auto_name.isChecked()
 assert Path(editor.save_preview.text()).parent == Path(save_directory)
 editor.save_auto_name.setChecked(False)
 editor.save_name.setText('manual-name')
-editor.save_format.setCurrentIndex(editor.save_format.findData('svg'))
+editor.save_format.button('svg').click()
 editor.save_button.click()
 app.processEvents()
 assert ('state', 'panel-1', {'interval_ms': 800}) in events

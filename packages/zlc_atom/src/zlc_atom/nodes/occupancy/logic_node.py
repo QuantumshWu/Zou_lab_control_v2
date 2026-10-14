@@ -32,6 +32,8 @@ OCCUPANCY_SCHEMA = AuthoringSchema(
             "Readout model",
             DEFAULT_READOUT_MODEL_CHOICE,
             choices=READOUT_MODEL_CHOICES,
+            segmented=True,
+            description="Default reads each file with its calibration's own default model",
         ),
     )
 )

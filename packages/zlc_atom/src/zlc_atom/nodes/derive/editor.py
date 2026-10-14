@@ -14,9 +14,11 @@ from html import escape
 from PyQt5 import QtCore, QtWidgets
 
 from zlc_ui.fluent import (
-    AXIS_GROUP_COLORS, FluentCheckBox, FluentCodeEdit, FluentComboBox, FluentFrame, FluentLabel, FluentLineEdit,
-    FluentSegmentedButtons, muted_note_label, retire_widget, scaled_px, signals_blocked,
+    AXIS_GROUP_COLORS, FluentButton, FluentCheckBox, FluentCodeEdit, FluentComboBox, FluentFrame, FluentLabel,
+    FluentLineEdit, FluentSegmentedButtons, command_gap, muted_note_label, popup_gap, retire_widget, scaled_px,
+    signals_blocked,
 )
+from zlc_ui.fluent.fluent import _FluentRoundedMenu
 
 from .expression import (
     OUTPUT_COLUMNS, OPERATIONS, ROW_DEFAULTS, STATISTICS, axes_text, compact_row, complete_row, describe_schema,
@@ -28,6 +30,9 @@ _ERROR_COLOUR = "#D13438"
 _OPERATION_LABELS = {choice.value: choice.label for column in OUTPUT_COLUMNS if column.name == "op"
                      for choice in column.choices if choice.value}
 _NUMBER = "#number"
+#: How a combo shows the items that are not names: the number a combine
+#: takes instead of a signal, and "every frame" at an ``at``.
+_SHOWN = {_NUMBER: "number", "": "All"}
 _FOOTER = "Averages over shots, per-site probabilities and fits belong in a plot panel."
 
 
@@ -65,28 +70,13 @@ def _labels_of(schema) -> tuple[str, ...] | None:
     return None if axis is None else event_labels(axis)
 
 
-class _Choices(QtWidgets.QWidget):
-    """A segmented choice whose choices follow the data: rebuilt when they change."""
+def _remove_button(parent, tooltip: str) -> FluentButton:
+    """A row's own ×: the quiet glyph that turns red under the pointer."""
 
-    activated = QtCore.pyqtSignal(object)
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._layout = QtWidgets.QHBoxLayout(self)
-        self._layout.setContentsMargins(0, 0, 0, 0)
-        self._choices = None
-        self._buttons = None
-
-    def show_choices(self, choices, current) -> None:
-        choices = tuple(choices)
-        if choices != self._choices:
-            if self._buttons is not None:
-                retire_widget(self._buttons)
-            self._choices = choices
-            self._buttons = FluentSegmentedButtons(choices, self)
-            self._buttons.activated.connect(self.activated.emit)
-            self._layout.addWidget(self._buttons)
-        self._buttons.set_current(current)
+    button = FluentButton("×", parent, role="destructive")
+    button.setFixedWidth(scaled_px(30, minimum=24))
+    button.setToolTip(tooltip)
+    return button
 
 
 class _OutputCard(FluentFrame):
@@ -117,21 +107,22 @@ class _OutputCard(FluentFrame):
         line.addWidget(self.value)
         self.at_label = FluentLabel("at")
         line.addWidget(self.at_label)
-        self.at = _Choices(self)
-        self.at.activated.connect(lambda label: self._edit(at=label))
+        # The frames come from the data -- one per readout event -- so they
+        # are a list to pick from, "All" first.
+        self.at = FluentComboBox()
+        self.at.activated.connect(lambda _index: self._edit(at=self.at.currentData()))
         line.addWidget(self.at)
         self.value_error = _error_label()
         line.addWidget(self.value_error, 1)
         line.addStretch(0)
         self.add = {}
         for stage in ("where", "combine", "statistic"):
-            button = FluentSegmentedButtons(((stage, f"+ {stage}"),), self)
-            button.activated.connect(self._open)
+            button = FluentButton(f"+ {stage}", self)
+            button.clicked.connect(lambda _checked=False, stage=stage: self._open(stage))
             self.add[stage] = button
             line.addWidget(button)
-        remove = FluentSegmentedButtons((("remove", "×"),), self)
-        remove.setToolTip("Remove this output")
-        remove.activated.connect(lambda _value: self._editor.remove_card(self))
+        remove = _remove_button(self, "Remove this output")
+        remove.clicked.connect(lambda: self._editor.remove_card(self))
         line.addWidget(remove)
         column.addLayout(line)
 
@@ -142,8 +133,8 @@ class _OutputCard(FluentFrame):
         self.mask.activated.connect(lambda _index: self._edit(where=self.mask.currentData()))
         where.addWidget(self.mask)
         where.addWidget(FluentLabel("at"))
-        self.where_at = _Choices(self)
-        self.where_at.activated.connect(lambda label: self._edit(where_at=label))
+        self.where_at = FluentComboBox()
+        self.where_at.activated.connect(lambda _index: self._edit(where_at=self.where_at.currentData()))
         where.addWidget(self.where_at)
         where.addWidget(FluentLabel("is"))
         self.where_is = FluentSegmentedButtons(((True, "true"), (False, "false")), self)
@@ -165,8 +156,8 @@ class _OutputCard(FluentFrame):
         combine.addWidget(self.constant)
         self.with_at_label = FluentLabel("at")
         combine.addWidget(self.with_at_label)
-        self.with_at = _Choices(self)
-        self.with_at.activated.connect(lambda label: self._edit(with_at=label))
+        self.with_at = FluentComboBox()
+        self.with_at.activated.connect(lambda _index: self._edit(with_at=self.with_at.currentData()))
         combine.addWidget(self.with_at)
         self._finish_line(combine, "combine")
 
@@ -201,9 +192,8 @@ class _OutputCard(FluentFrame):
         self.errors[stage] = _error_label()
         line.addWidget(self.errors[stage], 1)
         line.addStretch(0)
-        close = FluentSegmentedButtons(((stage, "×"),), self)
-        close.setToolTip(f"Remove the {stage} step")
-        close.activated.connect(self._close)
+        close = _remove_button(self, f"Remove the {stage} step")
+        close.clicked.connect(lambda: self._close(stage))
         line.addWidget(close)
 
     # -- edits -------------------------------------------------------------
@@ -251,6 +241,7 @@ class _OutputCard(FluentFrame):
 
     @staticmethod
     def _fill(combo, items, current) -> None:
+        """Offer ``items`` (and a ``current`` they lack), refilled only when they change."""
         items = tuple(items)
         if current and current not in items:
             items = (*items, current)
@@ -258,9 +249,9 @@ class _OutputCard(FluentFrame):
             with signals_blocked(combo):
                 combo.clear()
                 for item in items:
-                    combo.addItem("number" if item == _NUMBER else item, item)
+                    combo.addItem(_SHOWN.get(item, item), item)
         with signals_blocked(combo):
-            combo.setCurrentIndex(combo.findData(current) if current else -1)
+            combo.setCurrentIndex(items.index(current) if current in items else -1)
 
     def show_row(self, row: Mapping[str, object], context: Mapping[str, object]) -> None:
         self.row = dict(row)
@@ -277,7 +268,7 @@ class _OutputCard(FluentFrame):
         self.at_label.setVisible(bool(labels))
         self.at.setVisible(bool(labels))
         if labels:
-            self.at.show_choices((("", "All"), *((label, label) for label in labels)), row["at"])
+            self._fill(self.at, ("", *labels), row["at"])
 
         shown = {"where": bool(row["where"]), "combine": bool(row["op"] or row["with"]),
                  "statistic": bool(row["statistic"] or row["over"])}
@@ -289,7 +280,7 @@ class _OutputCard(FluentFrame):
         self._fill(self.mask, context["booleans"], row["where"])
         mask_labels = (_labels_of(schema_of(row["where"])) or context["frames_of"].get(row["where"])
                        or ((row["where_at"],) if row["where_at"] else ()))
-        self.where_at.show_choices((("", "All"), *((label, label) for label in mask_labels)), row["where_at"])
+        self._fill(self.where_at, ("", *mask_labels), row["where_at"])
         self.where_is.set_current(bool(row["where_is"]))
 
         self.op.set_current(row["op"] or None)
@@ -306,7 +297,7 @@ class _OutputCard(FluentFrame):
         self.with_at_label.setVisible(bool(with_labels))
         self.with_at.setVisible(bool(with_labels))
         if with_labels:
-            self.with_at.show_choices((("", "All"), *((label, label) for label in with_labels)), row["with_at"])
+            self._fill(self.with_at, ("", *with_labels), row["with_at"])
 
         self.statistic.set_current(row["statistic"] or None)
         reducible = answer["reducible"]
@@ -385,9 +376,8 @@ class _CodeCard(FluentFrame):
         line.addWidget(self.name)
         line.addWidget(FluentLabel("= code"))
         line.addStretch(1)
-        remove = FluentSegmentedButtons((("remove", "×"),), self)
-        remove.setToolTip("Remove this output")
-        remove.activated.connect(lambda _value: self._editor.remove_card(self))
+        remove = _remove_button(self, "Remove this output")
+        remove.clicked.connect(lambda: self._editor.remove_card(self))
         line.addWidget(remove)
         column.addLayout(line)
         self.code = FluentCodeEdit("")
@@ -396,13 +386,16 @@ class _CodeCard(FluentFrame):
         self.code.setTabStopDistance(self.code.fontMetrics().horizontalAdvance("    "))
         self.code.textChanged.connect(self._code_changed)
         column.addWidget(self.code)
+        # A command whose list is the data's -- every member and axis name --
+        # so the names wait behind it in a menu instead of lining the card.
         insert = QtWidgets.QHBoxLayout()
-        insert.addWidget(muted_note_label("Insert"))
-        self.inserts = _Choices(self)
-        self.inserts.activated.connect(self._insert)
-        insert.addWidget(self.inserts)
+        self.insert = FluentButton("Insert", self)
+        self.insert.setToolTip("Insert a member or axis name at the cursor")
+        self.insert.clicked.connect(self._show_inserts)
+        insert.addWidget(self.insert)
         insert.addStretch(1)
         column.addLayout(insert)
+        self._inserts: tuple[str, ...] = ()
         self.example = muted_note_label("")
         self.example.setWordWrap(True)
         self.example.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
@@ -431,6 +424,18 @@ class _CodeCard(FluentFrame):
         if self.code.height() != int(height):
             self.code.setFixedHeight(int(height))
 
+    def _show_inserts(self) -> None:
+        """This bundle's names below Insert, built for this click."""
+        menu = _FluentRoundedMenu(self)
+        offered = {menu.addAction(text): text for text in self._inserts}
+        anchor = self.insert.mapToGlobal(QtCore.QPoint(0, self.insert.height() + popup_gap()))
+        try:
+            chosen = offered.get(menu.exec_(anchor))
+        finally:
+            retire_widget(menu)
+        if chosen is not None:
+            self._insert(chosen)
+
     def _insert(self, text) -> None:
         self.code.insertPlainText(str(text))
         self.code.setFocus()
@@ -442,8 +447,8 @@ class _CodeCard(FluentFrame):
             with signals_blocked(self.code):
                 self.code.setPlainText(row["code"])
             self._fit_height()
-        self.inserts.show_choices(context["inserts"], None)
-        self.inserts.setVisible(bool(context["inserts"]))
+        self._inserts = tuple(context["inserts"])
+        self.insert.setVisible(bool(self._inserts))
         # The example is for an empty box; written code speaks for itself.
         _set_text(self.example, context["example"])
         self.example.setVisible(bool(context["example"]) and not row["code"].strip())
@@ -490,11 +495,15 @@ class DeriveEditor(QtWidgets.QWidget):
         self._input_rows: list[tuple[QtWidgets.QLabel, ...]] = []
 
         header = QtWidgets.QHBoxLayout()
+        header.setSpacing(command_gap())
         header.addWidget(FluentLabel("Outputs"))
         header.addStretch(1)
-        self.add = FluentSegmentedButtons((("structured", "Add output"), ("code", "Add code output")), self)
-        self.add.activated.connect(self._add)
-        header.addWidget(self.add)
+        self.add_output = FluentButton("Add output", self)
+        self.add_output.clicked.connect(lambda: self._add("structured"))
+        header.addWidget(self.add_output)
+        self.add_code = FluentButton("Add code output", self)
+        self.add_code.clicked.connect(lambda: self._add("code"))
+        header.addWidget(self.add_code)
         layout.addLayout(header)
         self.empty = muted_note_label(
             "No outputs yet. An output picks a value, pins it at a frame, and can mask, combine and reduce it.")
@@ -508,7 +517,8 @@ class DeriveEditor(QtWidgets.QWidget):
         layout.addWidget(self.footer)
 
     def set_mutation_enabled(self, enabled: bool) -> None:
-        self.add.setEnabled(enabled)
+        self.add_output.setEnabled(enabled)
+        self.add_code.setEnabled(enabled)
         for card in self._cards:
             card.setEnabled(enabled)
 
@@ -539,7 +549,7 @@ class DeriveEditor(QtWidgets.QWidget):
 
     def _card(self, kind):
         card = _CodeCard(self) if kind == "code" else _OutputCard(self)
-        card.setEnabled(self.add.isEnabled())
+        card.setEnabled(self.add_output.isEnabled())
         return card
 
     def _add(self, kind) -> None:
@@ -662,16 +672,16 @@ class DeriveEditor(QtWidgets.QWidget):
 
     @staticmethod
     def _code_help(members, schemas):
-        """Insert buttons and one example, written with this bundle's real names."""
+        """What Insert offers and one example, written with this bundle's real names."""
         inserts, axes = [], []
         for name in members:
-            inserts.append((f"a.{name}", f"a.{name}"))
+            inserts.append(f"a.{name}")
             schema = schemas.get(name)
             for axis in () if schema is None else (
                     *schema.point_domain.axes, *schema.cell_domain.axes):
                 if axis.coordinate_of is None and axis.role.value != "scalar" and axis.name not in axes:
                     axes.append(axis.name)
-        inserts.extend((repr(name), repr(name)) for name in axes)
+        inserts.extend(repr(name) for name in axes)
         numeric = next((name for name in members if schemas.get(name) is not None
                         and schemas[name].value_schema.dtype.kind != "b"), None)
         boolean = next((name for name in members if schemas.get(name) is not None

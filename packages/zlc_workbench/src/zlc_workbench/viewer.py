@@ -958,9 +958,15 @@ def _table_projection(draft: dict[str, object]) -> dict[str, object]:
                 ),
             }
         )
-    choices = [("values", "Values"), ("validity", "Validity")]
-    if draft["sigma"] is not None:
-        choices.append(("sigma", "Sigma"))
+    # (key, label, offered): the three components are one closed set, and
+    # Sigma is offered while the draft carries a sigma -- kept in the set
+    # rather than added, so the choice does not change shape under the
+    # Sigma switch beside it.
+    choices = (
+        ("values", "Values", True),
+        ("validity", "Validity", True),
+        ("sigma", "Sigma", draft["sigma"] is not None),
+    )
     structure = axis_structure(
         draft["repeat_axes"],
         draft["point_axes"],

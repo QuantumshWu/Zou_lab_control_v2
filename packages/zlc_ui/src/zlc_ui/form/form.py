@@ -124,6 +124,12 @@ class FormFieldProps:
     #: copied into a Qt item model merely to say that Scope exists.
     cycle_choices: Sequence[tuple[object, str]] | None = None
     cycle_label: str = ""
+    #: Show the choices side by side as one segmented control instead of a
+    #: popup.  The OWNER says so, for a closed set it declares whose labels
+    #: fit on a line; no layer between it and the widget decides it by
+    #: counting choices, because a short list of firmware rates is still
+    #: the device's data and still a popup.
+    segmented: bool = False
     allow_blank: bool | None = None
     path_mode: Literal["file", "dir"] = "file"
     file_filter: str = "All files (*)"
@@ -241,6 +247,18 @@ class FormFieldProps:
         elif self.cycle_label:
             raise ValueError(
                 f"field {self.key!r} cycle label requires cycle choices"
+            )
+        if not isinstance(self.segmented, bool):
+            raise TypeError(f"field {self.key!r} segmented must be bool")
+        if self.segmented and (
+            self.kind != "choice" or not choices or cycle_choices is not None
+        ):
+            # Every segment is on screen at once, so the set has to be
+            # there, whole and fixed: a lazy domain behind a Scope entry has
+            # no segment to stand for it.
+            raise ValueError(
+                f"field {self.key!r} is segmented, which needs a closed, "
+                "non-empty set of choices"
             )
 
         if self.kind == "choice":

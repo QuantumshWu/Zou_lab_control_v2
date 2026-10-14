@@ -132,6 +132,7 @@ def parameter_form_spec(fields: object) -> FormSpec:
                 choices=choices,
                 cycle_choices=field.get("cycle_choices"),
                 cycle_label=str(field.get("cycle_label") or ""),
+                segmented=bool(field.get("segmented")),
                 allow_blank=allow_none if kind in {"int", "number", "float"} else None,
                 unavailable_reason=str(field.get("unavailable_reason") or ""),
                 automatic=automatic,
@@ -258,7 +259,12 @@ def signal_form_runtime(groups_for) -> FormRuntimeContext:
 
 
 def interval_form_field(intervals: object, current: object) -> FormFieldProps:
-    """Project the scheduler's closed refresh domain as a choice control."""
+    """Project the scheduler's closed refresh domain as a segmented choice.
+
+    The domain is the scheduler's fixed policy, a handful of numbers, so
+    every one is shown at once; the unit is said once, by the row, and each
+    segment is just its number.
+    """
 
     values = tuple(int(value) for value in tuple(intervals or ()))
     if not values:
@@ -275,7 +281,9 @@ def interval_form_field(intervals: object, current: object) -> FormFieldProps:
         "choice",
         "Update interval",
         default=selected,
-        choices=tuple(FormChoice(f"{value} ms", value) for value in values),
+        unit="ms",
+        choices=tuple(FormChoice(str(value), value) for value in values),
+        segmented=True,
     )
 
 

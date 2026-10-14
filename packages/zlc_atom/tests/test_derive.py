@@ -393,3 +393,59 @@ def test_descriptor_reads_only_names_and_syntax_without_evaluating_code() -> Non
     for row in ({"name": "old", "expression": "a.counts"}, {"name": "x", "value": "counts", "op": "%"}):
         with pytest.raises(ValueError):
             schema.project_values({"outputs": (row,)})
+
+
+def test_the_editor_lists_what_the_data_offers_and_commands_are_buttons() -> None:
+    """The frames come from the data, so ``at`` is a list with All first;
+    adding an output, opening or closing a step and removing a row are
+    commands.  The draft reads as the same rows either way."""
+    from PyQt5 import QtCore, QtTest, QtWidgets
+    from zlc_ui.fluent import FluentButton
+
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    editor = LOGIC_NODE.ui_contributions[0]()
+    drafts = []
+    editor.draft_changed.connect(lambda patch: drafts.append(patch["values"]["outputs"]))
+    bundle = (("counts", _schema(2, 3, 4, np.dtype(float), "count"), None),
+              ("occupied", _schema(2, 3, 4, np.dtype(bool), "1"), None))
+
+    def project(rows):
+        editor.update_projection({"form_values": {"outputs": rows}, "input_bundle": bundle})
+        app.processEvents()
+        return editor._cards
+
+    def click(button):
+        QtTest.QTest.mouseClick(button, QtCore.Qt.LeftButton)
+        app.processEvents()
+        return drafts[-1]
+
+    try:
+        project(())
+        (row,) = click(editor.add_output)
+        assert row == {"name": "output_1", "value": "counts"}
+        (card,) = project((row,))
+        assert [card.at.itemText(index) for index in range(card.at.count())] == [
+            "All", "frame 0", "frame 1", "frame 2"]
+        assert card.at.currentIndex() == 0, "no pin reads every frame"
+        card.at.setCurrentIndex(2)
+        card.at.activated.emit(2)
+        (row,) = drafts[-1]
+        assert row["at"] == "frame 1"
+        project((row,))
+        (row,) = click(card.add["where"])
+        assert (row["where"], row["where_at"]) == ("occupied", "frame 1"), "a verdict at the value's own frame"
+        project((row,))
+        assert card.where_at.currentText() == "frame 1" and not card.lines["where"].isHidden()
+        (close,) = card.lines["where"].findChildren(FluentButton)
+        assert click(close) == ({"name": "output_1", "value": "counts", "at": "frame 1"},)
+        (remove,) = (button for button in card.findChildren(FluentButton)
+                     if button.text() == "×" and button.parentWidget() is card)
+        assert remove.role() == "destructive"
+        assert click(remove) == () and editor._cards == []
+        assert click(editor.add_code) == ({"name": "output_1"},)
+        (code,) = project(drafts[-1])
+        assert code.kind == "code" and not code.insert.isHidden()
+    finally:
+        editor.close()
+        editor.deleteLater()
+        app.processEvents()

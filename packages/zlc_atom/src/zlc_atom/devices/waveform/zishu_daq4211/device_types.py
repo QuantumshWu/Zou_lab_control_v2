@@ -72,6 +72,7 @@ ZISHU_DAQ4211_SCHEMA = AuthoringSchema(
                 AuthoringChoice(f"{value:g}", f"±{value:g} V")
                 for value in sorted(INPUT_RANGES, reverse=True)
             ),
+            segmented=True,
             description="all channels share one range",
         ),
         AuthoringField(

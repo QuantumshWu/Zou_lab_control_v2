@@ -16,7 +16,7 @@ from zlc_data import SPATIAL_X, SPATIAL_Y
 from zlc_plot import PANEL_SIZE_NAMES, AxisRef, ImagePlot, PlotLabels
 from zlc_ui.fluent import (
     FluentButton, FluentComboBox, FluentDoubleSpinBox, FluentFrame,
-    FluentLineEdit, FluentPopup, FluentScrollArea, FluentSettingsPopupAnchor,
+    FluentLineEdit, FluentPopup, FluentScrollArea, FluentSegmentedButtons, FluentSettingsPopupAnchor,
     FluentSpinBox, FluentSwitch, FluentTabWidget, add_row_switch, fluent_open_path, fluent_save_path,
     open_fluent_window,
 )
@@ -184,6 +184,10 @@ class SlmEditorControl(QtCore.QObject):
             int, np.ndarray, str, np.ndarray, dict[str, object] | None
         ] | None = None
         self._running = self._painting = self._closed = self._cleaned = False
+        #: What a press on the target does: toggle, brush or erase.  The
+        #: Paint choice shows it; a segmented control reports clicks and
+        #: holds no value to read back.
+        self._paint_mode = "toggle"
         #: A brush drag's target with every stroke since the last flush, and
         #: the objective it asks for; ``_flush_brush`` hands it on.
         self._brush: tuple[np.ndarray, str] | None = None
@@ -259,9 +263,10 @@ class SlmEditorControl(QtCore.QObject):
         edit, controls = FluentFrame(page), QtWidgets.QHBoxLayout()
         edit.setLayout(controls)
         controls.addWidget(QtWidgets.QLabel("Paint"))
-        self._mode = FluentComboBox(edit)
-        self._mode.addItems(("Toggle", "Brush", "Erase"))
-        self._mode.setMinimumWidth(104)
+        self._mode = FluentSegmentedButtons(
+            (("toggle", "Toggle"), ("brush", "Brush"), ("erase", "Erase")), edit)
+        self._mode.set_current(self._paint_mode)
+        self._mode.activated.connect(self._paint_mode_picked)
         controls.addWidget(self._mode)
         controls.addWidget(QtWidgets.QLabel("Intensity"))
         self._intensity = FluentDoubleSpinBox(edit)
@@ -759,6 +764,10 @@ class SlmEditorControl(QtCore.QObject):
         }
         self._show_phase()
         self._show_wavefront()
+
+    def _paint_mode_picked(self, mode: str) -> None:
+        self._paint_mode = mode
+        self._mode.set_current(mode)
 
     def _set_selectors_enabled(self, enabled: bool) -> None:
         """Choose plot gestures or target painting without rebuilding either host."""
@@ -1278,7 +1287,7 @@ class SlmEditorControl(QtCore.QObject):
         if watched is self._target_widget and not self._selectors.isChecked():
             kind = event.type()
             if kind == QtCore.QEvent.MouseButtonPress and event.button() == QtCore.Qt.LeftButton:
-                self._painting = self._mode.currentText() != "Toggle"
+                self._painting = self._paint_mode != "toggle"
                 return self._paint(event.pos())
             if kind == QtCore.QEvent.MouseMove and self._painting and event.buttons() & QtCore.Qt.LeftButton:
                 return self._paint(event.pos())
@@ -1300,8 +1309,8 @@ class SlmEditorControl(QtCore.QObject):
         column, row = int(np.floor(point.x + 0.5)), int(np.floor(point.y + 0.5))
         if not (0 <= row < self.shape[0] and 0 <= column < self.shape[1]):
             return False
-        mode = self._mode.currentText()
-        if mode == "Toggle":
+        mode = self._paint_mode
+        if mode == "toggle":
             target = np.array(self._target, copy=True)
             target[row, column] = 0.0 if target[row, column] > 0.0 else 1.0
             self.set_target(target, objective_kind="spots")
@@ -1317,9 +1326,9 @@ class SlmEditorControl(QtCore.QObject):
         yy, xx = np.ogrid[top:bottom, left:right]
         window = target[top:bottom, left:right]
         window[(yy - row) ** 2 + (xx - column) ** 2 <= 4] = (
-            0.0 if mode == "Erase" else self._intensity.value()
+            0.0 if mode == "erase" else self._intensity.value()
         )
-        self._brush = (target, self._objective_kind if mode == "Erase" else "spots")
+        self._brush = (target, self._objective_kind if mode == "erase" else "spots")
         if not self._brush_flush.isActive():
             self._flush_brush()
         return True

@@ -133,6 +133,14 @@ def test_a_choice_row_shows_the_label_its_declaration_gave_it() -> None:
         "Normal",
         "Fixed",
     ]
+    # Whether the choices sit side by side is the declaration's to say too,
+    # and every hop to the form carries it as said: the limit modes are a
+    # closed set, a unit ladder the data supplies is not.
+    from zlc_ui.console._panel_projection import parameter_form_spec
+
+    assert rows["relim_mode"]["segmented"] and not rows[unit_key]["segmented"]
+    fields = {field.key: field for field in parameter_form_spec(tuple(rows.values())).fields}
+    assert fields["relim_mode"].segmented and not fields[unit_key].segmented
 
 
 def test_a_control_on_auto_is_built_holding_what_auto_resolves_to() -> None:

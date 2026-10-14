@@ -113,6 +113,7 @@ X15213_SERVER_SCHEMA = AuthoringSchema(
                 AuthoringChoice("dvi", "DVI display"),
                 AuthoringChoice("usb", "USB frame memory"),
             ),
+            segmented=True,
         ),
         AuthoringField("display_name", "str", "DVI display name", ""),
         AuthoringField(

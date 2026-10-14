@@ -347,9 +347,11 @@ DEFAULT_READOUT_MODEL_CHOICE = "default"
 #: What a node may ask a calibration for, as a form offers it: the artifact's
 #: own default, then each model by name.  Said here, beside the kinds and the
 #: resolver, because a form offering a choice this mapping cannot resolve is a
-#: form that fails at build time.
+#: form that fails at build time.  The labels sit side by side on one line, so
+#: the first is just "Default": it stands under "Readout model", beside the
+#: model names, where it can only mean the calibration's own.
 READOUT_MODEL_CHOICES = (
-    AuthoringChoice(DEFAULT_READOUT_MODEL_CHOICE, "Calibration default"),
+    AuthoringChoice(DEFAULT_READOUT_MODEL_CHOICE, "Default"),
     AuthoringChoice(ReadoutModelKind.BOX.value, "Box"),
     AuthoringChoice(ReadoutModelKind.PER_SITE_PSF.value, "Per-site PSF"),
     AuthoringChoice(ReadoutModelKind.UNIFORM_PSF.value, "Uniform PSF"),

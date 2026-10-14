@@ -7400,7 +7400,7 @@ class ConsolePresenter:
                 for field in surface.get(group, ()):
                     public = {
                         key: value for key, value in field.items()
-                        if key not in {"cycle_choices", "cycle_label", "co_edited_with"}
+                        if key not in {"cycle_choices", "cycle_label", "co_edited_with", "segmented"}
                         and (key == "value" or value is not None and value != "" and value != ())
                     }
                     cycle = field.get("cycle_choices")

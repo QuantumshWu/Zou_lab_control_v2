@@ -115,6 +115,7 @@ CALIBRATION_SCHEMA = AuthoringSchema(
             # Every model by name; a calibration has no default of its own
             # to defer to while it is the one being made.
             choices=READOUT_MODEL_CHOICES[1:],
+            segmented=True,
         ),
         AuthoringField(
             "threshold_method",
@@ -125,6 +126,7 @@ CALIBRATION_SCHEMA = AuthoringSchema(
                 AuthoringChoice("gaussian", "Gaussian"),
                 AuthoringChoice("empirical", "Empirical"),
             ),
+            segmented=True,
         ),
         AuthoringField(
             "box_half_width",
@@ -170,10 +172,13 @@ CALIBRATION_SCHEMA = AuthoringSchema(
             "choice",
             "Frames",
             FRAMES_FROM_CAMERA,
+            # Short enough to sit side by side: the row already says
+            # "Frames", and the folder row below names where saved ones are.
             choices=(
-                AuthoringChoice(FRAMES_FROM_CAMERA, "Acquire new frames"),
-                AuthoringChoice(FRAMES_FROM_FOLDER, "Calibrate saved frames"),
+                AuthoringChoice(FRAMES_FROM_CAMERA, "New frames"),
+                AuthoringChoice(FRAMES_FROM_FOLDER, "Saved frames"),
             ),
+            segmented=True,
         ),
         AuthoringField(
             "saved_frames_path",

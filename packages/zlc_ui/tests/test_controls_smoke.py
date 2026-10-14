@@ -344,6 +344,39 @@ form = FluentParameterForm(spec, spec.default_values(), runtime=FormRuntimeConte
 assert form.read_all() == {'name': 'demo', 'count': 2}
 form.populate({'name': 'changed', 'count': 4})
 assert form.read_all() == {'name': 'changed', 'count': 4}
+
+# A closed set its owner declares segmented is one segmented control: a
+# click is the edit, a closed set may hold no choice yet, and the owner's
+# lock greys the whole strip.
+from zlc_ui.fluent import FluentComboBox, FluentSegmentedButtons
+from zlc_ui.form import FormChoice
+limits = tuple(FormChoice(label, label.lower()) for label in ('Tight', 'Normal', 'Fixed'))
+spec = FormSpec((
+    FormFieldProps('limits', 'choice', 'Limits', default='normal', choices=limits, segmented=True),
+    FormFieldProps('side', 'choice', 'Side', choices=(FormChoice('A', 'a'), FormChoice('B', 'b')), segmented=True),
+    FormFieldProps('rate', 'choice', 'Rate', default=1, choices=(FormChoice('1 Hz', 1), FormChoice('2 Hz', 2))),
+))
+form = FluentParameterForm(spec, spec.default_values())
+edited = []
+form.changed.connect(edited.append)
+strip = form.widget_for('limits')
+assert isinstance(strip, FluentSegmentedButtons)
+assert isinstance(form.widget_for('rate'), FluentComboBox), 'a few choices are not a declaration'
+strip.button('fixed').click()
+assert edited == ['limits'] and form.read_value('limits') == 'fixed'
+assert form.is_empty('side') and form.read_draft()['side'] is None
+form.populate({'limits': 'tight', 'side': 'b', 'rate': 2})
+assert edited == ['limits'], 'populating is not an edit'
+assert form.read_all() == {'limits': 'tight', 'side': 'b', 'rate': 2}
+form.set_editable('limits', False)
+assert not strip.isEnabled()
+# Other choices are another closed set, so another control.
+narrowed = FormSpec((
+    FormFieldProps('limits', 'choice', 'Limits', default='tight', choices=limits[::2], segmented=True),
+    *spec.fields[1:],
+))
+form.reconcile(narrowed, {'limits': 'tight', 'side': None, 'rate': 2})
+assert form.widget_for('limits') is not strip and form.read_draft() == {'limits': 'tight', 'side': None, 'rate': 2}
 """
     )
 
