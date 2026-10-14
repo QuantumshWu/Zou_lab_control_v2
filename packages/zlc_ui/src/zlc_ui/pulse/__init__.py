@@ -38,6 +38,6 @@ __all__ = [
     "ComponentVM", "PulseComponentView",
     "PulseEditorView", "PulsePreviewView", "PulseScanView", "PulseConfigView",
     "PulseScheduleView", "PulseTargetView", "PulseDragContainer",
-    "BracketPost", "BracketVM", "ScanPageRecord", "ScheduleVM",
+    "BindingRecord", "BracketPost", "BracketVM", "ScanPageRecord", "ScheduleVM",
     "TargetPortRecord", "TargetWidthRule",
 ]
