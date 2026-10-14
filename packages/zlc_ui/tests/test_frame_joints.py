@@ -21,6 +21,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+from typing import Callable
 
 import pytest
 
@@ -69,22 +70,63 @@ def native_ratio() -> float:
     return float(native)
 
 
-@pytest.mark.parametrize("scale", SCALES)
-@pytest.mark.parametrize("dpr", DPRS)
-def test_frame_joints(dpr: float, scale: float, native_ratio: float, tmp_path: Path) -> None:
-    completed = _run(json.dumps({"dpr": dpr, "scale": scale, "crops": str(tmp_path)}), dpr / native_ratio)
-    assert completed.returncode != 3, f"the harness did not produce DPR {dpr}: {completed.stdout[-300:]}"
-    assert completed.returncode == 0, completed.stderr[-3000:] or completed.stdout[-3000:]
-    line = next(
-        (text for text in completed.stdout.splitlines() if text.startswith("JOINTS ")), None
-    )
-    assert line is not None, completed.stdout[-2000:]
-    report = json.loads(line[len("JOINTS "):])
-    failures = [
+@pytest.fixture(scope="module")
+def reports(native_ratio: float, tmp_path_factory) -> Callable[[float, float], dict]:
+    """One child per (ratio, scale), run once and read by both tests."""
+
+    cache: dict[tuple[float, float], dict] = {}
+
+    def report(dpr: float, scale: float) -> dict:
+        key = (dpr, scale)
+        if key not in cache:
+            crops = tmp_path_factory.mktemp(f"joints_{dpr:g}_{scale:g}")
+            completed = _run(json.dumps({"dpr": dpr, "scale": scale, "crops": str(crops)}), dpr / native_ratio)
+            assert completed.returncode != 3, f"the harness did not produce DPR {dpr}: {completed.stdout[-300:]}"
+            assert completed.returncode == 0, completed.stderr[-3000:] or completed.stdout[-3000:]
+            line = next(
+                (text for text in completed.stdout.splitlines() if text.startswith("JOINTS ")), None
+            )
+            assert line is not None, completed.stdout[-2000:]
+            cache[key] = json.loads(line[len("JOINTS "):])
+        return cache[key]
+
+    return report
+
+
+def _is_focus_case(entry: dict) -> bool:
+    return "/focus/" in entry["case"] or entry["case"].startswith("focus_ring")
+
+
+def _failures(entries: list[dict]) -> list[str]:
+    return [
         f"{entry['case']} :: {entry['check']} :: {entry['detail']}"
         + (f" [crop {entry['crop']}]" if entry.get("crop") else "")
-        for entry in report["results"]
-        if not entry["ok"]
+        for entry in entries
+        if not entry.get("skip") and not entry["ok"]
     ]
-    assert report["results"], "the child measured nothing"
+
+
+@pytest.mark.parametrize("scale", SCALES)
+@pytest.mark.parametrize("dpr", DPRS)
+def test_frame_joints(dpr: float, scale: float, reports) -> None:
+    report = reports(dpr, scale)
+    entries = [entry for entry in report["results"] if not _is_focus_case(entry)]
+    assert entries, "the child measured nothing"
+    failures = _failures(entries)
+    assert not failures, f"DPR {dpr} scale {scale}:\n" + "\n".join(failures)
+
+
+@pytest.mark.parametrize("scale", SCALES)
+@pytest.mark.parametrize("dpr", DPRS)
+def test_focused_frame_joints(dpr: float, scale: float, reports) -> None:
+    """The focused field and the focus ring: measured only when the real
+    platform gives the test window keyboard focus (another window in front
+    can refuse it), and skipped with that reason when it does not."""
+
+    report = reports(dpr, scale)
+    entries = [entry for entry in report["results"] if _is_focus_case(entry)]
+    if any(entry.get("skip") == "FOCUS-UNAVAILABLE" for entry in entries):
+        pytest.skip("FOCUS-UNAVAILABLE: the platform did not give the test window keyboard focus")
+    assert entries, "the child measured no focus case"
+    failures = _failures(entries)
     assert not failures, f"DPR {dpr} scale {scale}:\n" + "\n".join(failures)

@@ -602,3 +602,52 @@ assert view.form._rows['power'].layout().itemAt(3).widget() is limits['power']
 view.close()
 """
     )
+
+
+def test_list_rules_follow_the_list_when_it_fills_on_screen(run_qt) -> None:
+    """A rule separates items and never closes a list -- also when the
+    manager is already open as the devices load, which is the real flow: a
+    card made under a window on screen is hidden until the layout's queued
+    show reaches it, and a rule decided from isHidden() skipped every new
+    card and left the last one ruled."""
+
+    run_qt(
+        """
+from zlc_ui.device_manager import DeviceManagerView
+from zlc_ui.qt import ensure_qt_app
+app = ensure_qt_app(['device-manager-rules'])
+view = DeviceManagerView()
+view.set_device_choices((('Camera', 'camera.fake', 'camera'),))
+view.resize(1100, 700); view.show(); app.processEvents()
+
+def rules(cards):
+    return {key: card._rule for key, card in cards.items()}
+
+view.set_loaded_devices((('camera', 'qCMOS', 'camera.dcam'), ('seq', 'Seq', 'seq.v'), ('slm', 'SLM', 'slm.v')))
+assert rules(view._loaded_cards) == {'camera': True, 'seq': True, 'slm': False}, rules(view._loaded_cards)
+app.processEvents()
+view.set_loaded_devices((('camera', 'qCMOS', 'camera.dcam'), ('seq', 'Seq', 'seq.v'),
+                         ('slm', 'SLM', 'slm.v'), ('dds', 'DDS', 'dds.v')))
+assert rules(view._loaded_cards)['slm'] and not rules(view._loaded_cards)['dds']
+
+view.set_devices((('c1', 'one', 'camera.fake', 'camera'),))
+app.processEvents()
+view.set_devices((('c1', 'one', 'camera.fake', 'camera'), ('c2', 'two', 'camera.fake', 'camera')))
+assert rules(view._cards) == {'c1': True, 'c2': False}, rules(view._cards)
+
+view.set_discovered_devices((('d1', 'one', 'camera.fake', False), ('d2', 'two', 'camera.fake', False)))
+frames = {key: widgets[0]._rule for key, widgets in view._discovered_widgets.items()}
+assert frames == {'d1': True, 'd2': False}, frames
+
+# Cards that stand side by side name themselves on one baseline: every
+# card's title row is card_title_row, so Camera and Discovered hardware
+# share one.
+app.processEvents()
+from zlc_ui.fluent import FluentLabel
+def title(text):
+    label = next(label for label in view.findChildren(FluentLabel) if label.text() == text and label.isVisible())
+    return label.mapTo(view, label.rect().topLeft()).y() + label.contentsRect().top()
+camera, discovered = title('Camera'), title('Discovered hardware')
+assert camera == discovered, (camera, discovered)
+"""
+    )

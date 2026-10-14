@@ -188,7 +188,8 @@ def spin_case(kind: str, state: str, offset: int) -> None:
     height = box.height()
     show(host)
     if not spin_state(box, host, state):
-        RESULTS.append({"case": case, "check": "state", "ok": True, "detail": "FOCUS-UNAVAILABLE", "skip": True})
+        RESULTS.append({"case": case, "check": "state", "ok": False, "detail": "no keyboard focus",
+                        "skip": "FOCUS-UNAVAILABLE"})
         host.close()
         return
     pump(0.1)
@@ -216,9 +217,10 @@ def spin_case(kind: str, state: str, offset: int) -> None:
     contiguous = bool(lit) and lit == list(range(lit[0], lit[0] + len(lit)))
     check(case, "T-S1 divider columns", contiguous and len(lit) == BD and lit[0] == expected_first,
           f"edge {hexs(edge)} cols {lit} expected {BD} from {expected_first}", image=image, box=crop)
+    # The checks below are judged on their own, at the columns the divider
+    # should hold when T-S1 found none: one failure must not hide the rest.
     if not lit:
-        host.close()
-        return
+        lit = list(range(expected_first, expected_first + BD))
     first, last = lit[0], lit[-1]
     rows_bad = [y for y in range(y0, y1) for x in lit if not eq(image[y, x], edge)]
     check(case, "T-S2 divider meets top and bottom", not rows_bad,
@@ -296,38 +298,159 @@ def spin_case(kind: str, state: str, offset: int) -> None:
             else:
                 check(case, "T-H1 tint over bottom edge", eq(image[y1 - BD - 1, column_x], tint),
                       hexs(image[y1 - BD - 1, column_x]), image=image, box=crop)
+            corner_case(case, image, box, state, tint, ground, x1, y0, y1)
     host.close()
 
 
-def chip_case() -> None:
-    """The step chip under the pointer: a pill clear of the frame and the
-    divider on every side."""
+def corner_case(case, image, box, state, tint, ground, x1, y0, y1) -> None:
+    """T-H3: at the rounded corner the tint meets the frame's arc with no
+    ground between them (concentric: the field's radius less the edge),
+    row by row, and it does not run over the arc."""
 
-    case = "dspin/chip_hover"
-    host = Host(220, 80)
-    box = make_spin("dspin")
-    box.setParent(host)
-    box.setGeometry(16, 16, 160, box.sizeHint().height())
+    size = int(math.ceil(F._radius() * DPR)) + 2 * BD
+    rows = range(y0, y0 + size) if state == "hover_up" else range(y1 - size, y1)
+    gaps, over = [], []
+    for y in rows:
+        line = [image[y, x] for x in range(x1 - 1, x1 - 1 - size, -1)]
+        tinted = [i for i, pixel in enumerate(line) if eq(pixel, tint)]
+        if not tinted:
+            continue
+        start = tinted[0]
+        # Between the frame's ink and the tint: nothing at the ground colour.
+        if any(eq(pixel, ground) for pixel in line[:start]):
+            gaps.append(y)
+        # The frame's ink is the darkest; the tint never replaces all of it.
+        darkest = min(int(pixel.sum()) for pixel in line[:start]) if start else None
+        if darkest is None or darkest >= int(tint.sum()):
+            over.append(y)
+    corner = (x1 - size - 4, rows.start - 4, x1 + 2, rows.stop + 4)
+    check(case, "T-H3 tint concentric with the corner (no ground, no overrun)", not gaps and not over,
+          f"ground rows {gaps[:6]} overrun rows {over[:6]}", image=image, box=corner)
+
+
+def _chip_box(host, width: int, *, step: float = 1.0, value: float = 11.0):
+    box = F.FluentDoubleSpinBox(host)
+    box.setRange(0.0, 100.0)
+    box.setSingleStep(step)
+    box.setValue(value)
+    box.setGeometry(16, 16, width, box.sizeHint().height())
+    return box
+
+
+def chip_case(styled: bool) -> None:
+    """The step chip: smaller than the digits in any window (a window-level
+    font sheet overrides setFont), its text centred on its INK inside the
+    hover pill, the pill clear of the frame and the divider."""
+
+    case = f"dspin/chip/{'styled' if styled else 'plain'}"
+    host = Host(260, 80)
+    if styled:
+        host.setStyleSheet(F.fluent_widget_stylesheet())
+    box = _chip_box(host, 180)
     show(host)
     chip = box._step_chip
+    pump(0.1)
+    if not check(case, "T-B chip shown", chip.isVisible(), f"text {box.text()!r} width {box.width()}"):
+        host.close()
+        return
+    image = grab(host)
+    ox, oy = box.x(), box.y()
+    inner = F.frame_inner_rect(box)
+    ground = image[dev(oy + box.height() / 2.0), dev(ox) + 3 * BD]
+    line = box.lineEdit().geometry()
+    digits = ink_box(image, dev(ox + line.x()), dev(oy + inner.top()) + 1,
+                     dev(ox + chip.x()) - 1, dev(oy + inner.bottom()) - 1, ground, threshold=80)
+    chip_rect = chip.geometry().translated(box.pos())
+    step = ink_box(image, edge_px(chip_rect.x()), edge_px(chip_rect.y()),
+                   edge_px(chip_rect.x() + chip_rect.width()), edge_px(chip_rect.y() + chip_rect.height()),
+                   ground, threshold=60)
+    crop = (dev(ox), dev(oy) - 2, dev(ox + box.width()) + 2, dev(oy + box.height()) + 2)
+    if digits is None or step is None:
+        check(case, "T-B digits and step drawn", False, f"digits {digits} step {step}", image=image, box=crop)
+    else:
+        digit_height = digits[3] - digits[1] + 1
+        step_height = step[3] - step[1] + 1
+        check(case, "T-B step smaller than the digits", step_height < digit_height,
+              f"step ink {step_height} px, digits {digit_height} px (chip font "
+              f"{chip.ink_font().pointSizeF():.2f} pt, box {box.font().pointSizeF():.2f} pt)",
+              image=image, box=crop)
     chip.setAttribute(QtCore.Qt.WA_UnderMouse, True)
     chip.repaint()
     pump(0.05)
     image = grab(host)
-    geometry = chip.geometry().translated(box.pos())
-    row = dev(geometry.y() + geometry.height() / 2.0)
-    ground = image[row, dev(box.x()) + 3 * BD + 1]
-    pill = image[row, dev(geometry.x() + 2)]
-    divider = edge_px(box.x() + F._spin_stepper_cells(box)[0])
-    gap = [x for x in range(edge_px(geometry.x() + geometry.width()), divider) if eq(image[row, x], ground)]
-    middle = dev(geometry.x() + geometry.width() / 2.0)
-    above = image[edge_px(geometry.y()) - 1, middle]
-    below = image[edge_px(geometry.y() + geometry.height()), middle]
-    crop = (dev(geometry.x()) - 6, dev(box.y()) - 2, divider + 6, dev(box.y() + box.height()) + 2)
-    check(case, "T-B hovered chip is a pill clear of frame and divider",
-          not eq(pill, ground) and bool(gap) and eq(above, ground) and eq(below, ground),
-          f"pill {hexs(pill)} ground {hexs(ground)} gap cols {gap} above {hexs(above)} below {hexs(below)}",
-          image=image, box=crop)
+    pill = chip.pill().translated(chip_rect.x(), chip_rect.y())
+    cx, cy = dev(pill.center().x()), dev(pill.center().y())
+    # The pill's extent, scanned from outside along its centre lines (the
+    # text is inside, so the first non-ground pixel is the pill's edge).
+    top = next((y for y in range(edge_px(chip_rect.y()) - 2, cy) if not eq(image[y, cx], ground)), None)
+    bottom = next((y for y in range(edge_px(chip_rect.y() + chip_rect.height()) + 1, cy, -1)
+                   if not eq(image[y, cx], ground)), None)
+    left = next((x for x in range(edge_px(chip_rect.x()) - 2, cx) if not eq(image[cy, x], ground)), None)
+    right = next((x for x in range(edge_px(chip_rect.x() + chip_rect.width()) + 1, cx, -1)
+                  if not eq(image[cy, x], ground)), None)
+    divider = edge_px(ox + F._spin_stepper_cells(box)[0])
+    hover_crop = (dev(chip_rect.x()) - 8, dev(oy) - 2, divider + 8, dev(oy + box.height()) + 2)
+    if None in (top, bottom, left, right):
+        check(case, "T-B hovered pill drawn", False, f"{top} {bottom} {left} {right}", image=image, box=hover_crop)
+        host.close()
+        return
+    tint = image[(top + bottom) // 2, left + max(1, (bottom - top) // 2) // 2 + 1]
+    clear = (eq(image[top - 1, cx], ground) and eq(image[bottom + 1, cx], ground)
+             and right < divider - 1 and top > dev(oy + inner.top()) and bottom < dev(oy + inner.bottom()) - 1)
+    check(case, "T-B hovered chip is a pill clear of frame and divider", clear and not eq(tint, ground),
+          f"pill rows {top}..{bottom} cols {left}..{right} divider {divider} tint {hexs(tint)}",
+          image=image, box=hover_crop)
+    text = ink_box(image, left + 1, top + 1, right, bottom, tint, threshold=90)
+    if text is None:
+        check(case, "T-B hovered text drawn", False, "no ink in the pill", image=image, box=hover_crop)
+    else:
+        pill_centre = ((left + right + 1) / 2.0, (top + bottom + 1) / 2.0)
+        ink_centre = ((text[0] + text[2] + 1) / 2.0, (text[1] + text[3] + 1) / 2.0)
+        # Half a device pixel: the text's origin is snapped to one.
+        tolerance = 0.5
+        check(case, "T-B hovered text centred on its ink",
+              abs(ink_centre[0] - pill_centre[0]) <= tolerance and abs(ink_centre[1] - pill_centre[1]) <= tolerance,
+              f"ink centre {ink_centre} pill centre {pill_centre} (ink {text}, pill {left},{top},{right},{bottom})",
+              image=image, box=hover_crop)
+    host.close()
+
+
+def chip_narrow_case() -> None:
+    """The chip yields to the digits: at every width it either fits beside
+    the number the box would show without it, or it is not there -- it
+    never rounds the value and never reaches past the frame."""
+
+    case = "dspin/chip_narrow"
+    host = Host(260, 120)
+    widths = (160, 120, 90, 70, 60, 48)
+    pairs = []
+    for width in widths:
+        box = _chip_box(host, width, step=0.001, value=1.234)
+        twin = _chip_box(host, width, step=0.001, value=1.234)
+        twin.move(16, 60)
+        # The same box with no chip to show.
+        twin._offers_step_chip = lambda: False
+        twin._refresh_step_chip()
+        pairs.append((width, box, twin))
+    show(host)
+    pump(0.1)
+    bad = []
+    for width, box, twin in pairs:
+        twin.setValue(1.234)
+        box.setValue(1.234)
+        chip = box._step_chip
+        inner = F.frame_inner_rect(box)
+        line = box.lineEdit().geometry()
+        text_end = line.x() + line.width() - box.lineEdit().textMargins().right()
+        if box.text() != twin.text():
+            bad.append(f"w{width}: shows {box.text()!r}, {twin.text()!r} without the chip")
+        if chip.isVisible() and (chip.x() < inner.left() or chip.x() < text_end):
+            bad.append(f"w{width}: chip at {chip.x()} past the frame {inner.left()} or the digits {text_end}")
+        if chip.isVisible() and box.fontMetrics().horizontalAdvance(box.text()) + 2 > text_end - line.x():
+            bad.append(f"w{width}: {box.text()!r} does not fit beside the chip")
+        box.hide()
+        twin.hide()
+    check(case, "T-B chip never rounds the value nor leaves the frame", not bad, "; ".join(bad))
     host.close()
 
 
@@ -530,17 +653,29 @@ def panel_card_case() -> None:
     host.close()
 
 
-def table_case(fitted: bool) -> None:
-    case = f"table/{'fitted' if fitted else 'free'}"
-    host = Host(360, 280)
-    table = F.FluentTableView(host)
-    model = QtGui.QStandardItemModel(4, 3, host)
+def table_case(fitted: bool, host_kind: str = "plain", rows: int = 4) -> None:
+    case = f"table/{'fitted' if fitted else 'free'}/{host_kind}/r{rows}"
+    host = Host(380, 300)
+    if host_kind == "frame":
+        holder = F.FluentFrame(host)
+    elif host_kind == "group":
+        holder = F.FluentGroupBox("Data", host)
+    else:
+        holder = None
+    table = F.FluentTableView(holder or host)
+    model = QtGui.QStandardItemModel(rows, 3, host)
     model.setHorizontalHeaderLabels(["A", "B", "C"])
-    for r in range(4):
+    for r in range(rows):
         for c in range(3):
             model.setItem(r, c, QtGui.QStandardItem(f"{r}{c}"))
     table.setModel(model)
-    table.setGeometry(16, 16, 300, 220)
+    if holder is not None:
+        layout = QtWidgets.QVBoxLayout(holder)
+        layout.setContentsMargins(12, 28 if host_kind == "group" else 12, 12, 12)
+        layout.addWidget(table)
+        holder.setGeometry(8, 8, 340, 264)
+    else:
+        table.setGeometry(16, 16, 300, 220)
     if fitted:
         table.set_content_rows_limit(10)
         table.resize(300, table.minimumHeight())
@@ -549,7 +684,8 @@ def table_case(fitted: bool) -> None:
     show(host)
     pump(0.2)
     image = grab(host)
-    ox, oy = table.x(), table.y()
+    origin = table.mapTo(host, QtCore.QPoint(0, 0))
+    ox, oy = origin.x(), origin.y()
     x0, y0 = edge_px(ox), edge_px(oy)
     x1, y1 = edge_px(ox + table.width()), edge_px(oy + table.height())
     viewport = table.viewport().geometry()
@@ -566,31 +702,52 @@ def table_case(fitted: bool) -> None:
             count += 1
         return count
 
-    inner_right = x1 - BD
+    inner = F.frame_inner_rect(table)
+    in_left, in_top = edge_px(ox + inner.left()), edge_px(oy + inner.top())
+    inner_right = x1 - BD if INTEGRAL else x1 - BD - 1
     if INTEGRAL:
-        # The frame and the header rules are the style sheet's own borders,
-        # whole device pixels only at a whole ratio (R1).
+        # The frame is the style sheet's own border, whole device pixels
+        # only at a whole ratio (R1).
         top_edge = run_from([image[y, xmid] for y in range(y0, y1)], edge)
         bottom_edge = run_from([image[y, xmid] for y in range(y1 - 1, y0, -1)], edge)
         check(case, "T-P2 top and bottom edges one edge-width", top_edge == BD and bottom_edge == BD,
               f"top {top_edge} bottom {bottom_edge} want {BD}", image=image, box=crop)
-        header = table.horizontalHeader().geometry()
-        rule_y = edge_px(oy + header.y() + header.height()) - BD
-        gaps = [x for x in range(edge_px(ox + header.x()), inner_right) if not eq(image[rule_y, x], edge)]
-        check(case, "T-P2 header rule reaches the frame", not gaps, f"row {rule_y} gaps {gaps[:6]}",
-              image=image, box=(inner_right - 12 * BD, rule_y - 6 * BD, x1 + 2, rule_y + 6 * BD))
-    else:
-        inner_right = x1 - BD - 1
-    row_y = edge_px(oy + viewport.y() + table.rowViewportPosition(2) + table.rowHeight(2)) - BD
-    gaps = [x for x in range(edge_px(ox + viewport.x()), inner_right) if not eq(image[row_y, x], edge)]
+    # The header rules are painted (R2): exact at every ratio.
+    header = table.horizontalHeader().geometry()
+    side = table.verticalHeader().geometry()
+    rule_y = edge_px(oy + F.device_snap(table, header.bottom() + 1, axis="y")) - BD
+    rule_x = edge_px(ox + F.device_snap(table, side.right() + 1)) - BD
+    rule = image[rule_y, dev(ox + header.x() + header.width() / 2.0)]
+    # The rules end with the viewport, or at the frame's inner edge where a
+    # fractional ratio lets the viewport run into the edge's partial pixel.
+    view_right = min(edge_px(ox + viewport.x() + viewport.width()), edge_px(ox + inner.right()))
+    view_bottom = min(edge_px(oy + viewport.y() + viewport.height()), edge_px(oy + inner.bottom()))
+    across = [x for x in range(in_left, view_right) for y in range(rule_y, rule_y + BD) if not eq(image[y, x], rule)]
+    check(case, "T-P2 header rule runs frame to viewport end through the corner", not across,
+          f"rule {hexs(rule)} row {rule_y} off at cols {sorted(set(across))[:8]} ({in_left}..{view_right})",
+          image=image, box=(x0 - 2, rule_y - 8 * BD, x0 + 30 * BD, rule_y + 8 * BD))
+    down = [y for y in range(in_top, view_bottom) for x in range(rule_x, rule_x + BD) if not eq(image[y, x], rule)]
+    check(case, "T-P2 row-header rule runs frame to viewport end through the corner", not down,
+          f"col {rule_x} off at rows {sorted(set(down))[:8]} ({in_top}..{view_bottom})",
+          image=image, box=(rule_x - 8 * BD, y0 - 2, rule_x + 8 * BD, y0 + 30 * BD))
+    # No hook: nothing rule-coloured just above the rule's ends or beside
+    # the row-header rule's ends.
+    hooks = [(x, y) for x in (in_left, view_right - 1) for y in range(rule_y - 3 * BD, rule_y)
+             if eq(image[y, x], rule) and not eq(image[y, x], image[rule_y - 4 * BD, dev(ox + header.x() + 4)])]
+    hooks += [(x, y) for y in (view_bottom - 1,) for x in range(rule_x + BD, rule_x + 4 * BD)
+              if eq(image[y, x], rule) and y < rule_y]
+    check(case, "T-P2 header rule ends square", not hooks, f"hook pixels {hooks[:6]}",
+          image=image, box=(view_right - 12 * BD, rule_y - 8 * BD, x1 + 2, rule_y + 8 * BD))
+    if not table.verticalScrollBar().isVisible():
+        frame_right = edge_px(ox + inner.right())
+        check(case, "T-P2 header rule reaches the frame", view_right == frame_right,
+              f"rule ends {view_right}, frame inner edge {frame_right}",
+              image=image, box=(frame_right - 12 * BD, rule_y - 6 * BD, x1 + 2, rule_y + 6 * BD))
+    row_index = min(2, rows - 2)
+    row_y = edge_px(oy + viewport.y() + table.rowViewportPosition(row_index) + table.rowHeight(row_index)) - BD
+    gaps = [x for x in range(edge_px(ox + viewport.x()), min(inner_right, view_right)) if not eq(image[row_y, x], rule)]
     check(case, "T-P2 row rule reaches the frame", not gaps, f"row {row_y} gaps {gaps[:6]}",
           image=image, box=(inner_right - 12 * BD, row_y - 6 * BD, x1 + 2, row_y + 6 * BD))
-    vertical = table.verticalHeader().geometry()
-    rule_x = edge_px(ox + vertical.x() + vertical.width()) - BD
-    if INTEGRAL:
-        gaps = [y for y in range(edge_px(oy + viewport.y()), y1 - BD) if not eq(image[y, rule_x], edge)]
-        check(case, "T-P2 row-header rule reaches the frame", not gaps, f"col {rule_x} gaps {gaps[:6]}",
-              image=image, box=(rule_x - 6 * BD, y1 - 20 * BD, rule_x + 6 * BD, y1 + 2))
     cell = table.visualRect(model.index(1, 1))
     cx = dev(ox + viewport.x() + cell.center().x())
     cy = dev(oy + viewport.y() + cell.center().y())
@@ -607,7 +764,7 @@ def table_case(fitted: bool) -> None:
           f"{counts} outline {hexs(outline)}", image=image,
           box=(dev(ox + viewport.x() + cell.left()) - 6, top_y - 6, dev(ox + viewport.x() + cell.right()) + 6,
                dev(oy + viewport.y() + cell.bottom()) + 6))
-    if INTEGRAL:
+    if INTEGRAL and host_kind == "plain":
         ground = image[y0 - 2, x0 + 8 * BD]
         size = int(math.ceil(F._radius() * DPR)) + BD
         tl, tr, bl, br = corner_masks(image, x0, y0, x1, y1, size, ground)
@@ -617,29 +774,39 @@ def table_case(fitted: bool) -> None:
     host.close()
 
 
-def frame_rule_case() -> None:
-    case = "frame_rule"
-    host = Host(260, 120)
+def frame_rule_case(offset: int) -> None:
+    """The rule is the bottom edge-width of the item, whole device pixels
+    of full ink, placed from the frame -- at a fractional origin too."""
+
+    case = f"frame_rule/o{offset}"
+    host = Host(260, 130)
     first = F.FluentFrame(host, rule=True)
-    first.setGeometry(16, 16, 200, 40)
-    second = F.FluentFrame(host, rule=True)
-    second.setGeometry(16, 64, 200, 40)
-    second.set_rule(False)
+    first.setGeometry(offset, offset, 200, 40)
+    second = F.FluentFrame(host, bordered=False, rule=False)
+    second.setGeometry(offset, offset + 48, 200, 40)
     show(host)
     pump(0.1)
     image = grab(host)
-    xmid = dev(16 + 100)
-    y1 = edge_px(16 + 40)
-    ground = image[edge_px(16 + 20), xmid]
-    rows = [image[y, xmid] for y in range(y1 - BD, y1)]
-    rule = rows[0]
+    xmid = dev(offset + 100)
+    # The device rows whose top lies inside the item's last logical
+    # edge-width: exactly the rule.
+    bottom = F.device_snap(first, first.height(), axis="y")
+    want = list(range(edge_px(offset + bottom - F.frame_border_px(first)), edge_px(offset + bottom)))
+    ground = image[edge_px(offset + 20), xmid]
+    lit = [y for y in range(edge_px(offset + 20), edge_px(offset + 40)) if not eq(image[y, xmid], ground)]
+    colours = {hexs(image[y, xmid]) for y in lit}
     check(case, "T-P3 rule is the bottom edge-width, full intensity",
-          all(eq(row, rule) for row in rows) and not eq(rule, ground) and eq(image[y1 - BD - 1, xmid], ground),
-          f"rule rows {[hexs(r) for r in rows]} above {hexs(image[y1 - BD - 1, xmid])}",
-          image=image, box=(xmid - 8, y1 - 8 * BD, xmid + 8, y1 + 4))
-    y2 = edge_px(64 + 40)
-    check(case, "T-P3 set_rule(False) draws none", eq(image[y2 - 1, xmid], ground),
-          hexs(image[y2 - 1, xmid]), image=image, box=(xmid - 8, y2 - 8 * BD, xmid + 8, y2 + 4))
+          lit == want and len(want) == BD and len(colours) == 1,
+          f"rule rows {lit} want {want} colours {colours}",
+          image=image, box=(xmid - 8, want[0] - 8 * BD if want else 0, xmid + 8, (want[-1] if want else 0) + 4 * BD))
+    # Where the second item's rule would be: its last edge-width, no rule ink.
+    bottom2 = F.device_snap(second, second.height(), axis="y")
+    rows2 = range(edge_px(offset + 48 + bottom2 - F.frame_border_px(second)), edge_px(offset + 48 + bottom2))
+    rule = image[lit[0], xmid] if lit else None
+    inked = [y for y in rows2 if rule is not None and eq(image[y, xmid], rule)]
+    check(case, "T-P3 an item without a rule draws none", rule is not None and not inked,
+          f"rule-coloured rows {inked}", image=image,
+          box=(xmid - 8, rows2.start - 8 * BD, xmid + 8, rows2.stop + 4))
     host.close()
 
 
@@ -662,10 +829,19 @@ def focus_ring_case() -> None:
         pump(0.05)
     if not button.hasFocus():
         FOCUS_OK = False
-        RESULTS.append({"case": case, "check": "state", "ok": True, "detail": "FOCUS-UNAVAILABLE", "skip": True})
+        RESULTS.append({"case": case, "check": "state", "ok": False, "detail": "no keyboard focus",
+                        "skip": "FOCUS-UNAVAILABLE"})
         host.close()
         return
-    pump(0.1)
+    # The ring is shown for a keyboard reason once the focus event is
+    # delivered; poll for it the way focus itself is polled.
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        pump(0.05)
+        ring = getattr(button, "_zlc_focus_ring", None)
+        if ring is not None and ring.isVisible():
+            break
+    pump(0.05)
     ring = getattr(button, "_zlc_focus_ring", None)
     check(case, "T-P4 ring shown outside a zero-margin parent",
           ring is not None and ring.isVisible() and ring.parentWidget() is not holder,
@@ -745,8 +921,9 @@ def tabs_case() -> None:
 
 
 def grid_case() -> None:
-    """A chosen card and an empty one have one outer extent, and their
-    outlines are whole device pixels."""
+    """A chosen card and an empty one have one outer extent on both axes,
+    every card stands on even gutters, and the outlines are whole device
+    pixels."""
 
     case = "grid"
     host = Host(360, 200)
@@ -763,22 +940,43 @@ def grid_case() -> None:
     viewport = grid.viewport()
     origin = viewport.mapTo(host, QtCore.QPoint(0, 0))
 
-    def extent(row, column):
-        rect = grid.visualRect(grid.model().index(row, column))
-        cx = dev(origin.x() + rect.center().x())
-        y0, y1 = edge_px(origin.y() + rect.top()), edge_px(origin.y() + rect.bottom() + 1)
-        ground = image[y0, cx]
-        rows = [y for y in range(y0, y1) if not eq(image[y, cx], ground)]
-        return (rows[0], rows[-1]) if rows else None, cx, ground
+    def card(row, column):
+        """(left, top, right, bottom) device px of the card's ink, scanned
+        from the cell's edges inward along its centre lines, and the
+        cell's own device box."""
 
-    chosen, cx, ground = extent(0, 0)
-    empty, ex, _ = extent(0, 1)
-    crop = (cx - 40, (chosen or (0, 0))[0] - 6, ex + 40, (chosen or (0, 0))[1] + 6)
-    check(case, "T-P5 chosen and empty cards share one extent", chosen is not None and chosen == empty,
-          f"chosen rows {chosen} empty rows {empty}", image=image, box=crop)
-    if INTEGRAL and empty is not None:
-        outline = image[empty[0], ex]
-        rows = [image[y, ex] for y in range(empty[0], empty[0] + BD + 1)]
+        rect = grid.visualRect(grid.model().index(row, column))
+        cx, cy = dev(origin.x() + rect.center().x()), dev(origin.y() + rect.center().y())
+        cell = (edge_px(origin.x() + rect.left()), edge_px(origin.y() + rect.top()),
+                edge_px(origin.x() + rect.left() + rect.width()), edge_px(origin.y() + rect.top() + rect.height()))
+        ground = image[cell[1], cx]
+        top = next((y for y in range(cell[1], cy) if not eq(image[y, cx], ground)), None)
+        bottom = next((y for y in range(cell[3] - 1, cy, -1) if not eq(image[y, cx], ground)), None)
+        left = next((x for x in range(cell[0], cx) if not eq(image[cy, x], ground)), None)
+        right = next((x for x in range(cell[2] - 1, cx, -1) if not eq(image[cy, x], ground)), None)
+        return (left, top, right, bottom), cell
+
+    chosen, chosen_cell = card(0, 0)
+    empty, empty_cell = card(0, 1)
+    crop = (chosen_cell[0] - 6, chosen_cell[1] - 6, empty_cell[2] + 6, empty_cell[3] + 6)
+    sizes = [None if None in box else (box[2] - box[0], box[3] - box[1]) for box in (chosen, empty)]
+    check(case, "T-P5 chosen and empty cards share one extent (both axes)",
+          None not in sizes and sizes[0] == sizes[1], f"chosen {chosen} {sizes[0]} empty {empty} {sizes[1]}",
+          image=image, box=crop)
+    slack = 0 if INTEGRAL else 1
+    gutters = []
+    for box, cell in ((chosen, chosen_cell), (empty, empty_cell)):
+        if None in box:
+            continue
+        gutters.append((box[0] - cell[0], cell[2] - 1 - box[2], box[1] - cell[1], cell[3] - 1 - box[3]))
+    even = all(abs(g[0] - g[1]) <= slack and abs(g[2] - g[3]) <= slack for g in gutters) and len(gutters) == 2
+    check(case, "T-P5 even gutters: left = right, top = bottom, same for every card", even
+          and len({g for g in gutters}) == 1 if INTEGRAL else even,
+          f"gutters (l, r, t, b) {gutters}", image=image, box=crop)
+    if INTEGRAL and None not in empty:
+        ex = (empty[0] + empty[2]) // 2
+        outline = image[empty[1], ex]
+        rows = [image[y, ex] for y in range(empty[1], empty[1] + BD + 1)]
         whole = all(eq(row, outline) for row in rows[:BD]) and not eq(rows[BD], outline)
         check(case, "T-P5 outline is whole device pixels", whole,
               f"top rows {[hexs(r) for r in rows]}", image=image, box=crop)
@@ -786,8 +984,9 @@ def grid_case() -> None:
 
 
 def segmented_case() -> None:
-    """The current face is concentric with the track: its rim is the same
-    along the diagonal of the corner as along the straight edge."""
+    """The current face is concentric with the track: placed one rim
+    inside it, with the track's radius less the rim, so along the corner's
+    diagonal the face starts where a concentric arc would."""
 
     case = "segmented"
     host = Host(300, 80)
@@ -798,35 +997,42 @@ def segmented_case() -> None:
     show(host)
     pump(0.2)
     image = grab(host)
-    x0, y0 = edge_px(control.x()), edge_px(control.y())
     first = control.button(1)
-    fy = edge_px(control.y() + first.y())
-    fx = edge_px(control.x() + first.x())
+    rim = first.x()
+    check(case, "T-P6 current face one rim inside the track",
+          first.x() == first.y() == control.height() - first.y() - first.height() and rim > 0,
+          f"face {first.geometry().getRect()} track {control.width()}x{control.height()}")
+    x0, y0 = edge_px(control.x()), edge_px(control.y())
     background = image[y0 - 2, x0 + 20]
     track = image[y0 + max(1, BD // 2), x0 + 20 * BD]
-    middle = dev(control.x() + first.x() + first.width() / 2.0)
-    straight = fy - next(y for y in range(y0 - 2, fy + 1) if not eq(image[y, middle], background))
 
-    def first_off(colour, limit):
-        for step in range(limit):
-            if not eq(image[y0 + step, x0 + step], colour):
+    def diagonal_start(differs, start=0, limit=80):
+        for step in range(start, limit):
+            if differs(image[y0 + step, x0 + step]):
                 return step
         return None
 
-    outer = first_off(background, 40)
-    inner = None
-    if outer is not None:
-        for step in range(outer, 60):
-            pixel = image[y0 + step, x0 + step]
-            if np.abs(pixel - track).max() > 24 and np.abs(pixel - background).max() > 24:
-                inner = step
-                break
-    diagonal = None if inner is None or outer is None else (inner - outer) * math.sqrt(2.0)
-    check(case, "T-P6 current face concentric with the track",
-          # A diagonal is read in whole diagonal steps of sqrt(2) device px.
-          diagonal is not None and abs(diagonal - straight) <= math.sqrt(2.0) + 1e-6 + (0 if INTEGRAL else 1),
-          f"straight rim {straight} diagonal rim {diagonal}", image=image,
-          box=(x0 - 4, y0 - 4, fx + 20 * BD, fy + 20 * BD))
+    def half(colour_a, colour_b):
+        # Past half way from one colour to the other: where an
+        # antialiased edge's coverage passes one half.
+        span = np.abs(np.asarray(colour_b) - np.asarray(colour_a)).max()
+        return lambda pixel: np.abs(np.asarray(pixel) - np.asarray(colour_a)).max() > span / 2.0
+
+    outer = diagonal_start(half(background, track))
+    face_edge = image[edge_px(control.y() + first.y() + first.height() / 2.0), edge_px(control.x() + rim)]
+    inner = None if outer is None else diagonal_start(half(track, face_edge), outer + 1)
+    radius = F._radius() * DPR
+    rim_px = rim * DPR
+    # Concentric arcs about one centre (radius, radius): the track's at
+    # radius R, the face's at R - rim.  Along the diagonal they lie at
+    # R(1 - 1/sqrt 2) and R - (R - rim)/sqrt 2 from the corner.
+    want_outer = radius * (1.0 - 1.0 / math.sqrt(2.0))
+    want_inner = radius - (radius - rim_px) / math.sqrt(2.0)
+    ok = (outer is not None and inner is not None
+          and abs(outer - want_outer) <= 1.0 and abs(inner - want_inner) <= 1.0)
+    check(case, "T-P6 current face concentric with the track", ok,
+          f"diagonal: track at {outer} (want {want_outer:.2f}), face at {inner} (want {want_inner:.2f})",
+          image=image, box=(x0 - 4, y0 - 4, x0 + 24 * BD, y0 + 24 * BD))
     host.close()
 
 
@@ -952,9 +1158,11 @@ def main() -> None:
         if not INTEGRAL:
             cases.append((spin_case, (kind, "rest", 17)))
     cases += [
-        (chip_case, ()), (chevron_case, ()), (column_case, ()), (form_case, ()),
+        (chip_case, (False,)), (chip_case, (True,)), (chip_narrow_case, ()),
+        (chevron_case, ()), (column_case, ()), (form_case, ()),
         (panel_card_case, ()), (table_case, (False,)), (table_case, (True,)),
-        (frame_rule_case, ()), (focus_ring_case, ()), (tabs_case, ()), (grid_case, ()),
+        (table_case, (False, "frame")), (table_case, (False, "group")), (table_case, (False, "frame", 40)),
+        (frame_rule_case, (16,)), (frame_rule_case, (17,)), (focus_ring_case, ()), (tabs_case, ()), (grid_case, ()),
         (segmented_case, ()), (round_case, ()), (guides_case, ()),
     ]
     for case, arguments in cases:
