@@ -74,6 +74,7 @@ from .logic import (
     LogicDraftFinalization,
     artifact_input_specs,
     build_arguments,
+    claim_names,
     dataset_inputs,
     device_key_options,
     draft_devices,
@@ -271,9 +272,7 @@ def _claims_projection(
         return {"label": spec.label, "entries": (), "base_dir": base_dir,
                 "file_filter": str(spec.codec.file_filter), "files": (),
                 "reads": None, "problems": (str(error),)}
-    names = tuple(
-        Path(entry["path"]).name or f"row {index + 1}" for index, entry in enumerate(entries)
-    )
+    names = claim_names(entries)
     frames = tuple(entry["frames"] for entry in entries)
     claims = finalization.artifacts.get(spec.name)
     reads = None

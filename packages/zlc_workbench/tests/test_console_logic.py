@@ -1304,21 +1304,21 @@ def test_an_occupancys_frame_claims_survive_its_camera_changing_frame_count(pres
     presenter.view.logic_draft_changed.emit(node_id, {"artifact_inputs": {"calibrations": claims}})
     editor = presenter.view.logic_editors[node_id]["artifact_claims"]["calibrations"]
     assert editor["problems"] == (
-        "load.json names middle frame 2, but the source carries 3 frames (0-2); "
+        "load names middle frame 2, but the source carries 3 frames (0-2); "
         "a numbered middle frame never stands for the first or the last",)
     assert editor["reads"] == ((), (2,), (0, 1))
     presenter.view.logic_draft_changed.emit(camera_id, {"values": {"frames_per_cycle": 2}})
     assert presenter.view.logic_editors[survival_id]["source_frames"] == ("0", "1")
     editor = presenter.view.logic_editors[node_id]["artifact_claims"]["calibrations"]
     assert editor["problems"] == (
-        "load.json names middle frame 2, but the source carries 2 frames (0-1); "
+        "load names middle frame 2, but the source carries 2 frames (0-1); "
         "a numbered middle frame never stands for the first or the last",)
     assert editor["reads"] == ((), (1,), (0,))
     assert presenter.logic[node_id].draft.artifact_inputs == {"calibrations": claims}, (
         "a frame count never edits the draft"
     )
     issues = presenter.logic_editor_projection(node_id)["issues"]
-    assert any("load.json names middle frame 2, but the source carries 2 frames (0-1)" in issue for issue in issues)
+    assert any("load names middle frame 2, but the source carries 2 frames (0-1)" in issue for issue in issues)
     presenter.view.logic_draft_changed.emit(camera_id, {"values": {"frames_per_cycle": 4}})
     editor = presenter.view.logic_editors[node_id]["artifact_claims"]["calibrations"]
     assert editor["problems"] == ()

@@ -133,15 +133,16 @@ class OccupancyProcessor:
         if any(not isinstance(reading, CalibrationReading) for reading in readings):
             raise TypeError("occupancy calibrations must be CalibrationReading")
         self.readings = readings
-        #: How a refusal names each calibration: its file, when it has one.
+        #: How a refusal names each calibration: its file's stem, as the
+        #: editor's rows show it, when it has one.
         self._names = tuple(
-            reading.path.name if reading.path is not None
+            reading.path.stem if reading.path is not None
             else "the calibration" if len(readings) == 1
             else f"calibration {index + 1}"
             for index, reading in enumerate(readings)
         )
         paths = [reading.path for reading in readings if reading.path is not None]
-        repeated = sorted({path.name for path in paths if paths.count(path) > 1})
+        repeated = sorted({path.stem for path in paths if paths.count(path) > 1})
         if repeated:
             raise ValueError(f"{repeated[0]} is listed twice: give it every frame it reads in one row")
         check_claims(tuple(reading.frames for reading in readings), self._names)

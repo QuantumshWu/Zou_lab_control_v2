@@ -665,7 +665,7 @@ def test_descriptor_and_direct_update_keep_the_plugin_boundary() -> None:
     template = next(
         f for f in descriptor.authoring_schema.fields if f.name == "pulse_template"
     )
-    with pytest.raises(ValueError, match=f"Enter {template.label}"):
+    with pytest.raises(ValueError, match=f"{template.label} must be filled in"):
         descriptor.authoring_schema.project_values()
     pulse_only = descriptor.authoring_schema.project_values(
         {"pulse_template": "operator-selected.json"}
