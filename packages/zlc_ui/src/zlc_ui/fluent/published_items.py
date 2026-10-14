@@ -4,19 +4,21 @@ from __future__ import annotations
 
 from PyQt5 import QtCore, QtGui, QtWidgets
 
-from .fluent import fluent_font_size, frame_pen, frame_stroke_rect, scaled_px, _radius
-from .style import DIVIDER, FONT, MUTED_INK, SURFACE, TEXT
+from .fluent import fluent_font_size, scaled_px, _radius
+from .style import BG, FONT, MUTED_INK, TEXT
 
 __all__ = ["PublishedItemsLegend"]
 
 
 class PublishedItemsLegend(QtWidgets.QWidget):
-    """Render ``(name, shape, description)`` rows as small outlined chips.
+    """Render ``(name, shape, description)`` rows as small neutral chips.
 
-    Each item is a hairline chip in the body font -- its name, then its shape
-    in graphite -- and the chips wrap to the width they are given.  It was a
-    monospace ``items:`` block that read like debug output.  The descriptions
-    are the tooltip; :meth:`text` is the same inventory as plain words.
+    Each item is a chip on the BG grey with no edge, in the body font -- its
+    name, then its shape in MUTED_INK -- and the chips wrap to the width they
+    are given.  It was a monospace ``items:`` block that read like debug
+    output, then a white chip in a hairline, one more outline on a white
+    row.  The descriptions are the tooltip; :meth:`text` is the same
+    inventory as plain words.
     """
 
     def __init__(self, parent=None) -> None:
@@ -103,9 +105,9 @@ class PublishedItemsLegend(QtWidgets.QWidget):
         pad_x = scaled_px(8, minimum=6)
         radius = float(_radius())
         for rect, name, shape in chips:
-            painter.setPen(frame_pen(self, DIVIDER))
-            painter.setBrush(QtGui.QColor(SURFACE))
-            painter.drawRoundedRect(frame_stroke_rect(self, QtCore.QRectF(rect)), radius, radius)
+            painter.setPen(QtCore.Qt.NoPen)
+            painter.setBrush(QtGui.QColor(BG))
+            painter.drawRoundedRect(QtCore.QRectF(rect), radius, radius)
             text_rect = rect.adjusted(pad_x, 0, -pad_x, 0)
             painter.setPen(QtGui.QColor(TEXT))
             painter.drawText(text_rect, QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter, name)

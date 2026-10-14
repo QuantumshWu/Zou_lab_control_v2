@@ -16,11 +16,12 @@ from __future__ import annotations
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 from zlc_ui.fluent import (
-    ACCENT,
     ACCENT_TINT,
     DIVIDER,
     MUTED_INK,
     RADIUS,
+    SELECTED,
+    SELECTED_HOVER,
     TEXT,
     FluentButton,
     FluentCardDialog,
@@ -61,7 +62,8 @@ class SignalChooser(FluentCardDialog):
             f"QListWidget::item {{ padding: {scaled_px(6, minimum=4)}px; "
             f"border: 1px solid transparent; border-radius: {scaled_px(RADIUS)}px; }} "
             f"QListWidget::item:hover {{ background: {ACCENT_TINT}; }} "
-            f"QListWidget::item:selected {{ background: {ACCENT}; color: {TEXT}; }}"
+            f"QListWidget::item:selected {{ background: {SELECTED}; color: {TEXT}; }} "
+            f"QListWidget::item:selected:hover {{ background: {SELECTED_HOVER}; }}"
         )
         self._rows = tuple(rows)
         producer = None

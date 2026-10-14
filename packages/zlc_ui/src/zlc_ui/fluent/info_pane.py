@@ -38,7 +38,6 @@ from .fluent import (
 from .style import (
     ACCENT,
     ACCENT_TINT,
-    BG,
     DIVIDER,
     FONT,
     GRAPHITE,
@@ -48,6 +47,8 @@ from .style import (
     ORANGE_DARK,
     ORANGE_TINT,
     RADIUS,
+    SELECTED,
+    SELECTED_HOVER,
     SURFACE,
     TEXT,
 )
@@ -196,6 +197,11 @@ class InfoTree(QtWidgets.QTreeWidget):
         self.setItemDelegate(_MatchDelegate(self))
         self.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
         self.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        # The row under the pointer, kept from the viewport's own events:
+        # drawRow lays the hover wash on it.
+        self._hover_row = QtCore.QPersistentModelIndex()
+        self.setMouseTracking(True)
+        self.viewport().setAttribute(QtCore.Qt.WA_Hover, True)
         self.setAlternatingRowColors(False)
         self.setFrameShape(QtWidgets.QFrame.NoFrame)
         self.setVerticalScrollMode(QtWidgets.QAbstractItemView.ScrollPerPixel)
@@ -218,6 +224,8 @@ class InfoTree(QtWidgets.QTreeWidget):
         header.setMinimumSectionSize(scaled_px(60, minimum=48))
         header.resizeSection(0, self._name_floor)
         radius = scaled_px(RADIUS, minimum=2)
+        # A cell paints no background of its own: the hover and selection
+        # washes are the ROW's, painted by drawRow.
         self.setStyleSheet(
             f"""
             QTreeView {{
@@ -227,7 +235,7 @@ class InfoTree(QtWidgets.QTreeWidget):
                 border-radius: {radius}px;
                 font: {fluent_font_size()}pt "{FONT}";
                 outline: none;
-                selection-background-color: {ACCENT_TINT};
+                selection-background-color: transparent;
                 selection-color: {TEXT};
                 show-decoration-selected: 1;
             }}
@@ -235,18 +243,58 @@ class InfoTree(QtWidgets.QTreeWidget):
                 border: none;
                 padding: {scaled_px(5, minimum=3)}px;
             }}
-            QTreeView::item:hover:!selected {{
-                background: {BG};
-            }}
-            QTreeView::branch {{
-                background: {SURFACE};
-            }}
-            QTreeView::branch:selected {{
-                background: {ACCENT_TINT};
+            QTreeView::item:selected, QTreeView::item:hover {{
+                background: transparent;
+                color: {TEXT};
             }}
             """
         )
         apply_fluent_scrollbars(self)
+
+    def drawRow(self, painter, option, index) -> None:  # noqa: N802 - Qt naming
+        """A row under the pointer or selected is ONE rounded wash across
+        its whole width, guides and chevron included: ACCENT_TINT under the
+        pointer, SELECTED when selected (SELECTED_HOVER both).  Painted per
+        cell, the selection was a square block broken at the column edge."""
+
+        selected = self.selectionModel() is not None and self.selectionModel().isSelected(index)
+        viewport = self.viewport()
+        hover = self._hover_row
+        hovered = hover.isValid() and hover.row() == index.row() and hover.parent() == index.parent()
+        if selected or hovered:
+            header = self.header()
+            left = header.sectionViewportPosition(header.logicalIndex(0))
+            last = header.logicalIndex(header.count() - 1)
+            right = header.sectionViewportPosition(last) + header.sectionSize(last)
+            row = self.visualRect(index)
+            inset = scaled_px(2, minimum=1)
+            x0 = device_snap(viewport, left + inset)
+            x1 = device_snap(viewport, max(right, viewport.width()) - inset)
+            y0 = device_snap(viewport, row.top(), axis="y")
+            y1 = device_snap(viewport, row.top() + row.height(), axis="y")
+            colour = (SELECTED_HOVER if selected and hovered else SELECTED if selected else ACCENT_TINT)
+            corner = float(scaled_px(RADIUS, minimum=2))
+            painter.save()
+            painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
+            painter.setPen(QtCore.Qt.NoPen)
+            painter.setBrush(QtGui.QColor(colour))
+            painter.drawRoundedRect(QtCore.QRectF(x0, y0, x1 - x0, y1 - y0), corner, corner)
+            painter.restore()
+        super().drawRow(painter, option, index)
+
+    def viewportEvent(self, event) -> bool:  # noqa: N802 - Qt naming
+        kind = event.type()
+        if kind in (QtCore.QEvent.HoverEnter, QtCore.QEvent.HoverMove, QtCore.QEvent.MouseMove):
+            self._set_hover_row(self.indexAt(event.pos()))
+        elif kind in (QtCore.QEvent.HoverLeave, QtCore.QEvent.Leave):
+            self._set_hover_row(QtCore.QModelIndex())
+        return super().viewportEvent(event)
+
+    def _set_hover_row(self, index: QtCore.QModelIndex) -> None:
+        row = index.sibling(index.row(), 0) if index.isValid() else QtCore.QModelIndex()
+        if QtCore.QModelIndex(self._hover_row) != row:
+            self._hover_row = QtCore.QPersistentModelIndex(row)
+            self.viewport().update()
 
     # ---------------------------------------------------------- branches
 
