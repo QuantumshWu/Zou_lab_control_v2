@@ -402,7 +402,9 @@ def test_the_editor_lists_what_the_data_offers_and_commands_are_buttons() -> Non
     from PyQt5 import QtCore, QtTest, QtWidgets
     from zlc_ui.fluent import FluentButton
 
-    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    from zlc_ui.qt import ensure_qt_app
+
+    app = ensure_qt_app(["zlc-derive-editor-test"])
     editor = LOGIC_NODE.ui_contributions[0]()
     drafts = []
     editor.draft_changed.connect(lambda patch: drafts.append(patch["values"]["outputs"]))
