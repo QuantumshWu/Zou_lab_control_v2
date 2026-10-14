@@ -1485,7 +1485,9 @@ def _plot_rows(
     for name, array in sorted(arrays.items()):
         shape = "x".join(str(size) for size in getattr(array, "shape", ()))
         dtype = getattr(getattr(array, "dtype", None), "name", "")
-        reopenable = "" if name in recipes else "  (array only)"
+        # A middle dot, as the viewer separates a value from what it is
+        # everywhere else.
+        reopenable = "" if name in recipes else " · array only"
         rows.append((name, f"{shape} {dtype}{reopenable}".strip()))
     for dataset, recipe in recipes.items():
         rows.append((f"plot {dataset}", f"{recipe['spec'].kind.value}, {recipe['size']}"))

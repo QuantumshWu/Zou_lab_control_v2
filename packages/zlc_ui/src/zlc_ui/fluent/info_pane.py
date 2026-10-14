@@ -21,9 +21,9 @@ from .fluent import (
     FIELD_BORDER_PX,
     FluentButton,
     FluentFrame,
+    FluentLabel,
     FluentLineEdit,
     FluentPathEdit,
-    FluentSectionLabel,
     FluentStatusStrip,
     FluentTabWidget,
     _FluentRoundedMenu,
@@ -32,6 +32,7 @@ from .fluent import (
     fluent_font_size,
     frame_border_px,
     retire_widget,
+    row_gap,
     scaled_px,
     setting_label_width,
     window_pad,
@@ -590,11 +591,13 @@ class _RowsTab(QtWidgets.QWidget):
         super().__init__(parent)
         self.setStyleSheet("background: transparent;")
         layout = QtWidgets.QVBoxLayout(self)
-        gap = scaled_px(6, minimum=4)
+        gap = row_gap()
         # The pane's one inset: the filter and the tree start where the
-        # first tab's underline starts, as the header's words above do.
+        # first tab's underline starts, as the header's words above do, and
+        # one pad under the tab strip, where every tab page of the viewer
+        # starts.
         pad = scaled_px(CARD_PAD)
-        layout.setContentsMargins(pad, gap, pad, gap)
+        layout.setContentsMargins(pad, pad, pad, gap)
         layout.setSpacing(gap)
         self.filter_edit = FluentLineEdit()
         self.filter_edit.setPlaceholderText("filter names and values")
@@ -726,8 +729,11 @@ class InfoPane(QtWidgets.QWidget):
         # tree and the status dot start on one x and end on one x.
         pad = scaled_px(CARD_PAD)
         header.setContentsMargins(pad, scaled_px(6), pad, scaled_px(6))
-        header.setSpacing(scaled_px(8, minimum=5))
-        header.addWidget(FluentSectionLabel(str(path_label)))
+        # The path's name is a row label, read on its field's line at the
+        # row's one gap from it -- a label like the one that names the
+        # chooser on the line beside it, not the title of a section.
+        header.setSpacing(row_gap())
+        header.addWidget(FluentLabel(str(path_label)))
 
         self.path_edit = FluentPathEdit(
             "",
