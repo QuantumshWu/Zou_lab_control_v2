@@ -472,6 +472,231 @@ def form_case() -> None:
     host.close()
 
 
+# ------------------------------------------------------------------ cards, tables, rules, rings
+def corner_masks(image, x0, y0, x1, y1, size, ground):
+    """The four corner squares' ink masks, mirrored onto the top-left one."""
+
+    def mask(region):
+        # The edge's own coverage: pixels darker than the ground outside.
+        return (np.asarray(ground).sum() - region.sum(axis=2)) > 30
+
+    tl = mask(image[y0:y0 + size, x0:x0 + size])
+    tr = mask(image[y0:y0 + size, x1 - size:x1])[:, ::-1]
+    bl = mask(image[y1 - size:y1, x0:x0 + size])[::-1, :]
+    br = mask(image[y1 - size:y1, x1 - size:x1])[::-1, ::-1]
+    return tl, tr, bl, br
+
+
+def mirror_equal(tl, tr, bl, br) -> bool:
+    """The four corners carry the same arc.  An opaque square child laid
+    over a corner erases its whole inner arc (tens of pixels); the style's
+    own antialiased arcs and a different fill beside the edge may differ
+    by a pixel or two, which is not a joint."""
+
+    tolerance = 2 * BD
+    return all(int(np.logical_xor(tl, other).sum()) <= tolerance for other in (tr, bl, br))
+
+
+def panel_card_case() -> None:
+    case = "panel_card"
+    from zlc_ui.console.panel_card_view import PanelCardView
+
+    host = Host(420, 340)
+    card = PanelCardView("panel-1", "Camera")
+    card.setParent(host)
+    card.move(16, 16)
+    show(host)
+    pump(0.2)
+    image = grab(host)
+    x0, y0 = edge_px(card.x()), edge_px(card.y())
+    x1, y1 = edge_px(card.x() + card.width()), edge_px(card.y() + card.height())
+    ymid = dev(card.y() + card.height() / 2.0)
+    edge = image[ymid, x0]
+    radius = int(math.ceil(F._radius() * DPR)) + BD
+    band_bottom = edge_px(card.y() + card._title_band.geometry().bottom() + 1)
+    left = [y for y in range(y0 + radius, y1 - radius) if not eq(image[y, x0], edge)]
+    right = [y for y in range(y0 + radius, y1 - radius) if not eq(image[y, x1 - 1], edge)]
+    top = [x for x in range(x0 + radius, x1 - radius) if not eq(image[y0, x], edge)]
+    crop = (x0 - 2, y0 - 2, x0 + 16 * BD, band_bottom + 4)
+    check(case, "T-P1 card edge continuous past the title band", not left and not right and not top,
+          f"edge {hexs(edge)} left rows {left[:6]} right rows {right[:6]} top cols {top[:6]}",
+          image=image, box=crop)
+    if INTEGRAL:
+        ground = image[y0 - 2, x0 + radius]
+        tl, tr, bl, br = corner_masks(image, x0, y0, x1, y1, radius, ground)
+        check(case, "T-P1 four corners mirror-equal", mirror_equal(tl, tr, bl, br),
+              f"tl {int(tl.sum())} tr {int(tr.sum())} bl {int(bl.sum())} br {int(br.sum())}",
+              image=image, box=crop)
+    host.close()
+
+
+def table_case(fitted: bool) -> None:
+    case = f"table/{'fitted' if fitted else 'free'}"
+    host = Host(360, 280)
+    table = F.FluentTableView(host)
+    model = QtGui.QStandardItemModel(4, 3, host)
+    model.setHorizontalHeaderLabels(["A", "B", "C"])
+    for r in range(4):
+        for c in range(3):
+            model.setItem(r, c, QtGui.QStandardItem(f"{r}{c}"))
+    table.setModel(model)
+    table.setGeometry(16, 16, 300, 220)
+    if fitted:
+        table.set_content_rows_limit(10)
+        table.resize(300, table.minimumHeight())
+    table.setCurrentIndex(model.index(1, 1))
+    table.selectionModel().select(model.index(1, 1), QtCore.QItemSelectionModel.ClearAndSelect)
+    show(host)
+    pump(0.2)
+    image = grab(host)
+    ox, oy = table.x(), table.y()
+    x0, y0 = edge_px(ox), edge_px(oy)
+    x1, y1 = edge_px(ox + table.width()), edge_px(oy + table.height())
+    viewport = table.viewport().geometry()
+    ymid = dev(oy + viewport.y() + viewport.height() / 2.0)
+    edge = image[ymid, x0]
+    xmid = dev(ox + viewport.x() + table.columnViewportPosition(2) + 4)
+    crop = (x0 - 2, y0 - 2, x1 + 2, y1 + 2)
+
+    def run_from(values, colour):
+        count = 0
+        for value in values:
+            if not eq(value, colour):
+                break
+            count += 1
+        return count
+
+    inner_right = x1 - BD
+    if INTEGRAL:
+        # The frame and the header rules are the style sheet's own borders,
+        # whole device pixels only at a whole ratio (R1).
+        top_edge = run_from([image[y, xmid] for y in range(y0, y1)], edge)
+        bottom_edge = run_from([image[y, xmid] for y in range(y1 - 1, y0, -1)], edge)
+        check(case, "T-P2 top and bottom edges one edge-width", top_edge == BD and bottom_edge == BD,
+              f"top {top_edge} bottom {bottom_edge} want {BD}", image=image, box=crop)
+        header = table.horizontalHeader().geometry()
+        rule_y = edge_px(oy + header.y() + header.height()) - BD
+        gaps = [x for x in range(edge_px(ox + header.x()), inner_right) if not eq(image[rule_y, x], edge)]
+        check(case, "T-P2 header rule reaches the frame", not gaps, f"row {rule_y} gaps {gaps[:6]}",
+              image=image, box=(inner_right - 12 * BD, rule_y - 6 * BD, x1 + 2, rule_y + 6 * BD))
+    else:
+        inner_right = x1 - BD - 1
+    row_y = edge_px(oy + viewport.y() + table.rowViewportPosition(2) + table.rowHeight(2)) - BD
+    gaps = [x for x in range(edge_px(ox + viewport.x()), inner_right) if not eq(image[row_y, x], edge)]
+    check(case, "T-P2 row rule reaches the frame", not gaps, f"row {row_y} gaps {gaps[:6]}",
+          image=image, box=(inner_right - 12 * BD, row_y - 6 * BD, x1 + 2, row_y + 6 * BD))
+    vertical = table.verticalHeader().geometry()
+    rule_x = edge_px(ox + vertical.x() + vertical.width()) - BD
+    if INTEGRAL:
+        gaps = [y for y in range(edge_px(oy + viewport.y()), y1 - BD) if not eq(image[y, rule_x], edge)]
+        check(case, "T-P2 row-header rule reaches the frame", not gaps, f"col {rule_x} gaps {gaps[:6]}",
+              image=image, box=(rule_x - 6 * BD, y1 - 20 * BD, rule_x + 6 * BD, y1 + 2))
+    cell = table.visualRect(model.index(1, 1))
+    cx = dev(ox + viewport.x() + cell.center().x())
+    cy = dev(oy + viewport.y() + cell.center().y())
+    top_y = edge_px(oy + viewport.y() + cell.top()) - BD
+    outline = image[top_y, cx]
+    counts = {
+        "top": run_from([image[y, cx] for y in range(top_y, cy)], outline),
+        "bottom": run_from([image[y, cx] for y in range(edge_px(oy + viewport.y() + cell.bottom() + 1) - 1, cy, -1)], outline),
+        "left": run_from([image[cy, x] for x in range(edge_px(ox + viewport.x() + cell.left()), cx)], outline),
+        "right": run_from([image[cy, x] for x in range(edge_px(ox + viewport.x() + cell.right() + 1) - 1, cx, -1)], outline),
+    }
+    check(case, "T-P2 selection outline one edge-width all round",
+          set(counts.values()) == {BD} and not eq(outline, edge),
+          f"{counts} outline {hexs(outline)}", image=image,
+          box=(dev(ox + viewport.x() + cell.left()) - 6, top_y - 6, dev(ox + viewport.x() + cell.right()) + 6,
+               dev(oy + viewport.y() + cell.bottom()) + 6))
+    if INTEGRAL:
+        ground = image[y0 - 2, x0 + 8 * BD]
+        size = int(math.ceil(F._radius() * DPR)) + BD
+        tl, tr, bl, br = corner_masks(image, x0, y0, x1, y1, size, ground)
+        check(case, "T-P2 four corners mirror-equal", mirror_equal(tl, tr, bl, br),
+              f"tl {int(tl.sum())} tr {int(tr.sum())} bl {int(bl.sum())} br {int(br.sum())}",
+              image=image, box=crop)
+    host.close()
+
+
+def frame_rule_case() -> None:
+    case = "frame_rule"
+    host = Host(260, 120)
+    first = F.FluentFrame(host, rule=True)
+    first.setGeometry(16, 16, 200, 40)
+    second = F.FluentFrame(host, rule=True)
+    second.setGeometry(16, 64, 200, 40)
+    second.set_rule(False)
+    show(host)
+    pump(0.1)
+    image = grab(host)
+    xmid = dev(16 + 100)
+    y1 = edge_px(16 + 40)
+    ground = image[edge_px(16 + 20), xmid]
+    rows = [image[y, xmid] for y in range(y1 - BD, y1)]
+    rule = rows[0]
+    check(case, "T-P3 rule is the bottom edge-width, full intensity",
+          all(eq(row, rule) for row in rows) and not eq(rule, ground) and eq(image[y1 - BD - 1, xmid], ground),
+          f"rule rows {[hexs(r) for r in rows]} above {hexs(image[y1 - BD - 1, xmid])}",
+          image=image, box=(xmid - 8, y1 - 8 * BD, xmid + 8, y1 + 4))
+    y2 = edge_px(64 + 40)
+    check(case, "T-P3 set_rule(False) draws none", eq(image[y2 - 1, xmid], ground),
+          hexs(image[y2 - 1, xmid]), image=image, box=(xmid - 8, y2 - 8 * BD, xmid + 8, y2 + 4))
+    host.close()
+
+
+def focus_ring_case() -> None:
+    global FOCUS_OK
+    case = "focus_ring"
+    host = Host(240, 120)
+    holder = QtWidgets.QWidget(host)
+    layout = QtWidgets.QHBoxLayout(holder)
+    layout.setContentsMargins(0, 0, 0, 0)
+    button = F.FluentButton("Apply")
+    layout.addWidget(button)
+    holder.setGeometry(24, 24, button.sizeHint().width(), button.sizeHint().height())
+    show(host)
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline and not button.hasFocus():
+        host.activateWindow()
+        APP.setActiveWindow(host)
+        button.setFocus(QtCore.Qt.TabFocusReason)
+        pump(0.05)
+    if not button.hasFocus():
+        FOCUS_OK = False
+        RESULTS.append({"case": case, "check": "state", "ok": True, "detail": "FOCUS-UNAVAILABLE", "skip": True})
+        host.close()
+        return
+    pump(0.1)
+    ring = getattr(button, "_zlc_focus_ring", None)
+    check(case, "T-P4 ring shown outside a zero-margin parent",
+          ring is not None and ring.isVisible() and ring.parentWidget() is not holder,
+          f"ring parent {None if ring is None else type(ring.parentWidget()).__name__}")
+    if not INTEGRAL or ring is None:
+        host.close()
+        return
+    image = grab(host)
+    origin = button.mapTo(host, QtCore.QPoint(0, 0))
+    bx0, by0 = edge_px(origin.x()), edge_px(origin.y())
+    bx1, by1 = edge_px(origin.x() + button.width()), edge_px(origin.y() + button.height())
+    cx, cy = (bx0 + bx1) // 2, (by0 + by1) // 2
+    ground = image[by0 - 1, cx]
+    column = [image[y, cx] for y in range(by0 - 6 * BD, by0)]
+    ink = min(column, key=lambda p: int(p.sum()))
+
+    def count(values):
+        return sum(1 for value in values if eq(value, ink))
+
+    widths = {
+        "top": count(image[y, cx] for y in range(by0 - 6 * BD, by0)),
+        "bottom": count(image[y, cx] for y in range(by1, by1 + 6 * BD)),
+        "left": count(image[cy, x] for x in range(bx0 - 6 * BD, bx0)),
+        "right": count(image[cy, x] for x in range(bx1, bx1 + 6 * BD)),
+    }
+    check(case, "T-P4 ring is two edge-widths of full ink on every side",
+          set(widths.values()) == {2 * BD} and eq(ground, image[by0 - 1, cx]),
+          f"{widths} ink {hexs(ink)}", image=image, box=(bx0 - 8 * BD, by0 - 8 * BD, bx0 + 20 * BD, by1 + 8 * BD))
+    host.close()
+
+
 def main() -> None:
     probe = Host(40, 40)
     probe.show()
@@ -490,6 +715,11 @@ def main() -> None:
     chevron_case()
     column_case()
     form_case()
+    panel_card_case()
+    table_case(False)
+    table_case(True)
+    frame_rule_case()
+    focus_ring_case()
     pump(0.1)
     for widget in APP.topLevelWidgets():
         widget.close()

@@ -336,7 +336,8 @@ app.processEvents()
 # card is the strip plus that picture plus its own padding, exactly.
 planned = widget.presented_front.logical_size
 assert (widget.width(), widget.height()) == planned, (widget.size(), planned)
-body_pad = tested_module.scaled_px(2) + tested_module.CARD_PAD
+# The strip sits inside the card's edge, which the body pad does not count.
+body_pad = tested_module.scaled_px(2) + tested_module.CARD_PAD + tested_module.FIELD_BORDER_PX
 assert card.height() - band.height() - widget.height() == body_pad
 assert card.width() - widget.width() == 2 * tested_module.CARD_PAD
 
@@ -434,7 +435,7 @@ card, widget = mounted_card(host)
 card.set_interval_choices((100,), 100)
 card.set_size_choices(('1x2', '2x2', '4x4'), '2x2')
 band = card._title_band
-pad = tested_module.scaled_px(2) + tested_module.CARD_PAD
+pad = tested_module.scaled_px(2) + tested_module.CARD_PAD + tested_module.FIELD_BORDER_PX
 packed = []
 card.geometry_changed.connect(lambda: packed.append(card.size()))
 

@@ -600,8 +600,10 @@ def fluent_scrollbar_stylesheet(
     """Return shared Fluent scrollbar CSS for scroll areas and popup lists."""
 
     thickness = fluent_scrollbar_thickness()
-    # Bars sit INSIDE the frame. Concentric corners need the inner radius,
-    # not the outer frame radius translated inward by its border width.
+    # Bars sit INSIDE the frame, and the handle a margin inside its track,
+    # so it never runs flush into a card's or a table's edge.  Concentric
+    # corners need the inner radius, not the outer frame radius translated
+    # inward by its border width.
     radius = max(0, _radius() - int(frame_width))
     return f"""
     {selector}:vertical {{
@@ -622,6 +624,7 @@ def fluent_scrollbar_stylesheet(
         background: #C8C6C4;
         border: none;
         border-radius: {radius}px;
+        margin: {scaled_px(2)}px;
         min-height: {scaled_px(28)}px;
         min-width: {scaled_px(28)}px;
     }}
@@ -797,14 +800,27 @@ class FluentFrame(QtWidgets.QFrame):
             """
         )
 
+    def set_rule(self, on: bool) -> None:
+        """Whether this list item draws its hairline.  A rule SEPARATES
+        items; it never closes a list -- under the last item it doubled
+        the card's own bottom edge."""
+
+        if bool(on) != self._rule:
+            self._rule = bool(on)
+            self.update()
+
     def paintEvent(self, event) -> None:  # noqa: N802 - Qt naming
         super().paintEvent(event)
         if self._bordered:
             stroke_card_border(self)
         elif self._rule:
+            # The bottom edge-width of the item, whole device pixels: an
+            # integer pen at h-1 sat a device pixel above the edge at 2x/3x.
+            edge = frame_border_px(self)
+            top = device_snap(self, self.height(), axis="y") - edge
             painter = QtGui.QPainter(self)
-            painter.setPen(QtGui.QPen(QtGui.QColor(DIVIDER), 1))
-            painter.drawLine(0, self.height() - 1, self.width(), self.height() - 1)
+            painter.setRenderHint(QtGui.QPainter.Antialiasing, False)
+            painter.fillRect(QtCore.QRectF(0.0, top, float(self.width()), edge), QtGui.QColor(DIVIDER))
             painter.end()
 
 
@@ -1360,8 +1376,10 @@ class FluentGroupBox(QtWidgets.QGroupBox):
 BUTTON_ROLES = ("primary", "standard", "destructive", "destructive_primary")
 
 #: The keyboard-focus ring: its stroke, and the clear space between it and
-#: the control (logical pixels).
-FOCUS_RING_PX = 1.5
+#: the control (logical pixels).  The stroke is a whole number of logical
+#: pixels on a whole-pixel inset, so it is whole device pixels at every
+#: integer ratio -- a 1.5 px pen smeared into a two-tone ring at 1x and 3x.
+FOCUS_RING_PX = 2.0
 FOCUS_RING_GAP = 2.0
 
 _BUTTON_STYLE_CACHE: tuple[float, str] | None = None
@@ -1606,19 +1624,31 @@ class _FocusRing(QtWidgets.QWidget):
 
     A ring on the control's edge was a second edge -- the very thing a
     selection or a field already draws -- so a focused chip read as a chosen
-    one.  The ring is a sibling laid over the control in its parent: a
-    stroke FOCUS_RING_PX wide, FOCUS_RING_GAP clear of the control all
-    round, following it as it moves and gone when it hides.
+    one.  The ring is an overlay laid over the control: a stroke
+    FOCUS_RING_PX wide, FOCUS_RING_GAP clear of the control all round,
+    following it as it moves and gone when it hides.
+
+    It lives in the nearest ancestor that has ROOM for it.  Laid in the
+    control's own parent, a control flush with a zero-margin parent (a
+    path's Browse, a form row, a card's command box) had its ring cut off
+    on that side.  The search stops at a scroll viewport: a ring clipped at
+    a scroll edge is what scrolled content looks like.
     """
 
     def __init__(self, target: QtWidgets.QWidget):
         super().__init__(target.parentWidget())
         self._target = target
+        self._chain: list[QtWidgets.QWidget] = []
         self._corner = float(_radius())
         self.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents)
         self.setFocusPolicy(QtCore.Qt.NoFocus)
         self.hide()
         target.installEventFilter(self)
+        target.destroyed.connect(self.deleteLater)
+
+    @staticmethod
+    def _reach() -> int:
+        return math.ceil(FOCUS_RING_GAP + FOCUS_RING_PX)
 
     def _frame(self) -> tuple[QtCore.QRect, float]:
         """What the ring goes round, in the target's coordinates, and its
@@ -1630,28 +1660,68 @@ class _FocusRing(QtWidgets.QWidget):
             return self._target.rect(), float(_radius())
         return frame()
 
+    def _rect_in(self, ancestor: QtWidgets.QWidget) -> QtCore.QRect:
+        rect, _corner = self._frame()
+        reach = self._reach()
+        origin = self._target.mapTo(ancestor, rect.topLeft())
+        return QtCore.QRect(origin, rect.size()).adjusted(-reach, -reach, reach, reach)
+
+    def _host(self) -> QtWidgets.QWidget | None:
+        candidate = self._target.parentWidget()
+        while candidate is not None:
+            if candidate.rect().contains(self._rect_in(candidate)) or candidate.isWindow():
+                return candidate
+            owner = candidate.parentWidget()
+            if isinstance(owner, QtWidgets.QAbstractScrollArea) and owner.viewport() is candidate:
+                return candidate
+            candidate = owner
+        return None
+
+    def _rehome(self) -> None:
+        host = self._host()
+        if host is None:
+            return
+        chain = []
+        widget = self._target.parentWidget()
+        while widget is not None and widget is not host:
+            chain.append(widget)
+            widget = widget.parentWidget()
+        for widget in self._chain:
+            if widget not in chain:
+                widget.removeEventFilter(self)
+        for widget in chain:
+            if widget not in self._chain:
+                widget.installEventFilter(self)
+        self._chain = chain
+        if self.parentWidget() is not host:
+            shown = self.isVisible()
+            self.setParent(host)
+            if shown:
+                self.show()
+
     def follow(self) -> None:
-        reach = math.ceil(FOCUS_RING_GAP + FOCUS_RING_PX)
-        rect, self._corner = self._frame()
-        rect = rect.translated(self._target.pos())
-        self.setGeometry(rect.adjusted(-reach, -reach, reach, reach))
+        self._rehome()
+        host = self.parentWidget()
+        if host is None:
+            return
+        _rect, self._corner = self._frame()
+        self.setGeometry(self._rect_in(host))
         self.raise_()
 
     def eventFilter(self, watched, event):  # noqa: N802 - Qt naming
         kind = event.type()
         if kind in (QtCore.QEvent.Move, QtCore.QEvent.Resize) and self.isVisible():
             self.follow()
-        elif kind == QtCore.QEvent.Hide:
+        elif watched is self._target and kind == QtCore.QEvent.Hide:
             self.hide()
-        elif kind == QtCore.QEvent.ParentChange:
-            self.setParent(self._target.parentWidget())
+        elif watched is self._target and kind == QtCore.QEvent.ParentChange:
             self.hide()
+            self._rehome()
         return False
 
     def paintEvent(self, event) -> None:  # noqa: N802 - Qt naming
         del event
-        reach = math.ceil(FOCUS_RING_GAP + FOCUS_RING_PX)
-        inset = reach - FOCUS_RING_GAP - FOCUS_RING_PX / 2.0
+        inset = self._reach() - FOCUS_RING_GAP - FOCUS_RING_PX / 2.0
         painter = QtGui.QPainter(self)
         painter.setRenderHint(QtGui.QPainter.Antialiasing)
         pen = QtGui.QPen(QtGui.QColor(HOVER))
@@ -5242,6 +5312,12 @@ class FluentSwitch(QtWidgets.QAbstractButton):
     offset = QtCore.pyqtProperty(float, fget=getOffset, fset=setOffset)
 
 
+def command_gap() -> int:
+    """The space between two commands in a row (Control, Log, Close)."""
+
+    return scaled_px(8, minimum=5)
+
+
 def add_row_switch(
     layout: QtWidgets.QBoxLayout,
     switch: FluentSwitch,
@@ -5260,7 +5336,7 @@ def add_row_switch(
 
     gap = layout.spacing()
     if gap < 0:
-        gap = scaled_px(8, minimum=6)
+        gap = command_gap()
     if lead:
         layout.addSpacing(gap)
     layout.addWidget(switch, 0, QtCore.Qt.AlignVCenter)
@@ -6850,6 +6926,7 @@ class FluentScrollArea(QtWidgets.QScrollArea):
         self.setStyleSheet(
             f"""
             QScrollArea {{ background: transparent; border: none; }}
+            QScrollArea > QWidget {{ background: transparent; }}
             QScrollArea > QWidget > QWidget {{ background: transparent; }}
             {fluent_scrollbar_stylesheet("QScrollBar")}
             """
@@ -6924,39 +7001,9 @@ class _RowHoverDelegate(QtWidgets.QStyledItemDelegate):
 
     A table view hovers one cell; a data table's unit is the row, so the
     view says which row the pointer is on and each of its cells draws the
-    hover wash.  A selected row is also OUTLINED in DERIVED_EDGE (3.4:1 on
-    the white rows; its ACCENT fill alone was 2.45:1): each cell draws the
-    row's top and bottom, the first and last columns its ends, and a run of
-    selected rows shares one box rather than a line between every pair.
+    hover wash.  The rules and the selection outline belong to the GRID,
+    not to a cell -- FluentTableView paints them across the viewport.
     """
-
-    def paint(self, painter, option, index) -> None:
-        super().paint(painter, option, index)
-        if not option.state & QtWidgets.QStyle.State_Selected:
-            return
-        view = self.parent()
-        selection = view.selectionModel() if view is not None else None
-        if selection is None:
-            return
-        row, parent = index.row(), index.parent()
-        model = index.model()
-        header = view.horizontalHeader()
-        first, last = _end_column(header, 1), _end_column(header, -1)
-        above = row > 0 and selection.isRowSelected(row - 1, parent)
-        below = row + 1 < model.rowCount(parent) and selection.isRowSelected(row + 1, parent)
-        width = scaled_px(1, minimum=1)
-        rect = option.rect
-        painter.save()
-        color = QtGui.QColor(DERIVED_EDGE)
-        if not above:
-            painter.fillRect(QtCore.QRect(rect.left(), rect.top(), rect.width(), width), color)
-        if not below:
-            painter.fillRect(QtCore.QRect(rect.left(), rect.bottom() + 1 - width, rect.width(), width), color)
-        if index.column() == first:
-            painter.fillRect(QtCore.QRect(rect.left(), rect.top(), width, rect.height()), color)
-        if index.column() == last:
-            painter.fillRect(QtCore.QRect(rect.right() + 1 - width, rect.top(), width, rect.height()), color)
-        painter.restore()
 
     def initStyleOption(self, option, index) -> None:  # noqa: N802 - Qt naming
         super().initStyleOption(option, index)
@@ -6965,6 +7012,43 @@ class _RowHoverDelegate(QtWidgets.QStyledItemDelegate):
             option.state |= QtWidgets.QStyle.State_MouseOver
         else:
             option.state &= ~QtWidgets.QStyle.State_MouseOver
+
+
+class _RuledRowHeader(QtWidgets.QHeaderView):
+    """A table's row header whose row rules are painted like the cells'.
+
+    The rules continue the viewport's own, one edge-width at each row's
+    bottom, and the rule that would lie on the frame's bottom edge is not
+    drawn -- as a section border it doubled the edge and squared the
+    rounded corner beside it."""
+
+    def __init__(self, parent=None):
+        super().__init__(QtCore.Qt.Vertical, parent)
+        # What QTableView gives the header it makes for itself.
+        self.setSectionsClickable(True)
+        self.setHighlightSections(True)
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        super().paintEvent(event)
+        viewport = self.viewport()
+        edge = frame_border_px(viewport)
+        width = float(viewport.width())
+        painter = QtGui.QPainter(viewport)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing, False)
+        divider = QtGui.QColor(DIVIDER)
+        first = max(0, self.visualIndexAt(0))
+        last = self.visualIndexAt(viewport.height() - 1)
+        last = self.count() - 1 if last < 0 else last
+        for visual in range(first, last + 1):
+            section = self.logicalIndex(visual)
+            if self.isSectionHidden(section):
+                continue
+            bottom = self.sectionViewportPosition(section) + self.sectionSize(section)
+            if bottom >= viewport.height():
+                continue
+            y = device_snap(viewport, bottom, axis="y") - edge
+            painter.fillRect(QtCore.QRectF(0.0, y, width, edge), divider)
+        painter.end()
 
 
 class FluentTableView(QtWidgets.QTableView):
@@ -6988,6 +7072,7 @@ class FluentTableView(QtWidgets.QTableView):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.setVerticalHeader(_RuledRowHeader(self))
         self.setFrameShape(QtWidgets.QFrame.NoFrame)
         # Rows, not boxes: one hairline under each row, no vertical rules.
         # No banding either -- every other Fluent surface is one white
@@ -7031,6 +7116,17 @@ class FluentTableView(QtWidgets.QTableView):
         self.verticalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Fixed)
         self.verticalHeader().setDefaultSectionSize(scaled_px(28, minimum=22))
         self.verticalHeader().setMinimumWidth(scaled_px(58, minimum=46))
+        # A cell's text sits the item padding PLUS the style's own item text
+        # margin in from its edge; a header section gets only its padding,
+        # so the same padding put every heading outboard of its column.
+        text_margin = self.style().pixelMetric(QtWidgets.QStyle.PM_FocusFrameHMargin, None, self) + 1
+        header_pad = scaled_px(6, minimum=4) + text_margin
+        # The header RULES are the header widgets' own edges, the whole
+        # width (height) of the viewport -- drawn per section they stopped
+        # at the last column.  A header has no :horizontal state of its
+        # own, so each is told apart by name.
+        self.horizontalHeader().setObjectName("fluentTableColumns")
+        self.verticalHeader().setObjectName("fluentTableRows")
         self.setStyleSheet(
             f"""
             QTableView {{
@@ -7046,11 +7142,11 @@ class FluentTableView(QtWidgets.QTableView):
             QTableView::item {{
                 padding: {scaled_px(3, minimum=2)}px {scaled_px(6, minimum=4)}px;
                 border: none;
-                border-bottom: 1px solid {DIVIDER};
             }}
             QTableView::item:selected {{
                 background: {ACCENT};
                 color: {TEXT};
+                border: none;
             }}
             QTableView::item:hover:!selected {{
                 background: {ACCENT_TINT};
@@ -7066,27 +7162,22 @@ class FluentTableView(QtWidgets.QTableView):
                 selection-background-color: {ACCENT_TINT};
                 selection-color: {TEXT};
             }}
-            QHeaderView {{ background: {SURFACE}; }}
+            QHeaderView {{ background: transparent; }}
+            QHeaderView#fluentTableColumns {{ border: none; border-bottom: {FIELD_BORDER_PX}px solid {DIVIDER}; }}
+            QHeaderView#fluentTableRows {{ border: none; border-right: {FIELD_BORDER_PX}px solid {DIVIDER}; }}
             QHeaderView::section {{
-                background: {SURFACE};
+                background: transparent;
                 color: {MUTED_INK};
                 border: none;
-                padding: {scaled_px(4, minimum=3)}px {scaled_px(6, minimum=4)}px;
+                padding: {scaled_px(4, minimum=3)}px {header_pad}px;
                 font: {fluent_font_size()}pt "{FONT}";
             }}
-            QHeaderView::section:horizontal {{
-                font-weight: 600;
-                border-bottom: 1px solid {DIVIDER};
-            }}
-            QHeaderView::section:vertical {{
-                border-right: 1px solid {DIVIDER};
-                border-bottom: 1px solid {DIVIDER};
-            }}
+            QHeaderView::section:horizontal {{ font-weight: 600; }}
             QTableCornerButton::section {{
-                background: {SURFACE};
+                background: transparent;
                 border: none;
-                border-right: 1px solid {DIVIDER};
-                border-bottom: 1px solid {DIVIDER};
+                border-right: {FIELD_BORDER_PX}px solid {DIVIDER};
+                border-bottom: {FIELD_BORDER_PX}px solid {DIVIDER};
             }}
             """
         )
@@ -7223,6 +7314,77 @@ class FluentTableView(QtWidgets.QTableView):
         if self._content_rows_limit:
             hint.setHeight(self.minimumHeight())
         return hint
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        """The cells, then the grid's own lines over them.
+
+        A row's rule is one hairline across the WHOLE viewport, frame to
+        frame -- drawn as a cell border it stopped where the last column
+        did.  A selected run of rows is outlined in DERIVED_EDGE (3.4:1 on
+        the white rows; the ACCENT fill alone is 2.45:1): one box per run
+        whose top and bottom REPLACE the rules that bound it, so the edge
+        is one edge-width thick on every side instead of a rule and an
+        outline stacked into two tones.
+        """
+
+        super().paintEvent(event)
+        model = self.model()
+        if model is None:
+            return
+        viewport = self.viewport()
+        width = float(viewport.width())
+        edge = frame_border_px(viewport)
+        header = self.verticalHeader()
+        first = max(0, header.visualIndexAt(0))
+        last = header.visualIndexAt(viewport.height() - 1)
+        last = model.rowCount(self.rootIndex()) - 1 if last < 0 else last
+        painter = QtGui.QPainter(viewport)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing, False)
+        divider = QtGui.QColor(DIVIDER)
+        for visual in range(first, last + 1):
+            row = header.logicalIndex(visual)
+            if header.isSectionHidden(row):
+                continue
+            bottom = self.rowViewportPosition(row) + self.rowHeight(row)
+            if bottom >= viewport.height():
+                # A rule separates rows; on the frame's own bottom edge it
+                # would only double it (a table fitted to its rows).
+                continue
+            y = device_snap(viewport, bottom, axis="y") - edge
+            painter.fillRect(QtCore.QRectF(0.0, y, width, edge), divider)
+        selection = self.selectionModel()
+        if selection is not None:
+            spans: dict[int, tuple[int, int]] = {}
+            for index in selection.selectedIndexes():
+                if index.parent() != self.rootIndex():
+                    continue
+                rect = self.visualRect(index)
+                if rect.isEmpty():
+                    continue
+                left, right = spans.get(index.row(), (rect.left(), rect.right() + 1))
+                spans[index.row()] = (min(left, rect.left()), max(right, rect.right() + 1))
+            outline = QtGui.QColor(DERIVED_EDGE)
+            for row, (left, right) in spans.items():
+                top = self.rowViewportPosition(row)
+                bottom = top + self.rowHeight(row)
+                above = spans.get(row - 1) == (left, right)
+                below = spans.get(row + 1) == (left, right)
+                x0 = device_snap(viewport, left)
+                x1 = device_snap(viewport, right)
+                y0 = max(0.0, device_snap(viewport, top, axis="y") - edge)
+                # A table fitted to its rows clips the last rule under its
+                # frame; the outline's bottom then sits on the last row.
+                y1 = min(device_snap(viewport, bottom, axis="y"),
+                         device_snap(viewport, viewport.height(), axis="y")) - edge
+                if not above:
+                    painter.fillRect(QtCore.QRectF(x0, y0, x1 - x0, edge), outline)
+                if not below:
+                    painter.fillRect(QtCore.QRectF(x0, y1, x1 - x0, edge), outline)
+                side_top = y0 if not above else device_snap(viewport, top, axis="y")
+                side_bottom = y1 + edge
+                painter.fillRect(QtCore.QRectF(x0, side_top, edge, side_bottom - side_top), outline)
+                painter.fillRect(QtCore.QRectF(x1 - edge, side_top, edge, side_bottom - side_top), outline)
+        painter.end()
 
     def viewportEvent(self, event) -> bool:  # noqa: N802 - Qt naming
         kind = event.type()

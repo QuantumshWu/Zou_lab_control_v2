@@ -20,6 +20,7 @@ from zlc_ui.fluent import (
     BG,
     CARD_PAD,
     CARD_TITLE_PAD,
+    FIELD_BORDER_PX,
     FluentButton,
     FluentGroupBox,
     FluentLabel,
@@ -401,18 +402,26 @@ class PanelCardView(FluentGroupBox):
             QtWidgets.QSizePolicy.Ignored,
             QtWidgets.QSizePolicy.Fixed,
         )
+        # The band is a fill INSIDE the card's edge: the card paints its
+        # own continuous edge, and an opaque band laid from (0, 0) painted
+        # over the top and side of it -- with an unscaled corner that left
+        # a fragment of the arc showing at three device pixels a point.  It
+        # starts one edge-width in, with the inner, concentric radius.
+        pad = scaled_px(CARD_PAD)
+        title_pad = scaled_px(CARD_TITLE_PAD)
+        inner_radius = max(0, scaled_px(RADIUS) - FIELD_BORDER_PX)
         self._title_band = QtWidgets.QWidget(self)
         self._title_band.setAttribute(QtCore.Qt.WA_StyledBackground, True)
         self._title_band.setStyleSheet(
             f"background: {BG};"
-            f"border-top-left-radius: {RADIUS}px;"
-            f"border-top-right-radius: {RADIUS}px;"
+            f"border-top-left-radius: {inner_radius}px;"
+            f"border-top-right-radius: {inner_radius}px;"
         )
         band_layout = QtWidgets.QHBoxLayout(self._title_band)
         band_layout.setContentsMargins(
-            CARD_PAD, CARD_TITLE_PAD, CARD_TITLE_PAD, CARD_TITLE_PAD
+            pad - FIELD_BORDER_PX, title_pad, title_pad - FIELD_BORDER_PX, title_pad
         )
-        band_layout.setSpacing(CARD_PAD)
+        band_layout.setSpacing(pad)
         # Centred on the band, so a one-line title sits level with Setting.
         band_layout.addWidget(self._title_label, 1, QtCore.Qt.AlignVCenter)
         band_layout.addWidget(self.status_dot, 0, QtCore.Qt.AlignVCenter)
@@ -426,18 +435,15 @@ class PanelCardView(FluentGroupBox):
         self._title_band.setFixedHeight(self._band_height())
 
         # The body is exactly CARD_PAD / 2 px / CARD_PAD around the surface,
-        # with no invented header, footer, status row, or stretch spacer.
+        # counted from the card's edge, with no invented header, footer,
+        # status row, or stretch spacer.
         outer = QtWidgets.QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
+        edge = FIELD_BORDER_PX
+        outer.setContentsMargins(edge, edge, edge, 0)
         outer.setSpacing(0)
         outer.addWidget(self._title_band)
         holder = QtWidgets.QVBoxLayout()
-        holder.setContentsMargins(
-            CARD_PAD,
-            scaled_px(2),
-            CARD_PAD,
-            CARD_PAD,
-        )
+        holder.setContentsMargins(pad - edge, scaled_px(2), pad - edge, pad)
         holder.setSpacing(0)
         outer.addLayout(holder)
         self._surface_layout = holder
@@ -468,7 +474,7 @@ class PanelCardView(FluentGroupBox):
         """
 
         lines = 2 * QtGui.QFontMetrics(self._title_label.font()).lineSpacing()
-        return max(lines, self.settings_button.height()) + 2 * CARD_TITLE_PAD
+        return max(lines, self.settings_button.height()) + 2 * scaled_px(CARD_TITLE_PAD)
 
     def _apply_card_size(self, size: str) -> None:
         """Reserve the room a picture of this preset needs, plus this card's own.
