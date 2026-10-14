@@ -70,12 +70,14 @@ class PulseConfigView(QtWidgets.QWidget):
         self.values_table.setModel(self.values_model)
         self.values_table.set_content_rows_limit(12)
         self.values_table.verticalHeader().hide()
-        # The name is what varies in length; a value and its unit are short
-        # and take what they need, the number set right like any number.
+        # Name and value take what they need, the number set right like any
+        # number and so beside its name; the unit closes the row.  Equal
+        # thirds gave the unit as much room as the name, and a stretched
+        # name put every value a table's width away from what it names.
         header = self.values_table.horizontalHeader()
-        header.setSectionResizeMode(0, QtWidgets.QHeaderView.Stretch)
+        header.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeToContents)
         header.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(2, QtWidgets.QHeaderView.Stretch)
         self.values_model.setHeaderData(
             1, QtCore.Qt.Horizontal, int(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter),
             QtCore.Qt.TextAlignmentRole,
