@@ -46,6 +46,7 @@ class PulseComponentView(QtWidgets.QWidget):
         top.addWidget(FluentLabel("Name"))
         self.name_edit = FluentLineEdit("")
         self.name_edit.setPlaceholderText("Subpulse name")
+        self.name_edit.set_placeholder_prompt()
         self.name_edit.editingFinished.connect(self._name_committed)
         top.addWidget(self.name_edit, 1)
         self._buttons = {}
@@ -217,6 +218,7 @@ class PulseComponentView(QtWidgets.QWidget):
         self._buttons["insert"].setText("Duplicate in Pulse" if instance else "Insert into Pulse")
         for action, button in self._buttons.items():
             button.setEnabled(not busy and (schedule is not None or action in ("new", "open")))
+        # Primary with its star only while there is something to save.
         self._buttons["save"].set_dirty(dirty)
         self.path_label.setText(path or ("Embedded in the current Pulse" if instance else "Unsaved Subpulse"))
         self.path_label.setToolTip(path)

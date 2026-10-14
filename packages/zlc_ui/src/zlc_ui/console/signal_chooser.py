@@ -13,15 +13,15 @@ decided elsewhere; this is a list and a button.
 
 from __future__ import annotations
 
-from PyQt5 import QtCore, QtWidgets
+from PyQt5 import QtCore, QtGui, QtWidgets
 
 from zlc_ui.fluent import (
+    ACCENT,
     ACCENT_TINT,
     DIVIDER,
-    GREY,
-    HOVER,
+    MUTED_INK,
     RADIUS,
-    SELECTION_EDGE,
+    TEXT,
     FluentButton,
     FluentCardDialog,
     FluentLabel,
@@ -61,8 +61,7 @@ class SignalChooser(FluentCardDialog):
             f"QListWidget::item {{ padding: {scaled_px(6, minimum=4)}px; "
             f"border: 1px solid transparent; border-radius: {scaled_px(RADIUS)}px; }} "
             f"QListWidget::item:hover {{ background: {ACCENT_TINT}; }} "
-            f"QListWidget::item:selected {{ background: {ACCENT_TINT}; "
-            f"border-color: {SELECTION_EDGE}; color: {HOVER}; }}"
+            f"QListWidget::item:selected {{ background: {ACCENT}; color: {TEXT}; }}"
         )
         self._rows = tuple(rows)
         producer = None
@@ -71,7 +70,7 @@ class SignalChooser(FluentCardDialog):
                 producer = group
                 heading = QtWidgets.QListWidgetItem(str(group))
                 heading.setFlags(QtCore.Qt.NoItemFlags)
-                heading.setForeground(QtWidgets.QApplication.palette().mid())
+                heading.setForeground(QtGui.QColor(MUTED_INK))
                 self.list.addItem(heading)
             text = f"    {label}" if state == "live" else f"    {label}  ({state})"
             item = QtWidgets.QListWidgetItem(text)
@@ -85,7 +84,7 @@ class SignalChooser(FluentCardDialog):
 
         if not self._rows:
             empty = FluentLabel("Nothing has published yet.")
-            empty.setStyleSheet(f"color: {GREY}; background: transparent; border: none;")
+            empty.setStyleSheet(f"color: {MUTED_INK}; background: transparent; border: none;")
             layout.addWidget(empty)
 
         buttons = QtWidgets.QHBoxLayout()

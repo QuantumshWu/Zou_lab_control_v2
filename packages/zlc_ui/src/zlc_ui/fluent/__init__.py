@@ -27,7 +27,7 @@ for _name in (
     "fluent_confirm", "fluent_save_path", "fluent_open_path", "stamped_file_name",
     "FluentComboBox", "FluentCycleComboBox", "FluentTreeComboBox", "FluentTabWidget",
     "FluentUnitPicker", "fluent_unit_picker", "unit_choice_tree",
-    "FluentSwitch", "FluentTriSwitch", "fluent_switch_width", "fluent_spinbox_stylesheet", "FluentSpinBox", "FluentInputDialog", "FluentCardDialog",
+    "FluentSwitch", "add_row_switch", "FluentTriSwitch", "fluent_switch_width", "fluent_spinbox_stylesheet", "FluentSpinBox", "FluentInputDialog", "FluentCardDialog",
     "FluentCodeEdit", "FluentDoubleSpinBox", "fluent_count_box", "fluent_integer_box", "FluentCheckBox", "FluentScrollArea",
     "FluentPageBody", "FluentTableView", "FluentSelectionGrid", "FluentSegmentedButtons",
     "LinkedScrollPanes", "apply_fluent_scrollbars", "FluentWindow", "FluentDialogWindow",
@@ -37,7 +37,8 @@ for _name in (
 ):
     _EXPORTS[_name] = ("zlc_ui.fluent.fluent", _name)
 for _name in (
-    "ACCENT", "ACCENT_TINT", "SELECTION_EDGE", "API_VIOLET", "API_VIOLET_DARK", "AXIS_GROUP_COLORS", "BG",
+    "ACCENT", "ACCENT_HOVER", "ACCENT_PRESSED", "ACCENT_STRONG", "ACCENT_TINT", "SELECTION_EDGE",
+    "DERIVED_EDGE", "DERIVED_INK", "DISABLED_INK", "MUTED_INK", "API_VIOLET", "API_VIOLET_DARK", "AXIS_GROUP_COLORS", "BG",
     "BUTTON_PADDING_H",
     "CONFIG_GREEN", "CONFIG_GREEN_DARK", "CONFIG_GREEN_TINT",
     "CARD_PAD", "CARD_TITLE_PAD", "CARD_TITLE_PX",

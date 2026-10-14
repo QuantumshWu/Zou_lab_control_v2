@@ -31,7 +31,9 @@ class _BindingButton(QtWidgets.QAbstractButton):
         if self.scan:
             badges.append(("S", ORANGE))
         if self.source != "default":
-            badges.append((self.source[0].upper(), API_VIOLET if self.source == "api" else CONFIG_GREEN))
+            # The "C" badge wears the config green at reading strength: white
+            # on CONFIG_GREEN itself was 2.0:1, on CONFIG_GREEN_DARK it is 6.2:1.
+            badges.append((self.source[0].upper(), API_VIOLET if self.source == "api" else CONFIG_GREEN_DARK))
         if not badges:
             badges.append(("", PLACEHOLDER))
         diameter = min(self.width() - 2, self.height() / len(badges) - 1)

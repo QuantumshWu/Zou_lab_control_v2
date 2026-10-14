@@ -8,7 +8,7 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 
 from zlc_ui.fluent import (
     FluentButton, FluentComboBox,
-    ElidedLabel, FluentGroupBox, FluentLabel, FluentLineEdit, FluentScrollArea,
+    ElidedLabel, FluentGroupBox, FluentLabel, FluentReadoutEdit, FluentScrollArea,
     FluentTableView, read_editable_combo, retire_widget, signals_blocked,
 )
 
@@ -58,8 +58,8 @@ class PulseConfigView(QtWidgets.QWidget):
             toolbar.addWidget(button)
         toolbar.addStretch(1)
         file_layout.addLayout(toolbar)
-        self.path_text = FluentLineEdit("")
-        self.path_text.setReadOnly(True)
+        # The chosen file is read, not typed: Load and Save as choose it.
+        self.path_text = FluentReadoutEdit("")
         self.path_text.setPlaceholderText("No value file selected")
         file_layout.addWidget(self.path_text)
         self.file_status = ElidedLabel("Save the Config file before using its values.")
@@ -177,6 +177,7 @@ class PulseConfigView(QtWidgets.QWidget):
             status += "  Unsaved edits do not participate in Fire."
         self.file_status.setText(status)
         self.file_status.setToolTip(record.active_path)
+        # Primary with its star only while there is something to save.
         self.save_button.set_dirty(record.dirty)
         for button in self._file_buttons:
             button.setEnabled(not record.busy)
@@ -259,9 +260,8 @@ class PulseConfigView(QtWidgets.QWidget):
                 combo.lineEdit().setPlaceholderText("Config name")
                 combo.activated.connect(lambda _index, field=field_id: self._commit_binding(field))
                 combo.editingFinished.connect(lambda field=field_id: self._commit_binding(field))
-                widgets = (ElidedLabel(), combo, FluentLineEdit(), FluentLineEdit(), ElidedLabel())
-                for value_widget in widgets[2:4]:
-                    value_widget.setReadOnly(True)
+                # Default and Config value are read, not typed: readouts.
+                widgets = (ElidedLabel(), combo, FluentReadoutEdit(), FluentReadoutEdit(), ElidedLabel())
                 for widget in widgets:
                     widget.setFixedHeight(row_height())
                 self._binding_rows[field_id] = widgets

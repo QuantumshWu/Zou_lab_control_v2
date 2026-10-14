@@ -528,7 +528,7 @@ def test_a_data_table_opens_a_cell_on_one_click_and_every_direction_walks_the_gr
         """
 from PyQt5 import QtCore, QtGui, QtTest, QtWidgets
 from zlc_ui import ensure_qt_app
-from zlc_ui.fluent import ACCENT_TINT, FluentTableView
+from zlc_ui.fluent import ACCENT, FluentTableView
 
 class Model(QtCore.QAbstractTableModel):
     def __init__(self, size, value):
@@ -569,7 +569,8 @@ table.resize(420, 200); table.show(); app.processEvents()
 
 assert not table.alternatingRowColors(), 'a Fluent table is not striped'
 assert 'alternate-background-color' not in table.styleSheet()
-assert f'selection-background-color: {ACCENT_TINT}' in table.styleSheet()
+assert f'selection-background-color: {ACCENT}' in table.styleSheet()
+assert table.selectionBehavior() == QtWidgets.QAbstractItemView.SelectRows, 'a data table selects rows'
 
 target = table.model().index(1, 2)
 click(table, target)
@@ -679,3 +680,152 @@ def test_a_widget_named_twice_is_unblocked_when_the_block_ends() -> None:
     with signals_blocked(target, target):
         assert target.signalsBlocked()
     assert not target.signalsBlocked()
+
+
+def test_one_save_rule_one_destructive_look_and_a_flush_readout(run_qt) -> None:
+    """Every Save is standard when clean and the primary with a star when
+    unsaved; every labelled destructive command sits on the red tint while a
+    one-glyph row remover stays a ghost; a command on a tinted card is white
+    with no edge; a readout starts where the text above it starts."""
+
+    run_qt(
+        """
+from PyQt5 import QtGui, QtWidgets
+from zlc_ui.qt import ensure_qt_app
+from zlc_ui.fluent import FluentButton, FluentLabel, FluentReadoutEdit
+from zlc_ui.fluent.fluent import FluentReadoutMultiline
+app = ensure_qt_app(['zlc-ui-tests'])
+
+save = FluentButton('Save')
+assert save.role() == 'standard' and save.text() == 'Save'
+save.set_dirty(True)
+assert save.role() == 'primary' and save.text() == 'Save*', (save.role(), save.text())
+save.set_dirty(True)
+assert save.text() == 'Save*'
+save.set_dirty(False)
+assert save.role() == 'standard' and save.text() == 'Save'
+run = FluentButton('Run', role='primary')
+run.set_dirty(True)
+run.set_dirty(False)
+assert run.role() == 'primary', 'a primary stays primary when clean'
+
+host = QtWidgets.QWidget()
+host.setStyleSheet('background: white;')
+row = QtWidgets.QHBoxLayout(host)
+ghost = FluentButton('×', role='destructive')
+seated = FluentButton('Remove', role='destructive')
+row.addWidget(ghost)
+row.addWidget(seated)
+host.show()
+app.processEvents()
+def face(button):
+    image = button.grab().toImage()
+    return image.pixelColor(image.width() // 2, image.height() // 5)
+assert face(ghost).alpha() == 0, face(ghost).name()
+from zlc_ui.fluent.style import RED_TINT, SURFACE
+assert face(seated).name().upper() == RED_TINT.upper(), face(seated).name()
+assert not seated.isCheckable(), 'a command is never a toggle'
+on_tint = FluentButton('Expand')
+on_tint.set_on_tint(True)
+row.addWidget(on_tint)
+app.processEvents()
+image = on_tint.grab().toImage()
+assert face(on_tint).name().upper() == SURFACE.upper(), face(on_tint).name()
+edge = image.pixelColor(image.width() // 2, 0).name().upper()
+assert edge == SURFACE.upper(), ('a command on a tint has no field edge', edge)
+
+column = QtWidgets.QWidget()
+column.setStyleSheet('background: white;')
+stack = QtWidgets.QVBoxLayout(column)
+header = FluentLabel('Default')
+single = FluentReadoutEdit('2 ms')
+multi = FluentReadoutMultiline('5 ms')
+for widget in (header, single, multi):
+    stack.addWidget(widget)
+column.resize(240, 140)
+column.show()
+app.processEvents()
+def first_ink(widget):
+    image = widget.grab().toImage()
+    ratio = image.devicePixelRatio() or 1.0
+    for x in range(image.width()):
+        for y in range(image.height()):
+            if QtGui.QColor(image.pixel(x, y)).lightness() < 128:
+                return widget.x() + x / ratio
+    raise AssertionError('no ink')
+left = first_ink(header)
+for widget in (single, multi):
+    assert abs(first_ink(widget) - left) <= 1.5, (type(widget).__name__, first_ink(widget), left)
+"""
+    )
+
+
+def test_a_setting_is_a_switch_beside_its_label_in_a_row_of_buttons(run_qt) -> None:
+    """A switch is a control's height with its track centred, so it lines
+    up with the buttons of its row; on is the accent with a rimmed white
+    thumb; keyboard focus rings the TRACK from outside; a field's
+    placeholder is information unless it is marked a pure prompt."""
+
+    run_qt(
+        """
+from PyQt5 import QtCore, QtGui, QtTest, QtWidgets
+from zlc_ui.qt import ensure_qt_app
+from zlc_ui.fluent import (
+    FluentButton, FluentLineEdit, FluentSegmentedButtons, FluentSwitch, add_row_switch,
+)
+from zlc_ui.fluent.style import ACCENT, MUTED_INK, SURFACE
+app = ensure_qt_app(['zlc-ui-tests'])
+
+host = QtWidgets.QWidget()
+host.setStyleSheet('background: white;')
+row = QtWidgets.QHBoxLayout(host)
+row.setSpacing(8)
+switch = FluentSwitch('Plot')
+start = FluentButton('Start', role='primary')
+add_row_switch(row, switch, lead=False)
+row.addWidget(start)
+host.show()
+app.processEvents()
+assert start.x() - switch.geometry().right() - 1 >= 2 * row.spacing(), 'a switch is its own group'
+assert switch.height() == start.height(), (switch.height(), start.height())
+assert abs(switch.geometry().center().y() - start.geometry().center().y()) <= 1
+track, radius = switch.focus_frame()
+assert abs(track.center().y() - switch.rect().center().y()) <= 1, track
+assert track.right() < switch.width() - 1, 'the label sits beside the track, not in it'
+
+switch.setChecked(True)
+QtTest.QTest.qWait(300)  # the thumb slides for 150 ms
+image = switch.grab().toImage()
+ratio = image.devicePixelRatio() or 1.0
+def at(x, y):
+    return image.pixelColor(int(x * ratio), int(y * ratio)).name().upper()
+assert at(track.left() + radius, track.center().y()) == ACCENT.upper(), 'on is the accent track'
+thumb_x = track.right() - radius
+assert at(thumb_x, track.center().y()) == SURFACE.upper(), 'with a white thumb'
+
+# The offscreen platform has no active window to give focus; deliver the
+# focus a Tab would.
+QtWidgets.QApplication.sendEvent(
+    switch, QtGui.QFocusEvent(QtCore.QEvent.FocusIn, QtCore.Qt.TabFocusReason))
+app.processEvents()
+ring = switch._zlc_focus_ring
+assert ring.isVisible()
+assert ring.geometry().width() < switch.width(), 'the ring goes round the track only'
+
+segments = FluentSegmentedButtons((('range', 'Range'), ('values', 'Values')))
+segments.set_current('range')
+segments.show()
+app.processEvents()
+widths = [segments.button(value).width() for value in ('range', 'values')]
+segments.set_current('values')
+app.processEvents()
+assert [segments.button(value).width() for value in ('range', 'values')] == widths, (
+    'marking a choice must not move the others')
+
+info = FluentLineEdit()
+prompt = FluentLineEdit()
+prompt.set_placeholder_prompt()
+assert info.palette().color(QtGui.QPalette.PlaceholderText).name().upper() == MUTED_INK.upper()
+assert prompt.palette().color(QtGui.QPalette.PlaceholderText).alpha() == 128
+"""
+    )

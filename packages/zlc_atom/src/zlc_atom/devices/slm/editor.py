@@ -17,7 +17,7 @@ from zlc_plot import PANEL_SIZE_NAMES, AxisRef, ImagePlot, PlotLabels
 from zlc_ui.fluent import (
     FluentButton, FluentComboBox, FluentDoubleSpinBox, FluentFrame,
     FluentLineEdit, FluentPopup, FluentScrollArea, FluentSettingsPopupAnchor,
-    FluentSpinBox, FluentSwitch, FluentTabWidget, fluent_open_path, fluent_save_path,
+    FluentSpinBox, FluentSwitch, FluentTabWidget, add_row_switch, fluent_open_path, fluent_save_path,
     open_fluent_window,
 )
 
@@ -269,13 +269,12 @@ class SlmEditorControl(QtCore.QObject):
         self._intensity.setDecimals(3)
         self._intensity.setValue(1.0)
         controls.addWidget(self._intensity)
-        self._selectors = FluentButton("Selectors", edit)
-        self._selectors.setCheckable(True)
+        self._selectors = FluentSwitch("Selectors", edit)
         self._selectors.setToolTip(
             "Enable plot selectors, wheel zoom, and pan; disable to paint the target"
         )
         self._selectors.toggled.connect(self._set_selectors_enabled)
-        controls.addWidget(self._selectors)
+        add_row_switch(controls, self._selectors)
         controls.addWidget(QtWidgets.QLabel("Size"))
         self._plot_size = FluentComboBox(edit)
         self._plot_size.addItems(PANEL_SIZE_NAMES)

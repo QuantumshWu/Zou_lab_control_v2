@@ -14,6 +14,7 @@ from PyQt5 import QtCore, QtWidgets
 from zlc_ui.fluent import (
     GREEN,
     GREY,
+    MUTED_INK,
     ORANGE,
     ORANGE_DARK,
     RED,
@@ -26,6 +27,8 @@ from zlc_ui.fluent import (
     FluentScrollArea,
     FluentSettingRow,
     FluentStatusDot,
+    FluentSwitch,
+    add_row_switch,
     FluentTreeComboBox,
     FONT,
     fill_grouped_choice_combo,
@@ -103,7 +106,7 @@ class LogicEditorView(QtWidgets.QWidget):
             "font-weight: 600; background: transparent; }"
         )
         self.kind_label = FluentLabel("")
-        self.kind_label.setStyleSheet(f"color: {GREY}; background: transparent; border: none;")
+        self.kind_label.setStyleSheet(f"color: {MUTED_INK}; background: transparent; border: none;")
         title_row.addWidget(self.title_label)
         title_row.addWidget(self.kind_label)
         title_row.addStretch(1)
@@ -166,7 +169,8 @@ class LogicEditorView(QtWidgets.QWidget):
         self._body_layout.addWidget(self._artifact_result_frame)
 
         # The lifecycle in one button, as on the node's row: Start while it is
-        # stopped, Stop while it runs.  Restart shows only while it runs, and
+        # stopped, Stop while it runs -- primary either way, the one run action
+        # of this page.  Restart shows only while it runs, and
         # Remove keeps to the far side, away from the button pressed most.
         actions = QtWidgets.QHBoxLayout()
         self.remove_button = FluentButton("Remove", role="destructive")
@@ -186,18 +190,19 @@ class LogicEditorView(QtWidgets.QWidget):
         # opens its Edit and focuses it -- so the switch that says what Start
         # will do belongs here too.  Both views show the SAME preference: it
         # lives on the node's binding, and neither widget keeps a default.
-        self.preview_switch = FluentButton("Plot")
-        self.preview_switch.setCheckable(True)
+        self.preview_switch = FluentSwitch("Plot")
         self.preview_switch.setToolTip(
             "Open this node's plot panel when it starts"
         )
         self.preview_switch.toggled.connect(self.auto_preview_changed.emit)
+        # Start/Stop stays the rightmost control, where every edit page keeps
+        # its main action; the Plot setting sits to its left, ahead of Restart.
+        add_row_switch(actions, self.preview_switch, lead=False)
         actions.addWidget(self.restart_button)
         actions.addWidget(self.run_button)
-        actions.addWidget(self.preview_switch)
-        # The node's own commands stand apart from what it edits: a Remove
-        # right under a section read as that section's remove.
-        self._body_layout.addSpacing(scaled_px(14, minimum=8))
+        # Clear of the help paragraph above, so the ghost Remove reads as a
+        # command on the action row and not as one more red sentence.
+        self._body_layout.addSpacing(scaled_px(12, minimum=8))
         self._body_layout.addLayout(actions)
         self._show_actions = bool(show_actions)
         for button in (self.remove_button, self.restart_button, self.run_button, self.preview_switch):
@@ -307,7 +312,7 @@ class LogicEditorView(QtWidgets.QWidget):
             (RED, RED_DARK) if error
             else (ORANGE, ORANGE_DARK) if issue
             else (GREEN, TEXT) if running
-            else (GREY, GREY)
+            else (GREY, MUTED_INK)
         )
         if colours != self._status_colours:
             self._status_colours = colours
@@ -394,7 +399,6 @@ class LogicEditorView(QtWidgets.QWidget):
         can_start = bool(self._projection.get("can_start"))
         can_stop = bool(self._projection.get("can_stop"))
         self.run_button.setText("Starting…" if pending else "Stop" if running else "Start")
-        self.run_button.set_role("standard" if running else "primary")
         self.run_button.setEnabled(
             self._mutation_enabled and not pending and (can_stop if running else can_start)
         )

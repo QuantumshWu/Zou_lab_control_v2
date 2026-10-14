@@ -842,7 +842,7 @@ def test_the_setting_frame_says_the_panels_standing_condition(run_qt) -> None:
     """
 
     run_qt(_SURFACE_PROLOGUE + """
-from zlc_ui.fluent import GREY, RED
+from zlc_ui.fluent import MUTED_INK, RED_DARK
 card.set_status('its plot surface has been travelling for 37 s', error=True)
 card._open_settings()
 app.processEvents()
@@ -850,10 +850,10 @@ label = card._settings_status
 assert label is not None
 assert not label.isHidden()
 assert label.text() == 'its plot surface has been travelling for 37 s'
-assert RED.upper() in label.styleSheet().upper()
+assert RED_DARK.upper() in label.styleSheet().upper()
 card.set_status('waiting for a signal', error=False)
 assert label.text() == 'waiting for a signal'
-assert GREY.upper() in label.styleSheet().upper()
+assert MUTED_INK.upper() in label.styleSheet().upper()
 card.set_status('', error=False)
 app.processEvents()
 assert label.isHidden() and label.text() == ''

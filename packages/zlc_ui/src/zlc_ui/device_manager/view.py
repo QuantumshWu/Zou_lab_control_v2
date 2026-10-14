@@ -8,10 +8,15 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 
 from zlc_ui.fluent import (
     ACCENT,
+    BG,
+    FONT,
     GREEN,
     GREY,
+    HOVER,
+    MUTED_INK,
     ORANGE,
     RED,
+    TEXT,
     ElidedLabel,
     FluentLabel,
     FluentButton,
@@ -23,9 +28,12 @@ from zlc_ui.fluent import (
     FluentSectionLabel,
     FluentStatusDot,
     FluentSwitch,
+    add_row_switch,
     FluentTabWidget,
+    fluent_font_size,
     muted_note_label,
     retire_widget,
+    scaled_px,
     signals_blocked,
     window_pad,
 )
@@ -53,11 +61,22 @@ class _DeviceCard(FluentFrame):
         outer.setContentsMargins(0, window_pad(0.3), 0, window_pad(0.6))
         outer.setSpacing(window_pad(0.35))
         header = QtWidgets.QHBoxLayout()
-        self.collapse_button = FluentButton("−")
-        self.collapse_button.setFixedWidth(window_pad(2.0))
+        # A disclosure, not a command: a ghost chevron, which a tonal
+        # square with a minus sign beside the Role box was read as.
+        self.collapse_button = QtWidgets.QToolButton()
+        self.collapse_button.setCursor(QtCore.Qt.PointingHandCursor)
+        self.collapse_button.setFixedSize(scaled_px(24, minimum=20), scaled_px(30, minimum=22))
+        self.collapse_button.setStyleSheet(
+            f"QToolButton {{ border: none; background: transparent; color: {MUTED_INK}; "
+            f"border-radius: {scaled_px(4)}px; padding: 0px; "
+            f"font-size: {round(fluent_font_size() * 1.5)}pt; }} "
+            f"QToolButton:hover {{ background: {BG}; color: {HOVER}; }}"
+        )
+        self._show_collapsed()
         self.name_label = muted_note_label("Role")
         self.role_edit = FluentLineEdit()
         self.role_edit.setPlaceholderText("role")
+        self.role_edit.set_placeholder_prompt()
         self.type_combo = FluentComboBox()
         self.remove_button = FluentButton("Remove", role="destructive")
         header.addWidget(self.collapse_button)
@@ -142,7 +161,11 @@ class _DeviceCard(FluentFrame):
         self._collapsed = not self._collapsed
         if self.form is not None:
             self.form.setVisible(not self._collapsed)
-        self.collapse_button.setText("+" if self._collapsed else "−")
+        self._show_collapsed()
+
+    def _show_collapsed(self) -> None:
+        self.collapse_button.setText("▸" if self._collapsed else "▾")
+        self.collapse_button.setToolTip("Show parameters" if self._collapsed else "Hide parameters")
 
 
 class _LiveDeviceCard(FluentFrame):
@@ -165,10 +188,9 @@ class _LiveDeviceCard(FluentFrame):
         #: One click beside Control publishes this device on the bench
         #: fabric, so the OTHER machine's "Scan hardware" finds it with no
         #: address typed anywhere.  A second click withdraws it.
-        self.remote_button = FluentButton("Remote")
-        # A chip: published is a STATE, and the chip shows the bench's
+        # A switch: published is a STATE, and the switch shows the bench's
         # answer, never the click -- see _remote_clicked.
-        self.remote_button.setCheckable(True)
+        self.remote_button = FluentSwitch("Remote")
         #: The device's own console: who is on its knobs -- local tunes,
         #: its in-process server, and remote clients once published.
         self.log_button = FluentButton("Log")
@@ -180,9 +202,11 @@ class _LiveDeviceCard(FluentFrame):
         identity.addWidget(self.detail_label)
         outer.addLayout(identity, 1)
         outer.addWidget(self.control_button)
-        outer.addWidget(self.remote_button)
         outer.addWidget(self.log_button)
         outer.addWidget(self.close_button)
+        # The setting stands apart from the commands, at the row's end: in
+        # the middle of them its label read as part of Log.
+        add_row_switch(outer, self.remote_button, trail=False)
         self.control_button.clicked.connect(
             lambda: self.device_open_requested.emit(self.instance_id)
         )
@@ -199,13 +223,13 @@ class _LiveDeviceCard(FluentFrame):
     ) -> None:
         self.role_label.setText(str(role))
         self.detail_label.setText(str(type_id))
-        # The chip state alone says published; the caption stays put so the
+        # The switch alone says published; the caption stays put so the
         # row's layout does not shuffle every time Remote is toggled.
         self.remote_button.setChecked(bool(remote))
         self.setToolTip(f"Internal ID: {self.instance_id}")
 
     def _remote_clicked(self, checked: bool) -> None:
-        # Qt flipped the chip on the click; put it back and ask.  Whether
+        # Qt flipped the switch on the click; put it back and ask.  Whether
         # the device is published is the bench's to say, through set_record.
         self.remote_button.setChecked(not checked)
         self.device_remote_toggled.emit(self.instance_id)
@@ -383,7 +407,7 @@ class DeviceControlView(QtWidgets.QWidget):
         # cannot read whole tells them nothing, so the text asks for its
         # full width and the column (and the snug window) grow to it.
         limits = FluentLabel("")
-        limits.setStyleSheet(f"color: {GREY}; background: transparent; border: none;")
+        limits.setStyleSheet(f"color: {MUTED_INK}; background: transparent; border: none;")
         limits.setToolTip(
             "The instrument's own range for this field; the editable window "
             "is the tighter of it and the bench policy"
@@ -851,6 +875,10 @@ class DeviceManagerView(QtWidgets.QWidget):
 
         shown = f"{name}{'*' if dirty else ''}"
         self.document_name.setText(shown)
+        # One primary at a time: Save, with its star, while the apparatus
+        # has unsaved edits; Init devices again once it is saved.
+        self.save_button.set_dirty(bool(dirty))
+        self.lifecycle_button.set_role("standard" if dirty else "primary")
         self.document_name.setToolTip(
             f"{name} ({'saved' if saved and not dirty else 'unsaved draft'})"
         )
@@ -1118,20 +1146,35 @@ class DeviceManagerView(QtWidgets.QWidget):
     def _ensure_domain(self, domain: str) -> None:
         if domain in self.domain_groups:
             return
-        group = FluentGroupBox(domain.replace("_", " ").title(), self.left_body)
+        # The card lays out its own title row so Add device sits beside the
+        # domain's name.  At the foot of a long list it was the last thing
+        # in the scrolled column and was usually cut in half by its edge.
+        title = domain.replace("_", " ").title()
+        group = FluentGroupBox(title, self.left_body, title_strip_px=0)
         group_layout = QtWidgets.QVBoxLayout(group)
         pad = window_pad(0.7)
-        group_layout.setContentsMargins(pad, pad, pad, pad)
+        # The title row stands where a painted title strip would: its name
+        # level with the neighbouring cards' titles.
+        group_layout.setContentsMargins(pad, scaled_px(2), pad, pad)
         group_layout.setSpacing(window_pad(0.4))
-        cards = QtWidgets.QVBoxLayout()
-        cards.setContentsMargins(0, 0, 0, 0)
-        cards.setSpacing(window_pad(0.4))
-        group_layout.addLayout(cards)
+        header = QtWidgets.QHBoxLayout()
+        heading = FluentLabel(title)
+        heading.setStyleSheet(
+            f'QLabel {{ color: {TEXT}; font: {fluent_font_size()}pt "{FONT}"; '
+            "font-weight: 600; background: transparent; }"
+        )
         button = FluentButton("Add device")
         button.clicked.connect(
             lambda _checked=False, value=domain: self._add_domain_clicked(value)
         )
-        group_layout.addWidget(button)
+        header.addWidget(heading)
+        header.addStretch(1)
+        header.addWidget(button)
+        group_layout.addLayout(header)
+        cards = QtWidgets.QVBoxLayout()
+        cards.setContentsMargins(0, 0, 0, 0)
+        cards.setSpacing(window_pad(0.4))
+        group_layout.addLayout(cards)
         self.domain_groups[domain] = group
         self.domain_card_layouts[domain] = cards
         self.domain_add_buttons[domain] = button

@@ -1511,7 +1511,7 @@ assert row.start_spin.value() == 1 and row.stop_spin.value() == 3
 assert scan_readout._rows[1].start_spin.valueUnit() == 'MHz'
 assert scan_readout._rows[2].stop_spin.value() == 6
 assert scan_readout._rows[2].input_stack.currentIndex() == 0
-assert scan_readout._rows[2].mode_button.text() == 'Values'
+assert scan_readout._rows[2].mode_choice.button('values').property('current') is True
 assert scan_readout._rows[2].custom_label.text() == 'Range off'
 assert 'not in this pulse' not in scan_readout._rows[1].port_combo.currentText()
 plan['axes'][0]['values'] = [4, 5, 6]
@@ -2204,18 +2204,16 @@ finally:
     )
 
 
-def test_the_auto_preview_control_is_a_chip_that_looks_different_when_on(run_qt) -> None:
-    """A checkable FluentButton once drew NO checked state: on and off were
-    the same pixels, in the same accent as Edit beside it, so the control read
-    as a fourth command button and an operator could not find the toggle at
-    all.  Checked, a button is now a toggle chip, pressed in the way a
-    segmented choice marks its current item.
+def test_the_auto_preview_control_is_a_switch_that_looks_different_when_on(run_qt) -> None:
+    """A checkable FluentButton once drew NO checked state, and a later toggle
+    chip still read as one more command among Start and Edit.  The setting
+    is a FluentSwitch: a track that is visibly on or off, its label beside it.
     """
 
     run_qt(
         """
 from zlc_ui.qt import ensure_qt_app
-from zlc_ui.fluent import FluentButton
+from zlc_ui.fluent import FluentSwitch
 from zlc_ui.console import logic_row_view as tested_module
 
 app = ensure_qt_app(['test'])
@@ -2225,7 +2223,7 @@ row.show()
 app.processEvents()
 
 switch = row.preview_switch
-assert isinstance(switch, FluentButton) and switch.isCheckable(), type(switch)
+assert isinstance(switch, FluentSwitch), type(switch)
 
 seen = []
 switch.toggled.connect(seen.append)
@@ -2246,8 +2244,8 @@ for index in range(layout.count()):
         row.run_button, row.preview_switch, row.edit_button, row.more_button,
     ):
         order.append(widget)
-assert order.index(row.preview_switch) == order.index(row.run_button) + 1, (
-    'the switch belongs immediately beside Start')
+assert order.index(row.preview_switch) == order.index(row.run_button) - 1, (
+    'the switch belongs immediately left of Start, as on the Edit page')
 
 row.set_task_takeover(True)
 assert not switch.isEnabled(), 'a row that cannot Start cannot re-aim Start'
@@ -2273,7 +2271,7 @@ def test_the_editor_shows_the_same_preview_switch_beside_its_own_start(run_qt) -
     run_qt(
         """
 from zlc_ui.qt import ensure_qt_app
-from zlc_ui.fluent import FluentButton
+from zlc_ui.fluent import FluentSwitch
 from zlc_ui.form import FormSpec
 from zlc_ui.console import logic_editor_view as tested_module
 
@@ -2297,16 +2295,29 @@ editor.resize(900, 420)
 editor.show()
 app.processEvents()
 switch = editor.preview_switch
-assert isinstance(switch, FluentButton) and switch.isCheckable(), type(switch)
+assert isinstance(switch, FluentSwitch), type(switch)
 assert switch.isChecked() is False, 'the editor shows the stored preference'
 
-# Beside Start, in pixels: same row, immediately to its right.  A switch that
-# merely EXISTS somewhere is what an operator could not find.
+# Beside Start, in pixels: same row, immediately to its left.  Start keeps
+# the rightmost slot every edit page gives its main action, so a setting
+# never sits where the action is looked for.  A switch that merely EXISTS
+# somewhere is what an operator could not find.
 start = editor.run_button
 assert switch.isVisible() and start.isVisible()
 assert abs(switch.y() - start.y()) <= 2, (switch.geometry(), start.geometry())
-gap = switch.x() - (start.x() + start.width())
+gap = start.x() - (switch.x() + switch.width())
 assert 0 <= gap <= 40, (switch.geometry(), start.geometry())
+assert start.role() == 'primary'
+
+# Running, the one button is Stop -- still this page's primary, so the way to
+# stop is the loudest control exactly while it is needed.
+editor.update_projection(dict(projection, running=True, can_stop=True))
+app.processEvents()
+assert start.text() == 'Stop' and start.role() == 'primary', (start.text(), start.role())
+assert editor.restart_button.isVisible()
+assert editor.restart_button.x() < start.x() and switch.x() < editor.restart_button.x()
+editor.update_projection(projection)
+app.processEvents()
 
 raised = []
 switch.toggled.connect(raised.append)
@@ -2369,8 +2380,8 @@ signal = '@logic/camera_measurement/frames'
 project(card, signal, signal, 'panel-2@camera_measurement/frames')
 assert card._caption() == 'panel-2@camera_measurement/frames', card._caption()
 line = card._band_fragments()[0]
-# The card's own id leads in grey; the name the operator reads follows it.
-assert line[0][:2] == ('panel-2', tested_module.GREY), line
+# The card's own id leads in muted ink; the name the operator reads follows it.
+assert line[0][:2] == ('panel-2', tested_module.MUTED_INK), line
 assert line[0][0] + line[1][0] == 'panel-2@camera_measurement/frames', line
 
 # The name itself is untouched, everywhere it is the NAME and not a caption.

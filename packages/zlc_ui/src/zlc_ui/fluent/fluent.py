@@ -31,10 +31,18 @@ from ..status import STATUS_SEVERITIES
 
 from .style import (
     ACCENT,
+    ACCENT_HOVER,
+    ACCENT_PRESSED,
+    ACCENT_STRONG,
     ACCENT_TINT,
+    DERIVED_EDGE,
+    DERIVED_INK,
+    DISABLED_INK,
+    MUTED_INK,
     SELECTION_EDGE,
     AUTO_SCALE_BASIS,
     BUTTON_PADDING_H,
+    BUTTON_TINT,
     AUTO_SCALE_MARGIN,
     BG,
     CARD_PAD,
@@ -54,12 +62,12 @@ from .style import (
     MUTED_LABEL_STYLE,
     ORANGE,
     ORANGE_DARK,
-    ORANGE_TINT,
     PADDING_V,
     PLACEHOLDER,
     RADIUS,
     RED,
     RED_DARK,
+    RED_TINT,
     TEXT,
     TITLE_ICON_GAP,
     TITLE_ICON_RATIO,
@@ -1166,13 +1174,20 @@ class FluentGroupBox(QtWidgets.QGroupBox):
 #: What a button DOES, which is all its look may say.  A colour chosen per
 #: call gave one verb a different hue in every window -- Remove orange here,
 #: grey there, blue in the editor -- with white text at 1.65-2.55:1 on top.
-#: ``primary`` is a surface's one main action (the only accent fill),
-#: ``standard`` every other command, ``destructive`` a command that takes
-#: something away (standard, red ink; a one-glyph remove-row x keeps quiet
-#: ink until the pointer is on it, since red at rest marks problems), and
-#: ``destructive_primary`` the
-#: confirm of a destructive question -- the one other white-on-colour fill.
+#: ``primary`` is a surface's ONE run or commit action (the deep
+#: ACCENT_STRONG fill, white ink) -- at most one per surface; ``standard``
+#: every other command (the light-blue tint); ``destructive`` a command that
+#: takes something away (a labelled one sits on the RED_TINT face; a
+#: one-glyph remover repeated down rows is a ghost in quiet ink that turns
+#: red only under the pointer, since red at rest marks problems); and
+#: ``destructive_primary`` the confirm of a destructive question -- the one
+#: white-on-red fill.
 BUTTON_ROLES = ("primary", "standard", "destructive", "destructive_primary")
+
+#: The keyboard-focus ring: its stroke, and the clear space between it and
+#: the control (logical pixels).
+FOCUS_RING_PX = 1.5
+FOCUS_RING_GAP = 2.0
 
 _BUTTON_STYLE_CACHE: tuple[float, str] | None = None
 
@@ -1180,79 +1195,105 @@ _BUTTON_STYLE_CACHE: tuple[float, str] | None = None
 def _button_stylesheet() -> str:
     """The one sheet every FluentButton wears; role and state pick the rules.
 
-    Standard is the resting look of the segmented choice the operator
-    already reads as calm: a white face, a hairline edge, the accent only on
-    the edge under the pointer.  A checkable button checked is a toggle chip
-    and wears that control's "current" state.  Disabled is an OUTLINE: a
-    filled grey disabled button and an enabled grey one were the same
-    pixels, and nobody could tell whether Start could be pressed.
+    The layers are told apart by FILL.  Standard is the light-blue
+    BUTTON_TINT with HOVER ink (7.7:1); primary the deep ACCENT_STRONG with
+    white ink (5.2:1), the one dark face on its surface.  Destructive has ONE
+    look for every labelled command -- Remove, Delete, Clear, Unload: the
+    RED_TINT face, no edge, RED_DARK ink (5.4:1), as far from white as the
+    light-blue face is -- so a Remove reads the same in a toolbar, a button
+    grid or alone; a one-glyph remover repeated down a list of rows (x)
+    stays a ghost with the red wash only under the pointer, because a column
+    of red faces shouted louder than the rows it removed.
+    destructive_primary is the RED_DARK fill with white ink.  A command ON A
+    TINTED CARD (``on_tint``, the green config Subpulse) is a white face
+    with NO edge and HOVER ink (9.9:1): white stands CIEDE2000 11.8 off the
+    green card, as BUTTON_TINT stands off a white one, and does not lay blue
+    on green; the card's FIELDS keep their white face AND their edge, so a
+    command beneath a name field is not one more box.  Pointer and press
+    each step the face a shade.  Dirty (something new to save) is ONE rule for every save or
+    commit: clean it is the role it was given, unsaved it is the primary
+    with a trailing star.  Disabled is an outline on the page grey with
+    DISABLED_INK; a disabled ghost stays a ghost.
     """
 
     global _BUTTON_STYLE_CACHE
     if _BUTTON_STYLE_CACHE is not None and _BUTTON_STYLE_CACHE[0] == _FLUENT_SCALE:
         return _BUTTON_STYLE_CACHE[1]
-    accent_hover = QtGui.QColor(ACCENT).darker(110).name()
-    accent_pressed = QtGui.QColor(ACCENT).darker(122).name()
-    red_hover = QtGui.QColor(RED).darker(110).name()
-    red_pressed = QtGui.QColor(RED).darker(122).name()
+    tint_hover = _mixed(BUTTON_TINT, ACCENT, 0.25).name()
+    tint_pressed = _mixed(BUTTON_TINT, ACCENT, 0.45).name()
+    strong_hover = QtGui.QColor(ACCENT_STRONG).darker(110).name()
+    strong_pressed = QtGui.QColor(ACCENT_STRONG).darker(122).name()
+    red_hover = _mixed(RED_TINT, RED, 0.19).name()
+    red_tint_pressed = _mixed(RED_TINT, RED, 0.3).name()
+    red_strong_hover = QtGui.QColor(RED_DARK).darker(112).name()
+    red_strong_pressed = QtGui.QColor(RED_DARK).darker(126).name()
+    on_tint_pressed = _mixed(BG, DIVIDER, 0.6).name()
     style = f"""
     QPushButton {{
-        background: {SURFACE};
-        color: {TEXT};
-        border: 1px solid {DIVIDER};
+        background: {BUTTON_TINT};
+        color: {HOVER};
+        border: 1px solid {BUTTON_TINT};
         border-radius: {_radius()}px;
         padding: 0px {scaled_px(BUTTON_PADDING_H, minimum=6)}px;
         font: {fluent_font_size()}pt "{FONT}";
         outline: none;
     }}
-    QPushButton:hover {{ border-color: {ACCENT}; }}
-    QPushButton:pressed {{ background: {ACCENT_TINT}; }}
-    QPushButton:checked {{
-        background: {ACCENT_TINT};
-        border-color: {SELECTION_EDGE};
-        color: {HOVER};
+    QPushButton:hover {{ background: {tint_hover}; border-color: {tint_hover}; }}
+    QPushButton:pressed {{ background: {tint_pressed}; border-color: {tint_pressed}; }}
+    QPushButton[on_tint="true"] {{
+        background: {SURFACE}; border-color: {SURFACE}; color: {HOVER};
     }}
-    QPushButton:checked:hover {{ border-color: {ACCENT}; }}
-    QPushButton[role="destructive"] {{ color: {RED_DARK}; }}
-    QPushButton[role="destructive"]:hover {{ border-color: {RED}; }}
-    QPushButton[role="destructive"]:pressed {{ background: {BG}; }}
+    QPushButton[on_tint="true"]:hover {{ background: {BG}; border-color: {BG}; }}
+    QPushButton[on_tint="true"]:pressed {{
+        background: {on_tint_pressed}; border-color: {on_tint_pressed};
+    }}
     QPushButton[role="primary"] {{
-        background: {ACCENT}; border-color: {ACCENT}; color: white;
+        background: {ACCENT_STRONG}; border-color: {ACCENT_STRONG}; color: white;
     }}
     QPushButton[role="primary"]:hover {{
-        background: {accent_hover}; border-color: {accent_hover};
+        background: {strong_hover}; border-color: {strong_hover};
     }}
     QPushButton[role="primary"]:pressed {{
-        background: {accent_pressed}; border-color: {accent_pressed};
+        background: {strong_pressed}; border-color: {strong_pressed};
     }}
-    QPushButton[role="destructive_primary"] {{
-        background: {RED}; border-color: {RED}; color: white;
+    QPushButton[role="destructive"] {{
+        background: {RED_TINT}; border-color: {RED_TINT}; color: {RED_DARK};
     }}
-    QPushButton[role="destructive_primary"]:hover {{
+    QPushButton[role="destructive"]:hover {{
         background: {red_hover}; border-color: {red_hover};
     }}
-    QPushButton[role="destructive_primary"]:pressed {{
-        background: {red_pressed}; border-color: {red_pressed};
+    QPushButton[role="destructive"]:pressed {{
+        background: {red_tint_pressed}; border-color: {red_tint_pressed};
     }}
-    QPushButton[dirty="true"] {{
-        background: {ORANGE_TINT}; border-color: {ORANGE}; color: {ORANGE_DARK};
+    QPushButton[role="destructive_primary"] {{
+        background: {RED_DARK}; border-color: {RED_DARK}; color: white;
+    }}
+    QPushButton[role="destructive_primary"]:hover {{
+        background: {red_strong_hover}; border-color: {red_strong_hover};
+    }}
+    QPushButton[role="destructive_primary"]:pressed {{
+        background: {red_strong_pressed}; border-color: {red_strong_pressed};
     }}
     QPushButton[glyph="true"] {{
         padding: 0px {scaled_px(4, minimum=2)}px;
         font-size: {round(fluent_font_size() * 1.35)}pt;
     }}
-    QPushButton[role="destructive"][glyph="true"] {{ color: {GRAPHITE}; }}
-    QPushButton[role="destructive"][glyph="true"]:hover,
-    QPushButton[role="destructive"][glyph="true"]:pressed {{
-        color: {RED_DARK}; border-color: {RED};
+    QPushButton[role="destructive"][glyph="true"] {{
+        background: transparent; border-color: transparent; color: {MUTED_INK};
     }}
-    QPushButton[role="destructive"][glyph="true"]:disabled {{
-        background: {BG}; border-color: {DIVIDER}; color: {PLACEHOLDER};
+    QPushButton[role="destructive"][glyph="true"]:hover {{
+        background: {RED_TINT}; border-color: {RED_TINT}; color: {RED_DARK};
+    }}
+    QPushButton[role="destructive"][glyph="true"]:pressed {{
+        background: {red_tint_pressed}; border-color: {red_tint_pressed}; color: {RED_DARK};
     }}
     QPushButton:disabled, QPushButton[role="primary"]:disabled,
-    QPushButton[role="destructive_primary"]:disabled, QPushButton[dirty="true"]:disabled,
-    QPushButton:checked:disabled {{
-        background: {BG}; border-color: {DIVIDER}; color: {PLACEHOLDER};
+    QPushButton[role="destructive"]:disabled, QPushButton[on_tint="true"]:disabled,
+    QPushButton[role="destructive_primary"]:disabled {{
+        background: {BG}; border-color: {DIVIDER}; color: {DISABLED_INK};
+    }}
+    QPushButton[role="destructive"][glyph="true"]:disabled {{
+        background: transparent; border-color: transparent; color: {DISABLED_INK};
     }}
     """
     _BUTTON_STYLE_CACHE = (_FLUENT_SCALE, style)
@@ -1262,41 +1303,76 @@ def _button_stylesheet() -> str:
 class FluentButton(QtWidgets.QPushButton):
     """A command, drawn by its ``role`` (see :data:`BUTTON_ROLES`).
 
-    Made checkable it is a toggle chip -- a state beside a command, drawn the
-    way a segmented choice marks its current item.  The label is never
-    elided: the button asks for its whole text plus padding, and a layout
-    too narrow for it is the layout's to fix.
+    A command only: an on/off setting is a :class:`FluentSwitch`, never a
+    checkable button.  The label is never elided: the button asks for its
+    whole text plus padding, and a layout too narrow for it is the layout's
+    to fix.
     """
 
     def __init__(self, text: str = "", parent=None, *, role: str = "standard"):
-        super().__init__(text, parent)
+        self._label = str(text)
         self._dirty = False
+        super().__init__(text, parent)
+        self.setProperty("on_tint", False)
         self.setMinimumHeight(scaled_px(30, minimum=22))
         # Default sizing is set ONCE here: a caller that opts into Expanding
         # (a button grid) keeps it.
         self.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
-        self.setProperty("dirty", False)
+        self._role = ""
         self._mark_glyph()
         self.set_role(role)
         self.setStyleSheet(_button_stylesheet())
 
     def setText(self, text: str) -> None:  # noqa: N802 - Qt API name
-        super().setText(text)
+        self._label = str(text)
+        self._show_label()
+
+    def _show_label(self) -> None:
+        """The label as shown: the caller's words and the dirty star."""
+
+        label = self._label
+        if self._dirty and not label.endswith("*"):
+            label += "*"
+        if QtWidgets.QPushButton.text(self) != label:
+            QtWidgets.QPushButton.setText(self, label)
         self._mark_glyph()
 
+    def sizeHint(self) -> QtCore.QSize:  # noqa: N802 - Qt API name
+        hint = super().sizeHint()
+        if self.property("glyph"):
+            # The enlarged symbol must not make its button taller than the
+            # word buttons beside it.
+            hint.setHeight(self.minimumHeight())
+        return hint
+
     def _mark_glyph(self) -> None:
-        """A one-symbol label (×, ⋯, −) is drawn larger, with little padding.
+        """A one-symbol label (×, ⋯, ▾) is drawn larger, with little padding.
 
         At body size such a symbol was a speck in the middle of a button
         padded for a word.
         """
 
-        glyph = len(self.text()) == 1 and not self.text().isalnum()
+        glyph = len(self._label) == 1 and not self._label.isalnum()
         if self.property("glyph") != glyph:
             self.setProperty("glyph", glyph)
             self._repolish()
 
+    def set_on_tint(self, on_tint: bool) -> None:
+        """Whether the button sits on a TINTED card (a config Subpulse).
+
+        There a light-blue face laid a second hue on the card's; it wears a
+        white face with no edge instead, which the card's fields (white AND
+        edged) do not.
+        """
+
+        value = bool(on_tint)
+        if self.property("on_tint") != value:
+            self.setProperty("on_tint", value)
+            self._repolish()
+
     def role(self) -> str:
+        """The role it is drawn with now: primary while dirty."""
+
         return str(self.property("role"))
 
     def set_role(self, role: str) -> None:
@@ -1305,8 +1381,13 @@ class FluentButton(QtWidgets.QPushButton):
         value = str(role)
         if value not in BUTTON_ROLES:
             raise ValueError(f"button role must be one of {BUTTON_ROLES}, not {value!r}")
-        if self.property("role") != value:
-            self.setProperty("role", value)
+        self._role = value
+        self._show_role()
+
+    def _show_role(self) -> None:
+        shown = "primary" if self._dirty else self._role
+        if self.property("role") != shown:
+            self.setProperty("role", shown)
             self._repolish()
 
     def _repolish(self) -> None:
@@ -1317,50 +1398,126 @@ class FluentButton(QtWidgets.QPushButton):
     def set_dirty(self, dirty: bool = True) -> None:
         """Mark that pressing this would save or apply something new.
 
-        A trailing ``*`` and the orange attention tint, whatever the role:
-        the star alone was easy to miss, and the yellow fill it used to come
-        with carried white text at 1.65:1.  Idempotent and width-stable --
-        the label never accumulates stars.
+        One rule for every save or commit: clean, the button wears the role
+        it was given (a Save is a standard command); unsaved, it is drawn
+        primary with a trailing ``*`` -- the one thing on its surface to
+        press.  A Save that was primary while there was nothing to save
+        shouted for no reason, and an orange tint on one tab beside a
+        primary on the next made one verb two looks.  Idempotent and
+        width-stable: the label never accumulates stars.
         """
 
         dirty = bool(dirty)
-        base = self.text()
-        if base.endswith("*"):
-            base = base[:-1]
+        if self._label.endswith("*"):
+            self._label = self._label[:-1]
         self._dirty = dirty
-        QtWidgets.QPushButton.setText(self, base + ("*" if dirty else ""))
-        if self.property("dirty") != dirty:
-            self.setProperty("dirty", dirty)
-            self._repolish()
+        self._show_label()
+        self._show_role()
 
     def is_dirty(self) -> bool:
         return self._dirty
 
-    def paintEvent(self, event) -> None:  # noqa: N802 - Qt naming
-        super().paintEvent(event)
-        _paint_keyboard_focus(self)
+    def focusInEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        super().focusInEvent(event)
+        _show_keyboard_focus(self, event)
+
+    def focusOutEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        super().focusOutEvent(event)
+        _show_keyboard_focus(self, event)
 
 
-def _paint_keyboard_focus(widget: QtWidgets.QWidget, rect: QtCore.QRectF | None = None) -> None:
-    """Ring ``widget`` while it holds focus the KEYBOARD gave it.
+class _FocusRing(QtWidgets.QWidget):
+    """Keyboard focus drawn OUTSIDE a control, never on its own edge.
 
-    Only a Tab or a shortcut draws it: a ring left by every click would
-    outline whichever control was pressed last.  Qt records which kind of
-    focus change happened on the window -- the flag its own styles read
-    before they draw a focus frame.
+    A ring on the control's edge was a second edge -- the very thing a
+    selection or a field already draws -- so a focused chip read as a chosen
+    one.  The ring is a sibling laid over the control in its parent: a
+    stroke FOCUS_RING_PX wide, FOCUS_RING_GAP clear of the control all
+    round, following it as it moves and gone when it hides.
     """
 
-    if not widget.hasFocus() or not widget.window().testAttribute(QtCore.Qt.WA_KeyboardFocusChange):
+    def __init__(self, target: QtWidgets.QWidget):
+        super().__init__(target.parentWidget())
+        self._target = target
+        self._corner = float(_radius())
+        self.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents)
+        self.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.hide()
+        target.installEventFilter(self)
+
+    def _frame(self) -> tuple[QtCore.QRect, float]:
+        """What the ring goes round, in the target's coordinates, and its
+        corner radius: the whole control, unless the control names a part
+        (a switch rings its track, not its label)."""
+
+        frame = getattr(self._target, "focus_frame", None)
+        if frame is None:
+            return self._target.rect(), float(_radius())
+        return frame()
+
+    def follow(self) -> None:
+        reach = math.ceil(FOCUS_RING_GAP + FOCUS_RING_PX)
+        rect, self._corner = self._frame()
+        rect = rect.translated(self._target.pos())
+        self.setGeometry(rect.adjusted(-reach, -reach, reach, reach))
+        self.raise_()
+
+    def eventFilter(self, watched, event):  # noqa: N802 - Qt naming
+        kind = event.type()
+        if kind in (QtCore.QEvent.Move, QtCore.QEvent.Resize) and self.isVisible():
+            self.follow()
+        elif kind == QtCore.QEvent.Hide:
+            self.hide()
+        elif kind == QtCore.QEvent.ParentChange:
+            self.setParent(self._target.parentWidget())
+            self.hide()
+        return False
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        del event
+        reach = math.ceil(FOCUS_RING_GAP + FOCUS_RING_PX)
+        inset = reach - FOCUS_RING_GAP - FOCUS_RING_PX / 2.0
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing)
+        pen = QtGui.QPen(QtGui.QColor(HOVER))
+        pen.setWidthF(FOCUS_RING_PX)
+        painter.setPen(pen)
+        painter.setBrush(QtCore.Qt.NoBrush)
+        corner = self._corner + FOCUS_RING_GAP + FOCUS_RING_PX / 2.0
+        painter.drawRoundedRect(
+            QtCore.QRectF(self.rect()).adjusted(inset, inset, -inset, -inset), corner, corner)
+        painter.end()
+
+
+def _show_keyboard_focus(target: QtWidgets.QWidget, event: QtGui.QFocusEvent) -> None:
+    """Ring ``target`` while it holds focus the KEYBOARD gave it.
+
+    Only a Tab, a Backtab or a shortcut draws it: a ring left by every click
+    would outline whichever control was pressed last.  A window coming back
+    to the front restores the ring when Qt recorded that its focus last moved
+    by keyboard -- the flag its own styles read before they draw a focus
+    frame.
+    """
+
+    ring = getattr(target, "_zlc_focus_ring", None)
+    reason = event.reason()
+    keyboard = event.gotFocus() and (
+        reason in (QtCore.Qt.TabFocusReason, QtCore.Qt.BacktabFocusReason,
+                   QtCore.Qt.ShortcutFocusReason)
+        or (reason == QtCore.Qt.ActiveWindowFocusReason
+            and target.window().testAttribute(QtCore.Qt.WA_KeyboardFocusChange))
+    )
+    if not keyboard:
+        if ring is not None:
+            ring.hide()
         return
-    painter = QtGui.QPainter(widget)
-    painter.setRenderHint(QtGui.QPainter.Antialiasing)
-    pen = QtGui.QPen(QtGui.QColor(HOVER))
-    pen.setWidthF(2.0)
-    painter.setPen(pen)
-    painter.setBrush(QtCore.Qt.NoBrush)
-    area = QtCore.QRectF(widget.rect()) if rect is None else QtCore.QRectF(rect)
-    painter.drawRoundedRect(area.adjusted(1.0, 1.0, -1.0, -1.0), _radius(), _radius())
-    painter.end()
+    if target.parentWidget() is None:
+        return
+    if ring is None:
+        ring = _FocusRing(target)
+        target._zlc_focus_ring = ring
+    ring.follow()
+    ring.show()
 
 
 def _apply_fluent_context_menu(widget, event, *, extra=()) -> None:
@@ -1436,6 +1593,7 @@ class FluentLineEdit(QtWidgets.QLineEdit):
         self._numeric_layout_key: tuple | None = None
         self.setMinimumHeight(scaled_px(30, minimum=22))
         self._apply_style()
+        self.set_placeholder_prompt(False)
         self.setText(str(text))
         self.editingFinished.connect(self._snap_to_resolution)
         self.textEdited.connect(self._normalize_visible_number)
@@ -1452,12 +1610,31 @@ class FluentLineEdit(QtWidgets.QLineEdit):
                 font: {fluent_font_size()}pt "{FONT}";
             }}
             QLineEdit:focus {{ border: 1px solid {ACCENT}; }}
-            QLineEdit:disabled {{ background: {BG}; color: {PLACEHOLDER}; }}
+            QLineEdit:disabled {{ background: {BG}; color: {DISABLED_INK}; }}
             """
         )
 
     def contextMenuEvent(self, event) -> None:  # noqa: N802 - Qt naming
         _apply_fluent_context_menu(self, event)
+
+    def set_placeholder_prompt(self, prompt: bool = True) -> None:
+        """Draw the placeholder as a pure PROMPT (the text ink at half
+        strength, Qt's own 2.9:1) instead of as information (MUTED_INK,
+        5.6:1, every field's default).
+
+        A placeholder that says what a blank field DOES -- "full sensor",
+        "camera's current" --, what to type there ("filter names and
+        values"), or that nothing is chosen yet is something the operator
+        must read, so information is the default; only a field's own name
+        repeated inside it ("File name", "role") may stay faint.
+        """
+
+        colour = QtGui.QColor(TEXT if prompt else MUTED_INK)
+        if prompt:
+            colour.setAlpha(128)
+        palette = self.palette()
+        palette.setColor(QtGui.QPalette.PlaceholderText, colour)
+        self.setPalette(palette)
 
     def set_display_elide(self, mode) -> None:
         """Elide what does not fit (``QtCore.Qt.ElideMiddle``, ...) while the
@@ -1488,7 +1665,7 @@ class FluentLineEdit(QtWidgets.QLineEdit):
             return
         painter = QtGui.QPainter(self)
         self.style().drawPrimitive(QtWidgets.QStyle.PE_PanelLineEdit, option, painter, self)
-        painter.setPen(QtGui.QColor(TEXT if self.isEnabled() else PLACEHOLDER))
+        painter.setPen(QtGui.QColor(TEXT if self.isEnabled() else DISABLED_INK))
         painter.setFont(self.font())
         painter.drawText(
             area, QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter,
@@ -1890,38 +2067,52 @@ class FluentLineEdit(QtWidgets.QLineEdit):
 
 
 class FluentReadoutEdit(FluentLineEdit):
-    """A read-only BUT selectable / copyable text field -- the THIRD line-edit kind.
+    """A read-only BUT selectable / copyable value -- the THIRD line-edit kind.
 
     Three visually distinct text widgets, so a user tells at a glance what a field is:
 
-      * :class:`FluentLineEdit`    -- WHITE fill + accent focus ring: an EDITABLE input.
-      * :class:`FluentLabel`       -- transparent, no border: pure DISPLAY (cannot select).
-      * :class:`FluentReadoutEdit` -- light-grey fill + faint border, NO focus ring: you can
-        select + Ctrl-C the text but NOT edit it (a command result, a resolved file path, a
-        readout value).
+      * :class:`FluentLineEdit`    -- WHITE box + accent focus edge: an EDITABLE input.
+      * :class:`FluentLabel`       -- plain text: pure DISPLAY (cannot select).
+      * :class:`FluentReadoutEdit` -- plain TEXT-ink text on the surface, no box: you can
+        select + Ctrl-C it but NOT edit it (a command result, a resolved file path, a
+        readout value).  A value too long for its row is elided in the MIDDLE -- a path
+        keeps its head and its file name -- and the tooltip carries all of it.
+
+    It wore a grey box with a faint edge, which is the disabled button's chrome: a path
+    the operator was meant to read looked like a control that was switched off.
 
     Inherits FluentLineEdit's sizing / API (``setText`` / ``text``) so it drops into the same
-    rows; it just paints the read-only look and refuses edits."""
+    rows.  Being text, it starts where text starts -- flush with its widget's left edge, so a
+    value sits exactly under its column header or beside the label it continues.  It kept a
+    field's inner padding when it lost the box, and every value then started nine pixels to
+    the right of the header above it."""
 
     def __init__(self, text: str = "", parent=None):
         super().__init__(text, parent)
+        # QLineEdit keeps two pixels before its text; a readout has no box to keep them from.
+        self.setTextMargins(-2, 0, 0, 0)
         self.setReadOnly(True)
         self.setCursor(QtCore.Qt.IBeamCursor)        # the I-beam signals "selectable text"
+        self.set_display_elide(QtCore.Qt.ElideMiddle)
+        self.setToolTip(self.text())
+
+    def setText(self, text: str) -> None:  # noqa: N802 - Qt API name
+        super().setText(text)
+        self.setToolTip(self.text())
 
     def _apply_style(self) -> None:
-        # grey fill (not white -> not an input) + a faint border (more than a bare label) +
-        # full-contrast text; NO accent focus border, because it cannot be edited.
+        # No box and no side inset: the transparent top and bottom edges keep a field's height.
         self.setStyleSheet(
             f"""
             QLineEdit {{
-                background: {BG};
-                border: 1px solid {DIVIDER};
-                border-radius: {_radius()}px;
-                padding: {scaled_px(PADDING_V)}px {scaled_px(EDIT_PADDING_H)}px;
+                background: transparent;
+                border: 1px solid transparent;
+                border-left-width: 0px;
+                border-right-width: 0px;
+                padding: {scaled_px(PADDING_V)}px 0px;
                 color: {TEXT};
                 font: {fluent_font_size()}pt "{FONT}";
             }}
-            QLineEdit:focus {{ border: 1px solid {DIVIDER}; }}
             """
         )
 
@@ -1930,8 +2121,8 @@ class FluentReadoutMultiline(QtWidgets.QPlainTextEdit):
     """A MULTI-LINE :class:`FluentReadoutEdit` -- the read-only-but-selectable text field for a
     value TOO LONG for one line (a resolved path, a metadata blob, or a data shape).
 
-    Same look/role as :class:`FluentReadoutEdit` (grey fill + faint border + full-contrast text, NO
-    accent focus ring: you can select + Ctrl-C but not edit), but it SOFT-WRAPS a long value at the
+    Same look/role as :class:`FluentReadoutEdit` (plain TEXT-ink text on the surface, no box:
+    you can select + Ctrl-C but not edit), but it SOFT-WRAPS a long value at the
     field width (``WrapAtWordBoundaryOrAnywhere``) and AUTO-SIZES its height to the WHOLE wrapped
     content -- so every line is shown in full and nothing is ever truncated the way a single-line edit
     clips it.  There is NO row cap and NO inner scrollbar: the field grows to fit all its lines and the
@@ -1945,7 +2136,7 @@ class FluentReadoutMultiline(QtWidgets.QPlainTextEdit):
                  max_height: int | None = None):
         super().__init__(parent)
         # plain=True -> transparent, borderless (reads as plain MESSAGE text, e.g. a warning/error
-        #   body) instead of the grey readout box; still selectable + wrap-anywhere.
+        #   body) with no padding and no caret; still selectable + wrap-anywhere.
         # max_height set -> the field grows to fit its content UP TO this many px, then STOPS and
         #   scrolls vertically (the QPlainTextEdit reserves its own scrollbar gutter and re-wraps the
         #   text narrower, so nothing ever lands under the bar).  None -> grow unbounded (default).
@@ -1972,6 +2163,9 @@ class FluentReadoutMultiline(QtWidgets.QPlainTextEdit):
         # its text.  At PADDING_V the row's content box lines up with the line edit's, so the anchored
         # height formula (single-row height + one lineSpacing per extra line) shows every line in full.
         self.document().setDocumentMargin(scaled_px(PADDING_V))
+        # That margin is on every side; a readout's text still starts at its widget's left edge,
+        # under the header or beside the label it continues, so the viewport takes it back.
+        self.setViewportMargins(-scaled_px(PADDING_V), 0, 0, 0)
         self._apply_style()
         if self._plain:
             # A MESSAGE body is not an input: hide the blinking text caret and don't steal the dialog's
@@ -1993,7 +2187,7 @@ class FluentReadoutMultiline(QtWidgets.QPlainTextEdit):
     def _apply_style(self) -> None:
         if self._plain:
             # Transparent + borderless: reads as plain MESSAGE text (a warning / error body), still
-            # selectable + wrap-anywhere -- no grey readout box, so it drops onto a white card cleanly.
+            # selectable + wrap-anywhere, flush with the card's text -- no field padding.
             base = f"""
             QPlainTextEdit {{
                 background: transparent;
@@ -2004,18 +2198,18 @@ class FluentReadoutMultiline(QtWidgets.QPlainTextEdit):
             }}
             """
         else:
-            # The SAME readout chrome as FluentReadoutEdit: grey fill (not white -> not an input) + a
-            # faint border + full-contrast text; NO accent focus border, because it cannot be edited.
+            # The SAME readout look as FluentReadoutEdit: plain TEXT-ink text on the surface, no
+            # box (a grey box was the disabled button's chrome) and no side inset.
             base = f"""
             QPlainTextEdit {{
-                background: {BG};
-                border: 1px solid {DIVIDER};
-                border-radius: {_radius()}px;
-                padding: {scaled_px(PADDING_V)}px {scaled_px(EDIT_PADDING_H)}px;
+                background: transparent;
+                border: 1px solid transparent;
+                border-left-width: 0px;
+                border-right-width: 0px;
+                padding: {scaled_px(PADDING_V)}px 0px;
                 color: {TEXT};
                 font: {fluent_font_size()}pt "{FONT}";
             }}
-            QPlainTextEdit:focus {{ border: 1px solid {DIVIDER}; }}
             """
         # Fold in the shared Fluent scrollbar look: a ``max_height`` field shows a vertical bar when it
         # overflows, and this ``setStyleSheet`` would otherwise clobber a separately-applied bar style.
@@ -2703,8 +2897,8 @@ QAbstractItemView {{
     border: none;
     padding: {gap}px;
     color: {TEXT};
-    selection-background-color: {ACCENT_TINT};
-    selection-color: {HOVER};
+    selection-background-color: {ACCENT};
+    selection-color: {TEXT};
     font: {fluent_font_size()}pt "{FONT}";
     outline: none;
 }}
@@ -2719,9 +2913,8 @@ QAbstractItemView::item:hover {{
     color: {TEXT};
 }}
 QAbstractItemView::item:selected {{
-    background-color: {ACCENT_TINT};
-    border-color: {SELECTION_EDGE};
-    color: {HOVER};
+    background-color: {ACCENT};
+    color: {TEXT};
 }}
 QAbstractItemView::corner {{
     background: transparent;
@@ -3157,7 +3350,7 @@ class FluentComboBox(QtWidgets.QAbstractButton):
         form, and an open combo filled with tint.  The field now says its
         states the way an edit does -- the accent edge under the pointer or
         while it is open -- and only a cycle choice whose wheel is ACTIVE
-        wears the selection's tint, because that is a state it holds.
+        wears the selection's look, because that is a state it holds.
         """
 
         del event
@@ -3172,15 +3365,15 @@ class FluentComboBox(QtWidgets.QAbstractButton):
             or (self._line_edit is not None and self._line_edit.hasFocus())
             or self.underMouse()
         )
-        fill = ACCENT_TINT if current else SURFACE if enabled else BG
-        edge = SELECTION_EDGE if current and not engaged else ACCENT if engaged else PLACEHOLDER
+        fill = ACCENT if current else SURFACE if enabled else BG
+        edge = ACCENT_HOVER if current and engaged else ACCENT if current or engaged else PLACEHOLDER
         painter.setPen(QtGui.QPen(QtGui.QColor(edge), 1.0))
         painter.setBrush(QtGui.QColor(fill))
         painter.drawRoundedRect(outer, radius, radius)
 
         if self._line_edit is None:
             text_rect = self._collapsed_text_rect()
-            painter.setPen(QtGui.QColor(HOVER if current else TEXT if enabled else PLACEHOLDER))
+            painter.setPen(QtGui.QColor(TEXT if enabled else DISABLED_INK))
             painter.setFont(self._collapsed_font())
             text = painter.fontMetrics().elidedText(
                 self._display_text(), QtCore.Qt.ElideRight, text_rect.width()
@@ -3191,7 +3384,7 @@ class FluentComboBox(QtWidgets.QAbstractButton):
         half = scaled_px(COMBO_TRI_SIZE) / 2.0
         cx = self.width() - drop_width / 2.0 - scaled_px(2)
         cy = self.height() / 2.0
-        chevron = QtGui.QPen(QtGui.QColor(GRAPHITE if enabled else PLACEHOLDER))
+        chevron = QtGui.QPen(QtGui.QColor(TEXT if current else GRAPHITE if enabled else PLACEHOLDER))
         chevron.setWidthF(max(1.0, scaled_px(3) / 2.0))
         chevron.setCapStyle(QtCore.Qt.RoundCap)
         chevron.setJoinStyle(QtCore.Qt.RoundJoin)
@@ -3203,7 +3396,14 @@ class FluentComboBox(QtWidgets.QAbstractButton):
             QtCore.QPointF(cx + half, cy - half / 2.0),
         ]))
         painter.end()
-        _paint_keyboard_focus(self)
+
+    def focusInEvent(self, event) -> None:  # noqa: N802 - Qt API name
+        super().focusInEvent(event)
+        _show_keyboard_focus(self, event)
+
+    def focusOutEvent(self, event) -> None:  # noqa: N802 - Qt API name
+        super().focusOutEvent(event)
+        _show_keyboard_focus(self, event)
 
     def enterEvent(self, event) -> None:  # noqa: N802 - Qt API name
         self.update()
@@ -4458,7 +4658,7 @@ class FluentTabWidget(QtWidgets.QTabWidget):
             }}
             QTabBar::tab {{
                 background: transparent;
-                color: {GRAPHITE};
+                color: {MUTED_INK};
                 border: none;
                 border-bottom: {scaled_px(2, minimum=2)}px solid transparent;
                 height: {scaled_px(32, minimum=26)}px;
@@ -4523,7 +4723,7 @@ class FluentTabWidget(QtWidgets.QTabWidget):
         radius = _radius()
         btn.setStyleSheet(
             f"""
-            QToolButton {{ border: none; background: transparent; color: {GREY};
+            QToolButton {{ border: none; background: transparent; color: {MUTED_INK};
                            border-radius: {radius}px; padding: 0px; }}
             QToolButton:hover {{ background: rgba(0, 0, 0, 18); color: {TEXT}; }}
             QToolButton:pressed {{ background: rgba(0, 0, 0, 34); color: {TEXT}; }}
@@ -4669,13 +4869,24 @@ def fluent_switch_width(text: str) -> int:
 
 
 class FluentSwitch(QtWidgets.QAbstractButton):
-    """An on/off setting: a small track with its label BESIDE it.
+    """An on/off setting: a small track with its label BESIDE it, in TEXT ink.
 
-    The label used to be painted across the track, under the thumb, which
-    covered a letter of every word it carried; and a blue thumb on a green
-    track put two hues on one bit.  Off is a white track ringed in grey with
-    a graphite thumb, on is the accent with a white thumb -- the standard
-    Fluent toggle.  The whole width, label included, takes the click.
+    Every boolean SETTING is one of these -- Selectors, Plot, Show off rows,
+    Remote -- including one that sits in a row of commands: a checkable
+    button there read as one more command, and on was told from off by a
+    shade.  The label used to be painted across the track, under the thumb,
+    which covered a letter of every word it carried.  Every state graphic
+    holds 3:1 against what it sits on: off is a white track ringed in
+    GRAPHITE (3.9:1 on white) with a GRAPHITE thumb; on is the ACCENT track
+    outlined in DERIVED_EDGE (3.4:1 on white -- the light accent alone was
+    2.45:1) with a white thumb rimmed in DERIVED_EDGE (3.4:1 against the
+    thumb).  Under the pointer the on track steps to ACCENT_HOVER and the
+    off ring to TEXT.  The widget is a control's height (30 design px) with
+    the track centred in it, so a switch lines up with the buttons of its
+    row; keyboard focus is the same ring outside the track that a button
+    wears outside its face.  The whole width, label included, takes the
+    click.  In a row of commands a switch and its label are their own group:
+    :func:`add_row_switch` puts the air of two button gaps either side.
     """
 
     def __init__(self, text: str = "", parent=None):
@@ -4685,6 +4896,10 @@ class FluentSwitch(QtWidgets.QAbstractButton):
         self.setCursor(QtCore.Qt.PointingHandCursor)
         self.setFont(QtGui.QFont(FONT, fluent_font_size()))
         self.setAttribute(QtCore.Qt.WA_Hover, True)
+        self.setFocusPolicy(QtCore.Qt.StrongFocus)
+        # A control's height, never stretched: a row centres it, so its
+        # track sits on the same line as the buttons beside it.
+        self.setSizePolicy(QtWidgets.QSizePolicy.Minimum, QtWidgets.QSizePolicy.Fixed)
         self._offset = float(self._thumb_inset())
         self._animating = False
         self._anim = QtCore.QPropertyAnimation(self, b"offset", self)
@@ -4698,7 +4913,8 @@ class FluentSwitch(QtWidgets.QAbstractButton):
         return scaled_px(4, minimum=3)
 
     def _apply_metrics(self) -> None:
-        self.setMinimumSize(fluent_switch_width(self.text()), scaled_px(30, minimum=24))
+        # A control's height, the same number a FluentButton takes.
+        self.setMinimumSize(fluent_switch_width(self.text()), scaled_px(30, minimum=22))
 
     def setText(self, text: str) -> None:  # noqa: N802 - Qt API
         value = str(text)
@@ -4720,10 +4936,20 @@ class FluentSwitch(QtWidgets.QAbstractButton):
             and 0 <= int(pos.y()) <= self.height()
         )
 
-    def _track_rect(self) -> QtCore.QRectF:
+    def _track_box(self) -> QtCore.QRect:
+        """The track's whole-pixel box, centred in the widget's height."""
+
         track_w, track_h = _switch_track_size()
-        top = (self.height() - track_h) / 2.0
-        return QtCore.QRectF(0.5, top + 0.5, track_w - 1.0, track_h - 1.0)
+        return QtCore.QRect(0, (self.height() - track_h) // 2, track_w, track_h)
+
+    def _track_rect(self) -> QtCore.QRectF:
+        return QtCore.QRectF(self._track_box()).adjusted(0.5, 0.5, -0.5, -0.5)
+
+    def focus_frame(self) -> tuple[QtCore.QRect, float]:
+        """The keyboard-focus ring goes round the track, not the label."""
+
+        box = self._track_box()
+        return box, box.height() / 2.0
 
     def paintEvent(self, event) -> None:
         del event
@@ -4732,15 +4958,17 @@ class FluentSwitch(QtWidgets.QAbstractButton):
         track = self._track_rect()
         radius = track.height() / 2.0
         on, enabled = self.isChecked(), self.isEnabled()
-        hovered = enabled and self.underMouse()
+        hovered = enabled and (self.underMouse() or self.isDown())
+        rim = None
         if on:
-            fill = QtGui.QColor(ACCENT if enabled else PLACEHOLDER)
-            if hovered:
-                fill = fill.darker(110)
-            edge, thumb = fill, QtGui.QColor(SURFACE)
+            fill = QtGui.QColor(
+                ACCENT_HOVER if hovered else ACCENT if enabled else PLACEHOLDER)
+            edge, thumb = QtGui.QColor(DERIVED_EDGE if enabled else PLACEHOLDER), QtGui.QColor(SURFACE)
+            if enabled:
+                rim = QtGui.QColor(DERIVED_EDGE)
         else:
             fill = QtGui.QColor(SURFACE if enabled else BG)
-            edge = QtGui.QColor(GRAPHITE if hovered else PLACEHOLDER if enabled else DIVIDER)
+            edge = QtGui.QColor(TEXT if hovered else GRAPHITE if enabled else DIVIDER)
             thumb = QtGui.QColor(GRAPHITE if enabled else PLACEHOLDER)
         painter.setPen(QtGui.QPen(edge, 1.0))
         painter.setBrush(fill)
@@ -4749,13 +4977,18 @@ class FluentSwitch(QtWidgets.QAbstractButton):
         inset = self._thumb_inset()
         diameter = max(1.0, track.height() + 1.0 - 2 * inset)
         offset = self._offset if self._animating else self._checked_offset()
-        painter.setPen(QtCore.Qt.NoPen)
+        thumb_rect = QtCore.QRectF(offset, track.center().y() - diameter / 2.0, diameter, diameter)
+        if rim is None:
+            painter.setPen(QtCore.Qt.NoPen)
+        else:
+            painter.setPen(QtGui.QPen(rim, 1.0))
+            thumb_rect.adjust(0.5, 0.5, -0.5, -0.5)
         painter.setBrush(thumb)
-        painter.drawEllipse(QtCore.QRectF(offset, track.center().y() - diameter / 2.0, diameter, diameter))
+        painter.drawEllipse(thumb_rect)
 
         if self.text():
             track_w, _track_h = _switch_track_size()
-            painter.setPen(QtGui.QColor(TEXT if enabled else PLACEHOLDER))
+            painter.setPen(QtGui.QColor(TEXT if enabled else DISABLED_INK))
             painter.setFont(self.font())
             left = track_w + scaled_px(8)
             painter.drawText(
@@ -4764,8 +4997,14 @@ class FluentSwitch(QtWidgets.QAbstractButton):
                 self.text(),
             )
         painter.end()
-        focus = self._track_rect().adjusted(-2.5, -2.5, 2.5, 2.5)
-        _paint_keyboard_focus(self, focus)
+
+    def focusInEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        super().focusInEvent(event)
+        _show_keyboard_focus(self, event)
+
+    def focusOutEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        super().focusOutEvent(event)
+        _show_keyboard_focus(self, event)
 
     def mouseReleaseEvent(self, event) -> None:
         # QAbstractButton already gates toggling on the left button + enabled state,
@@ -4805,6 +5044,32 @@ class FluentSwitch(QtWidgets.QAbstractButton):
         self.update()
 
     offset = QtCore.pyqtProperty(float, fget=getOffset, fset=setOffset)
+
+
+def add_row_switch(
+    layout: QtWidgets.QBoxLayout,
+    switch: FluentSwitch,
+    *,
+    lead: bool = True,
+    trail: bool = True,
+) -> None:
+    """Add ``switch`` to a row of commands as a group of its own.
+
+    At the row's own spacing a switch's label ran into the next command --
+    "Remote Log", "Plot Start" -- and read as one more word on a button.  A
+    second gap on each side that has a neighbour (``lead`` before the
+    track, ``trail`` after the label) keeps the setting and its label apart
+    from the commands, whatever the row's spacing is.
+    """
+
+    gap = layout.spacing()
+    if gap < 0:
+        gap = scaled_px(8, minimum=6)
+    if lead:
+        layout.addSpacing(gap)
+    layout.addWidget(switch, 0, QtCore.Qt.AlignVCenter)
+    if trail:
+        layout.addSpacing(gap)
 
 
 class FluentTriSwitch(QtWidgets.QAbstractButton):
@@ -6113,7 +6378,14 @@ class FluentCheckBox(QtWidgets.QCheckBox):
                 QtCore.QPointF(box.left() + 0.75 * w, box.top() + 0.34 * h),
             ]))
             painter.end()
-        _paint_keyboard_focus(self, box.adjusted(-3, -3, 3, 3))
+
+    def focusInEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        super().focusInEvent(event)
+        _show_keyboard_focus(self, event)
+
+    def focusOutEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        super().focusOutEvent(event)
+        _show_keyboard_focus(self, event)
 
 
 class FluentPageBody(QtWidgets.QWidget):
@@ -6238,6 +6510,64 @@ class FluentScrollArea(QtWidgets.QScrollArea):
         self._reserve_scrollbar_gutter()
 
 
+def _end_column(header: QtWidgets.QHeaderView, step: int) -> int:
+    """The logical column shown first (``step`` 1) or last (-1), or -1."""
+
+    count = header.count()
+    visual = 0 if step > 0 else count - 1
+    while 0 <= visual < count and header.isSectionHidden(header.logicalIndex(visual)):
+        visual += step
+    return header.logicalIndex(visual) if 0 <= visual < count else -1
+
+
+class _RowHoverDelegate(QtWidgets.QStyledItemDelegate):
+    """Marks every cell of the hovered ROW as under the pointer.
+
+    A table view hovers one cell; a data table's unit is the row, so the
+    view says which row the pointer is on and each of its cells draws the
+    hover wash.  A selected row is also OUTLINED in DERIVED_EDGE (3.4:1 on
+    the white rows; its ACCENT fill alone was 2.45:1): each cell draws the
+    row's top and bottom, the first and last columns its ends, and a run of
+    selected rows shares one box rather than a line between every pair.
+    """
+
+    def paint(self, painter, option, index) -> None:
+        super().paint(painter, option, index)
+        if not option.state & QtWidgets.QStyle.State_Selected:
+            return
+        view = self.parent()
+        selection = view.selectionModel() if view is not None else None
+        if selection is None:
+            return
+        row, parent = index.row(), index.parent()
+        model = index.model()
+        header = view.horizontalHeader()
+        first, last = _end_column(header, 1), _end_column(header, -1)
+        above = row > 0 and selection.isRowSelected(row - 1, parent)
+        below = row + 1 < model.rowCount(parent) and selection.isRowSelected(row + 1, parent)
+        width = scaled_px(1, minimum=1)
+        rect = option.rect
+        painter.save()
+        color = QtGui.QColor(DERIVED_EDGE)
+        if not above:
+            painter.fillRect(QtCore.QRect(rect.left(), rect.top(), rect.width(), width), color)
+        if not below:
+            painter.fillRect(QtCore.QRect(rect.left(), rect.bottom() + 1 - width, rect.width(), width), color)
+        if index.column() == first:
+            painter.fillRect(QtCore.QRect(rect.left(), rect.top(), width, rect.height()), color)
+        if index.column() == last:
+            painter.fillRect(QtCore.QRect(rect.right() + 1 - width, rect.top(), width, rect.height()), color)
+        painter.restore()
+
+    def initStyleOption(self, option, index) -> None:  # noqa: N802 - Qt naming
+        super().initStyleOption(option, index)
+        view = self.parent()
+        if index.row() == getattr(view, "_hover_row", -1):
+            option.state |= QtWidgets.QStyle.State_MouseOver
+        else:
+            option.state &= ~QtWidgets.QStyle.State_MouseOver
+
+
 class FluentTableView(QtWidgets.QTableView):
     """Virtual item view with the same quiet Fluent chrome as the form family.
 
@@ -6270,7 +6600,13 @@ class FluentTableView(QtWidgets.QTableView):
         self.setSortingEnabled(False)
         self.setCornerButtonEnabled(False)
         self.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
-        self.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectItems)
+        # A data table's unit is the ROW: the pointer and a selection light
+        # the whole of it.  A single-cell hover band slid along under the
+        # pointer and read as the cell being picked.
+        self.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self._hover_row = -1
+        self.setMouseTracking(True)
+        self.setItemDelegate(_RowHoverDelegate(self))
         # Model dimensions never participate in page/window size hints.  A
         # million-cell scientific table is still one viewport with its own
         # scrollbars, not a million-row request to the surrounding layout.
@@ -6303,7 +6639,7 @@ class FluentTableView(QtWidgets.QTableView):
                 color: {TEXT};
                 border: 1px solid {DIVIDER};
                 border-radius: {_radius()}px;
-                selection-background-color: {ACCENT_TINT};
+                selection-background-color: {ACCENT};
                 selection-color: {TEXT};
                 font: {fluent_font_size()}pt "{FONT}";
                 outline: none;
@@ -6314,12 +6650,11 @@ class FluentTableView(QtWidgets.QTableView):
                 border-bottom: 1px solid {DIVIDER};
             }}
             QTableView::item:selected {{
-                background: {ACCENT_TINT};
+                background: {ACCENT};
                 color: {TEXT};
-                border: 1px solid {SELECTION_EDGE};
             }}
             QTableView::item:hover:!selected {{
-                background: {BG};
+                background: {ACCENT_TINT};
                 color: {TEXT};
             }}
             QTableView QLineEdit {{
@@ -6335,7 +6670,7 @@ class FluentTableView(QtWidgets.QTableView):
             QHeaderView {{ background: {SURFACE}; }}
             QHeaderView::section {{
                 background: {SURFACE};
-                color: {GRAPHITE};
+                color: {MUTED_INK};
                 border: none;
                 padding: {scaled_px(4, minimum=3)}px {scaled_px(6, minimum=4)}px;
                 font: {fluent_font_size()}pt "{FONT}";
@@ -6489,6 +6824,19 @@ class FluentTableView(QtWidgets.QTableView):
         if self._content_rows_limit:
             hint.setHeight(self.minimumHeight())
         return hint
+
+    def viewportEvent(self, event) -> bool:  # noqa: N802 - Qt naming
+        kind = event.type()
+        if kind in (QtCore.QEvent.HoverEnter, QtCore.QEvent.HoverMove, QtCore.QEvent.MouseMove):
+            self._set_hover_row(self.rowAt(event.pos().y()))
+        elif kind in (QtCore.QEvent.HoverLeave, QtCore.QEvent.Leave):
+            self._set_hover_row(-1)
+        return super().viewportEvent(event)
+
+    def _set_hover_row(self, row: int) -> None:
+        if row != self._hover_row:
+            self._hover_row = row
+            self.viewport().update()
 
     def mousePressEvent(self, event) -> None:  # noqa: N802 - Qt naming
         """One click opens the cell it lands on.
@@ -6773,12 +7121,22 @@ class _SelectionGridModel(QtCore.QAbstractTableModel):
 class _SelectionGridDelegate(QtWidgets.QStyledItemDelegate):
     """A cell is a small card: blank until chosen, named once it is.
 
-    A DERIVED cell -- reached by a rule rather than marked -- is a dashed,
-    lightly tinted card that still says its name; a WARNING cell is edged in
-    red, chosen or not; a MISSING cell is an empty red-edged card and a HELD
-    one an empty dashed outline.  A disabled grid wears a disabled button's
-    look -- grey face, hairline edge, faint ink -- on every card, so what is
-    chosen still reads but nothing invites a click.
+    A chosen cell wears the selection's look -- the ACCENT fill, TEXT ink --
+    outlined in solid DERIVED_EDGE, because the fill alone is 2.45:1 on the
+    white card.  A DERIVED cell -- reached by a rule rather than marked -- is
+    clearly weaker: the ACCENT_TINT wash, a dashed DERIVED_EDGE, its name in
+    DERIVED_INK.  What tells a derived cell from an EMPTY one is its LABEL
+    and its blue dashed EDGE, not the fill: the wash is 1.17:1 from white,
+    there only to say "this belongs with the chosen ones".  The dashes are
+    flat-capped, 3 on and 3 off -- Qt's default square cap grew every dash by
+    a pen width into the gap, and the edge read as a solid line at 1x.  An
+    empty cell is white, edged like a field (PLACEHOLDER, 2.6:1): somewhere a
+    choice can go; under the pointer its edge turns ACCENT and it names
+    itself in MUTED_INK.  A WARNING cell is edged in red, chosen or not; a
+    MISSING cell is an empty red-edged card and a HELD one an empty dashed
+    outline (somebody else's frame).  A disabled grid wears a disabled
+    button's look -- grey face, hairline edge, faint ink -- on every card, so
+    what is chosen still reads but nothing invites a click.
     """
 
     def paint(self, painter, option, index) -> None:
@@ -6797,26 +7155,36 @@ class _SelectionGridDelegate(QtWidgets.QStyledItemDelegate):
         rect = QtCore.QRectF(option.rect).adjusted(inset, inset, -inset, -inset)
         painter.save()
         painter.setRenderHint(QtGui.QPainter.Antialiasing)
-        edge = (DIVIDER if not live or held else RED if state in ("warning", "missing")
-                else SELECTION_EDGE if selected or derived else ACCENT if hovered else DIVIDER)
-        pen = QtGui.QPen(QtGui.QColor(edge), scaled_px(1, minimum=1))
-        if derived and not hovered or held:
-            pen.setStyle(QtCore.Qt.DashLine)
-        painter.setPen(pen)
+        if not live or held:
+            pen = QtGui.QPen(QtGui.QColor(DIVIDER), float(scaled_px(1, minimum=1)))
+            if held:
+                pen.setCapStyle(QtCore.Qt.FlatCap)
+                pen.setDashPattern([3.0, 3.0])
+            painter.setPen(pen)
+        elif selected and state not in ("warning", "missing"):
+            painter.setPen(QtGui.QPen(QtGui.QColor(DERIVED_EDGE), float(scaled_px(1, minimum=1))))
+        else:
+            edge = (RED if state in ("warning", "missing") else ACCENT if hovered
+                    else DERIVED_EDGE if derived else PLACEHOLDER)
+            pen = QtGui.QPen(QtGui.QColor(edge), float(scaled_px(1, minimum=1)))
+            if derived and not hovered:
+                pen.setCapStyle(QtCore.Qt.FlatCap)
+                pen.setDashPattern([3.0, 3.0])
+            painter.setPen(pen)
         painter.setBrush(
             QtCore.Qt.NoBrush if held
             else QtGui.QColor(BG) if not live
-            else QtGui.QColor(ACCENT_TINT) if selected
-            else _mixed(SURFACE, ACCENT_TINT, 0.55) if derived
-            else QtGui.QColor(SURFACE)
+            else QtGui.QColor(ACCENT if selected else ACCENT_TINT if derived else SURFACE)
         )
         painter.drawRoundedRect(rect, _radius(), _radius())
         # A name says the row has the cell; the empty states say nobody, or
         # somebody else, has it -- named only as the preview under the pointer.
         if selected or hovered or state in ("derived", "warning"):
-            ink = (QtGui.QColor(PLACEHOLDER) if not live
-                   else QtGui.QColor(RED_DARK) if state == "warning" else QtGui.QColor(HOVER) if selected
-                   else _mixed(HOVER, SURFACE, 0.45) if derived else QtGui.QColor(PLACEHOLDER))
+            ink = QtGui.QColor(
+                DISABLED_INK if not live
+                else RED_DARK if state == "warning" else TEXT if selected
+                else DERIVED_INK if derived else MUTED_INK
+            )
             painter.setPen(ink)
             painter.drawText(rect, QtCore.Qt.AlignCenter, str(index.data() or ""))
         painter.restore()
@@ -6844,7 +7212,7 @@ class _SelectionGridDelegate(QtWidgets.QStyledItemDelegate):
         font.setPointSize(round(fluent_font_size() * 1.35))
         painter.setFont(font)
         painter.setPen(QtGui.QColor(
-            PLACEHOLDER if not live else RED_DARK if hovered or pressed else GRAPHITE))
+            DISABLED_INK if not live else RED_DARK if hovered or pressed else MUTED_INK))
         painter.drawText(rect, QtCore.Qt.AlignCenter, str(index.data()))
         painter.restore()
 
@@ -6913,9 +7281,9 @@ class _SelectionGridRowHeader(QtWidgets.QHeaderView):
         painter.save()
         painter.setFont(label_font)
         painter.setPen(QtGui.QColor(
-            PLACEHOLDER if not self.isEnabled()
+            DISABLED_INK if not self.isEnabled()
             else ACCENT if self.activatable and hovered
-            else TEXT if self.activatable or hovered else GRAPHITE
+            else TEXT if self.activatable or hovered else MUTED_INK
         ))
         if not note:
             painter.drawText(inner, align | QtCore.Qt.AlignVCenter, label)
@@ -6926,7 +7294,7 @@ class _SelectionGridRowHeader(QtWidgets.QHeaderView):
             painter.drawText(QtCore.QRect(inner.left(), top, inner.width(), label_height),
                              align | QtCore.Qt.AlignVCenter, label)
             painter.setFont(note_font)
-            painter.setPen(QtGui.QColor(PLACEHOLDER))
+            painter.setPen(QtGui.QColor(MUTED_INK))
             painter.drawText(QtCore.QRect(inner.left(), top + label_height, inner.width(), note_height),
                              align | QtCore.Qt.AlignVCenter, note)
         painter.restore()
@@ -7045,7 +7413,7 @@ class FluentSelectionGrid(QtWidgets.QTableView):
             QTableCornerButton::section {{ background: transparent; border: none; }}
             QHeaderView::section {{
                 background: transparent;
-                color: {GRAPHITE};
+                color: {MUTED_INK};
                 border: none;
                 padding: 0px {scaled_px(6, minimum=4)}px;
                 font: {fluent_font_size()}pt "{FONT}";
@@ -7240,8 +7608,33 @@ class FluentSelectionGrid(QtWidgets.QTableView):
         return self.sizeHint()
 
 
+class _SegmentButton(QtWidgets.QPushButton):
+    """One choice inside a FluentSegmentedButtons track.
+
+    Reached by Tab, never by a click -- a click makes it current, and a
+    focus face left behind would be one more state on the track -- and the
+    keyboard ring goes round the whole control, which is one thing.
+    """
+
+    def focusInEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        super().focusInEvent(event)
+        _show_keyboard_focus(self.parentWidget(), event)
+
+    def focusOutEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        super().focusOutEvent(event)
+        _show_keyboard_focus(self.parentWidget(), event)
+
+
 class FluentSegmentedButtons(QtWidgets.QWidget):
-    """One of a few named choices, the current one marked like a selection.
+    """One of a few named choices: ONE control, the current choice marked.
+
+    A neutral rounded track holds the choices flush, each a transparent face
+    in TEXT ink; the pointer darkens a choice a neutral step, and the
+    current one wears the selection's look (the ACCENT fill, TEXT ink) with
+    two more cues, because the fill alone is 1.84:1 on the track: a
+    DERIVED_EDGE outline and a semibold label.  Every choice is as wide as
+    its semibold label, so marking one never shifts the others.  A row of
+    separate tinted buttons read as a row of commands, which these are not.
 
     ``activated`` carries the value an operator clicked; :meth:`set_current`
     marks a value (or none) without emitting it.
@@ -7252,35 +7645,60 @@ class FluentSegmentedButtons(QtWidgets.QWidget):
     def __init__(self, choices: Sequence[tuple[object, str]], parent=None):
         super().__init__(parent)
         layout = QtWidgets.QHBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(scaled_px(6, minimum=4))
+        rim = scaled_px(2, minimum=2)
+        layout.setContentsMargins(rim, rim, rim, rim)
+        layout.setSpacing(0)
         self._buttons: dict[object, QtWidgets.QPushButton] = {}
+        pad = scaled_px(10, minimum=6)
+        strong = QtGui.QFont(FONT, fluent_font_size())
+        strong.setWeight(QtGui.QFont.DemiBold)
+        strong_metrics = QtGui.QFontMetrics(strong)
         for value, label in choices:
-            button = QtWidgets.QPushButton(label, self)
+            button = _SegmentButton(label, self)
             button.setCursor(QtCore.Qt.PointingHandCursor)
+            button.setFocusPolicy(QtCore.Qt.TabFocus)
+            button.setMinimumHeight(scaled_px(30, minimum=22) - 2 * rim)
+            button.setMinimumWidth(fluent_text_width(strong_metrics, str(label)) + 2 * pad + 2)
             button.setProperty("current", False)
             button.clicked.connect(lambda _checked=False, value=value: self.activated.emit(value))
             layout.addWidget(button)
             self._buttons[value] = button
+        self.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
+        hover = _mixed(DIVIDER, GRAPHITE, 0.22).name()
+        pressed = _mixed(DIVIDER, GRAPHITE, 0.36).name()
         self.setStyleSheet(
             f"""
             QPushButton {{
-                background: {SURFACE};
+                background: transparent;
                 color: {TEXT};
-                border: 1px solid {DIVIDER};
-                border-radius: {_radius()}px;
-                padding: {scaled_px(3, minimum=2)}px {scaled_px(10, minimum=6)}px;
+                border: 1px solid transparent;
+                border-radius: {max(1, _radius() - 1)}px;
+                padding: 0px {pad - 1}px;
                 font: {fluent_font_size()}pt "{FONT}";
+                outline: none;
             }}
-            QPushButton:hover {{ border-color: {ACCENT}; }}
+            QPushButton:hover, QPushButton:focus {{ background: {hover}; }}
+            QPushButton:pressed {{ background: {pressed}; }}
             QPushButton[current="true"] {{
-                background: {ACCENT_TINT};
-                border-color: {SELECTION_EDGE};
-                color: {HOVER};
+                background: {ACCENT}; border-color: {DERIVED_EDGE}; font-weight: 600;
             }}
-            QPushButton:disabled {{ color: {PLACEHOLDER}; }}
+            QPushButton[current="true"]:hover {{ background: {ACCENT_HOVER}; }}
+            QPushButton[current="true"]:pressed {{ background: {ACCENT_PRESSED}; }}
+            QPushButton:disabled {{ background: transparent; color: {DISABLED_INK}; }}
+            QPushButton[current="true"]:disabled {{ background: {SURFACE}; border-color: {DIVIDER}; }}
             """
         )
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        """The track: one neutral rounded face the choices sit in."""
+
+        del event
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing)
+        painter.setPen(QtCore.Qt.NoPen)
+        painter.setBrush(QtGui.QColor(DIVIDER if self.isEnabled() else BG))
+        painter.drawRoundedRect(QtCore.QRectF(self.rect()), _radius(), _radius())
+        painter.end()
 
     def button(self, value) -> QtWidgets.QPushButton:
         return self._buttons[value]
@@ -7968,7 +8386,7 @@ class FluentStatusStrip(FluentFrame):
     #: by the status vocabulary itself: a word added there without a colour here fails at
     #: import, not in the first Qt slot that shows it.
     SEVERITIES = {
-        word: {"idle": (GREY, GREY), "task": (ACCENT, TEXT),
+        word: {"idle": (GREY, MUTED_INK), "task": (ACCENT, TEXT),
                "warning": (ORANGE, ORANGE_DARK), "error": (RED, RED_DARK)}[word]
         for word in STATUS_SEVERITIES
     }

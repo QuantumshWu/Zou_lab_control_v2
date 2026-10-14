@@ -14,13 +14,15 @@ from zlc_ui.fluent import (
     detach_widget,
     ElidedLabel,
     GREEN,
-    GREY,
+    MUTED_INK,
     FluentButton,
     FluentComboBox,
     FluentFrame,
     FluentLabel,
     FluentScrollArea,
     FluentStatusDot,
+    FluentSwitch,
+    add_row_switch,
     FluentTabWidget,
     fluent_widget_stylesheet,
     muted_note_label,
@@ -86,7 +88,7 @@ class TaskConsoleView(QtWidgets.QWidget):
         self.name_label = FluentLabel("task")
         self.name_label.setFixedWidth(scaled_px(150, minimum=110))
         self.summary_label = ElidedLabel("")
-        self.summary_label.setStyleSheet(f"color: {GREY}; background: transparent; border: none;")
+        self.summary_label.setStyleSheet(f"color: {MUTED_INK}; background: transparent; border: none;")
 
         self.kind_combo = FluentComboBox()
         self._task_takeover = False
@@ -95,7 +97,7 @@ class TaskConsoleView(QtWidgets.QWidget):
         # Keep the full kind label and its arrow in the
         # same fixed slot on every screen scale.
         self.kind_combo.setFixedWidth(scaled_px(170, minimum=130))
-        self.add_panel_button = FluentButton("Add Panel", role="primary")
+        self.add_panel_button = FluentButton("Add Panel")
         self.add_panel_button.setEnabled(False)
 
         # Rendered as a push button rather than a toggle, so the button carries
@@ -103,11 +105,9 @@ class TaskConsoleView(QtWidgets.QWidget):
         # is asking FOR, which is what makes the command reversible.
         self.pause_switch = FluentButton("Pause")
         self._paused = False
-        # A toolbar toggle is a chip: pressed in is on, the way a segmented
-        # choice marks its current item.  A sliding switch among buttons read
-        # as one more command.
-        self.selectors_switch = FluentButton("Selectors")
-        self.selectors_switch.setCheckable(True)
+        # An on/off setting is a switch, even in a row of commands: a
+        # checkable button there read as one more command.
+        self.selectors_switch = FluentSwitch("Selectors")
         self.save_screenshot_button = FluentButton("Save image")
         self.save_screenshot_button.setToolTip("Save one screenshot of TaskConsole")
         self.save_layout_button = FluentButton("Save")
@@ -123,10 +123,12 @@ class TaskConsoleView(QtWidgets.QWidget):
         ):
             header.addWidget(widget, 0, QtCore.Qt.AlignVCenter)
         header.addWidget(self.summary_label, 1, QtCore.Qt.AlignVCenter)
+        header.addWidget(self.kind_combo, 0, QtCore.Qt.AlignVCenter)
+        header.addWidget(self.add_panel_button, 0, QtCore.Qt.AlignVCenter)
+        # The setting is a group of its own between the commands, so its
+        # label does not run into Pause.
+        add_row_switch(header, self.selectors_switch)
         for widget in (
-            self.kind_combo,
-            self.add_panel_button,
-            self.selectors_switch,
             self.pause_switch,
             self.save_screenshot_button,
             self.save_layout_button,
@@ -183,7 +185,7 @@ class TaskConsoleView(QtWidgets.QWidget):
             "(it starts STOPPED); open its Edit to set parameters and Start it."
         )
         self.logic_hint.setWordWrap(True)
-        self.logic_hint.setStyleSheet(f"color: {GREY}; background: transparent; border: none;")
+        self.logic_hint.setStyleSheet(f"color: {MUTED_INK}; background: transparent; border: none;")
         self.logic_layout.addWidget(self.logic_hint)
         self.logic_layout.addStretch(1)
         self._logic_rows: tuple[LogicRowView, ...] = ()

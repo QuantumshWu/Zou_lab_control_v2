@@ -5,7 +5,7 @@ from __future__ import annotations
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 from .fluent import fluent_font_size, scaled_px, _radius
-from .style import DIVIDER, FONT, GRAPHITE, GREY, SURFACE, TEXT
+from .style import DIVIDER, FONT, MUTED_INK, SURFACE, TEXT
 
 __all__ = ["PublishedItemsLegend"]
 
@@ -95,7 +95,7 @@ class PublishedItemsLegend(QtWidgets.QWidget):
         painter.setFont(self.font())
         chips = self._chips(max(1, self.width()))
         if not chips:
-            painter.setPen(QtGui.QColor(GREY))
+            painter.setPen(QtGui.QColor(MUTED_INK))
             painter.drawText(self.rect(), QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter, self._text)
             painter.end()
             return
@@ -110,7 +110,7 @@ class PublishedItemsLegend(QtWidgets.QWidget):
             painter.setPen(QtGui.QColor(TEXT))
             painter.drawText(text_rect, QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter, name)
             if shape:
-                painter.setPen(QtGui.QColor(GRAPHITE))
+                painter.setPen(QtGui.QColor(MUTED_INK))
                 painter.drawText(
                     text_rect.adjusted(metrics.horizontalAdvance(name), 0, 0, 0),
                     QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter, shape,

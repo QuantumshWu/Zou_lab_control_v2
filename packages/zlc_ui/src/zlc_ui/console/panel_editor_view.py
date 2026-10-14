@@ -28,8 +28,8 @@ from zlc_ui.fluent import (
     FluentScrollArea,
     FluentSettingRow,
     FluentSwitch,
-    GREY,
-    ORANGE,
+    MUTED_INK,
+    ORANGE_DARK,
     scaled_px,
     setting_label_width,
     stamped_file_name,
@@ -120,7 +120,7 @@ class PanelEditorView(QtWidgets.QWidget):
         self.title_label = FluentLabel(self.panel_id)
         self.kind_label = FluentLabel("")
         self.kind_label.setStyleSheet(
-            f"color: {GREY}; background: transparent; border: none;"
+            f"color: {MUTED_INK}; background: transparent; border: none;"
         )
         header_layout.addWidget(self.title_label, 1)
         header_layout.addWidget(FluentLabel("Plot kind (fixed):"))
@@ -152,7 +152,7 @@ class PanelEditorView(QtWidgets.QWidget):
             unavailable = FluentLabel("")
             unavailable.setWordWrap(True)
             unavailable.setStyleSheet(
-                f"color: {GREY}; background: transparent; border: none;"
+                f"color: {MUTED_INK}; background: transparent; border: none;"
             )
             layout.addWidget(unavailable)
             form = FluentParameterForm(FormSpec(()), {})
@@ -200,7 +200,7 @@ class PanelEditorView(QtWidgets.QWidget):
         )
         self.producer_summary.setWordWrap(True)
         self.producer_summary.setStyleSheet(
-            f"color: {GREY}; background: transparent; border: none;"
+            f"color: {MUTED_INK}; background: transparent; border: none;"
         )
         producer_layout.addWidget(self.producer_summary)
         self.producer_form = FluentParameterForm(FormSpec(()), {})
@@ -241,6 +241,7 @@ class PanelEditorView(QtWidgets.QWidget):
         self.save_auto_name.setChecked(True)
         self.save_name = FluentLineEdit()
         self.save_name.setPlaceholderText("File name")
+        self.save_name.set_placeholder_prompt()
         name_layout.addWidget(self.save_auto_name)
         name_layout.addWidget(self.save_name, 1)
         save_layout.addWidget(FluentSettingRow(
@@ -445,7 +446,7 @@ class PanelEditorView(QtWidgets.QWidget):
         aged = bool(self._projection.get("data_advanced") or self._projection.get("source_status"))
         self.snapshot_label.setText(self._snapshot_text(self._projection, stale=stale))
         # Written when it CHANGES: two values, a re-parse and a repolish.
-        colour = ORANGE if stale or aged or self._projection.get("snapshot_error") else GREY
+        colour = ORANGE_DARK if stale or aged or self._projection.get("snapshot_error") else MUTED_INK
         if colour != self._snapshot_colour:
             self._snapshot_colour = colour
             self.snapshot_label.setStyleSheet(

@@ -342,7 +342,10 @@ class _DataEditorView(QtWidgets.QWidget):
         action_row.setSpacing(window_pad(0.5))
         self.source_note = muted_note_label("")
         action_row.addWidget(self.source_note, 1)
-        self.apply_button = FluentButton("Apply && Preview", role="primary")
+        # The same rule as every other Save, in two steps: while the fields
+        # hold edits not yet applied, Apply & Preview is the primary (with
+        # its star); once applied and not yet saved, Save As… is.
+        self.apply_button = FluentButton("Apply && Preview")
         self.save_button = FluentButton("Save As…")
         self.discard_button = FluentButton("Discard", role="destructive")
         action_row.addWidget(self.apply_button)
@@ -766,7 +769,9 @@ class _DataEditorView(QtWidgets.QWidget):
             self.blank_help_label.setText(str(table.get("blank_help", "")))
             self.message_label.setText(str(data.get("message", "")))
             self._dirty = bool(data.get("dirty", False))
-            self.save_button.set_dirty(self._dirty)
+            modified = bool(data.get("modified", False))
+            self.apply_button.set_dirty(modified)
+            self.save_button.set_dirty(self._dirty and not modified)
             self.discard_button.setEnabled(self._dirty)
             self._set_axis_mode_controls(has_axis=selected is not None)
             self.apply_button.setEnabled(bool(data.get("can_apply", True)))
