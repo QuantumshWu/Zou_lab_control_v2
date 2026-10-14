@@ -1438,8 +1438,6 @@ class FluentParameterForm(QtWidgets.QWidget):
             # a form ends at ONE edge (see _align_number_column); this is
             # the box's own need until the row is installed.
             widget.setMaximumWidth(_number_cap(widget))
-            if isinstance(widget, FluentDoubleSpinBox):
-                widget.singleStepChanged.connect(self._align_number_column)
         cell = widget
         if picker is not None:
             holder = QtWidgets.QWidget(self)
@@ -1484,7 +1482,9 @@ class FluentParameterForm(QtWidgets.QWidget):
         Each box needs its own width -- an integer box has no step chip, a
         blank-or-number edit no stepper -- and the column takes the widest
         need, so a form of mixed numbers is one straight column.  A decimal
-        box's need changes with its step, so a new step re-aligns it."""
+        box's step chip has one reserved room whatever its step, so the
+        column does not move when a step changes, and forms side by side
+        end on the same edge."""
 
         if not self._caps_numbers:
             return

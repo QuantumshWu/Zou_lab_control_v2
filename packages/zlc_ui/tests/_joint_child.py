@@ -208,7 +208,7 @@ def spin_case(kind: str, state: str, offset: int) -> None:
     # origin leaves no whole pixel of it -- its darkest.
     edge = min((image[ymid, x] for x in range(x0 - 1, x0 + 2 * BD + 1)), key=lambda p: int(p.sum()))
     ground = image[ymid, x0 + 3 * BD + 1]
-    zone = range(dev(ox + column.left() - 4), dev(ox + column.left()) + 1)
+    zone = range(dev(ox + column.left() - 4), dev(ox + column.left()) + 2)
     lit = [x for x in zone if int(image[ymid, x].sum()) <= int(edge.sum())]
     if lit:
         edge = image[ymid, lit[0]]
@@ -217,32 +217,55 @@ def spin_case(kind: str, state: str, offset: int) -> None:
     contiguous = bool(lit) and lit == list(range(lit[0], lit[0] + len(lit)))
     check(case, "T-S1 divider columns", contiguous and len(lit) == BD and lit[0] == expected_first,
           f"edge {hexs(edge)} cols {lit} expected {BD} from {expected_first}", image=image, box=crop)
-    # The checks below are judged on their own, at the columns the divider
-    # should hold when T-S1 found none: one failure must not hide the rest.
-    if not lit:
-        lit = list(range(expected_first, expected_first + BD))
-    first, last = lit[0], lit[-1]
-    rows_bad = [y for y in range(y0, y1) for x in lit if not eq(image[y, x], edge)]
-    check(case, "T-S2 divider meets top and bottom", not rows_bad,
-          f"rows not edge-coloured: {sorted(set(rows_bad))[:8]}", image=image, box=crop)
     hovered = state.startswith("hover")
+    tint = None
+    if hovered:
+        cell = up_cell if state == "hover_up" else down_cell
+        region = image[dev(oy + cell.top()) + 1:dev(oy + cell.bottom()),
+                       dev(ox + cell.left()) + 1:dev(ox + cell.right())].reshape(-1, 3)
+        colours, counts = np.unique(region, axis=0, return_counts=True)
+        tint = colours[int(np.argmax(counts))]
     probe_y = dev(oy + (up_cell if state != "hover_down" else down_cell).center().y()) if hovered else ymid
+    # The divider AS DRAWN, whatever its colour: the run of columns beside
+    # the stepper column that are neither the field's ground nor the tint.
+    # The checks below read it, not the column it should be at -- read at
+    # the expected column, an old divider elsewhere passed them all.
+    drawn = [x for x in zone
+             if not eq(image[probe_y, x], ground) and not (tint is not None and eq(image[probe_y, x], tint))]
+    found = bool(drawn) and drawn == list(range(drawn[0], drawn[0] + len(drawn)))
+    if not found:
+        check(case, "T-S0 divider drawn", False, f"no single run of ink in cols {list(zone)}", image=image, box=crop)
+        host.close()
+        return
+    first, last = drawn[0], drawn[-1]
+    inner = F.frame_inner_rect(box)
+    top_row, bottom_row = edge_px(oy + inner.top()), edge_px(oy + inner.bottom())  # bottom exclusive
+    rows_bad = [y for y in range(top_row, bottom_row) for x in drawn if not eq(image[y, x], edge)]
+    check(case, "T-S2 divider meets top and bottom", not rows_bad,
+          f"rows not edge-coloured: {sorted(set(rows_bad))[:8]} (inner rows {top_row}..{bottom_row - 1})",
+          image=image, box=crop)
     left_px, right_px = image[probe_y, first - 1], image[probe_y, last + 1]
-    tint = image[dev(oy + (up_cell if state == "hover_up" else down_cell).center().y()), last + 1] if hovered else None
     right_ground = tint if hovered else ground
     check(case, "T-S3 no smear beside divider", eq(left_px, ground) and eq(right_px, right_ground),
           f"left {hexs(left_px)} right {hexs(right_px)} ground {hexs(ground)}", image=image, box=crop)
+    # T-S4: the top and bottom edge, across the whole stepper zone, are
+    # each one colour per row -- the divider neither lightens them nor
+    # crosses them as a darker nub (at a fractional ratio Qt draws those
+    # rows part-covered, and a full-intensity column through them showed).
+    reference_x = first - 2 * BD
+    right_limit = x1 - int(math.ceil((F._radius() + 1) * DPR))
+    edge_rows = list(range(y0 - 1, top_row)) + list(range(bottom_row, y1 + 1))
+    bad = []
+    for y in edge_rows:
+        reference = image[y, reference_x]
+        odd = [x for x in range(reference_x, right_limit) if not eq(image[y, x], reference)]
+        if odd:
+            bad.append(f"row {y}: {hexs(reference)} but {hexs(image[y, odd[0]])} at col {odd[0]}")
     if INTEGRAL:
-        reference = first - 2 * BD
-        edge_rows = list(range(y0, y0 + BD)) + list(range(y1 - BD, y1))
-        bad = [y for y in edge_rows if not eq(image[y, reference], edge) or not eq(image[y, first], edge)]
-        check(case, "T-S4 top/bottom edge untouched", not bad, f"rows {bad}", image=image, box=crop)
-    else:
-        bad = []
-        for y in list(range(y0, y0 + 2 * BD)) + list(range(y1 - 2 * BD, y1)):
-            if image[y, first].sum() > image[y, first - 2 * BD].sum():
-                bad.append(y)
-        check(case, "T-S4 edge not lightened at divider", not bad, f"rows {bad}", image=image, box=crop)
+        bad += [f"row {y} is {hexs(image[y, reference_x])}, not the edge"
+                for y in list(range(y0, y0 + BD)) + list(range(y1 - BD, y1)) if not eq(image[y, reference_x], edge)]
+    check(case, "T-S4 top/bottom edge one colour across the stepper", not bad, "; ".join(bad[:4]),
+          image=image, box=crop)
     option = QtWidgets.QStyleOptionSpinBox()
     box.initStyleOption(option)
     up = QtCore.QRectF(box.style().subControlRect(
@@ -257,7 +280,6 @@ def spin_case(kind: str, state: str, offset: int) -> None:
           f"edit ends {line.x() + line.width()} divider {divider_x}")
     chip = getattr(box, "_step_chip", None)
     if chip is not None and chip.isVisible():
-        inner = F.frame_inner_rect(box)
         geometry = QtCore.QRectF(chip.geometry())
         margins = box.lineEdit().textMargins()
         text_end = line.x() + line.width() - margins.right()
@@ -374,16 +396,29 @@ def chip_case(styled: bool) -> None:
               f"step ink {step_height} px, digits {digit_height} px (chip font "
               f"{chip.ink_font().pointSizeF():.2f} pt, box {box.font().pointSizeF():.2f} pt)",
               image=image, box=crop)
+        # The step's DIGITS (past the ±, whose lower bar is not on the
+        # baseline) stand on the value's baseline: both inks end on one row.
+        text_x = chip_rect.x() + F.device_snap(chip, chip.pill().center().x() - chip.ink().center().x())
+        after_sign = text_x + QtGui.QFontMetricsF(chip.ink_font()).horizontalAdvance("±")
+        step_digits = ink_box(image, edge_px(after_sign), edge_px(chip_rect.y()),
+                              edge_px(chip_rect.x() + chip_rect.width()),
+                              edge_px(chip_rect.y() + chip_rect.height()), ground, threshold=60)
+        check(case, "T-B step on the digits' baseline",
+              step_digits is not None and abs(step_digits[3] - digits[3]) <= 1,
+              f"step digits end on row {None if step_digits is None else step_digits[3]}, "
+              f"value digits on row {digits[3]}", image=image, box=crop)
     chip.setAttribute(QtCore.Qt.WA_UnderMouse, True)
     chip.repaint()
     pump(0.05)
     image = grab(host)
     pill = chip.pill().translated(chip_rect.x(), chip_rect.y())
     cx, cy = dev(pill.center().x()), dev(pill.center().y())
-    # The pill's extent, scanned from outside along its centre lines (the
-    # text is inside, so the first non-ground pixel is the pill's edge).
-    top = next((y for y in range(edge_px(chip_rect.y()) - 2, cy) if not eq(image[y, cx], ground)), None)
-    bottom = next((y for y in range(edge_px(chip_rect.y() + chip_rect.height()) + 1, cy, -1)
+    # The pill's extent, scanned from the chip's own edges inward along its
+    # centre lines (the text is inside, so the first non-ground pixel is the
+    # pill's edge; vertically the chip stands a pixel off the frame, so the
+    # scan may not start outside it).
+    top = next((y for y in range(edge_px(chip_rect.y()), cy) if not eq(image[y, cx], ground)), None)
+    bottom = next((y for y in range(edge_px(chip_rect.y() + chip_rect.height()) - 1, cy, -1)
                    if not eq(image[y, cx], ground)), None)
     left = next((x for x in range(edge_px(chip_rect.x()) - 2, cx) if not eq(image[cy, x], ground)), None)
     right = next((x for x in range(edge_px(chip_rect.x() + chip_rect.width()) + 1, cx, -1)
@@ -396,7 +431,8 @@ def chip_case(styled: bool) -> None:
         return
     tint = image[(top + bottom) // 2, left + max(1, (bottom - top) // 2) // 2 + 1]
     clear = (eq(image[top - 1, cx], ground) and eq(image[bottom + 1, cx], ground)
-             and right < divider - 1 and top > dev(oy + inner.top()) and bottom < dev(oy + inner.bottom()) - 1)
+             and right < divider - 1 and top > edge_px(oy + inner.top())
+             and bottom < edge_px(oy + inner.bottom()) - 1)
     check(case, "T-B hovered chip is a pill clear of frame and divider", clear and not eq(tint, ground),
           f"pill rows {top}..{bottom} cols {left}..{right} divider {divider} tint {hexs(tint)}",
           image=image, box=hover_crop)
@@ -920,6 +956,10 @@ def tabs_case() -> None:
     else:
         left_gap = edge_px(rect.left()) + int(ink.min()) - under[0]
         right_gap = under[-1] - (edge_px(rect.left()) + int(ink.max()))
+        # One LOGICAL pixel: the tab rects, the underline and the button's
+        # trail are whole logical pixels, so the balance is quantised to
+        # half of one, and the label's hinted ink and the x's symbol ink
+        # rasterise differently by up to a further device pixel each.
         check(case, "T-K4 closable tab balanced", abs(left_gap - right_gap) <= math.ceil(DPR),
               f"underline to text {left_gap}, x to underline end {right_gap}", image=image,
               box=(edge_px(rect.left()) - 4, edge_px(rect.top()) - 4, edge_px(rect.right()) + 4,

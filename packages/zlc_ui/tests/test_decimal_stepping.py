@@ -478,11 +478,9 @@ def test_the_step_is_shown_in_the_box_and_a_click_changes_it(box, monkeypatch) -
     assert chip.isVisible() and chip.text() == "±1"
     assert chip.toolTip() == "Step 1 · click to change"
     monkeypatch.setattr(F.FluentInputDialog, "getValue", lambda self: (0.25, True))
-    heard: list[float] = []
-    box.singleStepChanged.connect(lambda: heard.append(box.singleStep()))
     room = box._step_chip_room()
     chip.click()
-    assert box.singleStep() == 0.25 and heard == [0.25]
+    assert box.singleStep() == 0.25
     assert chip.text() == "±0.25" and chip.toolTip() == "Step 0.25 · click to change"
     assert box._step_chip_room() > room, "a longer step takes more of the field"
     edit = box.lineEdit()
@@ -497,20 +495,81 @@ def test_the_step_is_shown_in_the_box_and_a_click_changes_it(box, monkeypatch) -
     assert not chip.isVisible() and edit.textMargins().right() == 0
 
 
-def test_an_undeclared_step_follows_the_owners_first_number(box) -> None:
-    """With no step declared, a notch is one unit of the number's second
-    digit -- taken once, from the owner's first non-zero value, through
-    setValue or a range projected with its value -- not 1 whatever the
-    box holds; a declared step is never replaced."""
+def test_an_undeclared_step_is_one_whatever_the_box_holds(box) -> None:
+    """Nobody named a step, so a notch is 1 -- in whichever order the owner
+    declares value, resolution and unit, and in a box reused for another
+    quantity.  A step guessed from the first value was finer than a
+    resolution declared after it (the arrows did nothing) and stayed in a
+    seconds-sized step when the box was reused for hertz."""
 
-    box.setRange(0.0, 10.0, value=0.02)
-    assert box.singleStep() == 0.001 and box._step_chip.text() == "±0.001"
-    box.setValue(5.0)
-    assert box.singleStep() == 0.001, "an owner projecting values back keeps the operator's step"
-    other = type(box)()
-    other.setDecimals(1)
-    other.setValue(0.25)
-    assert other.singleStep() == 0.1, "never finer than the declared resolution"
-    other.setSingleStep(0.5)
-    other.setShownUnit(other.shownUnit())
-    assert other.singleStep() == 0.5
+    box.setValue(0.02)
+    box.setDecimals(2)
+    assert box.singleStep() == 1 and box._step_chip.text() == "±1"
+    assert _step(box, 1) == "1", "the arrows move it, onto the step's grid"
+    reused = type(box)()
+    reused.setRange(0.0, 1.0, value=0.001, unit="s")
+    reused.setRange(0.0, 1e9, value=2e8, unit="Hz")
+    assert reused.singleStep() == 1
+    assert _step(reused, 1) == "200000001"
+
+
+def test_the_width_rules_reserve_one_chip_whatever_the_step(box) -> None:
+    """Two forms in one card end their number boxes on one edge, and a step
+    edited through the chip moves no column: every width rule counts one
+    reserved chip, not the one shown now."""
+
+    from zlc_ui.fluent import FluentDoubleSpinBox
+
+    widths = []
+    for step in (1, 0.01, 0.001, 1.25e-05):
+        other = FluentDoubleSpinBox()
+        other.setSingleStep(step)
+        widths.append((other.width_for("-1234567890.12345678"), other.sizeHint().width()))
+    assert len(set(widths)) == 1, widths
+    before = box.width_for("12.5")
+    box.setSingleStep(0.0001)
+    assert box.width_for("12.5") == before
+
+
+def test_a_typed_number_takes_the_chips_room(box) -> None:
+    """A number the operator types that fits the field but not beside the
+    chip hides the chip -- while typing and after Enter -- and gives the
+    digits the whole room; a short number brings it back.  The chip yielded
+    only to numbers the box set itself, and a typed one stayed half hidden
+    under the chip's margin."""
+
+    from PyQt5 import QtCore, QtTest, QtWidgets
+    from zlc_ui.qt import ensure_qt_app
+
+    app = ensure_qt_app(["typed-number"])
+    window = QtWidgets.QWidget()
+    box.setParent(window)
+    box.setValue(1.5)
+    box.setGeometry(0, 0, 130, box.sizeHint().height())
+    window.show()
+    try:
+        app.processEvents()
+        chip, edit = box._step_chip, box.lineEdit()
+        assert chip.isVisible() and edit.textMargins().right() > 0
+        room, beside = box._digit_room(), box._digit_room() - box._step_chip_room()
+        metrics = edit.fontMetrics()
+        typed = "1"
+        while metrics.horizontalAdvance(typed) + 2 <= beside:
+            typed += "2"
+        assert metrics.horizontalAdvance(typed) + 2 <= room, "the field holds it without the chip"
+        edit.setFocus()
+        edit.selectAll()
+        QtTest.QTest.keyClicks(edit, typed)
+        app.processEvents()
+        assert not chip.isVisible() and edit.textMargins().right() == 0, "while typing"
+        QtTest.QTest.keyClick(edit, QtCore.Qt.Key_Return)
+        app.processEvents()
+        assert box.text() == typed
+        assert not chip.isVisible() and edit.textMargins().right() == 0, "after Enter"
+        edit.selectAll()
+        QtTest.QTest.keyClicks(edit, "2")
+        QtTest.QTest.keyClick(edit, QtCore.Qt.Key_Return)
+        app.processEvents()
+        assert chip.isVisible() and edit.textMargins().right() == box._step_chip_room()
+    finally:
+        window.close()

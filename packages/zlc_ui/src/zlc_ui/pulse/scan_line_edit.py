@@ -6,9 +6,10 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 
 from zlc_ui.fluent import (
     API_VIOLET, API_VIOLET_DARK, CONFIG_GREEN, CONFIG_GREEN_DARK, CONFIG_GREEN_TINT,
-    EDIT_PADDING_H, FONT, ORANGE, ORANGE_DARK, PADDING_V, PLACEHOLDER,
+    EDIT_PADDING_H, FIELD_BORDER_PX, FONT, ORANGE, ORANGE_DARK, PADDING_V, PLACEHOLDER,
     RADIUS, SURFACE, FluentCheckBox, FluentComboBox, FluentTriSwitch, FluentLabel,
-    FluentLineEdit, FluentPopup, FluentSettingsPopupAnchor, fluent_font_size, scaled_px, signals_blocked,
+    FluentLineEdit, FluentPopup, FluentSettingsPopupAnchor, device_snap, fluent_font_size, scaled_px,
+    signals_blocked,
     read_editable_combo, show_fluent_popup_for_anchor,
 )
 
@@ -38,24 +39,33 @@ class _BindingButton(QtWidgets.QAbstractButton):
             badges.append((self.source[0].upper(), API_VIOLET_DARK if self.source == "api" else CONFIG_GREEN_DARK))
         if not badges:
             badges.append(("", PLACEHOLDER))
-        diameter = min(self.width() - 2, self.height() / len(badges) - 1)
+        # Round badges: an EVEN number of device pixels across, on a device
+        # pixel, stacked a pixel apart and centred -- a circle is only round
+        # on a whole-pixel centre.
+        ratio = float(self.devicePixelRatioF())
+        gap = scaled_px(1)
+        room = min(self.width() - 2 * gap, (self.height() - (len(badges) - 1) * gap) / len(badges))
+        diameter = max(2, 2 * int(room * ratio / 2.0)) / ratio
+        stack = len(badges) * diameter + (len(badges) - 1) * gap
+        left = device_snap(self, (self.width() - diameter) / 2.0)
+        top = device_snap(self, (self.height() - stack) / 2.0, axis="y")
         font = QtGui.QFont(FONT, max(6, fluent_font_size() - 5))
         font.setBold(True)
         painter.setFont(font)
         for index, (text, color) in enumerate(badges):
-            y = (self.height() - len(badges) * diameter) / 2 + index * diameter
-            rect = QtCore.QRectF((self.width() - diameter) / 2, y, diameter, diameter)
+            y = device_snap(self, top + index * (diameter + gap), axis="y")
+            rect = QtCore.QRectF(left, y, diameter, diameter)
             painter.setPen(QtCore.Qt.NoPen)
             painter.setBrush(QtGui.QColor(color if self.isEnabled() else PLACEHOLDER).darker(
                 120 if self.isEnabled() and self.underMouse() else 100))
-            painter.drawEllipse(rect.adjusted(0.5, 0.5, -0.5, -0.5))
+            painter.drawEllipse(rect)
             painter.setPen(QtGui.QColor(SURFACE))
             painter.drawText(rect, QtCore.Qt.AlignCenter, text)
 
 
 def _bound_style(color: str, border: str, *, background: str = SURFACE) -> str:
     return (
-        f'QLineEdit {{ background: {background}; color: {color}; border: 1px solid {border}; '
+        f'QLineEdit {{ background: {background}; color: {color}; border: {FIELD_BORDER_PX}px solid {border}; '
         f'border-radius: {scaled_px(RADIUS)}px; padding: {scaled_px(PADDING_V)}px '
         f'{scaled_px(EDIT_PADDING_H)}px; font: {fluent_font_size()}pt "{FONT}"; }}'
     )

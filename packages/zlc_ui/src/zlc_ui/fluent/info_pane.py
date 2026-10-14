@@ -223,7 +223,7 @@ class InfoTree(QtWidgets.QTreeWidget):
             QTreeView {{
                 background: {SURFACE};
                 color: {TEXT};
-                border: 1px solid {DIVIDER};
+                border: {FIELD_BORDER_PX}px solid {DIVIDER};
                 border-radius: {radius}px;
                 font: {fluent_font_size()}pt "{FONT}";
                 outline: none;
@@ -275,8 +275,9 @@ class InfoTree(QtWidgets.QTreeWidget):
             )
         painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
         if index.model().hasChildren(index):
-            centre_x = rect.left() + depth * indent + indent / 2
-            centre_y = rect.center().y() + 0.5
+            # The chevron's centre on a device pixel, the row's middle.
+            centre_x = device_snap(surface, rect.left() + depth * indent + indent / 2)
+            centre_y = device_snap(surface, rect.top() + rect.height() / 2.0, axis="y")
             half = float(self._chevron)
             pen = QtGui.QPen(QtGui.QColor(GREY))
             pen.setWidthF(float(scaled_px(1.5, minimum=1)))
@@ -833,7 +834,7 @@ class InfoPane(QtWidgets.QWidget):
         )
         view.setFrameShape(QtWidgets.QFrame.NoFrame)
         view.setBackgroundBrush(QtGui.QColor(SURFACE))
-        view.setStyleSheet(f"QGraphicsView {{ border-top: 1px solid {DIVIDER}; }}")
+        view.setStyleSheet(f"QGraphicsView {{ border-top: {FIELD_BORDER_PX}px solid {DIVIDER}; }}")
         apply_fluent_scrollbars(view)
         view.node_activated.connect(
             lambda node_id, graph=title: self._activate_graph_node(graph, node_id)

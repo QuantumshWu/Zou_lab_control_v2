@@ -190,8 +190,11 @@ def scaled_px(value: int | float, *, minimum: int = 1) -> int:
 # pixel under the top edge and ran into the bottom one at every DPR.
 #
 #   * A divider is a FRAME SEGMENT: a filled rectangle, a whole number of
-#     device pixels wide, the frame's full outer height, in the frame's
-#     current edge colour, antialiasing off -- so its T-joints have no seam.
+#     device pixels wide, in the frame's current edge colour, antialiasing
+#     off, running between the edge's own rows (frame_inner_rect) -- so its
+#     T-joints have no seam, and at a fractional ratio, where Qt draws the
+#     top and bottom edge part-covered, it does not cross them as a darker
+#     nub.
 #   * A fill (a hover tint, a band) tiles exactly the room between the
 #     dividers and the frame's inner edges, concentric at a rounded corner.
 #   * A one-edge stroke is a filled rectangle or a whole-device-pixel pen on
@@ -281,17 +284,38 @@ def frame_edge_colour(
     return QtGui.QColor(focus if focused else rest)
 
 
+def frame_stroke_rect(widget: QtWidgets.QWidget, rect: QtCore.QRectF | None = None) -> QtCore.QRectF:
+    """``rect`` (default: the widget's) inset by half the frame edge, so a
+    pen of ``frame_border_px`` stroked on it lies wholly inside."""
+
+    half = frame_border_px(widget) / 2.0
+    return QtCore.QRectF(widget.rect() if rect is None else rect).adjusted(half, half, -half, -half)
+
+
+def frame_pen(widget: QtWidgets.QWidget, colour) -> QtGui.QPen:
+    """The pen a painted frame edge is drawn with: ``frame_border_px``
+    wide, the same edge the field sheets write as ``FIELD_BORDER_PX``."""
+
+    pen = QtGui.QPen(QtGui.QColor(colour))
+    pen.setWidthF(frame_border_px(widget))
+    return pen
+
+
 def paint_frame_divider(
     painter: QtGui.QPainter,
     widget: QtWidgets.QWidget,
     x: float,
     colour: QtGui.QColor,
 ) -> QtCore.QRectF:
-    """Fill one vertical frame segment at logical ``x`` (snapped), the frame's
-    full outer height, and return it so a neighbouring fill starts exactly at
-    its right edge."""
+    """Fill one vertical frame segment at logical ``x`` (snapped) and return
+    it, so a neighbouring fill starts exactly at its right edge.
 
-    rect = QtCore.QRectF(device_snap(widget, x), 0.0, frame_border_px(widget), float(widget.height()))
+    It runs from the first device row below the top edge to the last one
+    above the bottom edge: the edge's rows at its column are the edge's own,
+    the same pixels as either side of the joint at any ratio."""
+
+    inner = frame_inner_rect(widget)
+    rect = QtCore.QRectF(device_snap(widget, x), inner.top(), frame_border_px(widget), inner.height())
     painter.save()
     painter.setRenderHint(QtGui.QPainter.Antialiasing, False)
     painter.fillRect(rect, colour)
@@ -930,12 +954,10 @@ def _paint_fluent_card(
 
     painter = QtGui.QPainter(widget)
     painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
-    pen = QtGui.QPen(border)
-    pen.setWidthF(1.0)
-    painter.setPen(pen)
+    painter.setPen(frame_pen(widget, border))
     painter.setBrush(fill)
-    # inset by the half pen width so the 1 px stroke hugs the edge unclipped
-    rect = QtCore.QRectF(widget.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+    # Inset by half the edge, so the stroke hugs the widget's edge unclipped.
+    rect = frame_stroke_rect(widget)
     corner = float(_radius() if radius is None else radius)
     painter.drawRoundedRect(rect, corner, corner)
     # Ended here, not at garbage collection: a QMenu paints its items with
@@ -1344,13 +1366,12 @@ class FluentGroupBox(QtWidgets.QGroupBox):
         painter.setPen(QtCore.Qt.NoPen)
         painter.setBrush(QtGui.QColor(ACCENT_TINT if selected else (fill or "white")))
         painter.drawRoundedRect(QtCore.QRectF(self.rect()), radius, radius)
-        pen = QtGui.QPen(QtGui.QColor(SELECTION_EDGE if selected else (edge or DIVIDER)))
-        pen.setWidthF(1.0)
+        pen = frame_pen(self, SELECTION_EDGE if selected else (edge or DIVIDER))
         if dashed and not selected:
             pen.setStyle(QtCore.Qt.DashLine)
         painter.setPen(pen)
         painter.setBrush(QtCore.Qt.NoBrush)
-        painter.drawRoundedRect(QtCore.QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), radius, radius)
+        painter.drawRoundedRect(frame_stroke_rect(self), radius, radius)
         if self.title() and self._zlc_strip_px:
             font = QtGui.QFont(FONT, fluent_font_size())
             font.setWeight(QtGui.QFont.DemiBold)
@@ -1431,7 +1452,7 @@ def _button_stylesheet() -> str:
     QPushButton {{
         background: {BUTTON_TINT};
         color: {HOVER};
-        border: 1px solid {BUTTON_TINT};
+        border: {FIELD_BORDER_PX}px solid {BUTTON_TINT};
         border-radius: {_radius()}px;
         padding: 0px {scaled_px(BUTTON_PADDING_H, minimum=6)}px;
         font: {fluent_font_size()}pt "{FONT}";
@@ -1868,6 +1889,25 @@ def _apply_fluent_context_menu(widget, event, *, extra=()) -> None:
         command()
 
 
+def _line_edit_text_line(edit: QtWidgets.QLineEdit) -> QtCore.QRect:
+    """The line box QLineEdit lays its text in: its contents less the text
+    margins and its own horizontal inset, one line high, centred with Qt's
+    integer rounding.  Its top plus the font's ascent is the baseline."""
+
+    option = QtWidgets.QStyleOptionFrame()
+    # initFrom, not initStyleOption: a spin box's edit is made by Qt, and
+    # PyQt refuses a protected call on an object it did not create.
+    option.initFrom(edit)
+    contents = edit.style().subElementRect(QtWidgets.QStyle.SE_LineEditContents, option, edit)
+    margins = edit.textMargins()
+    area = contents.adjusted(margins.left(), margins.top(), -margins.right(), -margins.bottom())
+    line = edit.fontMetrics().height()
+    top = area.y() + (area.height() - line + 1) // 2
+    return QtCore.QRect(
+        area.x() + _QLINEEDIT_HMARGIN, top, max(0, area.width() - 2 * _QLINEEDIT_HMARGIN), line
+    )
+
+
 def _numeric_text_width(edit: QtWidgets.QLineEdit, right_edge: int | None = None) -> int:
     option = QtWidgets.QStyleOptionFrame()
     option.initFrom(edit)
@@ -1960,22 +2000,21 @@ class FluentLineEdit(QtWidgets.QLineEdit):
         if mode is None or self.hasFocus() or not self.text():
             super().paintEvent(event)
             return
-        option = QtWidgets.QStyleOptionFrame()
-        self.initStyleOption(option)
-        contents = self.style().subElementRect(QtWidgets.QStyle.SE_LineEditContents, option, self)
-        margins = self.textMargins()
-        # QLineEdit keeps two pixels either side of its text.
-        area = contents.adjusted(margins.left() + 2, margins.top(), -margins.right() - 2, -margins.bottom())
+        # Exactly where QLineEdit would put the text, so the elided spelling
+        # does not move against the whole one it replaces.
+        area = _line_edit_text_line(self)
         metrics = self.fontMetrics()
         if metrics.horizontalAdvance(self.text()) <= area.width():
             super().paintEvent(event)
             return
+        option = QtWidgets.QStyleOptionFrame()
+        self.initStyleOption(option)
         painter = QtGui.QPainter(self)
         self.style().drawPrimitive(QtWidgets.QStyle.PE_PanelLineEdit, option, painter, self)
         painter.setPen(QtGui.QColor(TEXT if self.isEnabled() else DISABLED_INK))
         painter.setFont(self.font())
         painter.drawText(
-            area, QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter,
+            area, QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop,
             metrics.elidedText(self.text(), mode, area.width()),
         )
         painter.end()
@@ -2413,7 +2452,7 @@ class FluentReadoutEdit(FluentLineEdit):
             f"""
             QLineEdit {{
                 background: transparent;
-                border: 1px solid transparent;
+                border: {FIELD_BORDER_PX}px solid transparent;
                 border-left-width: 0px;
                 border-right-width: 0px;
                 padding: {scaled_px(PADDING_V)}px 0px;
@@ -2510,7 +2549,7 @@ class FluentReadoutMultiline(QtWidgets.QPlainTextEdit):
             base = f"""
             QPlainTextEdit {{
                 background: transparent;
-                border: 1px solid transparent;
+                border: {FIELD_BORDER_PX}px solid transparent;
                 border-left-width: 0px;
                 border-right-width: 0px;
                 padding: {scaled_px(PADDING_V)}px 0px;
@@ -3213,7 +3252,7 @@ QAbstractItemView {{
 }}
 QAbstractItemView::item {{
     padding: {scaled_px(3, minimum=2)}px {scaled_px(6, minimum=4)}px;
-    border: 1px solid transparent;
+    border: {FIELD_BORDER_PX}px solid transparent;
     border-radius: {_radius()}px;
     color: {TEXT};
 }}
@@ -3695,7 +3734,7 @@ class FluentComboBox(QtWidgets.QAbstractButton):
         painter = QtGui.QPainter(self)
         painter.setRenderHint(QtGui.QPainter.Antialiasing)
         radius = float(_radius())
-        outer = QtCore.QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        outer = frame_stroke_rect(self)
         enabled = self.isEnabled()
         current = enabled and self.isChecked()
         engaged = enabled and (
@@ -3705,7 +3744,7 @@ class FluentComboBox(QtWidgets.QAbstractButton):
         )
         fill = ACCENT if current else SURFACE if enabled else BG
         edge = ACCENT_HOVER if current and engaged else ACCENT if current or engaged else PLACEHOLDER
-        painter.setPen(QtGui.QPen(QtGui.QColor(edge), 1.0))
+        painter.setPen(frame_pen(self, edge))
         painter.setBrush(QtGui.QColor(fill))
         painter.drawRoundedRect(outer, radius, radius)
 
@@ -4815,6 +4854,20 @@ def _tab_padding_h() -> int:
     return scaled_px(16, minimum=12)
 
 
+def _tab_margin_h() -> int:
+    """A pivot tab's horizontal margin: from its tab rect to its underline."""
+
+    return scaled_px(3)
+
+
+def _tab_font() -> QtGui.QFont:
+    """The font the tab sheet names for a label."""
+
+    font = QtGui.QFont(FONT)
+    font.setPointSizeF(fluent_font_size())
+    return font
+
+
 class _FluentTabCloseButton(QtWidgets.QToolButton):
     """The close affordance for a closable tab: a small "x" glyph that darkens on
     hover with a subtle round highlight.
@@ -4824,29 +4877,50 @@ class _FluentTabCloseButton(QtWidgets.QToolButton):
     button (it renders blank), so the close mark was invisible.  A QToolButton's
     text is centred and the hover background is the button rect rounded to a
     circle, so glyph and highlight are concentric by construction.  Frontend-
-    owned, reused via :meth:`FluentTabWidget.add_closable_tab`."""
+    owned, reused via :meth:`FluentTabWidget.add_closable_tab`.
+
+    The x has to end as far before its underline's end as the label's ink
+    starts after the underline's start.  The button carries the difference
+    as a transparent ``trail`` on its right, which the BAR sets after it has
+    laid the tab out (``_FluentTabBar.tabLayoutChange``), from where the
+    style actually seated the button and where the glyph's ink actually
+    ends -- not from a fitted constant.
+    """
 
     def __init__(self, parent=None):
         super().__init__(parent)
         # Even, so the hover disk (radius size / 2) is round.
-        size = scaled_even_px(18, minimum=14)
-        pixels = max(9, int(size * 0.62))
-        # A closable tab's text starts its padding (plus the glyph's own
-        # bearing) after the underline begins; the x has to end as far
-        # before the underline ends.  Qt seats the button two pixels inside
-        # the tab's padding box and the x's ink sits inside its disk, so the
-        # button carries the rest as a transparent margin on its right --
-        # without it the text stood 17 px in and the x 6 px.
-        glyph = QtGui.QFont(FONT)
-        glyph.setPixelSize(pixels)
-        glyph.setBold(True)
-        ink = QtGui.QFontMetricsF(glyph).tightBoundingRect("✕").width()
-        trail = max(0, int(round(_tab_padding_h() + 1 - (size - ink) / 2.0 - 2)))
-        self.setFixedSize(size + trail, size)
+        self._size = scaled_even_px(18, minimum=14)
+        self._pixels = max(9, int(self._size * 0.62))
+        self._trail = -1
         self.setText("✕")                       # heavy multiplication x
         self.setCursor(QtCore.Qt.PointingHandCursor)
         self.setFocusPolicy(QtCore.Qt.NoFocus)
         self.setToolTip("Close this tab")
+        self.set_trail(0)
+
+    def glyph_ink_right(self) -> float:
+        """Where the x's ink ends, from the left of its disk: the text is
+        centred on its advance in the disk, and the ink ends at its tight
+        box's right inside that advance."""
+
+        glyph = QtGui.QFont(FONT)
+        glyph.setPixelSize(self._pixels)
+        glyph.setBold(True)
+        metrics = QtGui.QFontMetricsF(glyph)
+        left = (self._size - metrics.horizontalAdvance(self.text())) / 2.0
+        return left + metrics.tightBoundingRect(self.text()).right()
+
+    def trail(self) -> int:
+        return self._trail
+
+    def set_trail(self, trail: int) -> None:
+        trail = max(0, int(trail))
+        if trail == self._trail:
+            return
+        self._trail = trail
+        size = self._size
+        self.setFixedSize(size + trail, size)
         radius = size // 2
         # Clearly-visible grey at rest (a near-white "x" disappears on the tab
         # bar), darkening to TEXT on hover/press with a concentric round
@@ -4856,7 +4930,7 @@ class _FluentTabCloseButton(QtWidgets.QToolButton):
         self.setStyleSheet(
             f"""
             QToolButton {{ border: none; background: transparent; color: #6E6E6E; padding: 0px;
-                           margin-right: {trail}px; font: bold {pixels}px "{FONT}"; }}
+                           margin-right: {trail}px; font: bold {self._pixels}px "{FONT}"; }}
             QToolButton:hover {{ background: rgba(0, 0, 0, 38); border-radius: {radius}px; color: {TEXT}; }}
             QToolButton:pressed {{ background: rgba(0, 0, 0, 64); border-radius: {radius}px; color: {TEXT}; }}
             """
@@ -4884,6 +4958,29 @@ class _FluentTabBar(QtWidgets.QTabBar):
         # style strokes across the WHOLE bar width (and so grows with the tab count) -- would
         # show as a thin line on the bar's top edge, above the labels.  Turn it off.
         self.setDrawBase(False)
+
+    def tabLayoutChange(self) -> None:  # noqa: N802 - Qt naming
+        """Balance every close x against its label, now that the style has
+        placed both (see ``_FluentTabCloseButton``)."""
+
+        super().tabLayoutChange()
+        label = QtGui.QFontMetricsF(_tab_font())
+        for index in range(self.count()):
+            button = self.tabButton(index, QtWidgets.QTabBar.RightSide)
+            if not isinstance(button, _FluentTabCloseButton) or not self.tabText(index):
+                continue
+            rect = self.tabRect(index)
+            underline_end = rect.x() + rect.width() - _tab_margin_h()
+            # How far inside the underline the style ends the button: its
+            # own seat, the same whatever the button's width.
+            seat = underline_end - (button.x() + button.width())
+            lead = _tab_padding_h() + label.leftBearing(self.tabText(index)[0])
+            ink_end = underline_end - seat - button.width() + button.glyph_ink_right()
+            # The x's ink should end ``lead`` before the underline does; a
+            # wider trail moves the disk left by what it adds (the style
+            # keeps the button's right end on its seat).
+            gap = underline_end - ink_end
+            button.set_trail(int(round(button.trail() + lead - gap)))
 
     def _natural_widths(self) -> list:
         # Explicit base call (NOT a no-arg super(), which fails inside a comprehension frame).
@@ -5012,7 +5109,7 @@ class FluentTabWidget(QtWidgets.QTabWidget):
                 border-bottom: {scaled_px(2, minimum=2)}px solid transparent;
                 height: {scaled_px(32, minimum=26)}px;
                 padding: 0px {_tab_padding_h()}px;
-                margin: 0px {scaled_px(3)}px;
+                margin: 0px {_tab_margin_h()}px;
                 font: {fluent_font_size()}pt "{FONT}";
             }}
             QTabBar::tab:first {{ margin-left: {scaled_px(CARD_PAD)}px; }}
@@ -5677,9 +5774,10 @@ def _paint_fluent_spin_buttons(widget: QtWidgets.QAbstractSpinBox) -> None:
     """Paint the stepper: a frame segment, the hovered cell's tint, two chevrons.
 
     The field is a two-cell frame, the classic numeric up-down.  The divider
-    is a segment OF the frame -- its full height, in the edge's own colour
-    for the state (the accent while focused) -- so its joints with the top
-    and bottom edge are one colour and cannot show a seam at any scale.  The
+    is a segment OF the frame -- from the top edge to the bottom one, in the
+    edge's own colour for the state (the accent while focused) -- so its
+    joints with the top and bottom edge are one colour and cannot show a
+    seam at any scale.  The
     tint under the pointer fills exactly the hovered cell, from the
     divider's far side to the inner edge, concentric at the corner; the
     chevrons sit on the cells' centres.  Nothing is offset from a
@@ -6063,7 +6161,7 @@ class FluentCodeEdit(QtWidgets.QPlainTextEdit):
         self.setReadOnly(read_only)
         pad = scaled_px(4)
         self.setStyleSheet(
-            f'QPlainTextEdit {{ background: white; color: {TEXT}; border: 1px solid {PLACEHOLDER}; '
+            f'QPlainTextEdit {{ background: white; color: {TEXT}; border: {FIELD_BORDER_PX}px solid {PLACEHOLDER}; '
             f'border-radius: {scaled_px(4)}px; font: {fluent_font_size()}pt "Consolas", "Courier New", '
             f'monospace; padding: {pad}px; }}')
         apply_fluent_scrollbars(self)
@@ -6087,8 +6185,12 @@ class _StepChip(QtWidgets.QAbstractButton):
     (``_STEP_CHIP_FONT_RATIO`` of the field's size), never ``self.font()``:
     a window-level ``QWidget { font }`` sheet overrides ``setFont``, and
     there the step came out the digits' size on their baseline -- ``0.001
-    ±1`` read as a value and its uncertainty.  The text is centred on its
-    INK, resting and hovered alike, so the pill is concentric with it.
+    ±1`` read as a value and its uncertainty.
+
+    The smaller text stands ON THE DIGITS' BASELINE (``baseline``), so the
+    two read as one line; centred on its own ink in the frame it rose two
+    pixels above the larger digits and read as a superscript.  The hover
+    pill is centred on that ink, so it is concentric with the text.
     """
 
     def __init__(self, box: "FluentDoubleSpinBox"):
@@ -6115,16 +6217,30 @@ class _StepChip(QtWidgets.QAbstractButton):
         path.addText(0.0, 0.0, self._ink_font, self.text() if text is None else text)
         return path.boundingRect()
 
+    def baseline(self) -> float:
+        """The digits' baseline in this chip, on a device pixel.
+
+        Laid out the way QLineEdit lays out its line: the line box centred
+        (integer division, Qt's own rounding) in the edit's contents less
+        its text margins, the baseline one ascent below its top."""
+
+        edit = self.parentWidget().lineEdit()
+        line = _line_edit_text_line(edit)
+        return device_snap(self, edit.y() + line.top() + edit.fontMetrics().ascent() - self.y(), axis="y")
+
     def pill(self) -> QtCore.QRectF:
-        """The hover pill: the text's ink plus even padding, centred in the
-        chip, its top and height on whole device pixels."""
+        """The hover pill: the text's ink plus even padding, centred on that
+        ink as it stands on the baseline, its top and height on whole device
+        pixels and inside the chip."""
 
         ratio = float(self.devicePixelRatioF())
         ink = self.ink()
         pad_v = scaled_px(3, minimum=2)
         height = math.ceil((ink.height() + 2 * pad_v) * ratio / 2.0) * 2.0 / ratio
         height = min(height, float(self.height()))
-        top = device_snap(self, (self.height() - height) / 2.0, axis="y")
+        centre = self.baseline() + ink.center().y()
+        top = device_snap(self, centre - height / 2.0, axis="y")
+        top = min(max(top, 0.0), float(self.height()) - height)
         return QtCore.QRectF(0.0, top, float(self.width()), height)
 
     def set_live(self, live: bool) -> None:
@@ -6161,12 +6277,8 @@ class _StepChip(QtWidgets.QAbstractButton):
         painter.setPen(QtGui.QColor(TEXT if hovered else MUTED_INK if live else DISABLED_INK))
         painter.setFont(self._ink_font)
         ink = self.ink()
-        centre = pill.center()
         painter.drawText(
-            QtCore.QPointF(
-                device_snap(self, centre.x() - ink.center().x()),
-                device_snap(self, centre.y() - ink.center().y(), axis="y"),
-            ),
+            QtCore.QPointF(device_snap(self, pill.center().x() - ink.center().x()), self.baseline()),
             self.text(),
         )
         painter.end()
@@ -6176,6 +6288,10 @@ class _StepChip(QtWidgets.QAbstractButton):
 #: beside the number rather than a second number (at 9 pt digits it is
 #: 7.2 pt, two pixels shorter at any ratio).
 _STEP_CHIP_FONT_RATIO = 0.8
+#: The chip every width rule reserves room for (see "ONE RESERVED ROOM" in
+#: FluentDoubleSpinBox): a step of a ten-thousandth, the finest a decimal
+#: box usually takes.
+_STEP_CHIP_SAMPLE = "±0.0001"
 
 
 def _step_chip_font() -> QtGui.QFont:
@@ -6199,9 +6315,6 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
     #: inside a Qt slot does not become a traceback, it ends the process.
     #: Declared here, there is no instant in which they are missing.
     valueNormalized = QtCore.pyqtSignal()
-    #: The step changed -- and with it the chip that shows it, so a host
-    #: that sized the box to its contents sizes it again.
-    singleStepChanged = QtCore.pyqtSignal()
 
     _normalization_pending = False
     _step_chip = None
@@ -6213,10 +6326,6 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
     _shown_unit = "1"
     _value = Decimal(0)
     _step = Decimal(1)
-    #: The owner or the operator named the step (setSingleStep); until
-    #: then it is derived from the value (see _derive_step).
-    _step_declared = False
-    _step_derived = False
     #: The owner's bounds, None on a side nobody declared.  Qt cannot say
     #: "no bound": with none declared its double range is the whole double
     #: line, and that placeholder is not a number anyone asked for.  Read
@@ -6243,13 +6352,17 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
         QtWidgets.QApplication.sendEvent(
             self, QtGui.QResizeEvent(self.size(), self.size())
         )
-        # The chip's room counts: a box sized for a sample shows its step.
-        chrome = self.width() - self._digit_room() + self._step_chip_room()
+        # The chip's RESERVED room counts -- one width whatever the step, so
+        # boxes sized for one sample end on one edge and a new step moves
+        # nothing; a box sized for a sample shows its step.
+        chrome = self.width() - self._digit_room() + self._step_chip_reserve()
         return self.fontMetrics().horizontalAdvance(str(sample)) + 2 + chrome
 
     def sizeHint(self) -> QtCore.QSize:  # noqa: N802
         size = super().sizeHint()
-        size.setWidth(self.fontMetrics().horizontalAdvance("-123.456e-12") + _spin_field_chrome() + self._step_chip_room())
+        size.setWidth(
+            self.fontMetrics().horizontalAdvance("-123.456e-12") + _spin_field_chrome() + self._step_chip_reserve()
+        )
         return size
 
     def minimumSizeHint(self) -> QtCore.QSize:  # noqa: N802
@@ -6281,6 +6394,10 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
         self.editingFinished.connect(self._update_number_geometry)
         self._step_chip = _StepChip(self)
         self._step_chip.clicked.connect(self._on_edit_step)
+        # The chip yields to what is TYPED as well as to what is shown: an
+        # operator's long number takes the chip's room the moment it needs
+        # it, and the chip comes back when the number fits beside it again.
+        self.lineEdit().textChanged.connect(lambda _text: self._place_step_chip())
 
         # No range of its own: a bound is the owner's, declared through
         # setRange, and until then the box holds whatever it is given.
@@ -6301,7 +6418,6 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
         except ValueError:
             return
         self._commit(number, notify_normalized=True)
-        self._derive_step()
 
     def _bounded(self, number: Decimal) -> Decimal:
         """``number`` inside the owner's range: a box never holds a value
@@ -6379,9 +6495,6 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
             self.valueChanged[str].emit(self.text())
         if number != requested:
             self._queue_normalization()
-        if value is not None:
-            # A value projected with its range is the owner's value too.
-            self._derive_step()
         return True
 
     def setMinimum(self, minimum: float) -> None:  # noqa: N802 - Qt API name
@@ -6412,8 +6525,8 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
         self._commit(self._value, notify_normalized=True)
 
     def setSingleStep(self, step: float) -> None:  # noqa: N802 - Qt API name
-        """The owner's (or the operator's) step: from now on it is theirs,
-        never derived from the value again."""
+        """The owner's (or the operator's) step, shown by the step chip.
+        Until one is named a notch is 1, whatever the box holds."""
 
         try:
             magnitude = abs(_finite_decimal(step))
@@ -6421,7 +6534,6 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
             return
         if magnitude == 0:
             return
-        self._step_declared = True
         self._adopt_step(magnitude)
 
     def _adopt_step(self, magnitude: Decimal) -> None:
@@ -6430,7 +6542,6 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
         super().setSingleStep(float(magnitude))
         if changed:
             self._refresh_step_chip()
-            self.singleStepChanged.emit()
 
     def decimalValue(self) -> Decimal:  # noqa: N802 - Qt API style
         """The value as the box holds it -- exact, in the owner's unit."""
@@ -6536,8 +6647,6 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
         self._display_text = ""
         if not self._commit(self._value, user_edit=True):
             self._shown_unit, self._display_text = previous
-            return
-        self._derive_step(again=True)
 
     def shownUnit(self) -> str:  # noqa: N802 - Qt API name
         return self._shown_unit
@@ -6748,28 +6857,36 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
     #
     # THE CHIP YIELDS TO THE DIGITS.  The value is fitted to the field's
     # whole digit room (``_text_width``, the chip not counted), and the chip
-    # is shown only while the number on screen still fits beside it; the
-    # digits then end before it (a right text margin).  So the chip never
-    # rounds a value, never covers a digit, and at a width that cannot hold
-    # both it is simply not there -- Edit step… in the context menu still
-    # is.  Every width rule that sizes a box for a sample (width_for,
-    # sizeHint, the form's number column) counts the chip, so a box sized by
-    # its owner shows it.
+    # is shown only while the text in the edit -- shown or being typed --
+    # still fits beside it; the digits then end before it (a right text
+    # margin).  So the chip never rounds a value, never covers a digit, and
+    # at a width that cannot hold both it is simply not there -- Edit step…
+    # in the context menu still is.
+    #
+    # ONE RESERVED ROOM.  Every width rule that sizes a box for a sample
+    # (width_for, sizeHint, the form's number column) counts the room of a
+    # canonical chip, ``_STEP_CHIP_SAMPLE``, not the chip shown now: a
+    # column whose width followed the step text ended two forms of one card
+    # on two edges and jumped when a step was edited.  A wider step simply
+    # takes more of the digits' room while the number leaves it.
 
     def _step_chip_text(self) -> str:
         step = self._step
         shown = _decimal_text(step) if -4 <= step.adjusted() <= 6 else f"{float(step):g}"
         return f"±{shown}"
 
-    def _step_chip_metrics(self) -> tuple[int, int, int, int]:
+    def _step_chip_metrics(self, text: str | None = None) -> tuple[int, int, int, int]:
         """``(chip width, gap to the divider, vertical gap, gap to the
-        digits)`` in logical px for the step shown now: the chip is the
-        text's ink plus its padding, measured with the chip's own font."""
+        digits)`` in logical px for ``text`` (default: the step shown now):
+        the chip is the text's ink plus its padding, measured with the
+        chip's own font."""
 
-        ink = self._step_chip.ink(self._step_chip_text())
+        ink = self._step_chip.ink(self._step_chip_text() if text is None else text)
         pad = scaled_px(6, minimum=4)
         width = int(math.ceil(ink.width())) + 2 * pad
-        return width, scaled_px(3, minimum=2), scaled_px(3, minimum=2), scaled_px(4, minimum=2)
+        # One pixel off the frame vertically: the chip is a hit area, and the
+        # pill inside it follows the digits' baseline, a little below centre.
+        return width, scaled_px(3, minimum=2), scaled_px(1), scaled_px(4, minimum=2)
 
     def _offers_step_chip(self) -> bool:
         return (
@@ -6778,8 +6895,9 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
             and self.buttonSymbols() != QtWidgets.QAbstractSpinBox.NoButtons
         )
 
-    def _step_chip_room(self) -> int:
-        """How much the chip takes from the digits: the right text margin.
+    def _step_chip_room(self, text: str | None = None) -> int:
+        """How much the chip showing ``text`` (default: the step now) takes
+        from the digits: the right text margin.
 
         The edit field ends at the frame's padding before the divider; the
         chip sits ``gap`` left of the divider, and the digits stop ``text
@@ -6787,9 +6905,15 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
 
         if not self._offers_step_chip():
             return 0
-        width, gap, _vertical, text_gap = self._step_chip_metrics()
+        width, gap, _vertical, text_gap = self._step_chip_metrics(text)
         before_divider = FIELD_BORDER_PX + scaled_px(EDIT_PADDING_H)
         return max(0, width + gap + text_gap - before_divider)
+
+    def _step_chip_reserve(self) -> int:
+        """The chip's share of every width rule: the room of the canonical
+        chip, the same for every decimal box at this scale."""
+
+        return self._step_chip_room(_STEP_CHIP_SAMPLE)
 
     def _digit_room(self) -> int:
         """The width the digits have with no chip beside them."""
@@ -6843,34 +6967,6 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
         self._place_step_chip()
         self.updateGeometry()
         self._update_number_geometry()
-
-    # ------------------------------------------------------------ the step
-
-    def _derive_step(self, *, again: bool = False) -> None:
-        """The step nobody declared, from the number the owner shows.
-
-        A box with no declared step moved by 1 whatever it held -- a 20 ms
-        exposure said ``±1`` (seconds) -- so until the owner or the
-        operator names one, a notch is one unit of the number's second
-        digit (0.02 -> 0.001, 1.5 -> 0.1, 250 -> 10), never finer than the
-        declared resolution.  It is taken once, from the first non-zero
-        value the owner sets (setValue, or setRange with a value), and again
-        when the unit on screen changes: an owner that projects every notch
-        back must not change the step the operator is stepping with."""
-
-        if self._step_declared or (self._step_derived and not again) or self.decimals() == 0:
-            return
-        try:
-            shown = abs(self._shown_from_value(self._value))
-        except (UnitError, ValueError, ArithmeticError):
-            return
-        if not shown.is_finite() or shown == 0:
-            return
-        step = Decimal(1).scaleb(shown.adjusted() - 1)
-        if self.decimals() < 323:
-            step = max(step, Decimal(1).scaleb(-int(self.decimals())))
-        self._step_derived = True
-        self._adopt_step(step)
 
     def contextMenuEvent(self, event) -> None:  # noqa: N802 - Qt naming
         # "Edit step…" stays here as well, with the box's other commands; the
@@ -7232,16 +7328,6 @@ class FluentScrollArea(QtWidgets.QScrollArea):
         self._reserve_scrollbar_gutter()
 
 
-def _end_column(header: QtWidgets.QHeaderView, step: int) -> int:
-    """The logical column shown first (``step`` 1) or last (-1), or -1."""
-
-    count = header.count()
-    visual = 0 if step > 0 else count - 1
-    while 0 <= visual < count and header.isSectionHidden(header.logicalIndex(visual)):
-        visual += step
-    return header.logicalIndex(visual) if 0 <= visual < count else -1
-
-
 class _RowHoverDelegate(QtWidgets.QStyledItemDelegate):
     """Marks every cell of the hovered ROW as under the pointer.
 
@@ -7465,14 +7551,12 @@ class FluentTableView(QtWidgets.QTableView):
         # placed from the frame; the headers and the corner draw no border
         # and no radius (a FluentFrame's ``QFrame`` rule would otherwise
         # round a QHeaderView's ends).
-        self.horizontalHeader().setObjectName("fluentTableColumns")
-        self.verticalHeader().setObjectName("fluentTableRows")
         self.setStyleSheet(
             f"""
             QTableView {{
                 background: white;
                 color: {TEXT};
-                border: 1px solid {DIVIDER};
+                border: {FIELD_BORDER_PX}px solid {DIVIDER};
                 border-radius: {_radius()}px;
                 selection-background-color: {ACCENT};
                 selection-color: {TEXT};

@@ -168,6 +168,8 @@ def test_an_authored_grid_the_spins_cannot_regenerate_is_kept_exactly() -> None:
 
         # A projected ROI is normalized after the synchronous reconcile has
         # finished. It must not claim that the operator manually edited it.
+        # Its start has more digits than the box shows (sign and seventeen
+        # significant digits), whatever room the box's step chip leaves.
         app = ensure_qt_app()
         editor.resize(850, 180)
         editor.show()
@@ -176,7 +178,7 @@ def test_an_authored_grid_the_spins_cannot_regenerate_is_kept_exactly() -> None:
         drafts = []
         editor.draft_changed.connect(drafts.append)
         editor.update_projection({"form_values": {"plan": json.dumps({"axes": [{
-            "port": "manual:power", "values": [142.1234567890123, 153.12345678395613, 164.1234567789],
+            "port": "manual:power", "values": [-142.1234567890123, 153.12345678395613, 164.1234567789],
             "unit": "mVpp", "mode": "range", "value_text": "",
         }]}), "api_values": ""}})
         for _ in range(8):

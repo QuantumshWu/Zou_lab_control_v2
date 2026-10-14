@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from PyQt5 import QtCore, QtGui, QtWidgets
 
-from .fluent import fluent_font_size, scaled_px, _radius
+from .fluent import fluent_font_size, frame_pen, frame_stroke_rect, scaled_px, _radius
 from .style import DIVIDER, FONT, MUTED_INK, SURFACE, TEXT
 
 __all__ = ["PublishedItemsLegend"]
@@ -103,9 +103,9 @@ class PublishedItemsLegend(QtWidgets.QWidget):
         pad_x = scaled_px(8, minimum=6)
         radius = float(_radius())
         for rect, name, shape in chips:
-            painter.setPen(QtGui.QPen(QtGui.QColor(DIVIDER), 1.0))
+            painter.setPen(frame_pen(self, DIVIDER))
             painter.setBrush(QtGui.QColor(SURFACE))
-            painter.drawRoundedRect(QtCore.QRectF(rect).adjusted(0.5, 0.5, -0.5, -0.5), radius, radius)
+            painter.drawRoundedRect(frame_stroke_rect(self, QtCore.QRectF(rect)), radius, radius)
             text_rect = rect.adjusted(pad_x, 0, -pad_x, 0)
             painter.setPen(QtGui.QColor(TEXT))
             painter.drawText(text_rect, QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter, name)
