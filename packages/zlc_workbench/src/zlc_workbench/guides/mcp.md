@@ -56,10 +56,12 @@ without it they return the confirmation text without opening a GUI dialog.
 
 Camera Measurement publishes complete cycles with all authored frames, pixel
 coordinates, units and validity. It does not own the experiment Pulse. Collect
-all triggers in each Pulse cycle even when interested in just one frame. For
-manual finite capture, prepare the Pulse first; Camera Start → that generation
-ready → Fire belongs in one already-decided batch, not separate model decisions.
-Wait for camera completion and the Pulse's pending/completion_pending flags to
+all triggers in each Pulse cycle even when interested in just one frame. With a
+running ready-reporting Measurement, `lab_pulse` fire re-arms it (Pulse state
+`acquisition`; `acquisition.armed.generation` names the run its frames go
+into); do not Start the camera separately before Fire. Set `acquisition` to ""
+to fire without restarting; for a finite capture choose the Measurement
+explicitly. Wait for camera completion and the Pulse's pending/completion_pending flags to
 clear before beginning another capture. Cached board.firing=false alone is not
 proof that the finite command lifecycle is complete.
 

@@ -1556,6 +1556,8 @@ class PulseScheduleView(QtWidgets.QWidget):
     save_requested = QtCore.pyqtSignal()
     load_requested = QtCore.pyqtSignal()
     connection_requested = QtCore.pyqtSignal(str, str)
+    #: The Acquisition value the operator picked: "auto", "" or a node id.
+    acquisition_selected = QtCore.pyqtSignal(str)
     feedback_requested = QtCore.pyqtSignal(str)
 
     def __init__(self, parent=None, *, embedded: bool = False) -> None:
@@ -1756,6 +1758,21 @@ class PulseScheduleView(QtWidgets.QWidget):
         connection_row.setSpacing(bar_gap)
         connection_row.addWidget(self.connection_endpoint, 1)
         connection_row.addWidget(self.connection_button)
+        # An editor the experiment opened has no address to dial; its row
+        # says instead what On Pulse re-arms.  Hidden until a host supplies
+        # the choices, so a standalone editor keeps its endpoint row.
+        self.acquisition_combo = FluentComboBox()
+        self.acquisition_combo.setFixedHeight(control_height)
+        self.acquisition_combo.setSizePolicy(
+            QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed
+        )
+        self.acquisition_combo.setToolTip(
+            "On Pulse, Hold and Step stop the board, restart this Measurement with "
+            "its current settings and wait until it is armed, then play. Stop Pulse "
+            "leaves it running. None = play without restarting."
+        )
+        self.acquisition_combo.hide()
+        connection_row.addWidget(self.acquisition_combo, 1)
         connection_layout.addLayout(connection_row)
         connection_layout.addWidget(self.connection_status)
         connection_layout.addStretch(1)
@@ -1853,6 +1870,11 @@ class PulseScheduleView(QtWidgets.QWidget):
         self.connection_button.clicked.connect(self._request_connection)
         self.connection_combo.currentIndexChanged[int].connect(
             self._sync_endpoint_enabled
+        )
+        self.acquisition_combo.currentIndexChanged[int].connect(
+            lambda _index: self.acquisition_selected.emit(
+                str(self.acquisition_combo.currentData())
+            )
         )
         self._sync_endpoint_enabled()
 
@@ -2161,9 +2183,27 @@ class PulseScheduleView(QtWidgets.QWidget):
         self.connection_endpoint.setText(vm.endpoint)
         self.connection_combo.setEnabled(not vm.locked)
         self.connection_button.setEnabled(not vm.locked)
+        # A locked connection has no address to type and nothing to dial.
+        self.connection_endpoint.setVisible(not vm.locked)
+        self.connection_button.setVisible(not vm.locked)
         self._sync_endpoint_enabled()
         self.connection_status.setText(vm.status)
         self.connection_status.setToolTip(vm.status)
+
+    def set_acquisition(self, choices: tuple[tuple[str, str], ...], selected: str) -> None:
+        """Project what On Pulse re-arms: (label, value) items and the chosen value."""
+
+        with signals_blocked(self.acquisition_combo):
+            self.acquisition_combo.clear()
+            for label, value in choices:
+                self.acquisition_combo.addItem(str(label), str(value))
+            index = self.acquisition_combo.findData(str(selected))
+            if index < 0:
+                raise ValueError(
+                    f"selected acquisition {selected!r} was not supplied to the view"
+                )
+            self.acquisition_combo.setCurrentIndex(index)
+        self.acquisition_combo.show()
 
     def _request_connection(self) -> None:
         """Emit the selected presenter-supplied connection intent."""

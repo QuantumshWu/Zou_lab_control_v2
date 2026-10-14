@@ -304,7 +304,8 @@ class _EditorView:
         "bracket_add_requested",
         "run_repeats_committed",
         "visible_ports_committed", "fill_port_requested", "clear_port_requested",
-        "feedback_requested", "connection_requested", "device_label_changed", "fire_requested",
+        "feedback_requested", "connection_requested", "acquisition_selected",
+        "device_label_changed", "fire_requested",
         "stop_requested", "sync_requested", "save_requested", "load_requested",
         "config_new_requested", "config_load_requested", "config_refresh_requested",
         "config_save_requested", "config_save_as_requested", "config_unload_requested",
@@ -331,6 +332,7 @@ class _EditorView:
         self.summary = ""
         self.capabilities = None
         self.status_token = ""
+        self.acquisition = None
         self.warnings: list[str] = []
         self.done: list[str] = []
         #: What the file dialog would answer; "" is the operator cancelling.
@@ -422,6 +424,9 @@ class _EditorView:
 
     def set_connection(self, connection) -> None:
         self.schedule_view.set_connection(connection)
+
+    def set_acquisition(self, choices, selected) -> None:
+        self.acquisition = (tuple(choices), str(selected))
 
     # -- the scan --------------------------------------------------------
 
@@ -4760,6 +4765,96 @@ def test_connect_hold_step_and_sync_run_on_the_device_worker(sequence) -> None:
         worker.deliver_until(lambda: not presenter._device_busy)
         assert len(presenter.sequence.periods) == periods + 1
         assert view.summary.endswith(f"{periods + 1} period(s)"), view.summary
+
+        # Linked to a Task Console, every play gesture re-arms its
+        # acquisition between LOAD and FIRE: armed while the board is quiet,
+        # played only once it is armed.
+        asked: list[str] = []
+
+        def rearm(choice, still_wanted):
+            asked.append(choice)
+            board.events.append("rearm")
+            return "camera_measurement", "g7"
+
+        presenter.link_acquisitions(lambda: (("camera_measurement", True),), rearm)
+        assert view.acquisition == ((
+            ("Auto · camera_measurement", "auto"),
+            ("None", ""),
+            ("camera_measurement · running", "camera_measurement"),
+        ), "auto")
+        board.events.clear()
+        view.scan_hold_requested.emit()
+        worker.deliver_until(lambda: not presenter._device_busy)
+        assert board.events == ["safe", "load", "rearm", "fire forever"]
+        assert presenter.invoke_public("step_scan_point", {"delta": 1}) is True
+        worker.deliver_until(lambda: not presenter._device_busy)
+        assert board.events[-4:] == ["safe", "load", "rearm", "fire forever"]
+        board.events.clear()
+        view.fire_requested.emit()
+        assert view.summary == "Starting · re-arming camera_measurement..."
+        worker.deliver_until(lambda: not presenter._device_busy)
+        assert board.events[:3] == ["safe", "load", "rearm"]
+        assert board.events[3].startswith("fire") and len(board.events) == 4
+        assert view.summary == "Started · camera_measurement re-armed (generation g7)"
+        assert presenter.execution_snapshot()["acquisition"]["armed"] == {
+            "node_id": "camera_measurement", "generation": "g7",
+        }
+        assert asked == ["auto", "auto", "auto"]
+        view.stop_requested.emit()
+        worker.deliver_until(lambda: not presenter._stop_busy)
+        board.events.clear()
+        view.fire_requested.emit()
+        worker.deliver_until(lambda: not presenter._device_busy)
+        assert board.events[:2] == ["load", "rearm"] and board.events[2].startswith("fire")
+
+        # None plays without re-arming.
+        view.acquisition_selected.emit("")
+        assert presenter.control_state()["acquisition"]["choice"] == ""
+        board.events.clear()
+        view.fire_requested.emit()
+        worker.deliver_until(lambda: not presenter._device_busy)
+        assert "rearm" not in board.events and board.events[0] == "safe"
+        view.acquisition_selected.emit("auto")
+
+        # Stop while the re-arm waits: no FIRE, the board SAFE, and nothing
+        # is asked of the acquisition beyond the one re-arm.
+        from threading import Event
+
+        waiting = Event()
+
+        def blocked(choice, still_wanted):
+            asked.append(choice)
+            board.events.append("rearm")
+            waiting.set()
+            while still_wanted():
+                time.sleep(0.01)
+            return None
+
+        presenter.link_acquisitions(lambda: (("camera_measurement", True),), blocked)
+        asked.clear()
+        board.events.clear()
+        view.fire_requested.emit()
+        assert waiting.wait(3.0)
+        view.stop_requested.emit()
+        worker.deliver_until(lambda: not presenter._stop_busy and not presenter._device_busy)
+        assert "rearm" in board.events
+        assert not any(event.startswith("fire") for event in board.events), board.events
+        assert board.events[-1] == "safe" and presenter.running is False
+        assert asked == ["auto"] and view.summary == "Stopped"
+
+        # A refused re-arm: no FIRE, the lease goes back, and the reason shows.
+        def refused(choice, still_wanted):
+            board.events.append("rearm")
+            raise RuntimeError("camera_measurement: the camera did not arm")
+
+        presenter.link_acquisitions(lambda: (("camera_measurement", True),), refused)
+        board.events.clear()
+        view.fire_requested.emit()
+        worker.deliver_until(lambda: not presenter._device_busy)
+        assert board.events == ["load", "rearm", "safe"], board.events
+        assert presenter._drive_lease is None
+        assert view.summary == "firing stopped: camera_measurement: the camera did not arm"
+        assert presenter.execution_snapshot()["acquisition"]["armed"] is None
     finally:
         presenter.close()
 

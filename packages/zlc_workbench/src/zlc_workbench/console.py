@@ -9518,80 +9518,93 @@ class ConsolePresenter:
     ) -> None:
         """Return current input failures to the waiting worker, not as Stop."""
         expected = {pub.event_ref for pub in expected_publications}
-        answer: Future = Future()
 
         def check() -> None:
+            if context.cancel_requested() or self._closing:
+                raise InterruptedError("stopped while checking the input signal")
+            parent = self.logic.get(str(context.instance_id))
+            if parent is None or parent.host is None or parent.host.generation != context.generation or not parent.host.running:
+                raise RuntimeError("the signal consumer's run is no longer active")
+            if signal != parent.draft.source_signal:
+                raise ValueError("the Task did not select this input signal")
+            plane = self.session.signal_plane
+
+            def belongs(publication: SignalPublication | None) -> bool:
+                pending = [] if publication is None else [publication]
+                seen = set()
+                while pending:
+                    item = pending.pop()
+                    ref = item.event_ref
+                    if ref in seen:
+                        continue
+                    seen.add(ref)
+                    if ref in expected:
+                        return True
+                    try:
+                        pending.extend(plane.direct_parent_publications(item))
+                    except (LookupError, ValueError):
+                        # An old, retired error cannot prove this run failed.
+                        continue
+                return False
+
+            for name in self._signal_input_chain(signal):
+                parts = split_signal_key(name)
+                if parts is None:
+                    continue
+                producer, output = parts
+                panel = self.panels.get(producer)
+                if panel is not None:
+                    if not panel.state.published_outputs.get(output, True):
+                        raise RuntimeError(f"{name}: output publication is disabled")
+                    if name == signal and not panel.state.fit.get("model"):
+                        raise RuntimeError(f"{name}: the Fit model is no longer enabled")
+                    if getattr(panel, "configuration", None) is None:
+                        refusal = getattr(panel, "vacancy", "") or getattr(panel, "unapplied_display", "")
+                        if refusal:
+                            raise RuntimeError(f"{name}: settings not applied -- {refusal}")
+                    for owner in (panel.port, panel.bridge):
+                        if owner is None:
+                            continue
+                        error = owner.last_error
+                        if error is not None and belongs(owner.last_error_publication):
+                            raise RuntimeError(f"{name}: {_error_text(error)}") from error
+                else:
+                    source = self.logic.get(producer)
+                    if source is None:
+                        if not any(item.name == name for item in plane.describe_signals()):
+                            raise RuntimeError(f"{name}: the input producer was removed")
+                        continue
+                    host = source.host
+                    if host is not None and host.observation.error and belongs(host.source_publication):
+                        raise RuntimeError(f"{name}: {host.observation.error}")
+
+        self._ask_owner(check, context.cancel_requested, "stopped while checking the input signal")
+
+    def _ask_owner(self, job: Callable[[], object], cancelled: Callable[[], bool], stopped: str) -> object:
+        """Run ``job`` on the owner turn and return its answer to this worker.
+
+        The waiting thread looks every 50 ms; once ``cancelled()`` says so
+        and the job has not begun, it never runs and ``InterruptedError(stopped)``
+        is raised.  A job already running is waited for.
+        """
+
+        answer: Future = Future()
+
+        def run() -> None:
             if not answer.set_running_or_notify_cancel():
                 return
             try:
-                if context.cancel_requested() or self._closing:
-                    raise InterruptedError("stopped while checking the input signal")
-                parent = self.logic.get(str(context.instance_id))
-                if parent is None or parent.host is None or parent.host.generation != context.generation or not parent.host.running:
-                    raise RuntimeError("the signal consumer's run is no longer active")
-                if signal != parent.draft.source_signal:
-                    raise ValueError("the Task did not select this input signal")
-                plane = self.session.signal_plane
-
-                def belongs(publication: SignalPublication | None) -> bool:
-                    pending = [] if publication is None else [publication]
-                    seen = set()
-                    while pending:
-                        item = pending.pop()
-                        ref = item.event_ref
-                        if ref in seen:
-                            continue
-                        seen.add(ref)
-                        if ref in expected:
-                            return True
-                        try:
-                            pending.extend(plane.direct_parent_publications(item))
-                        except (LookupError, ValueError):
-                            # An old, retired error cannot prove this run failed.
-                            continue
-                    return False
-
-                for name in self._signal_input_chain(signal):
-                    parts = split_signal_key(name)
-                    if parts is None:
-                        continue
-                    producer, output = parts
-                    panel = self.panels.get(producer)
-                    if panel is not None:
-                        if not panel.state.published_outputs.get(output, True):
-                            raise RuntimeError(f"{name}: output publication is disabled")
-                        if name == signal and not panel.state.fit.get("model"):
-                            raise RuntimeError(f"{name}: the Fit model is no longer enabled")
-                        if getattr(panel, "configuration", None) is None:
-                            refusal = getattr(panel, "vacancy", "") or getattr(panel, "unapplied_display", "")
-                            if refusal:
-                                raise RuntimeError(f"{name}: settings not applied -- {refusal}")
-                        for owner in (panel.port, panel.bridge):
-                            if owner is None:
-                                continue
-                            error = owner.last_error
-                            if error is not None and belongs(owner.last_error_publication):
-                                raise RuntimeError(f"{name}: {_error_text(error)}") from error
-                    else:
-                        source = self.logic.get(producer)
-                        if source is None:
-                            if not any(item.name == name for item in plane.describe_signals()):
-                                raise RuntimeError(f"{name}: the input producer was removed")
-                            continue
-                        host = source.host
-                        if host is not None and host.observation.error and belongs(host.source_publication):
-                            raise RuntimeError(f"{name}: {host.observation.error}")
-                answer.set_result(None)
+                answer.set_result(job())
             except BaseException as error:
                 answer.set_exception(error)
 
-        self._enqueue_panel_interaction(check)
+        self._enqueue_panel_interaction(run)
         while True:
             try:
                 return answer.result(timeout=0.05)
             except _AnswerTimeout:
-                if context.cancel_requested() and answer.cancel():
-                    raise InterruptedError("stopped while checking the input signal")
+                if cancelled() and answer.cancel():
+                    raise InterruptedError(stopped)
 
     def _acquisition_options(self, consumer: str) -> tuple[str, ...]:
         owner = self.logic.get(consumer)
@@ -9602,6 +9615,88 @@ class ConsolePresenter:
             and binding.descriptor.kind.value == "measurement"
             and (completion == "terminal" or binding.descriptor.reports_ready)
         )
+
+    @staticmethod
+    def _acquiring(binding: LogicBinding) -> bool:
+        """Running or queued: the same facts the row's status reads."""
+
+        host = binding.host
+        return binding.pending is not None or (host is not None and host.running)
+
+    def acquisition_choices(self) -> tuple[tuple[str, bool], ...]:
+        """The Measurements an On Pulse can re-arm, each with whether it runs now.
+
+        The Seamless candidates (Measurements that report ready).  Owner
+        thread; reads only bindings, never finalizes a draft.
+        """
+
+        return tuple(
+            (node_id, self._acquiring(self.logic[node_id]))
+            for node_id in self._acquisition_options("")
+        )
+
+    def rearm_acquisition(
+        self, choice: str, still_wanted: Callable[[], bool],
+    ) -> tuple[str, str] | None:
+        """Start or Restart what an On Pulse plays into, and wait until it is armed.
+
+        The Pulse Editor's command worker calls this between LOAD and FIRE,
+        with the board idle.  ``"auto"`` restarts the one ready-reporting
+        Measurement that is running and never starts an idle one; a node id
+        is Started when idle and Restarted when running, as Seamless's
+        Acquisition logic is.  Returns the node and the generation that
+        reported ready; None when Auto found nothing running or
+        ``still_wanted`` turned False -- a run already restarted then stays
+        running, armed with no partial cycle.  Any refusal or a run that
+        ends before ready raises, naming the node.
+        """
+
+        def restart() -> object:
+            if self._closing:
+                raise RuntimeError("Task Console is closing")
+            options = self._acquisition_options("")
+            if choice == "auto":
+                running = [node for node in options if self._acquiring(self.logic[node])]
+                if not running:
+                    return None
+                if len(running) > 1:
+                    raise RuntimeError(
+                        f"{len(running)} Measurements are running ({', '.join(running)}); "
+                        "choose one under Acquisition"
+                    )
+                node_id = running[0]
+            else:
+                node_id = choice
+            active = self._active_task()
+            if active is not None:
+                raise RuntimeError(f"{active.node_id}: stop the Task before On Pulse re-arms {node_id}")
+            if node_id not in options:
+                raise ValueError(f"{node_id!r} is not an available acquisition Measurement")
+            binding = self.logic[node_id]
+            was_running = self._acquiring(binding)
+            if not self.start_logic(node_id):
+                raise RuntimeError(f"{node_id}: {binding.draft_error or 'could not start'}")
+            host = binding.pending.host if binding.pending is not None else binding.host
+            self._report(
+                f"{node_id} {'restarted' if was_running else 'started'} for On Pulse",
+                severity="task",
+            )
+            return node_id, host
+
+        try:
+            armed = self._ask_owner(restart, lambda: not still_wanted(), "On Pulse was stopped")
+        except InterruptedError:
+            return None
+        if armed is None:
+            return None
+        node_id, host = armed
+        while still_wanted():
+            try:
+                if host.wait_ready(0.05):
+                    return node_id, host.generation.value
+            except (RuntimeError, InterruptedError) as error:
+                raise RuntimeError(f"{node_id}: {error}") from error
+        return None
 
     def _stop_acquisition(self, parent: LogicBinding) -> None:
         """Release only the child run this parent actually started."""
@@ -9624,55 +9719,43 @@ class ConsolePresenter:
     ) -> Mapping[str, SignalPublication] | None:
         """Restart through the original owner and wait for the requested boundary."""
 
-        answer: Future = Future()
+        def start() -> object:
+            if context.cancel_requested() or self._closing:
+                raise InterruptedError("stopped before acquisition restart")
+            parent = self.logic[str(context.instance_id)]
+            parent_host = parent.host
+            if parent_host is None or parent_host.generation != context.generation or not parent_host.running:
+                raise RuntimeError("the acquisition caller's run is no longer active")
+            descriptor = parent.descriptor
+            field = descriptor.acquisition_input
+            if completion != descriptor.acquisition_completion or not field:
+                raise ValueError("acquisition must match this run's declared selection and completion")
+            if self._active_task() is not None and (
+                not descriptor.authoring_schema.is_enabled(field, parent.draft.values)
+                or str(parent.draft.values.get(field) or "") != node_id
+            ):
+                raise ValueError("the Task did not select this acquisition")
+            if node_id not in self._acquisition_options(str(context.instance_id)):
+                raise ValueError(f"{node_id!r} is not an available acquisition Measurement")
+            if completion == "terminal" and parent.draft.source_signal and not any(
+                parts is not None and parts[0] == node_id
+                for signal in self._signal_input_chain(parent.draft.source_signal)
+                for parts in (split_signal_key(signal),)
+            ):
+                raise ValueError(
+                    f"{parent.draft.source_signal!r} does not derive from "
+                    f"the selected acquisition {node_id!r}"
+                )
+            if not self.start_logic(node_id, _acquisition=True):
+                raise RuntimeError(self.logic[node_id].draft_error or f"could not restart {node_id}")
+            binding = self.logic[node_id]
+            host = binding.pending.host if binding.pending is not None else binding.host
+            parent.acquisition_run = (node_id, host, host.generation)
+            return host, parent_host, context.generation
 
-        def start() -> None:
-            if not answer.set_running_or_notify_cancel():
-                return
-            try:
-                if context.cancel_requested() or self._closing:
-                    raise InterruptedError("stopped before acquisition restart")
-                parent = self.logic[str(context.instance_id)]
-                parent_host = parent.host
-                if parent_host is None or parent_host.generation != context.generation or not parent_host.running:
-                    raise RuntimeError("the acquisition caller's run is no longer active")
-                descriptor = parent.descriptor
-                field = descriptor.acquisition_input
-                if completion != descriptor.acquisition_completion or not field:
-                    raise ValueError("acquisition must match this run's declared selection and completion")
-                if self._active_task() is not None and (
-                    not descriptor.authoring_schema.is_enabled(field, parent.draft.values)
-                    or str(parent.draft.values.get(field) or "") != node_id
-                ):
-                    raise ValueError("the Task did not select this acquisition")
-                if node_id not in self._acquisition_options(str(context.instance_id)):
-                    raise ValueError(f"{node_id!r} is not an available acquisition Measurement")
-                if completion == "terminal" and parent.draft.source_signal and not any(
-                    parts is not None and parts[0] == node_id
-                    for signal in self._signal_input_chain(parent.draft.source_signal)
-                    for parts in (split_signal_key(signal),)
-                ):
-                    raise ValueError(
-                        f"{parent.draft.source_signal!r} does not derive from "
-                        f"the selected acquisition {node_id!r}"
-                    )
-                if not self.start_logic(node_id, _acquisition=True):
-                    raise RuntimeError(self.logic[node_id].draft_error or f"could not restart {node_id}")
-                binding = self.logic[node_id]
-                host = binding.pending.host if binding.pending is not None else binding.host
-                parent.acquisition_run = (node_id, host, host.generation)
-                answer.set_result((host, parent_host, context.generation))
-            except BaseException as error:
-                answer.set_exception(error)
-
-        self._enqueue_panel_interaction(start)
-        while True:
-            try:
-                host, parent_host, parent_generation = answer.result(timeout=0.05)
-                break
-            except _AnswerTimeout:
-                if context.cancel_requested() and answer.cancel():
-                    raise InterruptedError("stopped before acquisition restart")
+        host, parent_host, parent_generation = self._ask_owner(
+            start, context.cancel_requested, "stopped before acquisition restart",
+        )
         try:
             while not context.cancel_requested():
                 if completion == "ready":

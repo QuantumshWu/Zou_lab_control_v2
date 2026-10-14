@@ -579,6 +579,13 @@ class ExperimentGuiFlow:
             render=self.console.editor_render,
         )
         self._adopt_device_control(key, leaf.device, control)
+        if "sequencer.streamer" in leaf.capabilities:
+            # Its On Pulse re-arms the console's acquisition before it plays;
+            # this flow is the one place that holds both.
+            control.presenter.link_acquisitions(
+                self.console_presenter.acquisition_choices,
+                self.console_presenter.rearm_acquisition,
+            )
         return control
 
     def control_device(
