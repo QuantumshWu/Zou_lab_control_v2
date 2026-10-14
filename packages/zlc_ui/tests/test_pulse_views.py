@@ -1935,7 +1935,7 @@ def test_a_bracket_count_wears_its_binding_without_changing_the_post_width(run_q
         """
 from dataclasses import replace
 from zlc_ui.qt import ensure_qt_app
-from zlc_ui.fluent import API_VIOLET, CONFIG_GREEN, ORANGE
+from zlc_ui.fluent import API_VIOLET, CONFIG_GREEN, ORANGE, PLACEHOLDER
 from zlc_ui.pulse import FieldVM
 from zlc_ui.pulse.schedule_view import BracketPost
 from zlc_ui.pulse._layout import px
@@ -1945,7 +1945,6 @@ plain = FieldVM("4", can_scan=True, validator_kind="int", validator_lo=1,
                 validator_hi=(1 << 32) - 1, field_id="b.count")
 post = BracketPost("b", "end", count_field=plain)
 post.show(); app.processEvents()
-plain_edges = post.count_spin._frame_edges
 width = post.width()
 for field, edge in (
     (replace(plain, scan=True), ORANGE),
@@ -1956,8 +1955,8 @@ for field, edge in (
     (plain, None),
 ):
     post.set_count_field(field); app.processEvents()
-    assert post.count_spin._frame_edges == (plain_edges if edge is None else (edge, edge)), field
-    assert edge is None or edge in post.count_spin.styleSheet()
+    sheet = post.count_spin.styleSheet()
+    assert f"solid {edge or PLACEHOLDER}" in sheet, (field, sheet)
     assert "border: none" in post.count_edit.styleSheet(), "the edit draws no second frame"
     assert post.width() == width == post.count_spin.width() + 2 * px(7), field
 post.set_count_field(replace(plain, text="123456789")); app.processEvents()
