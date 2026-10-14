@@ -2,27 +2,79 @@
 
 from __future__ import annotations
 
+import math
+
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 from zlc_ui.fluent import (
     API_VIOLET, API_VIOLET_DARK, CONFIG_GREEN, CONFIG_GREEN_DARK, CONFIG_GREEN_TINT,
     EDIT_PADDING_H, FIELD_BORDER_PX, FONT, ORANGE, ORANGE_DARK, PADDING_V, PLACEHOLDER,
-    RADIUS, SURFACE, FluentCheckBox, FluentComboBox, FluentDoubleSpinBox, FluentTriSwitch,
-    FluentLabel, FluentLineEdit, FluentPopup, FluentSettingsPopupAnchor, device_snap,
-    fluent_font_size, fluent_inner_edit_stylesheet, scaled_px, signals_blocked,
-    read_editable_combo, show_fluent_popup_for_anchor,
+    RADIUS, SURFACE, FluentComboBox, FluentDoubleSpinBox, FluentLabel, FluentLineEdit,
+    FluentPopup, FluentSegmentedButtons, FluentSettingsPopupAnchor, FluentSwitch,
+    device_snap, field_room_end, fluent_font_size, fluent_inner_edit_stylesheet,
+    frame_inner_rect, line_edit_text_right, paint_centred_ink, scaled_even_px, scaled_px,
+    signals_blocked, read_editable_combo, show_fluent_popup_for_anchor,
 )
+
+#: Where a value comes from, in the order the popup offers them.
+_SOURCES = (("default", "Default"), ("api", "API"), ("config", "Config"))
 
 
 class _BindingButton(QtWidgets.QAbstractButton):
-    """A fixed-width pair of badges, never a cycling or numbered control."""
+    """A column of binding badges, never a cycling or numbered control.
+
+    Seated (:meth:`seat`) in the frame the operator SEES -- the field's
+    own, or that of a spin box that adopted the field -- rather than in the
+    line edit's rect, which inside a spin box is shorter than the frame
+    and sits padding away from the stepper.  The column ends one ``gap``
+    before what ends the field's room (:func:`field_room_end`: the frame's
+    inner edge, or the stepper), so a badge stands as far from the stepper
+    in a repeat box as from the edge in a plain field.  The badges are
+    centred on the frame's inner rect, never taller together than it with
+    at least a device pixel clear above and below, and each letter is
+    centred on its own ink (:func:`paint_centred_ink`).
+    """
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.scan = False
         self.source = "default"
+        #: The badge column and the frame's inner height, in this button.
+        self._column = QtCore.QRectF()
         self.setCursor(QtCore.Qt.PointingHandCursor)
-        self.setFixedSize(scaled_px(18, minimum=16), scaled_px(28, minimum=24))
+
+    @staticmethod
+    def gap() -> int:
+        """The clear room between the badges and what ends the field's room."""
+
+        return scaled_px(4, minimum=3)
+
+    @staticmethod
+    def diameter() -> int:
+        """A badge's diameter where the frame has room for it."""
+
+        return scaled_even_px(16, minimum=12)
+
+    def seat(self, frame: QtWidgets.QWidget) -> None:
+        """Seat the column in ``frame`` (this button's parent): one gap
+        before the end of its room, as tall as its inner rect.  The button
+        is the column plus a pixel each side, to take the pointer."""
+
+        inner = frame_inner_rect(frame)
+        right = device_snap(frame, field_room_end(frame) - self.gap())
+        left = right - self.diameter()
+        pad = scaled_px(1)
+        x0, x1 = int(math.floor(left)) - pad, int(math.ceil(right)) + pad
+        y0, y1 = int(math.ceil(inner.top())), int(math.floor(inner.bottom()))
+        self.setGeometry(x0, y0, x1 - x0, max(1, y1 - y0))
+        self._column = QtCore.QRectF(left - x0, inner.top() - y0, right - left, inner.height())
+        self.update()
+
+    def column_left(self) -> int:
+        """Where the badge column begins, in the parent's coordinates (whole
+        px, rounded outward): what the text keeps its gap from."""
+
+        return self.x() + int(math.floor(self._column.left()))
 
     def paintEvent(self, event) -> None:  # noqa: N802
         del event
@@ -39,28 +91,38 @@ class _BindingButton(QtWidgets.QAbstractButton):
             badges.append((self.source[0].upper(), API_VIOLET_DARK if self.source == "api" else CONFIG_GREEN_DARK))
         if not badges:
             badges.append(("", PLACEHOLDER))
-        # Round badges: an EVEN number of device pixels across, on a device
-        # pixel, stacked a pixel apart and centred -- a circle is only round
-        # on a whole-pixel centre.
+        # In whole device pixels: the frame's inner height, the badges'
+        # size and the space between two.  The stack leaves at least that
+        # space clear above and below (a logical pixel, never less than a
+        # device one), and takes the inner height's parity -- a size, or
+        # the space between two, one pixel smaller or larger -- so it is
+        # centred on whole pixels: half a pixel low is visible.
         ratio = float(self.devicePixelRatioF())
-        gap = scaled_px(1)
-        room = min(self.width() - 2 * gap, (self.height() - (len(badges) - 1) * gap) / len(badges))
-        diameter = max(2, 2 * int(room * ratio / 2.0)) / ratio
-        stack = len(badges) * diameter + (len(badges) - 1) * gap
-        left = device_snap(self, (self.width() - diameter) / 2.0)
-        top = device_snap(self, (self.height() - stack) / 2.0, axis="y")
+        column = self._column
+        room = int(round(column.height() * ratio))
+        count = len(badges)
+        between = max(1, int(round(scaled_px(1) * ratio)))
+        size = min(int(round(self.diameter() * ratio)), (room - (count + 1) * between) // count)
+        if (room - count * size - (count - 1) * between) & 1:
+            if count & 1:
+                size -= 1
+            else:
+                between += 1
+        size = max(2, size)
+        stack = count * size + (count - 1) * between
+        across = int(round(column.width() * ratio))
+        left = column.left() + (across - size) // 2 / ratio
         font = QtGui.QFont(FONT, max(6, fluent_font_size() - 5))
         font.setBold(True)
-        painter.setFont(font)
         for index, (text, color) in enumerate(badges):
-            y = device_snap(self, top + index * (diameter + gap), axis="y")
-            rect = QtCore.QRectF(left, y, diameter, diameter)
+            top = column.top() + ((room - stack) // 2 + index * (size + between)) / ratio
+            rect = QtCore.QRectF(left, top, size / ratio, size / ratio)
             painter.setPen(QtCore.Qt.NoPen)
             painter.setBrush(QtGui.QColor(color if self.isEnabled() else PLACEHOLDER).darker(
                 120 if self.isEnabled() and self.underMouse() else 100))
             painter.drawEllipse(rect)
-            painter.setPen(QtGui.QColor(SURFACE))
-            painter.drawText(rect, QtCore.Qt.AlignCenter, text)
+            if text:
+                paint_centred_ink(painter, self, rect, font, text, SURFACE)
 
 
 def _bound_style(color: str, border: str, *, background: str = SURFACE) -> str:
@@ -72,10 +134,19 @@ def _bound_style(color: str, border: str, *, background: str = SURFACE) -> str:
 
 
 class FluentScanLineEdit(FluentLineEdit):
-    """One default value; the popup emits binding intent, never a value override."""
+    """One default value; the popup emits binding intent, never a value override.
+
+    The popup says Scan with an on/off :class:`FluentSwitch` and the value's
+    source with a :class:`FluentSegmentedButtons` of Default / API / Config
+    (API withheld where a caller cannot supply the field): a click on a
+    source chooses it, and the owner projects back what it accepted.
+    """
 
     binding_committed = QtCore.pyqtSignal(bool, str)
     config_key_committed = QtCore.pyqtSignal(str)
+    #: A class attribute until __init__ makes the badges: Qt may deliver a
+    #: parent change or a resize while the base class is still being built.
+    binding_button: _BindingButton | None = None
 
     def __init__(self, text: str = "", parent=None, *, tooltip: str = "Edit Scan and value source") -> None:
         super().__init__(text, parent)
@@ -87,17 +158,58 @@ class FluentScanLineEdit(FluentLineEdit):
         self._config_names: tuple[str, ...] = ()
         self._popup = None
         self.textChanged.connect(self._project_popup)
-        self._reserve_right()
+        self._place_button()
 
-    def _reserve_right(self) -> None:
-        self.setTextMargins(0, 0, self.binding_button.width() + scaled_px(3), 0)
+    def _frame(self) -> QtWidgets.QWidget:
+        """The widget whose frame the operator sees: a spin box that adopted
+        this edit (it wears the binding's colours too), else the edit."""
+
+        host = self.parentWidget()
+        return host if isinstance(host, FluentDoubleSpinBox) and host.lineEdit() is self else self
 
     def _place_button(self) -> None:
+        """Seat the badges in the frame that is drawn, and end the text a
+        gap before them."""
+
         button = self.binding_button
-        button.move(self.width() - button.width() - scaled_px(4), (self.height() - button.height()) // 2)
+        if button is None:
+            return
+        frame = self._frame()
+        if button.parentWidget() is not frame:
+            # A child of the frame it sits in, over this edit: inside a spin
+            # box the edit is shorter than the frame and stops short of the
+            # stepper, and a child of it was clipped to it.  It goes with
+            # the edit, whoever its parent is.
+            button.setParent(frame)
+            if frame is not self:
+                self.destroyed.connect(button.deleteLater)
+            button.show()
+        button.seat(frame)
+        button.raise_()
+        # Where the text may end, in the frame's coordinates: this edit's
+        # right edge (as the box lays it out, when a box adopted it) less
+        # its own inset.  The digits end as far before the badges as they
+        # end before a step chip.
+        edge = self.width() if frame is self else frame.edit_field().right() + 1
+        text_end = edge - (self.width() - line_edit_text_right(self))
+        room = max(0, text_end - (button.column_left() - scaled_px(4, minimum=2)))
+        margins = self.textMargins()
+        if margins.right() != room:
+            self.setTextMargins(margins.left(), margins.top(), room, margins.bottom())
+
+    def event(self, event) -> bool:
+        if event.type() == QtCore.QEvent.ParentChange:
+            # Adopted by a spin box (or released by one): its frame is now
+            # the one the badges sit in.
+            self._place_button()
+        return super().event(event)
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
+        self._place_button()
+
+    def moveEvent(self, event) -> None:  # noqa: N802
+        super().moveEvent(event)
         self._place_button()
 
     def showEvent(self, event) -> None:  # noqa: N802
@@ -113,10 +225,10 @@ class FluentScanLineEdit(FluentLineEdit):
             layout.setContentsMargins(margin, margin, margin, margin)
             layout.setSpacing(scaled_px(6))
             layout.addWidget(FluentLabel("Scan"), 0, 0)
-            self.scan_toggle = FluentCheckBox("")
+            self.scan_toggle = FluentSwitch("")
             layout.addWidget(self.scan_toggle, 0, 1, QtCore.Qt.AlignLeft)
             layout.addWidget(FluentLabel("Source"), 1, 0)
-            self.source_switch = FluentTriSwitch(("Default", "API", "Config"))
+            self.source_switch = FluentSegmentedButtons(_SOURCES)
             layout.addWidget(self.source_switch, 1, 1, QtCore.Qt.AlignLeft)
             self.config_name_label = FluentLabel("Config name")
             self.config_name = FluentComboBox()
@@ -143,7 +255,7 @@ class FluentScanLineEdit(FluentLineEdit):
                 self.config_name_label.sizeHint().width() + layout.horizontalSpacing() + content_width)
             self.source_note.setFixedHeight(self.source_note.fontMetrics().lineSpacing() * 3)
             self.scan_toggle.toggled.connect(self._commit_binding)
-            self.source_switch.stateChanged.connect(self._commit_binding)
+            self.source_switch.activated.connect(self._choose_source)
             self.config_name.activated.connect(self._commit_config_key)
             self.config_name.editingFinished.connect(self._commit_config_key)
         self._popup_anchor.toggle(self._popup, prepare=self._project_popup, present=self._place_popup)
@@ -165,8 +277,8 @@ class FluentScanLineEdit(FluentLineEdit):
         with signals_blocked(self.scan_toggle, self.source_switch):
             self.scan_toggle.setChecked(scan)
             self.scan_toggle.setEnabled(can_scan and binding_editable)
-            self.source_switch.setState(("default", "api", "config").index(source))
-            self.source_switch.set_position_offered(1, can_api)
+            self.source_switch.set_current(source)
+            self.source_switch.button("api").setEnabled(can_api)
             self.source_switch.setEnabled(binding_editable)
         named = source == "config"
         combo = self.config_name
@@ -208,7 +320,7 @@ class FluentScanLineEdit(FluentLineEdit):
             self._project_popup()
 
     def _commit_config_key(self, *_args) -> None:
-        if self._field_state is None or self._field_state[2] != "config" or self.source_switch.state() != 2:
+        if self._field_state is None or self._field_state[2] != "config" or self.source_switch.current() != "config":
             return
         wanted = read_editable_combo(self.config_name)
         with signals_blocked(self.config_name, self.config_name.lineEdit()):
@@ -218,8 +330,18 @@ class FluentScanLineEdit(FluentLineEdit):
             # The same owner synchronously projects either acceptance or rejection.
             self._project_popup()
 
+    def _choose_source(self, source: str) -> None:
+        """A click on a source: shown at once, and asked of the owner, which
+        projects back what it accepts.  The source already chosen asks
+        nothing."""
+
+        if source == self.source_switch.current():
+            return
+        self.source_switch.set_current(source)
+        self._commit_binding()
+
     def _commit_binding(self, *_args) -> None:
-        self.binding_committed.emit(self.scan_toggle.isChecked(), ("default", "api", "config")[self.source_switch.state()])
+        self.binding_committed.emit(self.scan_toggle.isChecked(), self.source_switch.current())
 
     def set_field_state(self, *, editable: bool, scan: bool = False, source: str = "default",
                         can_scan: bool = True, effective_text: str = "", source_text: str = "",
@@ -275,7 +397,7 @@ class FluentScanLineEdit(FluentLineEdit):
         else:
             ink, edge, fill = tone
             self.setStyleSheet(_bound_style(ink, edge, background=fill))
-        self._reserve_right()
+        self._place_button()
         self._project_popup()
         if self._popup is not None and self._popup.isVisible():
             self._place_popup()
