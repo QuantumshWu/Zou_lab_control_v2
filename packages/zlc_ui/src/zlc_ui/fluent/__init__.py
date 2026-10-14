@@ -40,6 +40,11 @@ for _name in (
 ):
     _EXPORTS[_name] = ("zlc_ui.fluent.fluent", _name)
 for _name in (
+    "COLUMN_KINDS", "FluentColumnSet", "FluentColumnLine", "hold_place", "line_gap", "error_note_label",
+    "show_note",
+):
+    _EXPORTS[_name] = ("zlc_ui.fluent.column_set", _name)
+for _name in (
     "ACCENT", "ACCENT_HOVER", "ACCENT_STRONG", "ACCENT_TINT", "SELECTED", "SELECTED_HOVER",
     "SELECTION_EDGE", "DERIVED_INK", "DISABLED_INK", "MUTED_INK", "NEUTRAL_FILL", "API_VIOLET", "API_VIOLET_DARK", "AXIS_GROUP_COLORS", "BG",
     "BUTTON_PADDING_H",
