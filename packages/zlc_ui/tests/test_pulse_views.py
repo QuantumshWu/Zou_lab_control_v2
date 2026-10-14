@@ -729,8 +729,12 @@ original_take = strip.layout_main.takeAt
 strip.layout_main.takeAt = lambda index: (layout_moves.append(index), original_take(index))[1]
 
 retired_delay = view.channel_panel._rows["d1"][0].parentWidget()
+assert view.hidden_count_label.text() == "", "the combo says All ports shown"
 view.set_visible_ports(("d0", "d2"))
 assert retired_delay.isHidden(), "retired rows must disappear before deferred deletion"
+# The Ports card counts what its combo holds; how many are shown is the
+# Port Catalog's Visible line, said once for the page.
+assert view.hidden_count_label.text() == "1 port hidden", view.hidden_count_label.text()
 app.processEvents()
 assert strip.items() == timeline and strip._posts == posts
 assert not layout_moves, 'hiding a port detached the unchanged timeline'
@@ -743,6 +747,7 @@ before_height = strip.height()
 view.set_visible_ports(("d0",))
 for _ in range(4):
     app.processEvents()
+assert view.hidden_count_label.text() == "2 ports hidden", view.hidden_count_label.text()
 print('hidden row geometry', before_height, strip.height(), strip._indicator.height())
 assert strip.height() < before_height
 assert strip.size() == strip.sizeHint()
@@ -763,6 +768,7 @@ assert set(view.channel_panel._rows) == {"d0", "d2"}
 view.set_visible_ports(("d0", "d1", "d2"))
 app.processEvents()
 assert set(view.channel_panel._rows) == {"d0", "d1", "d2"}, "Show All brings it back"
+assert view.hidden_count_label.text() == ""
 # The columns are read across: a row shown again goes back to its place,
 # not to the bottom of its column, and so does a port added between two.
 assert delay_column() == ["d0", "d1", "d2"], delay_column()
@@ -2095,7 +2101,12 @@ handle.set_component_document(local, contexts=(("mot", "MOT · current Pulse"),)
 view.tabs.setCurrentWidget(view.component_view); app.processEvents()
 assert view.component_view._buttons["save"].text() == "Save Pulse"
 assert not view.component_view.schedule_view.run_button.isVisible()
-assert not view.component_view.schedule_view.names_panel.name_edit.isVisible()
+from zlc_ui.fluent import FluentReadoutEdit
+# Renamed in the page's own Name field: the catalog reads the name, as it
+# reads the totals under it, so it keeps its four lines on both pages.
+embedded_name = view.component_view.schedule_view.names_panel.name_edit
+assert isinstance(embedded_name, FluentReadoutEdit) and embedded_name.isVisible()
+assert embedded_name.text() == local.document_name
 assert not view.component_view.schedule_view.names_panel._rows["d0"].isEnabled()
 assert view.component_view.schedule_view.names_panel._rows["d0"].isReadOnly()
 assert main.names_panel._rows["d0"].isEnabled()
@@ -2244,17 +2255,21 @@ scan.close()
 
 
 def test_the_scan_pages_bound_fields_list_has_one_pitch(run_qt) -> None:
-    """Every line of the list -- a group's title or a field -- is one row
-    tall, so the lines of one group stand as far apart as the groups."""
+    """Every line of the list -- its intro, a group's title or a field -- is
+    one row tall with its text on the same line of that row, so the lines
+    of one group stand as far apart as the groups and the intro as far
+    above the first of them."""
 
     run_qt(r'''
+from PyQt5 import QtCore, QtGui
 from zlc_ui.qt import ensure_qt_app
+from zlc_ui.fluent import row_gap
 from zlc_ui.pulse import BindingRecord, PulseScanView, ScanPageRecord
 from zlc_ui.pulse._layout import row_height
 app = ensure_qt_app(["pulse-scan-pitch"])
 scan = PulseScanView()
 scan.resize(900, 600); scan.show()
-scan.set_page(ScanPageRecord(bindings=(
+scan.set_page(ScanPageRecord(slots_text="Physical fields available to Scan and API callers:", bindings=(
     BindingRecord("hold", "Hold.duration", scan=True),
     BindingRecord("load", "Trap load.duration", source="api", group_id="loading", group_label="Loading"),
     BindingRecord("pgc", "PGC.da_dipole", scan=True, source="config", group_id="loading", group_label="Loading"),
@@ -2266,9 +2281,32 @@ assert [line.text() for line in lines] == [
     "Pulse", "Hold.duration · Scan", "Loading", "Trap load.duration · API",
     "PGC.da_dipole · Scan + Config",
 ]
-tops = [line.y() for line in lines]
+lines.insert(0, scan.scan_slots_label)
+tops = [line.mapTo(scan, QtCore.QPoint()).y() for line in lines]
 assert {line.height() for line in lines} == {row_height()}
-assert {after - before for before, after in zip(tops, tops[1:])} == {row_height()}
+assert {after - before for before, after in zip(tops, tops[1:])} == {row_height()}, tops
+
+# The same line of each row: every text here has a letter as tall as an
+# "l", so the first inked row of each is that letter's top.
+image = scan.grab().toImage()
+ratio = image.devicePixelRatio()
+def ink_top(line):
+    box = QtCore.QRect(line.mapTo(scan, QtCore.QPoint()), line.size())
+    for y in range(int(box.top() * ratio), int((box.bottom() + 1) * ratio)):
+        if any(QtGui.QColor(image.pixel(x, y)).lightness() < 160
+               for x in range(int(box.left() * ratio), int((box.right() + 1) * ratio))):
+            return y / ratio - box.top()
+    raise AssertionError(f"no ink in {line.text()!r}")
+offsets = {line.text(): ink_top(line) for line in lines}
+assert len(set(offsets.values())) == 1, offsets
+
+# The run row follows the list at the row gap.
+run_top = scan.scan_repeats_spin.mapTo(scan, QtCore.QPoint()).y()
+assert run_top - (tops[-1] + row_height()) == row_gap()
+# A long intro (a Config error) wraps, whole, rather than being cut.
+scan.set_slots_text("Config error: " + "the named value file could not be read; " * 8)
+app.processEvents()
+assert scan.scan_slots_label.height() > row_height()
 scan.close()
 ''')
 
@@ -2285,6 +2323,82 @@ dot = view.status_dot
 assert dot.size() == FluentStatusDot().size()
 assert view.title_label.x() - (dot.x() + dot.width()) == status_dot_gap()
 view.finish_close()
+''')
+
+
+def test_the_header_summary_follows_the_title_at_the_row_gap(run_qt) -> None:
+    """The title is as wide as its words and the summary starts one row gap
+    after it, whatever the pulse is called: it floated a fixed 260 px
+    column away, and a path elided while that band stood empty."""
+
+    run_qt(r'''
+from zlc_ui.qt import ensure_qt_app
+from zlc_ui.fluent import FluentSectionLabel, row_gap
+from zlc_ui.pulse import PulseEditorView
+app = ensure_qt_app(["pulse-header-summary"])
+view = PulseEditorView()
+view.resize(1100, 640); view.show(); app.processEvents()
+title, summary = view.title_label, view.summary_label
+assert isinstance(title, FluentSectionLabel), "the header row's title is a section title"
+path = "C:\\pulses\\review.json · 4 periods"
+view.set_summary(path)
+for name in ("review", "a much longer pulse name than that"):
+    view.set_title(f"PulseGUI · {name}")
+    app.processEvents()
+    words = title.fontMetrics().horizontalAdvance(title.text())
+    assert words <= title.width() <= words + 2, (title.width(), words)
+    assert summary.x() - (title.x() + title.width()) == row_gap()
+    assert summary.fontMetrics().horizontalAdvance(path) < summary.width(), "a short path is whole"
+view.finish_close()
+''')
+
+
+def test_the_port_rows_start_one_section_gap_under_the_header_rows(run_qt) -> None:
+    """Every card and side panel opens with four header rows and its port
+    rows start one section gap under them, on one y across the strip: the
+    header block was a fixed 178 px that left a hole three section gaps
+    tall, and the read-only catalog hid its Name line and left two."""
+
+    run_qt(_schedule_source() + r'''
+from PyQt5 import QtCore, QtWidgets
+from zlc_ui.qt import ensure_qt_app
+from zlc_ui.fluent import FluentReadoutEdit, section_gap
+from dataclasses import replace
+from zlc_ui.pulse import DelayRowVM, PulseScheduleView
+from zlc_ui.pulse._layout import panel_top_height
+app = ensure_qt_app(["pulse-header-rows"])
+direct = QtCore.Qt.FindDirectChildrenOnly
+vm = replace(vm, delay_rows=tuple(DelayRowVM(port.key, FieldVM("0"), "ns", ("ns",)) for port in ports))
+
+def header_rows(card, view):
+    top = next(w for w in card.findChildren(QtWidgets.QWidget, options=direct)
+               if w.height() == panel_top_height())
+    shown = [w for w in top.findChildren(QtWidgets.QWidget, options=direct) if w.isVisible()]
+    return sorted({w.mapTo(view, QtCore.QPoint()).y() for w in shown}), max(
+        w.mapTo(view, QtCore.QPoint(0, w.height())).y() for w in shown)
+
+for embedded in (False, True):
+    view = PulseScheduleView(embedded=embedded)
+    view.resize(1100, 520); view.show()
+    view.set_schedule(vm)
+    app.processEvents()
+    panel = view.names_panel
+    columns = [(panel, panel._row_holders["d0"])]
+    columns += [(card, card.port_rows["d0"]) for card in view._cards.values()]
+    if not embedded:
+        columns.append((view.channel_panel, view.channel_panel._rows["d0"][0]))
+    else:
+        assert isinstance(panel.name_edit, FluentReadoutEdit) and panel.name_edit.isVisible()
+        assert panel.name_edit.text() == vm.document_name
+    rows = {card.title(): header_rows(card, view) for card, _row in columns}
+    assert len({tuple(tops) for tops, _bottom in rows.values()}) == 1, rows
+    assert all(len(tops) == 4 for tops, _bottom in rows.values()), rows
+    firsts = {row.mapTo(view, QtCore.QPoint()).y() for _card, row in columns}
+    assert len(firsts) == 1, firsts
+    bottom = next(iter(rows.values()))[1]
+    assert firsts.pop() - bottom == section_gap(), (bottom, section_gap())
+    view.close()
+    app.processEvents()
 ''')
 
 

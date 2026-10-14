@@ -232,6 +232,10 @@ class PeriodCard(FluentGroupBox):
         # shown where every card shows its name and cannot be typed into
         # (set_period switches it off).
         top_layout.addWidget(self.name_edit)
+        # Each header line one row tall, whatever height a control would
+        # take at this scale, so row N stands on one y across the strip.
+        for widget in (self.duration_edit, self.unit_combo, self.name_edit):
+            widget.setFixedHeight(row_height())
         top_layout.addStretch(1)
         column.addWidget(top)
         self._column = column
@@ -536,11 +540,17 @@ class ChannelNamesPanel(FluentGroupBox):
     def __init__(self, parent=None, *, editable: bool = True) -> None:
         super().__init__("Port Catalog", parent)
         self._editable = editable
-        self.name_edit = FluentLineEdit("")
-        self.document_name_edit = self.name_edit
-        self.name_edit.setPlaceholderText("pulse name")
-        self.name_edit.set_placeholder_prompt()
-        self.name_edit.editingFinished.connect(lambda: self.document_name_committed.emit(self.name_edit.text()))
+        if editable:
+            self.name_edit = FluentLineEdit("")
+            self.name_edit.setPlaceholderText("pulse name")
+            self.name_edit.set_placeholder_prompt()
+            self.name_edit.editingFinished.connect(
+                lambda: self.document_name_committed.emit(self.name_edit.text()))
+        else:
+            # Read-only -- a Subpulse's schedule, renamed in its page's own
+            # Name field -- the name is read here like the totals under it,
+            # so the catalog keeps its four lines on every page.
+            self.name_edit = FluentReadoutEdit("")
         # What the pulse adds up to is read, not typed: readouts, not
         # switched-off fields.
         self.total_label = FluentReadoutEdit("")
@@ -556,15 +566,11 @@ class ChannelNamesPanel(FluentGroupBox):
         top_layout = QtWidgets.QVBoxLayout(top)
         top_layout.setContentsMargins(0, 0, 0, 0)
         top_layout.setSpacing(row_gap())
-        self._labels: list[ElidedLabel] = []
-        if editable:
-            self._labels.append(add_labeled_widget(top_layout, "Name", self.name_edit))
-        else:
-            self.name_edit.setParent(top)
-            self.name_edit.hide()
-        for text, readout in (("Total", self.total_label), ("Periods", self.periods_label),
-                              ("Visible", self.visible_label)):
-            self._labels.append(add_labeled_widget(top_layout, text, readout))
+        self._labels: list[ElidedLabel] = [
+            add_labeled_widget(top_layout, text, widget)
+            for text, widget in (("Name", self.name_edit), ("Total", self.total_label),
+                                 ("Periods", self.periods_label), ("Visible", self.visible_label))
+        ]
         top_layout.addStretch(1)
         self._layout.addWidget(top)
         self._rows: dict[str, FluentLineEdit] = {}
@@ -1085,6 +1091,7 @@ class ComponentCard(FluentGroupBox):
         # it.  A field on one end and bare text on the other would read as
         # two kinds of thing.
         self.name_label = ElidedLabel(component.name)
+        self.name_edit.setFixedHeight(row_height())
         name_line = self._value_line(self.name_label)
         top_layout.addWidget(self.name_edit if mode == "closed" else name_line)
         if mode == "closed":
@@ -1936,10 +1943,12 @@ class PulseScheduleView(QtWidgets.QWidget):
         self.add_port_button = FluentButton("Add")
         self.hide_off_button = FluentButton("Hide Off")
         self.show_all_button = FluentButton("Show All")
-        self.visible_label = FluentReadoutEdit("")
+        # How many ports the combo above holds.  How many are shown is the
+        # Port Catalog's Visible line, said there once for the page.
+        self.hidden_count_label = FluentReadoutEdit("")
         for button in (self.add_port_button, self.hide_off_button, self.show_all_button):
             button.setFixedHeight(control_height)
-        self.visible_label.setFixedHeight(control_height)
+        self.hidden_count_label.setFixedHeight(control_height)
         ports_layout.addWidget(self.hidden_port_combo)
         ports_row = QtWidgets.QHBoxLayout()
         ports_row.setContentsMargins(0, 0, 0, 0)
@@ -1948,7 +1957,7 @@ class PulseScheduleView(QtWidgets.QWidget):
             button.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
             ports_row.addWidget(button, 1)
         ports_layout.addLayout(ports_row)
-        ports_layout.addWidget(self.visible_label)
+        ports_layout.addWidget(self.hidden_count_label)
         ports_layout.addStretch(1)
         bar.addWidget(ports_area)
         self.button_frame.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Maximum)
@@ -2125,11 +2134,6 @@ class PulseScheduleView(QtWidgets.QWidget):
     def _reconcile(self, vm: ScheduleVM) -> None:
         """Update existing rows and move timeline items only when their order changes."""
         card_width = period_card_width(ports=vm.ports, analog_mode_choices=vm.analog_mode_choices)
-        visible_count = sum(1 for port in vm.ports if port.visible)
-        self.visible_label.setText(
-            f"Visible {visible_count}/{len(vm.ports)} ports · "
-            f"Hidden {max(0, len(vm.ports) - visible_count)}"
-        )
         self.names_panel.set_ports(vm.document_name, vm.ports)
         self.names_panel.set_summary(vm.total_text, vm.total_tooltip, vm.period_count, vm.visible_text)
         self.channel_panel.set_delay_rows(self._visible_delay_rows(vm), vm.ports)
@@ -2291,6 +2295,11 @@ class PulseScheduleView(QtWidgets.QWidget):
                 self.hidden_port_combo.addItem("All ports shown", None)
         self.hidden_port_combo.setEnabled(bool(hidden))
         self.add_port_button.setEnabled(bool(hidden))
+        # Counted from the list the combo holds; with none hidden the combo
+        # already says "All ports shown".
+        self.hidden_count_label.setText(
+            f"{len(hidden)} {'port' if len(hidden) == 1 else 'ports'} hidden" if hidden else ""
+        )
 
     def set_period(self, period: PeriodVM) -> None:
         if self._schedule is None:

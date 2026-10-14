@@ -6,7 +6,7 @@ from PyQt5 import QtCore, QtWidgets
 
 from zlc_ui.fluent import (
     ElidedLabel, FluentButton, FluentCodeEdit, FluentFrame, FluentGroupBox, FluentLabel,
-    FluentSectionLabel, fluent_count_box, retire_widget, signals_blocked,
+    FluentSectionLabel, centred_line_top, fluent_count_box, retire_widget, signals_blocked,
 )
 from zlc_ui.form import being_edited
 
@@ -44,9 +44,16 @@ class PulseScanView(QtWidgets.QWidget):
         info_layout = QtWidgets.QVBoxLayout(info)
         info_layout.setContentsMargins(pad, pad, pad, pad)
         info_layout.setSpacing(row_gap())
+        # The list's intro is its first line: as tall as the lines under it,
+        # its text on the line they centre theirs on, so the intro and the
+        # list share one pitch.  A long one (a Config error) wraps below.
         self.scan_slots_label = FluentLabel("")
         self.scan_slots_label.setWordWrap(True)
-        info_layout.addWidget(self.scan_slots_label)
+        self.scan_slots_label.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop)
+        self.scan_slots_label.ensurePolished()
+        self.scan_slots_label.setContentsMargins(
+            0, centred_line_top(0, row_height(), self.scan_slots_label.font()), 0, 0)
+        self.scan_slots_label.setMinimumHeight(row_height())
         # The bound fields, under a section title per group when there are
         # groups; rebuilt only when the list changes.  One line per field,
         # each as tall as a section title, so the list has one pitch.
@@ -56,7 +63,12 @@ class PulseScanView(QtWidgets.QWidget):
         self._bindings_layout.setContentsMargins(0, 0, 0, 0)
         self._bindings_layout.setSpacing(0)
         self._bindings_shown: tuple[BindingRecord, ...] | None = None
-        info_layout.addWidget(self.bindings_box)
+        listing = QtWidgets.QVBoxLayout()
+        listing.setContentsMargins(0, 0, 0, 0)
+        listing.setSpacing(0)
+        listing.addWidget(self.scan_slots_label)
+        listing.addWidget(self.bindings_box)
+        info_layout.addLayout(listing)
 
         run_row = QtWidgets.QHBoxLayout()
         run_row.setContentsMargins(0, 0, 0, 0)
