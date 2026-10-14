@@ -843,6 +843,14 @@ class FluentStatusDot(QtWidgets.QLabel):
         self.setStyleSheet(status_dot_stylesheet(wanted, radius=max(1, self._size // 2)))
 
 
+#: THE weight of every heading -- a card's title, a section title, a column's
+#: name -- spelled for a sheet: Segoe UI Semibold (``QFont.DemiBold``, 63).
+#: Qt 5 reads a sheet's CSS weight divided by 8, so the CSS 600 the sheets
+#: wrote was Qt's Bold (75) and every heading set in a sheet stood a stroke
+#: heavier than the card title painted with ``QFont.DemiBold``.
+HEADING_CSS_WEIGHT = int(QtGui.QFont.DemiBold) * 8
+
+
 def _paint_label_line(label: QtWidgets.QLabel) -> bool:
     """Paint a one-line, plain-text, vertically centred ``label`` with its
     line on :func:`centred_line_top` of its contents -- the line the field
@@ -916,16 +924,18 @@ def muted_note_label(text: str) -> "QtWidgets.QLabel":
 
 
 def column_header_label(text: str) -> "FluentLabel":
-    """The name of a column laid out by hand -- a grid of bindings, a form
-    set in columns -- in the look of a FluentTableView's column names:
-    weight 600 in MUTED_INK, on the line of the row it heads.  ``setBold``
-    on a FluentLabel changes nothing (its sheet's ``font`` shorthand wins
-    over a QFont), and headings made that way read as one more row of
-    data."""
+    """A heading INSIDE a card: the name of a column laid out by hand -- a
+    grid of bindings, a form set in columns -- or of a small group of rows
+    within the card.  One step quieter than the card's own title and a
+    :class:`FluentSectionLabel`: the same Semibold (:data:`HEADING_CSS_WEIGHT`)
+    in MUTED_INK, the look of a FluentTableView's column names, on the line
+    of the row it heads.  ``setBold`` on a FluentLabel changes nothing (its
+    sheet's ``font`` shorthand wins over a QFont), and headings made that
+    way read as one more row of data."""
 
     label = FluentLabel(text)
     label.setStyleSheet(
-        f'QLabel {{ color: {MUTED_INK}; font: 600 {fluent_font_size()}pt "{FONT}"; '
+        f'QLabel {{ color: {MUTED_INK}; font: {HEADING_CSS_WEIGHT} {fluent_font_size()}pt "{FONT}"; '
         f"background: transparent; border: none; }}"
     )
     return label
@@ -2812,19 +2822,22 @@ class FluentSectionLabel(FluentLabel):
     """THE section title: a group's name on its own line, or the title of a
     header row whose commands and summary sit beside it.
 
-    One style, everywhere a section is named: TEXT ink at the weight of a
-    card's title and a table's column names (600), as tall as a control,
-    its line on the line a field of that height puts its text on.  It kept
-    a top margin for an own-line header, and as the title of a row of
-    fields that margin put it two pixels under their text; the space above
-    a section is the section gap of the layout it stands in."""
+    One style, everywhere a section is named: TEXT ink at the one heading
+    weight, Semibold (:data:`HEADING_CSS_WEIGHT`) -- the weight of a
+    FluentGroupBox's title, so a card's title and a section's read alike;
+    a heading inside a card is one step quieter
+    (:func:`column_header_label`) -- as tall as a control, its line on the
+    line a field of that height puts its text on.  It kept a top margin
+    for an own-line header, and as the title of a row of fields that
+    margin put it two pixels under their text; the space above a section
+    is the section gap of the layout it stands in."""
 
     def __init__(self, text: str = "", parent=None):
         super().__init__(text, parent)
         # The weight goes in the SHEET, the one that renders: a QFont-only
         # weight set before a sheet is dropped when the sheet repolishes.
         self.setStyleSheet(
-            f'QLabel {{ color: {TEXT}; font: 600 {fluent_font_size()}pt "{FONT}"; '
+            f'QLabel {{ color: {TEXT}; font: {HEADING_CSS_WEIGHT} {fluent_font_size()}pt "{FONT}"; '
             f"background: transparent; border: none; }}"
         )
         self.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
@@ -7654,7 +7667,7 @@ class FluentTableView(QtWidgets.QTableView):
                 padding: {scaled_px(4, minimum=3)}px {header_pad}px;
                 font: {fluent_font_size()}pt "{FONT}";
             }}
-            QHeaderView::section:horizontal {{ font-weight: 600; }}
+            QHeaderView::section:horizontal {{ font-weight: {HEADING_CSS_WEIGHT}; }}
             QTableCornerButton::section {{ background: transparent; border: none; border-radius: 0px; }}
             """
         )
