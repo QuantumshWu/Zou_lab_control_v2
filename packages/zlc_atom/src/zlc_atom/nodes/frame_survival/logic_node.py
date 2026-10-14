@@ -68,7 +68,8 @@ def _build(*, source_signal: str, **values: object) -> FrameSurvivalProcessor:
 def _editor_factory(parent=None):
     from PyQt5 import QtCore, QtWidgets
     from zlc_ui.fluent import (
-        FluentLabel, FluentSegmentedButtons, FluentSelectionGrid, muted_note_label,
+        FluentSectionLabel, FluentSegmentedButtons, FluentSelectionGrid, error_note_label, line_gap,
+        muted_note_label, show_note,
     )
     from .processor import PAIR_RULES
 
@@ -86,9 +87,13 @@ def _editor_factory(parent=None):
         a derived card (the light wash, dashed), a pair the operator added
         against the rule is a chosen card, and one they left out is an
         empty card -- so what the rule decided and what was decided by hand
-        are told apart at a glance.  The preset strip marks the rule in
-        force, None an explicit list still empty, and nothing an explicit
-        list with pairs in it (the summary names it).
+        are told apart at a glance.  The strip is the selection's closed
+        set and always marks one: the rule in force, None for an explicit
+        list still empty, Selected for an explicit list with pairs in it.
+        Selected, picked under a rule, keeps the rule's pairs as the list.
+
+        "Pairs" heads the section in the editor's label column, so the strip
+        and the grid's first card start on the form's field edge.
         """
 
         draft_changed = QtCore.pyqtSignal(object)
@@ -98,12 +103,17 @@ def _editor_factory(parent=None):
             super().__init__(parent)
             layout = QtWidgets.QVBoxLayout(self)
             layout.setContentsMargins(0, 0, 0, 0)
+            layout.setSpacing(line_gap())
             header = QtWidgets.QHBoxLayout()
+            header.setSpacing(line_gap())
+            self.title = FluentSectionLabel("Pairs")
+            # Centred on the strip beside it, not dropped below it like an own-line section.
+            self.title.setContentsMargins(0, 0, 0, 0)
+            header.addWidget(self.title)
             # None clears every mark: an explicit, still-empty selection to mark pairs into.
             self.presets = FluentSegmentedButtons(
-                (*((rule, labels[rule]) for rule in PAIR_RULES), ("none", "None")), self)
-            self.presets.activated.connect(lambda rule: self.draft_changed.emit(
-                {"values": {"selection": "custom" if rule == "none" else rule, "pairs": ()}}))
+                (*((rule, labels[rule]) for rule in PAIR_RULES), ("none", "None"), ("custom", "Selected")), self)
+            self.presets.activated.connect(self._preset)
             header.addWidget(self.presets)
             header.addStretch(1)
             self.summary = muted_note_label("")
@@ -112,8 +122,7 @@ def _editor_factory(parent=None):
             self.table = FluentSelectionGrid(self)
             self.table.selection_edited.connect(self._marked)
             layout.addWidget(self.table, 0, QtCore.Qt.AlignLeft)
-            self.note = FluentLabel("")
-            self.note.setWordWrap(True)
+            self.note = error_note_label()
             layout.addWidget(self.note)
             self._frames = None
             self._selection = "all"
@@ -123,6 +132,31 @@ def _editor_factory(parent=None):
         @property
         def model(self):
             return self.table.model()
+
+        def row_labels(self):
+            """The labels this form puts in the editor's label column."""
+
+            header = self.table.verticalHeader()
+            return (self.title.text(), *(
+                str(self.model.headerData(row, QtCore.Qt.Vertical)) for row in range(header.count())))
+
+        def set_label_width(self, width):
+            """The editor's label column: the strip and the first card start on its field edge."""
+
+            self.title.setFixedWidth(int(width))
+            self.table.set_label_width(int(width))
+
+        def _preset(self, choice):
+            if choice == "custom":
+                if self._selection == "custom" or self._frames is None:
+                    return
+                count = len(self._frames)
+                pairs = tuple({"start": str(frame_identity(start, count)), "end": str(frame_identity(end, count)),
+                               "selected": True} for start, end in self._wanted)
+            else:
+                pairs = ()
+            self.draft_changed.emit({"values": {
+                "selection": "custom" if choice in ("none", "custom") else choice, "pairs": pairs}})
 
         def _marked(self, cells):
             if self._frames is None:
@@ -167,8 +201,9 @@ def _editor_factory(parent=None):
             self.table.setEnabled(frames is not None)
             if frames is None:
                 self.table.set_cell_states({})
-                self.summary.setText(labels[selection])
-                self.note.setText("Waiting for the source frames")
+                self._wanted = ()
+                self.summary.setText("Waiting for the source frames")
+                show_note(self.note, "")
                 return
             count = len(frames)
             wanted, absent = _selected_pairs(
@@ -191,7 +226,7 @@ def _editor_factory(parent=None):
             if self.table.selected_cells() != cells:
                 self.table.set_selected(cells)
             self.summary.setText(f"{labels[selection]} · {len(wanted)} of {count * (count - 1) // 2} pairs")
-            self.note.setText("" if not absent else "Not in this source: " + ", ".join(
+            show_note(self.note, "" if not absent else "Not in this source: " + ", ".join(
                 f"{start}-{end}" for start, end, _selected in absent))
 
         def set_mutation_enabled(self, enabled):

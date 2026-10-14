@@ -29,7 +29,7 @@ from zlc_data import (
 from zlc_runtime import DatasetCoverage, SignalValue
 
 from zlc_atom.nodes.frame_survival import FrameSurvivalProcessor
-from zlc_atom.nodes.frame_survival.processor import PAIR_RULES, _forward_pairs
+from zlc_atom.nodes.frame_survival.processor import _forward_pairs
 
 
 def _occupied_snapshot(
@@ -271,7 +271,7 @@ def test_pair_matrix_selects_like_a_table_and_writes_the_draft() -> None:
 
     try:
         form.update_projection({"form_values": dict(values), "source_frames": None})
-        assert not form.table.isEnabled() and "Waiting" in form.note.text()
+        assert not form.table.isEnabled() and "Waiting" in form.summary.text() and form.note.isHidden()
         project()
         assert marked() == list(_forward_pairs(4)) and "6 of 6" in form.summary.text()
         assert drafts == [], "showing a rule is not an edit"
@@ -317,6 +317,11 @@ def test_pair_matrix_selects_like_a_table_and_writes_the_draft() -> None:
         # A preset returns to a rule and clears the explicit pairs.
         form.presets.button("from_first").click()
         assert drafts[-1] == {"values": {"selection": "from_first", "pairs": ()}}
+        # Selected, picked under a rule, keeps the rule's pairs as the list.
+        project(**drafts[-1]["values"])
+        form.presets.button("custom").click()
+        assert drafts[-1] == {"values": {"selection": "custom", "pairs": tuple(
+            {"start": "0", "end": end, "selected": True} for end in ("1", "2", "last"))}}
         # None clears every mark at once, leaving an explicit selection to fill.
         form.presets.button("none").click()
         assert drafts[-1] == {"values": {"selection": "custom", "pairs": ()}}
@@ -326,8 +331,8 @@ def test_pair_matrix_selects_like_a_table_and_writes_the_draft() -> None:
         drafts.clear()
         project(selection="custom", pairs=({"start": "0", "end": "1"}, {"start": "2", "end": "5"}))
         assert marked() == [(0, 1)] and "2-5" in form.note.text() and drafts == []
-        assert derived() == [] and not any(
-            form.presets.button(value).property("current") for value in (*PAIR_RULES, "none"))
+        # The strip always marks one choice: a list with pairs is Selected.
+        assert derived() == [] and form.presets.current() == "custom"
         # The reported 22-frame case: a real Ctrl click excludes only first→last.
         frames = tuple(str(index) for index in range(22))
         project(selection="from_first", pairs=())
