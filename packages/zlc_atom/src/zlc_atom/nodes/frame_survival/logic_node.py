@@ -189,7 +189,8 @@ def _editor_factory(parent=None):
             self._overrides = _checked_overrides(tuple(
                 (row["start"], row["end"], row.get("selected", True)) for row in values["pairs"]
                 if row["start"] not in (None, "") and row["end"] not in (None, "")))
-            self.presets.set_current("none" if selection == "custom" and not self._overrides else selection)
+            current = "none" if selection == "custom" and not self._overrides else selection
+            self.presets.set_current(current)
             self.table.setEnabled(frames is not None)
             if frames is None:
                 self.table.set_cell_states({})
@@ -217,7 +218,9 @@ def _editor_factory(parent=None):
             cells = tuple(sorted((start, end - 1) for start, end in wanted))
             if self.table.selected_cells() != cells:
                 self.table.set_selected(cells)
-            self.summary.setText(f"{labels[selection]} · {len(wanted)} of {count * (count - 1) // 2} pairs")
+            # Named with the strip's own word for its current segment.
+            self.summary.setText(
+                f"{self.presets.button(current).text()} · {len(wanted)} of {count * (count - 1) // 2} pairs")
             show_note(self.note, "" if not absent else "Not in this source: " + ", ".join(
                 f"{start}-{end}" for start, end, _selected in absent))
 
