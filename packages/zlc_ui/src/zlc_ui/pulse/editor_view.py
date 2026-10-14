@@ -25,6 +25,7 @@ from zlc_ui.fluent import (
     window_pad,
 )
 
+from ._layout import section_gap
 from .preview_view import PulsePreviewView
 from .scan_view import PulseScanView
 from .config_view import PulseConfigView
@@ -60,7 +61,10 @@ class PulseEditorView(QtWidgets.QWidget):
         header = FluentFrame(bordered=False)
         header.setFixedHeight(scaled_px(48, minimum=38))
         header_layout = QtWidgets.QHBoxLayout(header)
-        header_layout.setContentsMargins(scaled_px(12), scaled_px(6), scaled_px(12), scaled_px(6))
+        # The status dot stands on the pages' left content edge and Clear
+        # All ends on their right one: the header and every tab below it
+        # are inset by the same section gap.
+        header_layout.setContentsMargins(section_gap(), scaled_px(6), section_gap(), scaled_px(6))
         header_layout.setSpacing(scaled_px(8, minimum=5))
         self.status_dot = FluentStatusDot(size=16)
         self.title_label = FluentLabel("PulseGUI - Untitled*")

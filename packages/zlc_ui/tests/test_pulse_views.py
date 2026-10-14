@@ -1274,8 +1274,11 @@ view.scan_view.set_page(ScanPageRecord(bindings=(
     BindingRecord("dac:p2:x", "Cool · bias", source="api", group_id="pgc", group_label="PGC"),
     BindingRecord("delay:x", "Delay", source="api"),
 )))
-scan_text = view.scan_view.bindings_label.text()
-assert scan_text.index("<b>Pulse</b>") < scan_text.index("MOT &amp; cooling") < scan_text.index("<b>PGC</b>")
+from zlc_ui.fluent import FluentSectionLabel
+listed = view.scan_view._bindings_layout
+shown = [listed.itemAt(index).widget() for index in range(listed.count())]
+assert [w.text() for w in shown if isinstance(w, FluentSectionLabel)] == ["Pulse", "MOT & cooling", "PGC"]
+scan_text = "\n".join(w.text() for w in shown)
 assert "Load · bias · Scan" in scan_text and "Cool · bias · API" in scan_text
 assert not qt_errors, qt_errors
 view.finish_close()
@@ -1715,7 +1718,7 @@ assert fill_d.isEnabled() and not fill_a.isEnabled() and clear_a.isEnabled()
 assert [widget.mapTo(view, QtCore.QPoint()).x() for widget in view.channel_panel._rows["d0"]] == [
     widget.mapTo(view, QtCore.QPoint()).x() for widget in view.channel_panel._rows["a0"]
 ]
-assert fill_d.text() == "●" and clear_d.text() == "○"
+assert fill_d.text() == "⬤" and clear_d.text() == "○"
 for button in (fill_d, clear_d, fill_a, clear_a):
     QtTest.QTest.mouseClick(button, QtCore.Qt.LeftButton)
 assert asked == [("on", "d0"), ("off", "d0"), ("off", "a0")], asked
@@ -1910,12 +1913,12 @@ def test_a_bracket_post_shows_a_count_of_ten_thousand_whole(run_qt) -> None:
 from PyQt5 import QtWidgets
 from zlc_ui.qt import ensure_qt_app
 from zlc_ui.pulse.schedule_view import BracketPost
-from zlc_ui.pulse._layout import px
+from zlc_ui.pulse._layout import card_pad
 
 app = ensure_qt_app(["post-width"])
 post = BracketPost("b", "end", count=10000)
 post.show(); app.processEvents()
-assert post.width() == post.count_spin.width() + 2 * px(7)
+assert post.width() == post.count_spin.width() + 2 * card_pad()
 assert post.count_edit.contentsRect().width() - post.count_edit.textMargins().right() >= post.count_edit.fontMetrics().horizontalAdvance("10000")
 assert post.count_edit.text() == "10000" and not post.count_edit.property("numericError")
 post.close(); post.deleteLater()
@@ -1937,7 +1940,7 @@ from zlc_ui.qt import ensure_qt_app
 from zlc_ui.fluent import API_VIOLET, CONFIG_GREEN, ORANGE, PLACEHOLDER
 from zlc_ui.pulse import FieldVM
 from zlc_ui.pulse.schedule_view import BracketPost
-from zlc_ui.pulse._layout import px
+from zlc_ui.pulse._layout import card_pad
 
 app = ensure_qt_app(["post-binding"])
 plain = FieldVM("4", can_scan=True, validator_kind="int", validator_lo=1,
@@ -1957,9 +1960,9 @@ for field, edge in (
     sheet = post.count_spin.styleSheet()
     assert f"solid {edge or PLACEHOLDER}" in sheet, (field, sheet)
     assert "border: none" in post.count_edit.styleSheet(), "the edit draws no second frame"
-    assert post.width() == width == post.count_spin.width() + 2 * px(7), field
+    assert post.width() == width == post.count_spin.width() + 2 * card_pad(), field
 post.set_count_field(replace(plain, text="123456789")); app.processEvents()
-assert post.width() > width and post.width() == post.count_spin.width() + 2 * px(7)
+assert post.width() > width and post.width() == post.count_spin.width() + 2 * card_pad()
 post.close(); post.deleteLater()
 """
     )
@@ -2165,7 +2168,7 @@ card.expand_button.click(); app.processEvents()
 first = main._cards["p1"]
 assert first.duration_edit.isReadOnly() and first.duration_edit.isEnabled()
 assert not first.duration_edit.binding_button.isEnabled()
-assert not first.checks["d0"].isEnabled() and first.name_edit.isReadOnly()
+assert not first.checks["d0"].isEnabled() and not first.name_edit.isEnabled(), "read-only content is switched off, like its combos"
 assert not first.unit_combo.isEnabled()
 assert first.bus_value_edits["a0"].isReadOnly() and not first.bus_mode_combos["a0"].isEnabled()
 blocked = []

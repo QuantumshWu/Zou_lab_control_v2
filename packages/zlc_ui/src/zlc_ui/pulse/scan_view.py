@@ -2,19 +2,17 @@
 
 from __future__ import annotations
 
-from html import escape
-
-from PyQt5 import QtCore, QtWidgets
+from PyQt5 import QtCore, QtGui, QtWidgets
 
 from zlc_ui.fluent import (
-    FluentButton, FluentCodeEdit,
-    FluentFrame, FluentGroupBox, FluentLabel, fluent_count_box,
-    signals_blocked,
+    MUTED_INK, FluentButton, FluentCodeEdit, FluentFrame, FluentGroupBox, FluentLabel,
+    FluentSectionLabel, fluent_count_box, retire_widget, signals_blocked,
 )
 from zlc_ui.form import being_edited
 
-from ._layout import px, row_height
-from .models import BindingRecord, ScanPageRecord  # noqa: F401
+from ._layout import card_pad, inline_gap, row_gap, row_height, section_gap
+from .models import BindingRecord, ScanPageRecord
+from .scan_line_edit import _SOURCES
 
 
 class PulseScanView(QtWidgets.QWidget):
@@ -33,26 +31,34 @@ class PulseScanView(QtWidgets.QWidget):
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
         self.setStyleSheet("background: transparent;")
+        # The page's edges and gaps are every tab's; inside each card its
+        # text, title and controls start on the card pad, the title's x.
         layout = QtWidgets.QVBoxLayout(self)
-        margin = px(8, minimum=5)
-        layout.setContentsMargins(margin, margin, margin, margin)
-        layout.setSpacing(px(8, minimum=5))
+        page = section_gap()
+        layout.setContentsMargins(page, page, page, page)
+        layout.setSpacing(section_gap())
+        pad = card_pad()
 
         info = FluentFrame()
-        info.setMinimumHeight(px(64, minimum=52))
         info_layout = QtWidgets.QVBoxLayout(info)
-        info_layout.setContentsMargins(px(12), px(8), px(12), px(8))
+        info_layout.setContentsMargins(pad, pad, pad, pad)
+        info_layout.setSpacing(row_gap())
         self.scan_slots_label = FluentLabel("")
         self.scan_slots_label.setWordWrap(True)
         info_layout.addWidget(self.scan_slots_label)
-        self.bindings_label = FluentLabel("")
-        self.bindings_label.setWordWrap(True)
-        self.bindings_label.setTextFormat(QtCore.Qt.RichText)
-        info_layout.addWidget(self.bindings_label)
+        # The bound fields, under a section title per group when there are
+        # groups; rebuilt only when the list changes.
+        self.bindings_box = QtWidgets.QWidget()
+        self.bindings_box.setStyleSheet("background: transparent;")
+        self._bindings_layout = QtWidgets.QVBoxLayout(self.bindings_box)
+        self._bindings_layout.setContentsMargins(0, 0, 0, 0)
+        self._bindings_layout.setSpacing(0)
+        self._bindings_shown: tuple[BindingRecord, ...] | None = None
+        info_layout.addWidget(self.bindings_box)
 
         run_row = QtWidgets.QHBoxLayout()
         run_row.setContentsMargins(0, 0, 0, 0)
-        run_row.setSpacing(px(6, minimum=4))
+        run_row.setSpacing(inline_gap())
         run_row.addWidget(FluentLabel("Scan repeats (0 = ∞)"))
         self.scan_repeats_spin = fluent_count_box()
         self._minimum_repeats = 0
@@ -78,15 +84,15 @@ class PulseScanView(QtWidgets.QWidget):
         layout.addWidget(info)
 
         body = QtWidgets.QHBoxLayout()
-        body.setSpacing(px(8, minimum=5))
+        body.setSpacing(row_gap())
         editor_box = FluentGroupBox("Generate the scan table (Python)")
         editor_layout = QtWidgets.QVBoxLayout(editor_box)
-        editor_layout.setContentsMargins(px(8), px(8), px(8), px(8))
-        editor_layout.setSpacing(px(6, minimum=4))
+        editor_layout.setContentsMargins(pad, pad, pad, pad)
+        editor_layout.setSpacing(row_gap())
         self.scan_code = FluentCodeEdit()
 
         template_buttons = QtWidgets.QHBoxLayout()
-        template_buttons.setSpacing(px(6, minimum=4))
+        template_buttons.setSpacing(inline_gap())
         self.scan_load_program_button = FluentButton("Load Program")
         self.scan_column_template_button = FluentButton("Template: column_stack")
         self.scan_grid_template_button = FluentButton("Template: grid")
@@ -101,7 +107,7 @@ class PulseScanView(QtWidgets.QWidget):
         editor_layout.addWidget(self.scan_code, 1)
 
         code_buttons = QtWidgets.QHBoxLayout()
-        code_buttons.setSpacing(px(6, minimum=4))
+        code_buttons.setSpacing(inline_gap())
         self.scan_run_button = FluentButton("Run", role="primary")
         self.scan_save_array_button = FluentButton("Save Array")
         self.scan_load_array_button = FluentButton("Load Array")
@@ -124,10 +130,14 @@ class PulseScanView(QtWidgets.QWidget):
 
         preview_box = FluentGroupBox("Scan table")
         preview_layout = QtWidgets.QVBoxLayout(preview_box)
-        preview_layout.setContentsMargins(px(8), px(8), px(8), px(8))
+        preview_layout.setContentsMargins(pad, pad, pad, pad)
         self.scan_table_view = FluentCodeEdit(read_only=True)
+        # A note where there is no table to show is quiet text, not table
+        # text: the placeholder, in the muted ink every such note wears.
+        palette = self.scan_table_view.palette()
+        palette.setColor(QtGui.QPalette.PlaceholderText, QtGui.QColor(MUTED_INK))
+        self.scan_table_view.setPalette(palette)
         preview_layout.addWidget(self.scan_table_view, 1)
-        preview_layout.addWidget(QtWidgets.QWidget(), 0)
         body.addWidget(preview_box, 2)
         layout.addLayout(body, 1)
 
@@ -182,6 +192,7 @@ class PulseScanView(QtWidgets.QWidget):
         self.set_slots_text(record.slots_text)
         self.set_bindings(record.bindings)
         self.set_scan_table_text(record.table_text)
+        self.scan_table_view.setPlaceholderText(record.table_note)
         self.set_repeats(record.repeats)
         self.set_progress_text(record.progress_text)
         self.set_workspace_busy(record.busy)
@@ -196,24 +207,29 @@ class PulseScanView(QtWidgets.QWidget):
 
     def set_bindings(self, bindings) -> None:
         records = tuple(bindings)
+        if records == self._bindings_shown:
+            return
+        self._bindings_shown = records
+        while self._bindings_layout.count():
+            retire_widget(self._bindings_layout.takeAt(0).widget())
         groups = {}
         for record in records:
             groups.setdefault(record.group_id, (record.group_label, []))[1].append(record)
         show_groups = any(groups)
-        lines = []
+        sources = dict(_SOURCES)
         for group_id in sorted(groups, key=lambda group_id: bool(group_id)):
             label, members = groups[group_id]
             if show_groups:
-                if lines:
-                    lines.append("")
-                lines.append(f"<b>{escape(label or 'Pulse')}</b>")
-            for record in members:
-                modes = (["Scan"] if record.scan else []) + (
-                    [record.source.upper()] if record.source != "default" else []
-                )
-                lines.append(escape(f"{record.label} · " + " + ".join(modes)))
-        self.bindings_label.setText("<br>".join(lines))
-        self.bindings_label.setVisible(bool(records))
+                self._bindings_layout.addWidget(FluentSectionLabel(label or "Pulse"))
+            lines = FluentLabel("\n".join(
+                f"{record.label} · " + " + ".join(
+                    (["Scan"] if record.scan else [])
+                    + ([sources[record.source]] if record.source != "default" else []))
+                for record in members
+            ))
+            lines.setWordWrap(True)
+            self._bindings_layout.addWidget(lines)
+        self.bindings_box.setVisible(bool(records))
 
     def set_progress_text(self, text: str) -> None:
         self.scan_progress_label.setText(str(text))

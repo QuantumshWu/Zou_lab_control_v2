@@ -1590,7 +1590,8 @@ def test_default_config_mode_projects_file_subpulse_without_replacing_defaults(s
         view.refresh_effective_requested.emit()
         with pytest.raises(ValueError, match="fields or units changed"):
             presenter._execution_request()
-        assert "fields or units changed" in view.scan_view.page.table_text
+        assert "fields or units changed" in view.scan_view.page.table_note
+        assert view.scan_view.page.table_text == ""
         code = presenter.state.scan_source
         view.scan_array_clear_requested.emit()
         assert presenter.state.scan_rows == () and presenter.state.scan_fields == ()

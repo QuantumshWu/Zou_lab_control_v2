@@ -421,6 +421,14 @@ def project_target(
     return tuple(records)
 
 
+def _grouped_label(sequence, reference, component) -> str:
+    """A field's label as listed under its Subpulse's group header: the
+    header names the Subpulse, so the label does not say it again."""
+
+    label = field_label(sequence, reference)
+    return label if component is None else label.removeprefix(f"{component.name} / ")
+
+
 def _scan_table_text(rows: Sequence[Sequence[float]], columns: Sequence[object]) -> str:
     """The scan table as a person reads it: a header, then the first rows.
 
@@ -433,8 +441,6 @@ def _scan_table_text(rows: Sequence[Sequence[float]], columns: Sequence[object])
     reaching a page that is not about the wire.
     """
 
-    if not rows:
-        return "(no scan table yet -- write a program and press Run)"
     specs = list(columns)
     header = "  ".join(
         f"{getattr(column, 'label', '') or getattr(column, 'name', index):>14}"
@@ -723,7 +729,12 @@ def _binding_field_state(
     default_text: str = "",
     actual_text: str = "",
 ) -> dict[str, object]:
-    """Display the source of the next execution, distinct from its default."""
+    """Display the source of the next execution, distinct from its default.
+
+    The status is the note under the slot's popup, below its Config name and
+    its Effective value: it never repeats them, so it fits the note's two
+    lines whatever the name.
+    """
     state = dict(config_enabled=config_enabled, default_text=default_text)
     if binding is None:
         return state
@@ -737,15 +748,15 @@ def _binding_field_state(
         if value is None:
             status = (
                 "Config is off; using the Pulse default." if not config_enabled else
-                f"Config '{binding.config_key}' is not supplied; using the Pulse default."
+                "That name is not supplied by Config; using the Pulse default."
                 if binding.config_key else "Config name is unassigned; using the Pulse default."
             )
         else:
             active = True
             effective = actual_text or f"{format_quantity(value[0], '1')} {value[1]}"
-            status = f"Saved Config '{binding.config_key}' supplies {effective}. Open Config to edit its value."
+            status = "The saved Config supplies this value. Edit it on the Value Config page."
     elif binding.source == "api":
-        status = "An API caller may override this field; otherwise its Pulse default is used."
+        status = "An API caller may override it; otherwise the Pulse default is used."
     else:
         status = "Using the Pulse default."
     return dict(**state, scan=binding.scan, source=binding.source, config_active=active,
@@ -2278,7 +2289,7 @@ class PulseEditorPresenter:
             return ()
         return tuple(
             BindingRecord(
-                b.field_id, field_label(sequence, b.field_ref), b.scan, b.source,
+                b.field_id, _grouped_label(sequence, b.field_ref, component), b.scan, b.source,
                 "" if component is None else component.component_id,
                 "Pulse" if component is None else component.name,
             )
@@ -2345,8 +2356,9 @@ class PulseEditorPresenter:
             for b in self.sequence.config_bindings:
                 default = pulse_field_value(self.sequence, b.field_ref, b.unit)
                 effective = active.get(b.config_key) if b.config_key else None
+                component = self.sequence.component_for_field(b.field_ref)
                 bindings.append((
-                    b.field_id, field_label(self.sequence, b.field_ref), b.config_key,
+                    b.field_id, _grouped_label(self.sequence, b.field_ref, component), b.config_key,
                     f"{format_quantity(default, '1')} {b.unit}",
                     "" if effective is None else f"{format_quantity(effective[0], '1')} {effective[1]}",
                     "Config off" if not self.sequence.config_enabled else
@@ -2354,7 +2366,6 @@ class PulseEditorPresenter:
                     "Scan table" if b.scan and scan_active else
                     "Default" if effective is None else "Applied",
                 ))
-                component = self.sequence.component_for_field(b.field_ref)
                 binding_groups.append((
                     b.field_id, "" if component is None else component.component_id,
                     "Pulse" if component is None else component.name,
@@ -4853,8 +4864,10 @@ class PulseEditorPresenter:
                     )
                 ),
                 bindings=binding_records,
-                table_text=("Scan fields or units changed. Generate or load the scan table again."
-                            if stale else _scan_table_text(rows, columns)),
+                table_text="" if stale or not rows else _scan_table_text(rows, columns),
+                table_note=("Scan fields or units changed. Generate or load the scan table again."
+                            if stale else "" if rows else
+                            "No scan table yet: write a program and press Run."),
                 source_text=self._state.scan_source,
                 source_dirty=self._state.scan_source_dirty or stale,
                 repeats=self._state.scan_repeats,
