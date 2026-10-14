@@ -79,6 +79,7 @@ from .logic import (
     draft_devices,
     finalize_logic_draft,
     make_host,
+    source_label,
     task_input_summary,
 )
 from .panel_save import (
@@ -8438,12 +8439,7 @@ class ConsolePresenter:
             "auto_preview": binding.auto_preview,
             "preview_offered": binding.descriptor.offers_a_preview,
             "source_required": bool(source_specs),
-            "source_label": (
-                source_specs[0].name.replace("_", " ").title()
-                + (" · Signal bundle" if source_specs[0].select_bundle else "")
-                if source_specs
-                else "Signal"
-            ),
+            "source_label": source_label(source_specs[0]) if source_specs else "Signal",
             "source_bundle": bool(source_specs and source_specs[0].select_bundle),
             "source_signal": binding.draft.source_signal,
             "source_schema": None if source_description is None else source_description.schema,
