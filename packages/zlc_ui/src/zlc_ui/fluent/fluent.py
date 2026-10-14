@@ -1168,7 +1168,9 @@ class FluentGroupBox(QtWidgets.QGroupBox):
 #: grey there, blue in the editor -- with white text at 1.65-2.55:1 on top.
 #: ``primary`` is a surface's one main action (the only accent fill),
 #: ``standard`` every other command, ``destructive`` a command that takes
-#: something away (standard, red ink), and ``destructive_primary`` the
+#: something away (standard, red ink; a one-glyph remove-row x keeps quiet
+#: ink until the pointer is on it, since red at rest marks problems), and
+#: ``destructive_primary`` the
 #: confirm of a destructive question -- the one other white-on-colour fill.
 BUTTON_ROLES = ("primary", "standard", "destructive", "destructive_primary")
 
@@ -1238,6 +1240,14 @@ def _button_stylesheet() -> str:
     QPushButton[glyph="true"] {{
         padding: 0px {scaled_px(4, minimum=2)}px;
         font-size: {round(fluent_font_size() * 1.35)}pt;
+    }}
+    QPushButton[role="destructive"][glyph="true"] {{ color: {GRAPHITE}; }}
+    QPushButton[role="destructive"][glyph="true"]:hover,
+    QPushButton[role="destructive"][glyph="true"]:pressed {{
+        color: {RED_DARK}; border-color: {RED};
+    }}
+    QPushButton[role="destructive"][glyph="true"]:disabled {{
+        background: {BG}; border-color: {DIVIDER}; color: {PLACEHOLDER};
     }}
     QPushButton:disabled, QPushButton[role="primary"]:disabled,
     QPushButton[role="destructive_primary"]:disabled, QPushButton[dirty="true"]:disabled,
@@ -6766,7 +6776,9 @@ class _SelectionGridDelegate(QtWidgets.QStyledItemDelegate):
     A DERIVED cell -- reached by a rule rather than marked -- is a dashed,
     lightly tinted card that still says its name; a WARNING cell is edged in
     red, chosen or not; a MISSING cell is an empty red-edged card and a HELD
-    one an empty dashed outline.
+    one an empty dashed outline.  A disabled grid wears a disabled button's
+    look -- grey face, hairline edge, faint ink -- on every card, so what is
+    chosen still reads but nothing invites a click.
     """
 
     def paint(self, painter, option, index) -> None:
@@ -6777,54 +6789,62 @@ class _SelectionGridDelegate(QtWidgets.QStyledItemDelegate):
         held = state == "held"
         if not held and not index.flags() & QtCore.Qt.ItemIsSelectable:
             return
+        live = self.parent().isEnabled()
         selected = bool(option.state & QtWidgets.QStyle.State_Selected)
-        hovered = bool(option.state & QtWidgets.QStyle.State_MouseOver) and not held
+        hovered = bool(option.state & QtWidgets.QStyle.State_MouseOver) and not held and live
         derived = state == "derived" and not selected
         inset = scaled_px(2, minimum=1)
         rect = QtCore.QRectF(option.rect).adjusted(inset, inset, -inset, -inset)
         painter.save()
         painter.setRenderHint(QtGui.QPainter.Antialiasing)
-        edge = (RED if state in ("warning", "missing") else DIVIDER if held
+        edge = (DIVIDER if not live or held else RED if state in ("warning", "missing")
                 else SELECTION_EDGE if selected or derived else ACCENT if hovered else DIVIDER)
         pen = QtGui.QPen(QtGui.QColor(edge), scaled_px(1, minimum=1))
         if derived and not hovered or held:
             pen.setStyle(QtCore.Qt.DashLine)
         painter.setPen(pen)
         painter.setBrush(
-            QtGui.QColor(ACCENT_TINT) if selected
+            QtCore.Qt.NoBrush if held
+            else QtGui.QColor(BG) if not live
+            else QtGui.QColor(ACCENT_TINT) if selected
             else _mixed(SURFACE, ACCENT_TINT, 0.55) if derived
-            else QtCore.Qt.NoBrush if held
             else QtGui.QColor(SURFACE)
         )
         painter.drawRoundedRect(rect, _radius(), _radius())
         # A name says the row has the cell; the empty states say nobody, or
         # somebody else, has it -- named only as the preview under the pointer.
         if selected or hovered or state in ("derived", "warning"):
-            ink = (QtGui.QColor(RED_DARK) if state == "warning" else QtGui.QColor(HOVER) if selected
+            ink = (QtGui.QColor(PLACEHOLDER) if not live
+                   else QtGui.QColor(RED_DARK) if state == "warning" else QtGui.QColor(HOVER) if selected
                    else _mixed(HOVER, SURFACE, 0.45) if derived else QtGui.QColor(PLACEHOLDER))
             painter.setPen(ink)
             painter.drawText(rect, QtCore.Qt.AlignCenter, str(index.data() or ""))
         painter.restore()
 
     def _paint_action(self, painter, option, index) -> None:
-        """The destructive glyph button every remove-row x in the console is:
-        a white card with a hairline edge and red ink, the edge red under the
-        pointer -- as tall as the row's cells, so it lines up with them."""
+        """The quiet destructive glyph every remove-row x in the console is:
+        a white card, hairline edge and quiet ink at rest, red ink and a red
+        edge only under the pointer -- red at rest belongs to problems.  As
+        tall as the row's cells, so it lines up with them."""
 
         grid = self.parent()
         cell = (index.row(), index.column())
-        hovered = grid.hovered_action() == cell
+        live = grid.isEnabled()
+        hovered = live and grid.hovered_action() == cell
+        pressed = live and grid.pressed_action() == cell
         inset = scaled_px(2, minimum=1)
         rect = QtCore.QRectF(option.rect).adjusted(inset, inset, -inset, -inset)
         painter.save()
         painter.setRenderHint(QtGui.QPainter.Antialiasing)
-        painter.setPen(QtGui.QPen(QtGui.QColor(RED if hovered else DIVIDER), scaled_px(1, minimum=1)))
-        painter.setBrush(QtGui.QColor(BG if grid.pressed_action() == cell else SURFACE))
+        painter.setPen(QtGui.QPen(QtGui.QColor(RED if hovered or pressed else DIVIDER),
+                                  scaled_px(1, minimum=1)))
+        painter.setBrush(QtGui.QColor(BG if pressed or not live else SURFACE))
         painter.drawRoundedRect(rect, _radius(), _radius())
         font = QtGui.QFont(FONT)
         font.setPointSize(round(fluent_font_size() * 1.35))
         painter.setFont(font)
-        painter.setPen(QtGui.QColor(RED_DARK))
+        painter.setPen(QtGui.QColor(
+            PLACEHOLDER if not live else RED_DARK if hovered or pressed else GRAPHITE))
         painter.drawText(rect, QtCore.Qt.AlignCenter, str(index.data()))
         painter.restore()
 
@@ -6884,7 +6904,7 @@ class _SelectionGridRowHeader(QtWidgets.QHeaderView):
             return
         label, note = self._texts(section)
         label_font, note_font = self._fonts()
-        hovered = section == self._hovered
+        hovered = section == self._hovered and self.isEnabled()
         # Left-aligned labels start on the grid's own edge, the edge the
         # content above and below it shares; right-aligned ones sit off it.
         pad = scaled_px(8, minimum=5)
@@ -6893,7 +6913,8 @@ class _SelectionGridRowHeader(QtWidgets.QHeaderView):
         painter.save()
         painter.setFont(label_font)
         painter.setPen(QtGui.QColor(
-            ACCENT if self.activatable and hovered
+            PLACEHOLDER if not self.isEnabled()
+            else ACCENT if self.activatable and hovered
             else TEXT if self.activatable or hovered else GRAPHITE
         ))
         if not note:
@@ -6956,7 +6977,10 @@ class FluentSelectionGrid(QtWidgets.QTableView):
     as ``row_action(row, value)`` and never change the selection.
     :meth:`set_cell_states` marks cells a rule reached ("derived"), that
     cannot be honoured ("warning"), that nobody has ("missing") or that
-    another row holds ("held", not choosable).
+    another row holds ("held", not choosable: the pointer says so, and a
+    click shows the cell's tooltip at once).  :meth:`set_label_width` ends
+    the row-label column where a form's label column ends, so the first
+    card starts on the form's field edge.
     """
 
     selection_edited = QtCore.pyqtSignal(object)
@@ -6976,6 +7000,7 @@ class FluentSelectionGrid(QtWidgets.QTableView):
         #: The action cell under the pointer, and the one a press began on.
         self._hovered_action: tuple[int, int] | None = None
         self._pressed_action: tuple[int, int] | None = None
+        self._cursor = QtCore.Qt.ArrowCursor
         row_header = _SelectionGridRowHeader(self)
         row_header.activatable = label_action is not None
         if label_action is not None:
@@ -7070,6 +7095,28 @@ class FluentSelectionGrid(QtWidgets.QTableView):
         ))
         self.updateGeometry()
 
+    def label_width_hint(self) -> int:
+        """The form label column at which every row label still fits."""
+
+        header = self.verticalHeader()
+        widest = max((header.sectionSizeFromContents(section).width()
+                      for section in range(header.count())), default=0)
+        return max(0, widest - self._label_offset())
+
+    def set_label_width(self, width: int) -> None:
+        """End the row-label column where a form's ``width`` label column
+        ends, so the first card starts on the form's field edge."""
+
+        self.verticalHeader().setMinimumWidth(int(width) + self._label_offset())
+        self.updateGeometries()
+        self.updateGeometry()
+
+    @staticmethod
+    def _label_offset() -> int:
+        # A setting row's label-to-field spacing, less the inset that keeps
+        # a card off its cell's edge.
+        return scaled_px(6, minimum=4) - scaled_px(2, minimum=1)
+
     def set_cell_states(self, states: "dict[tuple[int, int], str]",
                         tips: "dict[tuple[int, int], str] | None" = None) -> None:
         """Mark cells with :data:`GRID_CELL_STATES`, with optional tooltips."""
@@ -7111,6 +7158,15 @@ class FluentSelectionGrid(QtWidgets.QTableView):
             return None
         return index.row(), index.column()
 
+    def _held(self, pos) -> QtCore.QModelIndex | None:
+        index = self.indexAt(pos)
+        return index if index.isValid() and index.data(_GRID_STATE_ROLE) == "held" else None
+
+    def _set_cursor(self, cursor) -> None:
+        if cursor != self._cursor:
+            self._cursor = cursor
+            self.viewport().setCursor(cursor)
+
     def mousePressEvent(self, event) -> None:  # noqa: N802 - Qt API
         # An action cell is a button: it acts on release, and neither starts
         # a selection gesture nor ends one.
@@ -7119,6 +7175,14 @@ class FluentSelectionGrid(QtWidgets.QTableView):
             if event.button() == QtCore.Qt.LeftButton:
                 self._pressed_action = cell
                 self.viewport().update()
+            event.accept()
+            return
+        # A held cell cannot be chosen here; the click says why at once
+        # instead of being swallowed.
+        held = self._held(event.pos())
+        if held is not None:
+            QtWidgets.QToolTip.showText(event.globalPos(), str(held.data(QtCore.Qt.ToolTipRole) or ""),
+                                        self.viewport(), self.visualRect(held))
             event.accept()
             return
         if self._toggle and event.button() == QtCore.Qt.LeftButton:
@@ -7135,18 +7199,19 @@ class FluentSelectionGrid(QtWidgets.QTableView):
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802 - Qt API
         cell = self._action_cell(event.pos())
+        self._set_cursor(QtCore.Qt.PointingHandCursor if cell is not None
+                         else QtCore.Qt.ForbiddenCursor if self._held(event.pos()) is not None
+                         else QtCore.Qt.ArrowCursor)
         if cell != self._hovered_action:
             self._hovered_action = cell
-            self.viewport().setCursor(QtCore.Qt.PointingHandCursor if cell is not None
-                                      else QtCore.Qt.ArrowCursor)
             self.viewport().update()
         if self._pressed_action is None:
             super().mouseMoveEvent(event)
 
     def leaveEvent(self, event) -> None:  # noqa: N802 - Qt API
+        self._set_cursor(QtCore.Qt.ArrowCursor)
         if self._hovered_action is not None:
             self._hovered_action = None
-            self.viewport().setCursor(QtCore.Qt.ArrowCursor)
             self.viewport().update()
         super().leaveEvent(event)
 
@@ -7166,7 +7231,8 @@ class FluentSelectionGrid(QtWidgets.QTableView):
     def sizeHint(self) -> QtCore.QSize:  # noqa: N802 - Qt API
         horizontal, vertical = self.horizontalHeader(), self.verticalHeader()
         return QtCore.QSize(
-            vertical.sizeHint().width() + horizontal.length() + 2 * self.frameWidth(),
+            max(vertical.minimumWidth(), vertical.sizeHint().width())
+            + horizontal.length() + 2 * self.frameWidth(),
             horizontal.sizeHint().height() + vertical.length() + 2 * self.frameWidth(),
         )
 

@@ -280,7 +280,7 @@ def _claims_projection(entries, frames):
         "artifact_claims": {"calibrations": {
             "label": "Calibrations", "entries": tuple(entries), "base_dir": "C:/data",
             "file_filter": "Calibration artifacts (*.json)",
-            "files": tuple({"path": entry["path"], "summary": "20 ms · 1 sites · box"} for entry in entries),
+            "files": tuple({"path": entry["path"], "summary": "20 ms · 1 sites · default Box"} for entry in entries),
             "reads": reads, "problems": problems,
         }},
         "source_frames": frames,
@@ -292,6 +292,7 @@ def test_the_calibrations_editor_gives_frames_to_files_by_clicking(monkeypatch) 
     from PyQt5 import QtCore, QtTest, QtWidgets
 
     from zlc_atom.nodes.occupancy import editor as editor_module
+    from zlc_ui.fluent import scaled_px
 
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     editor = OCCUPANCY_NODE.ui_contributions[0]()
@@ -326,6 +327,12 @@ def test_the_calibrations_editor_gives_frames_to_files_by_clicking(monkeypatch) 
         assert grid.model().index(1, 4).data(QtCore.Qt.UserRole + 1) == "derived", "read as rest"
         assert drafts == [], "showing claims is not an edit"
         assert "3 frames · each read once" in editor.summary.text()
+        # The file names are the label column: with it, Add and the first
+        # card start on one edge, however long the names are.
+        editor.set_label_width(editor.label_width_hint())
+        app.processEvents()
+        card = grid.viewport().mapTo(editor, grid.visualRect(grid.model().index(0, 0)).topLeft())
+        assert abs(card.x() + scaled_px(2, minimum=1) - editor.add_button.x()) <= 1
         # Last moves to the readout file; frame 2 is then its, and not
         # offered to the load file at all.
         claims = click(1, 0)

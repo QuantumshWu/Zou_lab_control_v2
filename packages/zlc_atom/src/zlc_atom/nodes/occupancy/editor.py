@@ -4,16 +4,18 @@ The operator says which file reads which frames the way they think it --
 this one the load frame, that one the rest -- by marking cells: "Last" and
 "Rest" follow the frame count, a frame number keeps its position.  A frame
 reached through Last or Rest shows as a dashed card in its file's row, and
-as an empty dashed outline in the other rows when it is a Last (only
-un-marking that Last gives it away); a frame nobody reads is an empty red
+as an empty dashed outline in the other rows when it is a Last (Last
+moves it: a click there says so); a frame nobody reads is an empty red
 card in every row, and one two files reach, or a number the source does not
 carry, is a red-edged card with the reason below.  Nothing here changes a claim
 because the frame count changed: what was authored stays until the operator
 edits it.  A file is removed by the × that ends its row and replaced by
 clicking its name.  The readout model -- which model each file is read
-with -- is chosen under the files it applies to.  The title and the model's label
-sit in the editor's one label column, so Add and the model buttons start
-where the form's fields do.  The console resolves the
+with -- is chosen under the files it applies to.  The file names are the
+editor's label column, shared with the form: the title, the model's label
+and the names end where the form's labels do (the longest name widens the
+column for all of them), so Add, the first card, the model buttons and the
+form's fields start on one edge.  The console resolves the
 files and projects how the source's frames read them; this widget only
 draws that and writes the edits back.
 """
@@ -44,8 +46,7 @@ from zlc_atom.nodes.calibration import READOUT_MODEL_CHOICES
 CALIBRATIONS = "calibrations"
 _NAMED = ((LAST, "Last"), (REST, "Rest"))
 _GAP = None
-_HINT = ("Click a cell to give that frame to a file · Last and Rest follow the frame count"
-         " · click a file name to replace it")
+_HINT = "Click a cell to give that frame to a file · Last and Rest follow the frame count"
 _EMPTY = "Add a calibration file; the first one reads every frame"
 
 
@@ -89,6 +90,7 @@ class CalibrationsEditor(QtWidgets.QWidget):
         self.note.setStyleSheet(f"color: {RED_DARK}; background: transparent; border: none;")
         layout.addWidget(self.note)
         self.hint = muted_note_label(_HINT)
+        self.hint.setWordWrap(True)
         layout.addWidget(self.hint)
         self.model_row = QtWidgets.QWidget(self)
         model_layout = QtWidgets.QHBoxLayout(self.model_row)
@@ -111,11 +113,18 @@ class CalibrationsEditor(QtWidgets.QWidget):
         self._base_dir = ""
         self._filter = "All files (*)"
 
+    def label_width_hint(self) -> int:
+        """The label column this editor's title, model label and file names need."""
+
+        names = self.grid.label_width_hint() if self._entries else 0
+        return max(names, self.title.sizeHint().width(), self.model_label.sizeHint().width())
+
     def set_label_width(self, width: int) -> None:
         """The editor's label column, shared with the form's "Frames" row."""
 
         self.title.setFixedWidth(int(width))
         self.model_label.setFixedWidth(int(width))
+        self.grid.set_label_width(int(width))
 
     # ---------------------------------------------------------------- reading
 
@@ -171,11 +180,11 @@ class CalibrationsEditor(QtWidgets.QWidget):
                     mine = next((how for reader, how in readers if reader == row), None)
                     last = next((reader for reader, how in readers if how == LAST), None)
                     if mine is None and last is not None:
-                        # Another file's Last: only un-marking it gives the frame away.
+                        # Another file's Last: Last moves it, the number does not.
                         states[(row, column)] = "held"
                         tips[(row, column)] = (
-                            f"read as Last by {names[last]}; un-mark its Last to give frame "
-                            f"{token} away")
+                            f"{names[last]} reads frame {token} as Last; click Last in this "
+                            "row to read it here")
                     elif len(readers) > 1 and mine is not None:
                         states[(row, column)] = "warning"
                         tips[(row, column)] = "read by " + " and ".join(
