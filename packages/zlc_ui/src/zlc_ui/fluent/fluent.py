@@ -6147,7 +6147,18 @@ class FluentCodeEdit(QtWidgets.QPlainTextEdit):
     padding put it 2.3 px further in -- and the first line sits as far below the top edge.
     Only code being WRITTEN is coloured: a read-only view shows what a program produced, a
     table or the sentence that says there is none yet, and Python colouring painted the
-    "and" of that sentence as a keyword."""
+    "and" of that sentence as a keyword.
+
+    An empty editor shows its placeholder as a note: in MUTED_INK and the body font, wrapped,
+    where its text would start.  The editor paints it itself -- Qt 5.15 decides whether to
+    show a QPlainTextEdit's placeholder only when the TEXT changes, so a note given to an
+    editor that was already empty (an empty scan table, a fresh expression box) was never
+    drawn and the pane stood blank."""
+
+    #: The placeholder note, and whether the viewport shows it; class
+    #: attributes so they exist before __init__ runs.
+    _note = ""
+    _noted = False
 
     def __init__(self, text: str = "", parent=None, *, read_only: bool = False):
         super().__init__(parent)
@@ -6163,6 +6174,39 @@ class FluentCodeEdit(QtWidgets.QPlainTextEdit):
         apply_fluent_scrollbars(self)
         if not read_only:
             self._highlighter = _PythonHighlighter(self.document())
+        self.textChanged.connect(self._show_note_with_text)
+
+    def _wants_note(self) -> bool:
+        return bool(self._note) and self.document().isEmpty()
+
+    def _show_note_with_text(self) -> None:
+        # An edit repaints only the lines it touched; the note, wrapped,
+        # reaches further, so it comes and goes with the whole viewport.
+        if self._noted != self._wants_note():
+            self.viewport().update()
+
+    def placeholderText(self) -> str:  # noqa: N802 - Qt API name
+        return self._note
+
+    def setPlaceholderText(self, text: str) -> None:  # noqa: N802 - Qt API name
+        note = str(text or "")
+        if note != self._note:
+            self._note = note
+            self.viewport().update()
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        super().paintEvent(event)
+        self._noted = self._wants_note()
+        if not self._noted:
+            return
+        painter = QtGui.QPainter(self.viewport())
+        painter.setFont(QtGui.QFont(FONT, fluent_font_size()))
+        painter.setPen(QtGui.QColor(MUTED_INK if self.isEnabled() else DISABLED_INK))
+        painter.drawText(
+            QtCore.QRectF(self.viewport().rect()),
+            int(QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop | QtCore.Qt.TextWordWrap), self._note,
+        )
+        painter.end()
 
     def contextMenuEvent(self, event) -> None:  # noqa: N802 - Qt naming
         _apply_fluent_context_menu(self, event)   # Fluent right-click (undo/cut/copy/paste), not the native menu
