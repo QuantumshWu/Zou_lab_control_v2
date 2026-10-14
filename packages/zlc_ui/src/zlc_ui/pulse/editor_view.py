@@ -16,8 +16,8 @@ from zlc_ui.fluent import (
     FluentButton,
     fluent_message,
     FluentFrame,
-    FluentLabel,
     FluentReadoutEdit,
+    FluentSectionLabel,
     FluentStatusDot,
     FluentTabWidget,
     fluent_widget_stylesheet,
@@ -69,9 +69,12 @@ class PulseEditorView(QtWidgets.QWidget):
         # The status strip's dot and the strip's air after it: the header's
         # words start where a strip's do.
         self.status_dot = FluentStatusDot()
-        self.title_label = FluentLabel("PulseGUI · Untitled*")
-        self.title_label.setMinimumWidth(scaled_px(260, minimum=180))
-        self.title_label.setAlignment(QtCore.Qt.AlignVCenter | QtCore.Qt.AlignLeft)
+        # The header row's title, in the section title's weight so the
+        # summary beside it reads as a second thing.  At its own width: the
+        # summary follows it at the row gap, and a long path has all the
+        # rest of the header before it elides.
+        self.title_label = FluentSectionLabel("PulseGUI · Untitled")
+        self.title_label.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Preferred)
         # What the editor holds -- its file, its period count, a config
         # error -- is a readout to read and copy, not a disabled input: the
         # disabled edit drew it at 2.4:1.

@@ -11,7 +11,7 @@ from __future__ import annotations
 from PyQt5 import QtCore, QtWidgets
 
 from zlc_ui.fluent import (
-    card_pad, row_gap,
+    card_pad, row_gap, section_gap,
     FONT, MUTED_LABEL_STYLE, ElidedLabel,
     fluent_font_size, scaled_px, setting_label_width,
 )
@@ -22,7 +22,9 @@ ROW_HEIGHT = 30
 #: there (whole in its tooltip) rather than pushing every field away.
 CHANNEL_LABEL_WIDTH = 100
 TIME_UNIT_WIDTH = 60
-PANEL_TOP_HEIGHT = 178
+#: Every card and side panel opens with this many header rows above its
+#: port rows: a period's Duration caption, value, unit and name.
+PANEL_HEADER_ROWS = 4
 CHANNEL_ROW_SPACING = 4
 PERIOD_CARD_WIDTH = 160
 #: A spacer card carries one number and a column of circles: narrow enough
@@ -44,10 +46,6 @@ def row_spacing() -> int:
     are packed closer than a form's to show more outputs at once."""
 
     return px(CHANNEL_ROW_SPACING, minimum=3)
-
-
-
-
 
 
 def channel_label_width() -> int:
@@ -85,7 +83,14 @@ def time_unit_width() -> int:
 
 
 def panel_top_height() -> int:
-    return px(PANEL_TOP_HEIGHT, minimum=138)
+    """The header block every card and side panel opens with: its header
+    rows at the row gap, and the section gap that parts them from the port
+    rows (less the port rows' own spacing, which the card's column adds
+    after the block).  One height for all of them, so row N of every card
+    and side panel stands on one y."""
+
+    return (PANEL_HEADER_ROWS * row_height() + (PANEL_HEADER_ROWS - 1) * row_gap()
+            + section_gap() - row_spacing())
 
 
 def period_card_width(*, ports=(), analog_mode_choices=()) -> int:
