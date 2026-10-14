@@ -30,6 +30,7 @@ from .form import (
 )
 
 from ..fluent import (
+    row_gap,
     FluentButton,
     FluentComboBox,
     FluentCycleComboBox,
@@ -97,16 +98,6 @@ class FormRuntimeContext:
         return coerce_choice_labels(self.choice_labels)
 
 
-def form_gap() -> int:
-    """The form's one gap: between two of its rows, and between two cells of
-    one row (the gap FluentSettingRow keeps between label and control).
-
-    Every row block of a form page keeps it -- a list field's rows, the
-    rows of a host that lays several forms out as one -- so a page has one
-    row pitch whichever widget holds its rows.
-    """
-
-    return scaled_px(6, minimum=4)
 
 
 def _value_error(field: FormFieldProps, message: str) -> ValueError:
@@ -322,7 +313,7 @@ class _RowsEditor(QtWidgets.QWidget):
         )
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(form_gap())
+        layout.setSpacing(row_gap())
         self.add_button = FluentButton("Add")
         self.add_button.setToolTip(field.description)
         self.add_button.clicked.connect(self._add_pressed)
@@ -333,7 +324,7 @@ class _RowsEditor(QtWidgets.QWidget):
         layout.addLayout(head)
         self._rows_layout = QtWidgets.QVBoxLayout()
         self._rows_layout.setContentsMargins(0, 0, 0, 0)
-        self._rows_layout.setSpacing(form_gap())
+        self._rows_layout.setSpacing(row_gap())
         layout.addLayout(self._rows_layout)
 
     def first_line_height(self) -> int:
@@ -397,7 +388,7 @@ class _RowsEditor(QtWidgets.QWidget):
         )
         beside = QtWidgets.QHBoxLayout(row)
         beside.setContentsMargins(0, 0, 0, 0)
-        beside.setSpacing(form_gap())
+        beside.setSpacing(row_gap())
         cells: dict[str, QtWidgets.QWidget] = {}
         for column in self._field.columns:
             widget = FORM_WIDGET_HANDLERS[column.kind].build(
@@ -1281,7 +1272,7 @@ class FluentParameterForm(QtWidgets.QWidget):
 
         self._layout = QtWidgets.QVBoxLayout(self)
         self._layout.setContentsMargins(0, 0, 0, 0)
-        self._layout.setSpacing(form_gap())
+        self._layout.setSpacing(row_gap())
         self._layout.setSizeConstraint(QtWidgets.QLayout.SetMinimumSize)
         label_width = self._label_width or _form_label_width(spec.fields)
         # Built ONCE, with the values it opens on.  A form that was built on
@@ -1508,7 +1499,7 @@ class FluentParameterForm(QtWidgets.QWidget):
             )
             beside = QtWidgets.QHBoxLayout(holder)
             beside.setContentsMargins(0, 0, 0, 0)
-            beside.setSpacing(form_gap())
+            beside.setSpacing(row_gap())
             beside.addWidget(widget, 1)
             beside.addWidget(picker, 0)
             if capped:

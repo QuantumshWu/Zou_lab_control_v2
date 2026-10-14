@@ -1,12 +1,9 @@
 """Shared display-scaled geometry for pulse views.
 
-One spacing scale for every page of the editor, in design px scaled through
-:func:`px`: a card's content stands :func:`card_pad` inside its edge, cells
-of one row stand :func:`inline_gap` apart, rows of a form and cards side by
-side stand :func:`row_gap` apart, and a page's sections -- and its content
-from the page's own edge -- stand :func:`section_gap` apart.  Each page took
-private literals before, so the same page edge jumped from tab to tab and
-one strip of cards had two different gaps.
+The editor keeps the suite's one page rhythm -- ``card_pad``, ``row_gap``
+and ``section_gap`` from :mod:`zlc_ui.fluent` -- and adds only what is its
+own: the port-row table's height and pitch, the card widths, and the label
+column of its side panels.
 """
 
 from __future__ import annotations
@@ -14,6 +11,7 @@ from __future__ import annotations
 from PyQt5 import QtCore, QtWidgets
 
 from zlc_ui.fluent import (
+    card_pad, row_gap, section_gap,
     CARD_PAD, FONT, MUTED_INK, MUTED_LABEL_STYLE, ElidedLabel, FluentLabel, FluentReadoutEdit,
     field_text_inset, fluent_font_size, line_edit_text_right, scaled_px,
     setting_label_width, window_pad,
@@ -31,8 +29,6 @@ PERIOD_CARD_WIDTH = 160
 #: A spacer card carries one number and a column of circles: narrow enough
 #: to read as a gap between periods rather than as one of them.
 SPACER_CARD_WIDTH = 94
-INLINE_GAP = 6
-ROW_GAP = 6
 
 
 def px(value: int | float, *, minimum: int = 1) -> int:
@@ -51,31 +47,8 @@ def row_spacing() -> int:
     return px(CHANNEL_ROW_SPACING, minimum=3)
 
 
-def card_pad() -> int:
-    """A card's content inset, on every side: where FluentGroupBox paints
-    its title, so the title, the labels and the controls start on one x."""
-
-    return scaled_px(CARD_PAD)
 
 
-def inline_gap() -> int:
-    """Between two cells of one row: a label and its control, a field and
-    its unit, two buttons."""
-
-    return px(INLINE_GAP, minimum=4)
-
-
-def row_gap() -> int:
-    """Between two rows of a form, and between two cards side by side."""
-
-    return px(ROW_GAP, minimum=4)
-
-
-def section_gap() -> int:
-    """Between a page's sections, and from the page's edge to its content:
-    every tab's cards start and end on the same two x."""
-
-    return window_pad(1)
 
 
 def channel_label_width() -> int:
@@ -140,7 +113,7 @@ def period_card_width(*, ports=(), analog_mode_choices=()) -> int:
         combo.ensurePolished()
         edit.ensurePolished()
         code_width = max(edit.fontMetrics().horizontalAdvance(text) + 2 for text in codes)
-        return max(width, 2 * card_pad() + combo.sizeHint().width() + inline_gap()
+        return max(width, 2 * card_pad() + combo.sizeHint().width() + row_gap()
                    + edit.width() - _numeric_text_width(edit) + code_width)
     finally:
         combo.deleteLater()
@@ -237,7 +210,7 @@ def add_labeled_widget(layout, label_text: str, widget: QtWidgets.QWidget) -> El
 
     row = QtWidgets.QHBoxLayout()
     row.setContentsMargins(0, 0, 0, 0)
-    row.setSpacing(inline_gap())
+    row.setSpacing(row_gap())
     label = form_label(label_text)
     row.addWidget(label)
     if isinstance(widget, FluentReadoutEdit):
@@ -248,10 +221,10 @@ def add_labeled_widget(layout, label_text: str, widget: QtWidgets.QWidget) -> El
 
 
 __all__ = [
-    "add_labeled_widget", "bound_field_width", "card_pad", "channel_label_width", "channel_name_edit_width",
+    "add_labeled_widget", "bound_field_width", "channel_label_width", "channel_name_edit_width",
     "column_header", "config_name_width", "field_column_readout", "form_control_cell", "form_label",
-    "inline_gap", "label_column_width", "panel_top_height", "quiet",
-    "period_card_width", "period_control_width", "px", "row_gap", "row_height",
-    "row_spacing", "section_gap", "spacer_card_width",
+    "label_column_width", "panel_top_height", "quiet",
+    "period_card_width", "period_control_width", "px", "row_height",
+    "row_spacing", "spacer_card_width",
     "spacer_control_width", "time_unit_width",
 ]

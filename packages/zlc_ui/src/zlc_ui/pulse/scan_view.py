@@ -10,7 +10,10 @@ from zlc_ui.fluent import (
 )
 from zlc_ui.form import being_edited
 
-from ._layout import card_pad, inline_gap, row_gap, row_height, section_gap
+from ._layout import (
+    row_height,
+)
+from zlc_ui.fluent import card_pad, row_gap, section_gap
 from .models import BindingRecord, ScanPageRecord
 from .scan_line_edit import _SOURCES
 
@@ -58,7 +61,7 @@ class PulseScanView(QtWidgets.QWidget):
 
         run_row = QtWidgets.QHBoxLayout()
         run_row.setContentsMargins(0, 0, 0, 0)
-        run_row.setSpacing(inline_gap())
+        run_row.setSpacing(row_gap())
         run_row.addWidget(FluentLabel("Scan repeats (0 = ∞)"))
         self.scan_repeats_spin = fluent_count_box()
         self._minimum_repeats = 0
@@ -92,7 +95,7 @@ class PulseScanView(QtWidgets.QWidget):
         self.scan_code = FluentCodeEdit()
 
         template_buttons = QtWidgets.QHBoxLayout()
-        template_buttons.setSpacing(inline_gap())
+        template_buttons.setSpacing(row_gap())
         self.scan_load_program_button = FluentButton("Load Program")
         self.scan_column_template_button = FluentButton("Template: column_stack")
         self.scan_grid_template_button = FluentButton("Template: grid")
@@ -107,7 +110,7 @@ class PulseScanView(QtWidgets.QWidget):
         editor_layout.addWidget(self.scan_code, 1)
 
         code_buttons = QtWidgets.QHBoxLayout()
-        code_buttons.setSpacing(inline_gap())
+        code_buttons.setSpacing(row_gap())
         self.scan_run_button = FluentButton("Run", role="primary")
         self.scan_save_array_button = FluentButton("Save Array")
         self.scan_load_array_button = FluentButton("Load Array")

@@ -12,9 +12,9 @@ from zlc_ui.fluent import (
 )
 
 from ._layout import (
-    bound_field_width, card_pad, config_name_width, inline_gap, panel_top_height, px, quiet, row_gap, row_height,
-    row_spacing, section_gap,
+    bound_field_width, config_name_width, panel_top_height, px, quiet, row_height, row_spacing,
 )
+from zlc_ui.fluent import card_pad, row_gap, section_gap
 from .models import ScheduleVM
 from .schedule_view import PulseScheduleView
 
@@ -60,7 +60,7 @@ class PulseComponentView(QtWidgets.QWidget):
         # the card's right edge, Browse under the last command.
         label_width = setting_label_width(("Subpulse", "Config file"), minimum=0)
         top = QtWidgets.QHBoxLayout()
-        top.setSpacing(inline_gap())
+        top.setSpacing(row_gap())
         subpulse_label = FluentLabel("Subpulse")
         subpulse_label.setFixedWidth(label_width)
         top.addWidget(subpulse_label)
@@ -89,7 +89,7 @@ class PulseComponentView(QtWidgets.QWidget):
         self.config_file_row.setStyleSheet("QWidget#subpulseConfigFileRow { background: transparent; }")
         file_row = QtWidgets.QHBoxLayout(self.config_file_row)
         file_row.setContentsMargins(0, 0, 0, 0)
-        file_row.setSpacing(inline_gap())
+        file_row.setSpacing(row_gap())
         file_label = FluentLabel("Config file")
         file_label.setFixedWidth(label_width)
         file_row.addWidget(file_label)
@@ -110,7 +110,7 @@ class PulseComponentView(QtWidgets.QWidget):
         # state at its right -- not squeezed in after Browse, where it ended
         # the file row short of the commands above it.
         hint = QtWidgets.QHBoxLayout()
-        hint.setSpacing(inline_gap())
+        hint.setSpacing(row_gap())
         self.scope_label = ElidedLabel("")
         hint.addWidget(self.scope_label, 1)
         self.source_status = quiet(FluentLabel(""))
@@ -128,7 +128,7 @@ class PulseComponentView(QtWidgets.QWidget):
         self.bindings_box = FluentGroupBox("Numeric Config references")
         self._binding_layout = QtWidgets.QGridLayout(self.bindings_box)
         self._binding_layout.setContentsMargins(pad, pad, pad, pad)
-        self._binding_layout.setHorizontalSpacing(inline_gap())
+        self._binding_layout.setHorizontalSpacing(row_gap())
         self._binding_layout.setVerticalSpacing(row_gap())
         self._binding_layout.setColumnStretch(2, 1)
         self._binding_layout.setAlignment(QtCore.Qt.AlignTop)

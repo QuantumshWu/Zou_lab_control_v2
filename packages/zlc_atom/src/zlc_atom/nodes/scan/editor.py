@@ -51,7 +51,7 @@ from zlc_ui.fluent import (
     field_text_inset,
     fill_grouped_choice_combo,
     fluent_unit_picker,
-    line_gap,
+    row_gap,
     muted_note_label,
     show_note,
     signals_blocked,
@@ -159,7 +159,7 @@ class _AxisRow(QtWidgets.QWidget):
         rows, ranges = columns
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(line_gap() // 2)
+        layout.setSpacing(row_gap() // 2)
         line = FluentColumnLine(rows, self)
         layout.addWidget(line)
         self.range_inputs = FluentColumnLine(ranges, self)
@@ -556,9 +556,9 @@ class ScanPlanEditor(QtWidgets.QWidget):
         self._range_columns.setParent(self)
         column = QtWidgets.QVBoxLayout(self)
         column.setContentsMargins(0, 0, 0, 0)
-        column.setSpacing(line_gap())
+        column.setSpacing(row_gap())
         header = QtWidgets.QHBoxLayout()
-        header.setSpacing(line_gap())
+        header.setSpacing(row_gap())
         title = FluentSectionLabel("Scan plan")
         # Centred on the buttons beside it, not dropped below them like an own-line section.
         title.setContentsMargins(0, 0, 0, 0)
@@ -570,7 +570,7 @@ class ScanPlanEditor(QtWidgets.QWidget):
         header.addWidget(self.add_manual_button)
         column.addLayout(header)
         self.rows_layout = QtWidgets.QVBoxLayout()
-        self.rows_layout.setSpacing(line_gap())
+        self.rows_layout.setSpacing(row_gap())
         column.addLayout(self.rows_layout)
         self.summary = FluentLabel("")
         self.summary.setWordWrap(True)

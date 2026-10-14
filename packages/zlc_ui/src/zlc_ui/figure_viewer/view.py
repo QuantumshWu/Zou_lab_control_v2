@@ -26,11 +26,11 @@ from zlc_ui.console.panel_editor_view import (
 from zlc_ui.device_manager.view import (
     card_title_row,
     muted_summary_label,
-    row_gap,
 )
 from zlc_ui.form.qt_form import being_edited
 from zlc_ui.fluent import (
     retire_widget,
+    row_gap,
     CARD_PAD,
     ElidedLabel,
     FluentPageBody,

@@ -30,7 +30,7 @@ from zlc_ui.fluent import (
     window_pad,
 )
 from zlc_ui.fluent import PublishedItemsLegend
-from zlc_ui.form import form_gap
+from zlc_ui.fluent import row_gap
 
 #: Every kind a row can carry, so the kind column is one width on every row
 #: and the status beside it starts at one x down the page.
@@ -140,10 +140,10 @@ class LogicRowView(FluentFrame):
         # Plot | Start | Stop group has the same air in both places.
         pad = scaled_px(CARD_PAD)
         outer.setContentsMargins(pad, pad, pad, pad)
-        outer.setSpacing(form_gap())
+        outer.setSpacing(row_gap())
 
         top = QtWidgets.QHBoxLayout()
-        top.setSpacing(form_gap())
+        top.setSpacing(row_gap())
         self.dot = FluentStatusDot(size=STATUS_DOT, color=GREY)
         self.name_label = ElidedLabel(self.title)
         # Name and kind are fixed columns: every row's kind and status start

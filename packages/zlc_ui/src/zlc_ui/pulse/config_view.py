@@ -14,9 +14,9 @@ from zlc_ui.fluent import (
 )
 
 from ._layout import (
-    bound_field_width, card_pad, column_header, config_name_width, inline_gap, px, row_gap,
-    row_height, section_gap,
+    bound_field_width, column_header, config_name_width, px, row_height,
 )
+from zlc_ui.fluent import card_pad, row_gap, section_gap
 from .models import ConfigPageRecord
 
 #: The binding grid's columns, left to right: what it binds, the Config name
@@ -59,7 +59,7 @@ class PulseConfigView(QtWidgets.QWidget):
         file_layout.setContentsMargins(pad, pad, pad, pad)
         file_layout.setSpacing(row_gap())
         toolbar = QtWidgets.QHBoxLayout()
-        toolbar.setSpacing(inline_gap())
+        toolbar.setSpacing(row_gap())
         self._file_buttons = []
         for name, text, role in (
             ("new", "New file", "standard"), ("load", "Open file", "standard"),
@@ -108,7 +108,7 @@ class PulseConfigView(QtWidgets.QWidget):
         self.values_model.itemChanged.connect(lambda _item: self._emit_entries())
         file_layout.addWidget(self.values_table)
         actions = QtWidgets.QHBoxLayout()
-        actions.setSpacing(inline_gap())
+        actions.setSpacing(row_gap())
         self.add_button = FluentButton("Add parameter")
         self.remove_button = FluentButton("Remove selected", role="destructive")
         self.add_button.clicked.connect(self._add_entry)
@@ -133,7 +133,7 @@ class PulseConfigView(QtWidgets.QWidget):
         # and the two values have fixed widths, and the status takes the
         # rest.  Stretch shares put a page width between them.
         self._binding_grid = QtWidgets.QGridLayout()
-        self._binding_grid.setHorizontalSpacing(inline_gap())
+        self._binding_grid.setHorizontalSpacing(row_gap())
         self._binding_grid.setVerticalSpacing(row_gap())
         self._binding_grid.setColumnStretch(_STATUS, 1)
         self._grid_headers = tuple(

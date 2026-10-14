@@ -15,7 +15,10 @@ from zlc_ui.fluent import (
     FluentReadoutEdit, FluentScrollArea, FluentSwitch, add_row_switch, signals_blocked,
 )
 
-from ._layout import card_pad, px, row_height, section_gap
+from ._layout import (
+    px, row_height,
+)
+from zlc_ui.fluent import card_pad, section_gap
 
 
 class PulsePreviewView(QtWidgets.QWidget):

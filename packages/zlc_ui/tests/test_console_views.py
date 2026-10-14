@@ -962,12 +962,12 @@ assert editor.artifact_form.widget_for('calibration_path').mapTo(editor, QtCore.
 # on one column; and the content sits a window pad inside the page on both
 # sides, the scrollbar's gutter held although no bar shows.
 from zlc_ui.fluent import FluentSettingRow, window_pad
-from zlc_ui.form import form_gap
+from zlc_ui.fluent import row_gap
 top_of = lambda widget: widget.mapTo(editor, QtCore.QPoint()).y()
 rows = sorted((row for row in editor.findChildren(FluentSettingRow) if row.isVisible()), key=top_of)
 assert len(rows) == 5, [row.layout().itemAt(0).widget().text() for row in rows]
 gaps = [top_of(below) - top_of(above) - above.height() for above, below in zip(rows, rows[1:])]
-assert gaps == [form_gap()] * 4, gaps
+assert gaps == [row_gap()] * 4, gaps
 assert top_of(rows[0]) - top_of(editor.status_label) - editor.status_label.height() == window_pad()
 assert top_of(editor.remove_button) - top_of(rows[-1]) - rows[-1].height() == window_pad()
 assert len({row.layout().itemAt(1).widget().mapTo(editor, QtCore.QPoint()).x() for row in rows}) == 1

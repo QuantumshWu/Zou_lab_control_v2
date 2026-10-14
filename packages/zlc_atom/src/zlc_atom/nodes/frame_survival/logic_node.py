@@ -68,7 +68,7 @@ def _build(*, source_signal: str, **values: object) -> FrameSurvivalProcessor:
 def _editor_factory(parent=None):
     from PyQt5 import QtCore, QtWidgets
     from zlc_ui.fluent import (
-        FluentSectionLabel, FluentSegmentedButtons, FluentSelectionGrid, error_note_label, line_gap,
+        FluentSectionLabel, FluentSegmentedButtons, FluentSelectionGrid, error_note_label, row_gap,
         muted_note_label, show_note,
     )
     from .processor import PAIR_RULES
@@ -103,9 +103,9 @@ def _editor_factory(parent=None):
             super().__init__(parent)
             layout = QtWidgets.QVBoxLayout(self)
             layout.setContentsMargins(0, 0, 0, 0)
-            layout.setSpacing(line_gap())
+            layout.setSpacing(row_gap())
             header = QtWidgets.QHBoxLayout()
-            header.setSpacing(line_gap())
+            header.setSpacing(row_gap())
             self.title = FluentSectionLabel("Pairs")
             # Centred on the strip beside it, not dropped below it like an own-line section.
             self.title.setContentsMargins(0, 0, 0, 0)

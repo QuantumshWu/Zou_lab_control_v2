@@ -23,7 +23,7 @@ from PyQt5 import QtCore, QtWidgets
 from zlc_ui.fluent import (
     AXIS_GROUP_COLORS, CARD_PAD, FluentButton, FluentCheckBox, FluentCodeEdit, FluentColumnLine, FluentColumnSet,
     FluentComboBox, FluentFrame, FluentLabel, FluentLineEdit, FluentSectionLabel, FluentSegmentedButtons,
-    error_note_label, field_text_inset, hold_place, line_gap, muted_note_label, popup_gap, retire_widget,
+    error_note_label, field_text_inset, hold_place, row_gap, muted_note_label, popup_gap, retire_widget,
     scaled_px, show_note, signals_blocked,
 )
 from zlc_ui.fluent.fluent import _FluentRoundedMenu
@@ -90,7 +90,7 @@ def _card_column(card: QtWidgets.QWidget) -> QtWidgets.QVBoxLayout:
     column = QtWidgets.QVBoxLayout(card)
     pad = scaled_px(CARD_PAD)
     column.setContentsMargins(pad, pad, pad, pad)
-    column.setSpacing(line_gap())
+    column.setSpacing(row_gap())
     return column
 
 
@@ -183,7 +183,7 @@ class _OutputCard(FluentFrame):
         over = QtWidgets.QWidget(self)
         self.over_host = QtWidgets.QHBoxLayout(over)
         self.over_host.setContentsMargins(0, 0, 0, 0)
-        self.over_host.setSpacing(line_gap())
+        self.over_host.setSpacing(row_gap())
         statistic.place("operand", self.statistic, FluentLabel("over"), over, to="actions")
         self.over: dict[str, QtWidgets.QCheckBox] = {}
 
@@ -199,7 +199,7 @@ class _OutputCard(FluentFrame):
         block = QtWidgets.QWidget(self)
         rows = QtWidgets.QVBoxLayout(block)
         rows.setContentsMargins(0, 0, 0, 0)
-        rows.setSpacing(line_gap() // 2)
+        rows.setSpacing(row_gap() // 2)
         line = FluentColumnLine(self._editor.columns, block)
         rows.addWidget(line)
         column.addWidget(block)
@@ -503,12 +503,12 @@ class DeriveEditor(QtWidgets.QWidget):
         self.columns.set_width("lead", scaled_px(_NAME_WIDTH))
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(line_gap())
+        layout.setSpacing(row_gap())
 
         # A row of the editor's form: "Inputs" in its label column, the
         # members' names where the bundle combo's text starts above them.
         inputs = QtWidgets.QHBoxLayout()
-        inputs.setSpacing(line_gap())
+        inputs.setSpacing(row_gap())
         self.inputs_title = FluentLabel("Inputs")
         inputs.addWidget(self.inputs_title, 0, QtCore.Qt.AlignTop)
         self.inputs = QtWidgets.QGridLayout()
@@ -521,7 +521,7 @@ class DeriveEditor(QtWidgets.QWidget):
         self._input_rows: list[tuple[QtWidgets.QLabel, ...]] = []
 
         header = QtWidgets.QHBoxLayout()
-        header.setSpacing(line_gap())
+        header.setSpacing(row_gap())
         title = FluentSectionLabel("Outputs")
         # Centred on the buttons beside it, not dropped below them like an own-line section.
         title.setContentsMargins(0, 0, 0, 0)
@@ -539,7 +539,7 @@ class DeriveEditor(QtWidgets.QWidget):
         self.empty.setWordWrap(True)
         layout.addWidget(self.empty)
         self.cards = QtWidgets.QVBoxLayout()
-        self.cards.setSpacing(line_gap())
+        self.cards.setSpacing(row_gap())
         layout.addLayout(self.cards)
         self.footer = muted_note_label(_FOOTER)
         self.footer.setWordWrap(True)

@@ -25,7 +25,7 @@ from zlc_ui.fluent import (
     window_pad,
 )
 
-from ._layout import section_gap
+from zlc_ui.fluent import section_gap
 from .preview_view import PulsePreviewView
 from .scan_view import PulseScanView
 from .config_view import PulseConfigView

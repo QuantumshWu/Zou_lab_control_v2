@@ -43,21 +43,13 @@ from collections.abc import Sequence
 
 from PyQt5 import QtCore, QtWidgets, sip
 
-from .fluent import FluentLabel, fluent_font_size, scaled_px
+from .fluent import FluentLabel, fluent_font_size, row_gap, scaled_px
 from .style import FONT, RED_DARK
 
 #: What decides a column's width; see the module docstring.
 COLUMN_KINDS = ("fit", "stretch", "slots", "glyph")
 
 
-def line_gap() -> int:
-    """The one gap of a section built of lines: between two cells of a line,
-    between two lines, and between two cards.
-
-    It is a :class:`FluentSettingRow`'s label-to-field spacing and a form's
-    row spacing, so such a section keeps the rhythm of the form above it."""
-
-    return scaled_px(6, minimum=4)
 
 
 def error_note_label(text: str = "") -> QtWidgets.QLabel:
@@ -116,7 +108,7 @@ class FluentColumnSet(QtCore.QObject):
         unknown = set(self._kinds.values()) - set(COLUMN_KINDS)
         if unknown:
             raise ValueError(f"unknown column kinds {sorted(unknown)!r}")
-        self.gap = line_gap()
+        self.gap = row_gap()
         self._pinned: dict[str, int] = {}
         self._lines: list[FluentColumnLine] = []
         self._followers: list[tuple[QtWidgets.QWidget, str, int]] = []
@@ -316,6 +308,5 @@ __all__ = [
     "FluentColumnSet",
     "error_note_label",
     "hold_place",
-    "line_gap",
     "show_note",
 ]

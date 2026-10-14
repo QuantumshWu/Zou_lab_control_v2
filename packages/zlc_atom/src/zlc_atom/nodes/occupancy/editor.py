@@ -41,7 +41,7 @@ from zlc_ui.fluent import (
     FluentSelectionGrid,
     error_note_label,
     fluent_open_path,
-    line_gap,
+    row_gap,
     muted_note_label,
     scaled_px,
     show_note,
@@ -69,11 +69,11 @@ class CalibrationsEditor(QtWidgets.QWidget):
         super().__init__(parent)
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(line_gap())
+        layout.setSpacing(row_gap())
         header = QtWidgets.QHBoxLayout()
         # The label-to-field spacing of a setting row: with the title in the
         # label column, Add starts on the form's field edge.
-        header.setSpacing(line_gap())
+        header.setSpacing(row_gap())
         self.title = FluentSectionLabel("Calibrations")
         # Centred on the button beside it, not dropped below it like an own-line section.
         self.title.setContentsMargins(0, 0, 0, 0)
@@ -103,7 +103,7 @@ class CalibrationsEditor(QtWidgets.QWidget):
         self.model_row = QtWidgets.QWidget(self)
         model_layout = QtWidgets.QHBoxLayout(self.model_row)
         model_layout.setContentsMargins(0, scaled_px(6), 0, 0)
-        model_layout.setSpacing(line_gap())
+        model_layout.setSpacing(row_gap())
         # A field label like "Frames" above it, not a second hint line.
         self.model_label = FluentLabel("Readout model")
         self.model_label.setStyleSheet(f"color: {TEXT}; background: transparent; border: none;")

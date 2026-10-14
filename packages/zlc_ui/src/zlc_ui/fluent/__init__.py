@@ -30,7 +30,7 @@ for _name in (
     "fluent_confirm", "fluent_save_path", "fluent_open_path", "stamped_file_name",
     "FluentComboBox", "FluentCycleComboBox", "FluentTreeComboBox", "FluentTabWidget",
     "FluentUnitPicker", "fluent_unit_picker", "unit_choice_tree",
-    "FluentSwitch", "add_row_switch", "command_gap", "fluent_switch_width", "fluent_spinbox_stylesheet", "fluent_inner_edit_stylesheet", "FluentSpinBox", "FluentInputDialog", "FluentCardDialog",
+    "FluentSwitch", "add_row_switch", "command_gap", "fluent_switch_width", "fluent_spinbox_stylesheet", "row_gap", "section_gap", "card_pad", "fluent_inner_edit_stylesheet", "FluentSpinBox", "FluentInputDialog", "FluentCardDialog",
     "FluentCodeEdit", "FluentDoubleSpinBox", "fluent_count_box", "fluent_integer_box", "FluentCheckBox", "FluentScrollArea",
     "FluentPageBody", "FluentTableView", "FluentSelectionGrid", "FluentSegmentedButtons",
     "LinkedScrollPanes", "apply_fluent_scrollbars", "FluentWindow", "FluentDialogWindow",
@@ -40,7 +40,7 @@ for _name in (
 ):
     _EXPORTS[_name] = ("zlc_ui.fluent.fluent", _name)
 for _name in (
-    "COLUMN_KINDS", "FluentColumnSet", "FluentColumnLine", "hold_place", "line_gap", "error_note_label",
+    "COLUMN_KINDS", "FluentColumnSet", "FluentColumnLine", "hold_place", "error_note_label",
     "show_note",
 ):
     _EXPORTS[_name] = ("zlc_ui.fluent.column_set", _name)

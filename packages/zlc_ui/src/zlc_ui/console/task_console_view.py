@@ -31,7 +31,7 @@ from zlc_ui.fluent import (
 )
 
 from .board_view import ConsoleBoardView
-from zlc_ui.form import form_gap
+from zlc_ui.fluent import row_gap
 
 from .logic_row_view import STATUS_DOT, LogicRowView, mount_logic_page
 from .panel_card_view import PanelCardView
@@ -188,7 +188,7 @@ class TaskConsoleView(QtWidgets.QWidget):
         self.logic_layout = QtWidgets.QVBoxLayout(self.logic_body)
         # Cards stack a form gap apart, like rows; the page edges are every
         # Logic page's (mount_logic_page).
-        self.logic_layout.setSpacing(form_gap())
+        self.logic_layout.setSpacing(row_gap())
         self.logic_hint = FluentLabel(
             "No logic nodes yet.  Add a Measurement / Processor / Task from the header "
             "(it starts STOPPED); open its Edit to set parameters and Start it."

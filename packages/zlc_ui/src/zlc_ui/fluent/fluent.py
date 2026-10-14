@@ -188,6 +188,29 @@ def control_height() -> int:
     return scaled_px(30, minimum=22)
 
 
+def row_gap() -> int:
+    """The ONE gap of a page's rhythm: between two rows of a form, two
+    lines of a card, two stacked cards, and two cells of one row (a label
+    and its control, a field and its unit, two buttons).  Defined once, so
+    no surface keeps a private copy that drifts to 3 or 7."""
+
+    return scaled_px(6, minimum=4)
+
+
+def section_gap() -> int:
+    """Between two sections of a page, above an action bar, and from a
+    page's edge to its content."""
+
+    return window_pad(1)
+
+
+def card_pad() -> int:
+    """A card's content inset on every side: where its title and its first
+    row start."""
+
+    return scaled_px(CARD_PAD)
+
+
 # ---------------------------------------------------------------- frame geometry
 #
 # THE ONE GEOMETRY RULE for a frame with parts inside it (a spin box's

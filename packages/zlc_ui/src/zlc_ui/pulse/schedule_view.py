@@ -25,11 +25,11 @@ from zlc_ui.fluent import (
 )
 
 from ._layout import (
-    add_labeled_widget, card_pad, channel_name_edit_width, field_column_readout, form_label,
-    inline_gap, label_column_width, panel_top_height, px, period_card_width,
-    period_control_width, quiet, row_gap, row_height, row_spacing, section_gap,
+    add_labeled_widget, channel_name_edit_width, field_column_readout, form_label, label_column_width,
+    panel_top_height, px, period_card_width, period_control_width, quiet, row_height, row_spacing,
     spacer_card_width, spacer_control_width, time_unit_width,
 )
+from zlc_ui.fluent import card_pad, row_gap, section_gap
 from .models import (
     PERIOD_KIND_SPACER,
     VALIDATOR_FLOAT,
@@ -382,7 +382,7 @@ class PeriodCard(FluentGroupBox):
                 widget.setFixedHeight(row_height())
                 row_layout = QtWidgets.QHBoxLayout(widget)
                 row_layout.setContentsMargins(0, 0, 0, 0)
-                row_layout.setSpacing(inline_gap())
+                row_layout.setSpacing(row_gap())
                 combo = FluentComboBox()
                 if self.kind == PERIOD_KIND_SPACER:
                     # A spacer holds every DAC: the one mode it has is shown,
@@ -578,7 +578,7 @@ class ChannelNamesPanel(FluentGroupBox):
         width = label_column_width(shown)
         for label in (*self._labels, *self._row_labels.values()):
             label.setFixedWidth(width)
-        self.setFixedWidth(2 * card_pad() + width + inline_gap() + channel_name_edit_width())
+        self.setFixedWidth(2 * card_pad() + width + row_gap() + channel_name_edit_width())
 
     def set_ports(self, document_name: str, ports: tuple[PortRowVM, ...]) -> None:
         self.name_edit.setText(str(document_name))
@@ -597,7 +597,7 @@ class ChannelNamesPanel(FluentGroupBox):
                 holder.setStyleSheet("background: transparent;")
                 row = QtWidgets.QHBoxLayout(holder)
                 row.setContentsMargins(0, 0, 0, 0)
-                row.setSpacing(inline_gap())
+                row.setSpacing(row_gap())
                 endpoint = form_label(port.endpoint_text or port.key)
                 field.setFixedHeight(row_height())
                 row.addWidget(endpoint)
@@ -683,7 +683,7 @@ class ChannelPanel(FluentGroupBox):
         mode_row = QtWidgets.QWidget()
         mode_layout = QtWidgets.QHBoxLayout(mode_row)
         mode_layout.setContentsMargins(0, 0, 0, 0)
-        mode_layout.setSpacing(inline_gap())
+        mode_layout.setSpacing(row_gap())
         # The row's "Config" label names it; a switch saying "Config" again
         # beside it read "Config: Config".
         self.config_mode = FluentSwitch("")
@@ -721,7 +721,7 @@ class ChannelPanel(FluentGroupBox):
         for label in (*self._labels, *self._row_labels.values()):
             label.setFixedWidth(width)
         cells = (width, self._delay_width(), time_unit_width(), row_height(), row_height())
-        self.setFixedWidth(2 * card_pad() + sum(cells) + inline_gap() * (len(cells) - 1))
+        self.setFixedWidth(2 * card_pad() + sum(cells) + row_gap() * (len(cells) - 1))
 
     def set_delay_rows(
         self,
@@ -764,7 +764,7 @@ class ChannelPanel(FluentGroupBox):
                 holder = QtWidgets.QWidget()
                 holder_layout = QtWidgets.QHBoxLayout(holder)
                 holder_layout.setContentsMargins(0, 0, 0, 0)
-                holder_layout.setSpacing(inline_gap())
+                holder_layout.setSpacing(row_gap())
                 label = form_label(port.label)
                 holder_layout.addWidget(label)
                 holder_layout.addWidget(edit)
@@ -1851,7 +1851,7 @@ class PulseScheduleView(QtWidgets.QWidget):
         control_layout.setSpacing(gap)
         controls = QtWidgets.QGridLayout()
         controls.setContentsMargins(0, 0, 0, 0)
-        controls.setHorizontalSpacing(inline_gap())
+        controls.setHorizontalSpacing(row_gap())
         controls.setVerticalSpacing(gap)
         self.run_button = FluentButton("On Pulse")
         # Stop takes the board safe: it ends what the hardware is doing, and
@@ -1914,7 +1914,7 @@ class PulseScheduleView(QtWidgets.QWidget):
         connection_layout.addWidget(self.connection_combo)
         connection_row = QtWidgets.QHBoxLayout()
         connection_row.setContentsMargins(0, 0, 0, 0)
-        connection_row.setSpacing(inline_gap())
+        connection_row.setSpacing(row_gap())
         connection_row.addWidget(self.connection_endpoint, 1)
         connection_row.addWidget(self.connection_button)
         connection_layout.addLayout(connection_row)
@@ -1939,7 +1939,7 @@ class PulseScheduleView(QtWidgets.QWidget):
         ports_layout.addWidget(self.hidden_port_combo)
         ports_row = QtWidgets.QHBoxLayout()
         ports_row.setContentsMargins(0, 0, 0, 0)
-        ports_row.setSpacing(inline_gap())
+        ports_row.setSpacing(row_gap())
         for button in (self.add_port_button, self.hide_off_button, self.show_all_button):
             button.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
             ports_row.addWidget(button, 1)
@@ -1962,7 +1962,7 @@ class PulseScheduleView(QtWidgets.QWidget):
             compact = FluentFrame(bordered=False)
             toolbar = QtWidgets.QHBoxLayout(compact)
             toolbar.setContentsMargins(0, 0, 0, 0)
-            toolbar.setSpacing(inline_gap())
+            toolbar.setSpacing(row_gap())
             for widget in (self.add_button, self.spacer_button, self.bracket_button, self.remove_button):
                 widget.setParent(compact)
                 widget.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Fixed)

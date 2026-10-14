@@ -18,7 +18,10 @@ from zlc_ui.fluent import (
     fluent_scrollbar_thickness, signals_blocked,
 )
 
-from ._layout import card_pad, column_header, inline_gap, px, row_gap, row_height, section_gap
+from ._layout import (
+    column_header, px, row_height,
+)
+from zlc_ui.fluent import card_pad, row_gap, section_gap
 from .models import TargetPortRecord, TargetWidthRule
 
 
@@ -66,7 +69,7 @@ class PulseTargetView(QtWidgets.QWidget):
         header.setFixedHeight(px(58, minimum=48))
         header_layout = QtWidgets.QHBoxLayout(header)
         header_layout.setContentsMargins(pad, pad, pad, pad)
-        header_layout.setSpacing(inline_gap())
+        header_layout.setSpacing(row_gap())
         self.status_label = FluentLabel("")
         self.status_label.setWordWrap(True)
         header_layout.addWidget(self.status_label, 1)
@@ -92,7 +95,7 @@ class PulseTargetView(QtWidgets.QWidget):
         self.digital_card = FluentGroupBox("Digital outputs")
         self.digital_layout = QtWidgets.QGridLayout(self.digital_card)
         self.digital_layout.setContentsMargins(pad, pad, pad, pad)
-        self.digital_layout.setHorizontalSpacing(inline_gap())
+        self.digital_layout.setHorizontalSpacing(row_gap())
         self.digital_layout.setVerticalSpacing(row_gap())
         self.digital_layout.setColumnStretch(0, 1)
         self.digital_layout.setColumnStretch(1, 2)
@@ -102,7 +105,7 @@ class PulseTargetView(QtWidgets.QWidget):
         self.dac_card = FluentGroupBox("DAC outputs")
         self.dac_layout = QtWidgets.QGridLayout(self.dac_card)
         self.dac_layout.setContentsMargins(pad, pad, pad, pad)
-        self.dac_layout.setHorizontalSpacing(inline_gap())
+        self.dac_layout.setHorizontalSpacing(row_gap())
         self.dac_layout.setVerticalSpacing(row_gap())
         self.dac_layout.setColumnStretch(0, 1)
         self.dac_layout.setColumnStretch(2, 2)

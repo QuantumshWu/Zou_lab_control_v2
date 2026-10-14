@@ -35,7 +35,8 @@ from zlc_ui.fluent import (
     setting_label_width,
     window_pad,
 )
-from zlc_ui.form import FluentParameterForm, FormSpec, form_gap
+from zlc_ui.fluent import row_gap
+from zlc_ui.form import FluentParameterForm, FormSpec
 from zlc_ui.form.qt_form import _form_label_width
 from .logic_row_view import (
     STATE_COLOURS,
@@ -98,7 +99,7 @@ class LogicEditorView(QtWidgets.QWidget):
         # shown -- a block spacing of its own had put 9 between rows that
         # stand 5 apart everywhere else, and 19 above the action bar.
         self._body_layout = QtWidgets.QVBoxLayout(body)
-        self._body_layout.setSpacing(form_gap())
+        self._body_layout.setSpacing(row_gap())
         self._lead_gap = QtWidgets.QSpacerItem(0, 0, QtWidgets.QSizePolicy.Minimum, QtWidgets.QSizePolicy.Fixed)
         self._action_gap = QtWidgets.QSpacerItem(0, 0, QtWidgets.QSizePolicy.Minimum, QtWidgets.QSizePolicy.Fixed)
         #: The spacer above each contribution, by its factory.
@@ -155,7 +156,7 @@ class LogicEditorView(QtWidgets.QWidget):
         self._selector_frame.setStyleSheet("background: transparent;")
         self._selector_layout = QtWidgets.QVBoxLayout(self._selector_frame)
         self._selector_layout.setContentsMargins(0, 0, 0, 0)
-        self._selector_layout.setSpacing(form_gap())
+        self._selector_layout.setSpacing(row_gap())
         self.source_combo: FluentComboBox | None = None
         self._body_layout.addWidget(self._selector_frame)
 
@@ -184,7 +185,7 @@ class LogicEditorView(QtWidgets.QWidget):
             self._artifact_result_frame
         )
         self._artifact_result_layout.setContentsMargins(0, 0, 0, 0)
-        self._artifact_result_layout.setSpacing(form_gap())
+        self._artifact_result_layout.setSpacing(row_gap())
         self._artifact_result_rows: dict[str, FluentSettingRow] = {}
         self._body_layout.addWidget(self._artifact_result_frame)
 
@@ -194,7 +195,7 @@ class LogicEditorView(QtWidgets.QWidget):
         # are always there, so nothing on this row moves when a run begins.
         # Remove keeps to the far side, away from the buttons pressed most.
         actions = QtWidgets.QHBoxLayout()
-        actions.setSpacing(form_gap())
+        actions.setSpacing(row_gap())
         self.remove_button = FluentButton("Remove", role="destructive")
         self.remove_button.clicked.connect(self.remove_requested.emit)
         actions.addWidget(self.remove_button)
@@ -430,7 +431,7 @@ class LogicEditorView(QtWidgets.QWidget):
         it, and before the action bar.  A hidden block takes no gap at all.
         """
 
-        extra = window_pad() - form_gap()
+        extra = window_pad() - row_gap()
         rows_above = any(
             not block.isHidden()
             for block in (self._selector_frame, self.artifact_form, self.form)

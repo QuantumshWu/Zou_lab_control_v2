@@ -7,6 +7,8 @@ from collections.abc import Mapping
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 from zlc_ui.fluent import (
+    control_height,
+    row_gap,
     ACCENT,
     ACCENT_TINT,
     CARD_PAD,
@@ -62,18 +64,8 @@ from zlc_ui.form.qt_form import (
 from zlc_ui.console.status_strip import StatusStrip
 
 
-def control_height() -> int:
-    """The one height of a row's controls: fields, combos and buttons."""
-
-    return scaled_px(30, minimum=22)
 
 
-def row_gap() -> int:
-    """The gap between the rows of a form and between the cells of one row,
-    the gap FluentSettingRow and FluentParameterForm keep -- so a title row,
-    a device's header row and the form rows under it step at one pitch."""
-
-    return scaled_px(6, minimum=4)
 
 
 def _rule_gap() -> int:
