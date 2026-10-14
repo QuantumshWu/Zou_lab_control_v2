@@ -243,8 +243,10 @@ class LogicEditorView(QtWidgets.QWidget):
         # operator is reading.  They read nothing but the projection, so
         # an unchanged projection makes them all no-ops, and the fields
         # below are excluded from the comparison precisely because the
-        # cheap half further down is what applies them.
-        volatile = ("running", "pending", "error", "issues", "status",
+        # cheap half further down is what applies them.  ``error`` is not
+        # among them: it changes only when a run fails or recovers, and a
+        # contribution shows a failure beside the row that caused it.
+        volatile = ("running", "pending", "issues", "status",
                     "auto_preview", "can_start", "can_stop")
         structure = {
             key: value for key, value in incoming.items() if key not in volatile

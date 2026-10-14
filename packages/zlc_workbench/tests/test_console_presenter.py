@@ -972,12 +972,13 @@ def test_header_save_layout_writes_no_panel_dataset(
     node, snapshot = _one_shot(session)
     presenter.add_panel(node.signal_key("frames"), snapshot, title="frames")
     rows = (
-        {"name": "first", "code": "result = a.frames.isel(frame=0)"},
-        {"name": "twice", "code": "result = first * 2"},
+        {"name": "first", "value": "frames", "at": "0"},
+        {"name": "twice", "value": "first", "op": "*", "with": "2"},
+        {"name": "rows", "code": "result = first.mean('spatial-y')"},
     )
     derived = presenter.add_logic(
         "derive", source_signal=node.signal_key("frames"),
-        values={"expressions": rows},
+        values={"outputs": rows},
     )
     path = tmp_path / "layout.json"
     presenter.view.save_answer = str(path)
@@ -991,10 +992,13 @@ def test_header_save_layout_writes_no_panel_dataset(
     assert presenter.LAYOUT_FORMAT == "zlc.console-board"
     assert document["format"] == presenter.LAYOUT_FORMAT
     assert document["panels"][0]["signal"] == node.signal_key("frames")
-    assert document["logic"][0]["values"]["expressions"] == list(rows)
+    assert document["logic"][0]["values"]["outputs"] == list(rows)
     assert presenter.apply_layout(document)
-    # A draft holds the projected value: a "rows" field is a tuple of rows.
-    assert presenter.logic[derived].draft.values["expressions"] == rows
+    # A draft holds the projected value: a "rows" field is a tuple of rows,
+    # each with every column.
+    from zlc_atom.nodes.derive.expression import complete_row
+
+    assert presenter.logic[derived].draft.values["outputs"] == tuple(complete_row(row) for row in rows)
     assert not tuple(tmp_path.glob("*.npz"))
 
 
@@ -4172,9 +4176,11 @@ def test_a_board_names_its_panels_and_a_load_respells_every_reference_to_them() 
         LayoutDocument.from_tree(tree)
     saved["fit"] = {}
     tree["logic"].append({"node_id": "derived", "api_name": "derive", "values": {
-        "expressions": [{"name": "result", "code": "a.counts +", "retired_column": 123}]}})
+        "outputs": [{"name": "result", "code": "a.counts +", "retired_column": 123}]}})
     _document, unfinished = _loaded_board(tree, ("panel-3", "panel-4", "panel-5"))
-    assert unfinished.logic[-1].draft.values["expressions"] == ({"name": "result", "code": "a.counts +"},)
+    from zlc_atom.nodes.derive.expression import complete_row
+
+    assert unfinished.logic[-1].draft.values["outputs"] == (complete_row({"name": "result", "code": "a.counts +"}),)
     with pytest.raises(LayoutError, match="one fresh panel_id per saved panel"):
         _loaded_board(tree, ("panel-3", "panel-4"))
 
@@ -4990,23 +4996,23 @@ def test_a_derive_publishes_the_counts_of_the_occupied_sites(
     _settle_logic(presenter, occupancy_id)
     counts_signal = stable_signal_key("occupancy", "counts")
     program = (
-        {"name": "bright", "code": "result = a.counts.isel(frame=1).where(a.occupied.isel(frame=1))"},
-        {"name": "how_many", "code": "result = a.occupied.isel(frame=1).count('calibration.site')"},
+        {"name": "bright", "value": "counts", "at": "1", "where": "occupied", "where_at": "1"},
+        {"name": "how_many", "value": "occupied", "at": "1", "statistic": "sum", "over": "calibration.site"},
     )
     derive_id = presenter.add_logic(
         "derive",
         node_id="sites",
-        values={"expressions": (program[0], {"name": "how_many", "code": ""})},
+        values={"outputs": (program[0], {"name": "how_many", "value": "occupied", "statistic": "sum"})},
         source_signal=counts_signal,
         open_editor=False,
     )
     incomplete = presenter.logic_editor_projection(derive_id)
     assert not incomplete["can_start"]
-    assert incomplete["issues"][0] == "Signals row 2: Enter Python code"
+    assert incomplete["issues"][0] == "how_many · statistic: choose the axes it reduces over"
     assert presenter._logic_state(presenter.logic[derive_id]) == (
-        "idle", "Draft: Signals row 2: Enter Python code"
+        "idle", "Draft: how_many · statistic: choose the axes it reduces over"
     )
-    assert presenter.update_logic_draft(derive_id, values={"expressions": program})
+    assert presenter.update_logic_draft(derive_id, values={"outputs": program})
     assert presenter.logic_editor_projection(derive_id)["can_start"]
     # Named by the draft, before anything ran: the board's own listing of
     # what this row will publish.
@@ -5036,7 +5042,7 @@ def test_a_derive_publishes_the_counts_of_the_occupied_sites(
     np.testing.assert_array_equal(values[judged], expected[judged])
     assert bright.schema.point_domain.axes == (), "scalar isel removes the named frame axis"
     assert bright.schema.value_schema.value_unit == (counts.schema.value_schema.value_unit or "1")
-    assert bright.run_record["parameters"]["expressions"] == program
+    assert bright.run_record["parameters"]["outputs"] == program
     how_many = front.value(stable_signal_key("sites", "how_many"))
     assert how_many is not None
     np.testing.assert_array_equal(
@@ -6347,8 +6353,8 @@ def test_a_following_processor_survives_its_camera_stop_and_restart(
     assert survival.following
     assert next(row for row in presenter.view.logic_rows if row.title == survival_id).commands[1]
     assert presenter.logic_editor_projection(survival_id)["can_stop"]
-    assert presenter._logic_state(survival)[0] == "running"
-    assert "waiting for a new source generation" in presenter._logic_state(survival)[1]
+    assert presenter._logic_state(survival)[0] == "error"
+    assert "restarts with the source's next run" in presenter._logic_state(survival)[1]
     # More shots from the same incompatible schema must not spin restarts.
     session.fire(shots=1)
     for _ in range(3):

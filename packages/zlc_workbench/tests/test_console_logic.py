@@ -1333,7 +1333,7 @@ def test_a_producers_new_output_reaches_every_open_editors_sources(presenter) ->
     assert total not in presenter.view.logic_editors[consumer_id]["source_options"]
     presenter.view.logic_draft_changed.emit(
         producer_id,
-        {"values": {"expressions": ({"name": "total", "code": "result = a.frames"},)}},
+        {"values": {"outputs": ({"name": "total", "value": "frames"},)}},
     )
     assert total in presenter.view.logic_editors[consumer_id]["source_options"]
 
@@ -1387,7 +1387,7 @@ def test_a_calibrations_api_fields_come_from_its_pulse_unless_chosen(presenter, 
 def test_make_host_hands_the_descriptor_contract_to_its_node_host() -> None:
     """The host takes what the descriptor declares, never a node attribute.
 
-    A derive reads the outputs its expression names: the declaration says
+    A derive reads the outputs its rows name: the declaration says
     there is an input, the instance says which siblings of it to fetch, and
     what it publishes is named by its draft, not by its kind.
     """

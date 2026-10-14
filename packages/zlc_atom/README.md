@@ -319,20 +319,32 @@ occupancy-rate output. The generic
 `zlc_plot` overlay declaration and same-run geometry document let any
 compatible presenter join `occupied` to `frame_judged` without knowing the
 Occupancy plugin. Two processors build on that classification without
-adding a second one: `derive` publishes named Dataset results from ordinary
-Python. Each output has a `name` and multiline `code`, ending in `result = ...`
-(a single expression also works). For example, output `agree` uses
-`result = a.occupied.isel(frame=0) == a.occupied.isel(frame=2)`; output `counts`
-uses `result = a.counts.isel(frame=1).where(agree)`. Scalar `isel` removes the
-selected named frame axis while retaining its size-one Point domain;
-`isel(frame=[1])` instead retains the length-one named axis. `where` changes
-validity, not the stored counts. Input range is explicit: `event` is the current
-publication, `run` is the accumulated run, and `window` requests the last N
-events from Runtime. Derive owns no additional history. Named reductions such
-as `mean("repeat", where=condition)` preserve the remaining axes and units;
-the editor lists the actual input axes and embeds the supported operations.
-Axis names are case-sensitive; use the displayed name or full AxisId, for
-example `count("calibration.site")` for Occupancy's `Site` axis.
+adding a second one: `derive` publishes named Dataset results computed
+within each shot. Each row of its `outputs` is one published signal, written
+as flat columns and applied in a fixed order -- select, mask, combine,
+reduce: `value` (a member of the bound bundle or an earlier output) pinned
+with `at` (a label of its readout-event axis, such as `"1"`; empty keeps every
+frame, and a pin removes the axis), then optionally `where`/`where_at`/
+`where_is` (a boolean that invalidates the other samples), `op`/`with`/
+`with_at` (`+ - * / == != > < >= <= & |` with a member, an earlier output or a
+number in the value's unit) and `statistic`/`over` (`sum mean count min max
+std any all` over comma-separated axes inside the shot). For example
+`{"name": "bright", "value": "counts", "at": "1", "where": "occupied",
+"where_at": "1"}` keeps the counts of the sites frame 1 judged occupied, and
+`{"name": "loaded", "value": "occupied", "at": "0", "statistic": "sum",
+"over": "Site"}` counts the atoms loaded in each shot; agreement of frames 0
+and 2 is `"op": "=="` with `"with_at": "2"`, and a later row masks with it.
+On booleans `sum` is the number true, `mean` the fraction true and `count`
+the valid samples, as in a plot; booleans do not mix with numbers. An operand
+whose axes are a subset of the value's repeats along the rest, so a per-shot
+level normalises every site. The editor types each row against the source's
+own schemas -- the evaluation's rules, no data -- and shows the result
+(`→ repeat 1 × Site 35 · float32 · unit 1`) or the error beside its control;
+Start refuses a row that does not type. A row with only `name` and `code` is
+ordinary Python over `a.<member>` assigning `result`, for anything else (a
+site subset, a custom function). Statistics across shots -- averages,
+per-site probabilities with error bars, fits -- belong in a plot panel, so
+Derive owns no history.
 The separate processor
 `frame_survival` asks, for selected forward frame pairs
 of a multi-frame cycle, whether a site an earlier frame saw loaded is still

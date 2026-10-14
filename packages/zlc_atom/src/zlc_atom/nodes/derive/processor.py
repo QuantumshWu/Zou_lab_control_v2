@@ -7,36 +7,31 @@ from dataclasses import replace
 from zlc_data import owned_snapshot_from_arrays
 from zlc_runtime import DatasetOutputDeclaration, LiveDatasetOutput, MonitorCoverage, SignalValue
 
-from .expression import Operand, compiled_rows, execute, signal_rows
+from .expression import Operand, compact_row, compiled, execute, output_rows
 
 
 def declared_outputs(rows: Sequence[Mapping[str, object]]) -> tuple[DatasetOutputDeclaration, ...]:
     return tuple(DatasetOutputDeclaration(row["name"], f"derive.{row['name']}",
                                           index_by_source=True)
-                 for row in signal_rows(rows))
+                 for row in output_rows(rows))
 
 
 class DeriveProcessor:
-    """Numerical code owns no input history, placement table or parallel schema."""
+    """Numerical code owns no input history, placement table or parallel schema.
 
-    def __init__(
-        self, *, expressions, primary_output: str, input_outputs: Sequence[str],
-        input_view: str = "event", window: int = 50,
-    ):
-        self.expressions = signal_rows(expressions)
-        self._programs = compiled_rows(self.expressions)
+    Each publication of the bound bundle is one shot: every output is
+    evaluated over that publication's members, in row order.
+    """
+
+    def __init__(self, *, outputs, primary_output: str, input_outputs: Sequence[str]):
+        self._programs = compiled(outputs)
+        self.outputs = tuple(compact_row(row) for row, _program in self._programs)
         self.primary_output = str(primary_output)
         names = tuple(input_outputs)
         if self.primary_output not in names:
             raise ValueError("the subscription anchor must belong to the input bundle")
         self.dataset_input_siblings = tuple(name for name in names if name != self.primary_output)
-        if input_view not in ("event", "run", "window"):
-            raise ValueError("input_view must be event, run or window")
-        if isinstance(window, bool) or int(window) < 1:
-            raise ValueError("window must be a positive event count")
-        self.dataset_input_view = input_view
-        self.dataset_input_window = int(window)
-        self.dataset_output_declarations = declared_outputs(self.expressions)
+        self.dataset_output_declarations = declared_outputs(self.outputs)
 
     def evaluate(self, source: SignalValue):
         return self.evaluate_inputs({"a": source})
@@ -79,8 +74,7 @@ class DeriveProcessor:
         primary = inputs["a"]
         return {
             "parameters": {
-                "expressions": self.expressions, "input_view": self.dataset_input_view,
-                "window": self.dataset_input_window if self.dataset_input_view == "window" else None,
+                "outputs": self.outputs,
                 "source_signal": primary.name,
                 "inputs": {
                     self.primary_output if name == "a" else name: value.name

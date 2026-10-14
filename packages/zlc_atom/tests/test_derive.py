@@ -1,4 +1,4 @@
-"""Derive executes ordinary Python on real three-domain Dataset operands."""
+"""Derive evaluates structured and code outputs on real three-domain Dataset operands."""
 
 from __future__ import annotations
 
@@ -13,9 +13,9 @@ from zlc_data import (
 from zlc_runtime import DatasetCoverage, MonitorCoverage, SignalValue
 
 from zlc_atom.nodes.derive import (
-    LOGIC_NODE, DeriveProcessor, ExpressionError, Operand,
+    LOGIC_NODE, DeriveError, DeriveProcessor, Operand,
 )
-from zlc_atom.nodes.derive.expression import compiled_rows, execute
+from zlc_atom.nodes.derive.expression import compiled, execute, typed_outputs
 
 COUNTS = "@logic/occupancy/counts"
 OCCUPIED = "@logic/occupancy/occupied"
@@ -51,7 +51,7 @@ def _rows(*signals):
 
 
 def _one(code, outputs):
-    return execute(compiled_rows(_rows(("answer", code))), outputs)["answer"]
+    return execute(compiled(_rows(("answer", code))), outputs)["answer"]
 
 
 def test_conditional_repeat_means_publish_one_35_site_vector() -> None:
@@ -101,8 +101,10 @@ def test_scalar_isel_drops_only_its_named_axis_while_lists_keep_length_one() -> 
     np.testing.assert_array_equal(scalar.values, kept.values)
     np.testing.assert_array_equal(source.sel(frame=1).values, scalar.values)
     assert source.sel(frame=[1]).schema == kept.schema
-    with pytest.raises(ValueError, match="axes/coordinates differ"):
-        _ = scalar + kept
+    # The pinned operand lacks only the frame axis: it repeats along it.
+    assert (scalar + kept).schema == kept.schema
+    with pytest.raises(ValueError, match="operand axes differ"):
+        _ = source.isel(frame=[0]) + kept
     one = source.isel(cycle=[0], frame=1, site=2)
     assert one.shape == (1, 1, 1)
     assert one.schema.repeat_domain.axes[0].name == "cycle"
@@ -216,15 +218,24 @@ def test_where_and_reductions_keep_invalid_and_empty_groups_explicit() -> None:
         assert not result.valid[0, 0, 0]
         assert result.valid[1, 0, 0] and result.values[1, 0, 0] == pytest.approx(expected)
     boolean = mask.with_values(mask.values, valid=source.valid)
-    for operation, expected in (("count", 1), ("any", True), ("all", False)):
+    # Booleans read as a plot reads them: sum is the number true, mean the
+    # fraction true, count the valid samples -- of any dtype.
+    for operation, expected in (("count", 2), ("sum", 1), ("mean", .5), ("any", True), ("all", False)):
         result = getattr(boolean, operation)("site")
         assert not result.valid[0, 0, 0]
         assert result.valid[1, 0, 0] and result.values[1, 0, 0] == expected
         assert result.unit == "1"
+    for operation in ("min", "max", "std"):
+        with pytest.raises(TypeError, match="needs numbers"):
+            getattr(boolean, operation)("site")
+    with pytest.raises(TypeError, match="do not mix with numbers"):
+        _ = source == boolean
+    with pytest.raises(TypeError, match="do not mix with numbers"):
+        _ = boolean * 2
     empty = mask.with_values(np.zeros(mask.shape, dtype=bool))
     for operation in ("sum", "mean", "min", "max", "std", "count"):
         assert not getattr(source, operation)(("cycle", "site"), where=empty).valid.any()
-    for operation in ("all", "any", "count"):
+    for operation in ("all", "any", "count", "sum", "mean"):
         assert not getattr(mask, operation)(("cycle", "site"), where=empty).valid.any()
     counted = source.count("cycle")
     np.testing.assert_array_equal(counted.values, [[[1, 0, 1]]])
@@ -237,14 +248,14 @@ def test_python_locals_numpy_and_previous_outputs_do_not_create_a_second_schema(
         ("difference", "scaled.isel(frame=1) - scaled.isel(frame=0)"),
         ("condition", "result = (difference > 0) & (difference < 5)"),
     )
-    programs = compiled_rows(rows)
-    assert tuple(name for name, _, _ in programs) == (
+    programs = compiled(rows)
+    assert tuple(row["name"] for row, _ in programs) == (
         "scaled",
         "difference",
         "condition",
     )
     results = execute(programs, {"counts": source})
-    assert tuple(results) == tuple(name for name, _, _ in programs)
+    assert tuple(results) == tuple(row["name"] for row, _ in programs)
     assert results["scaled"].schema == source.schema
     np.testing.assert_array_equal(results["scaled"].values, np.clip(source.values, 1, 4))
     np.testing.assert_array_equal(results["difference"].values, [[[2., 3., 2.]]])
@@ -266,51 +277,103 @@ def test_code_errors_are_named_without_escaping_the_worker() -> None:
         ("result = a.counts.with_values(np.zeros((2, 2)))", "three-domain physical shape"),
         ("result = a.counts.where(a.counts)", "boolean Dataset condition"),
     ):
-        with pytest.raises(ExpressionError, match=message):
+        with pytest.raises(DeriveError, match=f"answer · code: .*{message}"):
             _one(code, outputs)
     for rows in (
         (), ({"name": "old", "expression": "a.counts"},),
         _rows(("result", "a.counts")), _rows(("same", "a.counts"), ("same", "a.counts")),
+        ({"name": "mixed", "value": "counts", "code": "a.counts"},),
     ):
-        with pytest.raises(ExpressionError):
-            execute(compiled_rows(rows), outputs)
+        with pytest.raises(DeriveError):
+            execute(compiled(rows), outputs)
+
+
+def test_structured_outputs_type_exactly_as_they_evaluate() -> None:
+    """Each row reads select -> mask -> combine -> reduce; the schemas alone
+    give the same answer the data does, and refusals name row and stage."""
+    values = np.arange(24.0).reshape(2, 3, 4)
+    occupied = values % 3 != 0
+    outputs = {"counts": _operand(values), "occupied": _operand(occupied, "1")}
+    schemas = {name: value.schema for name, value in outputs.items()}
+    rows = (
+        {"name": "bright", "value": "counts", "at": "frame 1", "where": "occupied", "where_at": "frame 1"},
+        {"name": "loaded", "value": "occupied", "at": "frame 0", "statistic": "sum", "over": "site"},
+        {"name": "fraction", "value": "occupied", "at": "frame 0", "statistic": "mean", "over": "site"},
+        {"name": "level", "value": "bright", "statistic": "mean", "over": "site"},
+        # A per-shot level repeats along the sites it lacks.
+        {"name": "norm", "value": "counts", "at": "frame 1", "op": "/", "with": "level"},
+        {"name": "dark", "value": "counts", "at": "frame 2", "where": "occupied", "where_at": "frame 2",
+         "where_is": False},
+        {"name": "rise", "value": "counts", "at": "frame 2", "op": "-", "with": "counts", "with_at": "frame 0"},
+        {"name": "high", "value": "counts", "at": "frame 1", "op": ">", "with": "15"},
+        {"name": "agree", "value": "occupied", "at": "frame 0", "op": "==", "with": "occupied",
+         "with_at": "frame 2"},
+        {"name": "coded", "code": "result = norm * 2"},
+        {"name": "after", "value": "coded", "statistic": "max", "over": "site"},
+    )
+    answers = typed_outputs(rows, schemas)
+    results = execute(compiled(rows), outputs)
+    for row, answer in zip(rows, answers):
+        assert answer["error"] is None, answer["error"]
+        assert answer["schema"] is None or answer["schema"] == results[row["name"]].schema, row["name"]
+    assert answers[-2]["schema"] is answers[-1]["schema"] is None  # code: known after Start
+    np.testing.assert_array_equal(results["bright"].valid, occupied[:, 1:2, :])
+    np.testing.assert_array_equal(results["loaded"].values[:, 0, 0], occupied[:, 0, :].sum(axis=1))
+    np.testing.assert_allclose(results["fraction"].values[:, 0, 0], occupied[:, 0, :].mean(axis=1))
+    level = np.array([values[r, 1, occupied[r, 1]].mean() for r in range(2)])
+    np.testing.assert_allclose(results["norm"].values[:, 0, :], values[:, 1, :] / level[:, None])
+    np.testing.assert_array_equal(results["dark"].valid, ~occupied[:, 2:3, :])
+    np.testing.assert_array_equal(results["rise"].values, values[:, 2:3, :] - values[:, 0:1, :])
+    assert results["high"].dtype == bool and results["agree"].dtype == bool
+    assert results["loaded"].shape == (2, 1, 1) and results["loaded"].dtype == np.int64
+    for row, stage, message in (
+        # A pin is the frame's label, as a plot shows it.
+        ({"name": "x", "value": "counts", "at": "1"}, "value",
+         "no frame '1'; frame labels: frame 0, frame 1, frame 2"),
+        ({"name": "x", "value": "counts", "at": "frame 1", "where": "occupied"}, "where",
+         "frame is only on the mask"),
+        ({"name": "x", "value": "counts", "at": "frame 1", "op": "==", "with": "occupied", "with_at": "frame 1"},
+         "combine", "do not mix with numbers"),
+        ({"name": "x", "value": "counts", "at": "frame 1", "statistic": "mean", "over": "Site"},
+         "statistic", "no axis 'Site'; axes: cycle, site"),
+        ({"name": "x", "value": "counts", "statistic": "mean", "over": "cycle"},
+         "statistic", "belong in a plot panel"),
+        ({"name": "x", "value": "missing"}, "value", "no input or earlier output named 'missing'"),
+        ({"name": "x", "value": "later"}, "value", "defined below"),
+        ({"name": "x", "value": "counts", "op": "-"}, "combine", "choose what to combine with"),
+        ({"name": "counts", "value": "occupied"}, "name", "an input's name"),
+    ):
+        (answer, *_rest) = typed_outputs((row, {"name": "later", "value": "counts"}), schemas)
+        error = answer["error"]
+        assert (error.output, error.stage) == (row["name"], stage) and message in error.detail, error
 
 
 def test_processor_publishes_current_estimates_and_the_exact_program_provenance() -> None:
     values = np.arange(18.0).reshape(3, 2, 3)
     occupied = values % 2 == 0
-    rows = _rows(("bright", "a.counts.isel(frame=1).where(a.occupied.isel(frame=1))"),
-                 ("mean", "bright.mean('cycle')"))
-    processor = DeriveProcessor(expressions=rows, primary_output="counts",
-        input_outputs=("counts", "occupied"), input_view="run")
+    rows = ({"name": "bright", "value": "counts", "at": "frame 1", "where": "occupied", "where_at": "frame 1"},
+            {"name": "total", "code": "bright.sum('site')"})
+    processor = DeriveProcessor(outputs=rows, primary_output="counts",
+        input_outputs=("counts", "occupied"))
     assert processor.dataset_input_siblings == ("occupied",)
-    assert processor.dataset_input_view == "run"
     counts = _snapshot(values, "count", revision=3, name="counts")
-    canonical = replace(_schema(6, 2, 3, values.dtype, "count"),
-                        value_schema=counts.block.schema.value_schema)
-    primary = SignalValue(COUNTS, counts,
-        coverage=DatasetCoverage(6, 12), canonical_schema=canonical,
-        cell_origin=(1, 0))
-    inputs = {
-        "a": primary, "occupied": SignalValue(OCCUPIED, _snapshot(occupied, "1", revision=3),
-            coverage=primary.coverage, canonical_schema=_schema(6, 2, 3, occupied.dtype, "1"),
-            cell_origin=(1, 0)),
-    }
+    primary = SignalValue(COUNTS, counts, coverage=MonitorCoverage(6, 6))
+    inputs = {"a": primary, "occupied": SignalValue(OCCUPIED, _snapshot(occupied, "1", revision=3),
+                                                    coverage=primary.coverage)}
     outputs = processor.evaluate_inputs(inputs)
-    bright, mean = outputs["bright"], outputs["mean"]
+    bright, total = outputs["bright"], outputs["total"]
     assert bright.snapshot.block.schema.value_schema.name == "bright"
-    assert mean.snapshot.block.schema.value_schema.name == "mean"
+    assert total.snapshot.block.schema.value_schema.name == "total"
     assert primary.schema.value_schema.name == "counts"
     assert bright.snapshot.block.revision.value == 3
     assert bright.snapshot.block.values.shape == (3, 1, 3)
     assert bright.coverage == MonitorCoverage(3, 3)
     assert bright.canonical_schema is None and bright.cell_origin is None
-    assert mean.snapshot.block.values.shape == (1, 1, 3)
-    # The provenance the runtime files for this run: the exact program and
-    # which signal fed each input name.
+    assert total.snapshot.block.values.shape == (3, 1, 1)
+    # The provenance the runtime files for this run: the exact outputs, as
+    # written, and which signal fed each input name.
     parameters = processor.describe_run(inputs)["parameters"]
-    assert parameters["expressions"] == rows
-    assert parameters["input_view"] == "run"
+    assert parameters["outputs"] == rows
     assert parameters["inputs"] == {"counts": COUNTS, "occupied": OCCUPIED}
     np.testing.assert_array_equal(bright.snapshot.expanded_validity(), occupied[:, 1:2, :])
     with pytest.raises(RuntimeError, match="lost 'occupied'"):
@@ -319,13 +382,14 @@ def test_processor_publishes_current_estimates_and_the_exact_program_provenance(
 
 def test_descriptor_reads_only_names_and_syntax_without_evaluating_code() -> None:
     rows = _rows(("answer", "raise SystemExit('must not execute while editing')"))
-    declared = LOGIC_NODE.outputs_for({"expressions": rows}, {})
+    declared = LOGIC_NODE.outputs_for({"outputs": rows}, {})
     assert [(item.name, item.contract_id) for item in declared] == [("answer", "derive.answer")]
     schema = LOGIC_NODE.authoring_schema
-    authored = schema.project_values({"expressions": list(rows)})
-    assert authored == {"input_view": "event", "window": 50, "expressions": rows}
-    assert schema.draft_values({})["expressions"] == ()
-    with pytest.raises(ValueError, match="line 1"):
-        schema.project_values({"expressions": _rows(("broken", "result = ("))})
-    with pytest.raises(ValueError):
-        schema.project_values({"expressions": ({"name": "old", "expression": "a.counts"},)})
+    authored = schema.project_values({"outputs": list(rows)})
+    assert authored["outputs"][0]["code"] == rows[0]["code"] and authored["outputs"][0]["value"] == ""
+    assert schema.draft_values({})["outputs"] == ()
+    with pytest.raises(ValueError, match="broken · code: line 1"):
+        schema.project_values({"outputs": _rows(("broken", "result = ("))})
+    for row in ({"name": "old", "expression": "a.counts"}, {"name": "x", "value": "counts", "op": "%"}):
+        with pytest.raises(ValueError):
+            schema.project_values({"outputs": (row,)})
