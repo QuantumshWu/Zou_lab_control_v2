@@ -880,6 +880,22 @@ def muted_note_label(text: str) -> "QtWidgets.QLabel":
     return lbl
 
 
+def column_header_label(text: str) -> "FluentLabel":
+    """The name of a column laid out by hand -- a grid of bindings, a form
+    set in columns -- in the look of a FluentTableView's column names:
+    weight 600 in MUTED_INK, on the line of the row it heads.  ``setBold``
+    on a FluentLabel changes nothing (its sheet's ``font`` shorthand wins
+    over a QFont), and headings made that way read as one more row of
+    data."""
+
+    label = FluentLabel(text)
+    label.setStyleSheet(
+        f'QLabel {{ color: {MUTED_INK}; font: 600 {fluent_font_size()}pt "{FONT}"; '
+        f"background: transparent; border: none; }}"
+    )
+    return label
+
+
 class FluentFrame(QtWidgets.QFrame):
     def __init__(self, parent=None, *, bordered: bool = True, rule: bool = False,
                  round: tuple[str, ...] = ("NW", "NE", "SE", "SW")):
@@ -7322,13 +7338,39 @@ class _RuledRowHeader(QtWidgets.QHeaderView):
     The rules continue the viewport's own, one edge-width at each row's
     bottom, and the rule that would lie on the frame's bottom edge is not
     drawn -- as a section border it doubled the edge and squared the
-    rounded corner beside it."""
+    rounded corner beside it.
+
+    A row's label is drawn as a CELL of its row, by the table's own item
+    painter: the header's section painter centred its line box another
+    way and put every row number a pixel under the values beside it."""
 
     def __init__(self, parent=None):
         super().__init__(QtCore.Qt.Vertical, parent)
         # What QTableView gives the header it makes for itself.
         self.setSectionsClickable(True)
         self.setHighlightSections(True)
+
+    def paintSection(self, painter, rect, section: int) -> None:  # noqa: N802 - Qt naming
+        table = self.parent()
+        model = self.model()
+        if not isinstance(table, QtWidgets.QTableView) or model is None or not rect.isValid():
+            super().paintSection(painter, rect, section)
+            return
+        option = table.viewOptions()
+        option.rect = rect
+        option.text = str(model.headerData(section, QtCore.Qt.Vertical, QtCore.Qt.DisplayRole) or "")
+        option.features |= QtWidgets.QStyleOptionViewItem.HasDisplay
+        option.displayAlignment = self.defaultAlignment()
+        option.state &= ~(QtWidgets.QStyle.State_Selected | QtWidgets.QStyle.State_MouseOver
+                          | QtWidgets.QStyle.State_HasFocus)
+        option.palette.setColor(QtGui.QPalette.Text, QtGui.QColor(MUTED_INK))
+        selection = table.selectionModel()
+        # A row of the selection names itself in bold, as Qt's own header did.
+        option.font.setBold(bool(
+            self.highlightSections() and selection is not None
+            and selection.rowIntersectsSelection(section, table.rootIndex())
+        ))
+        table.style().drawControl(QtWidgets.QStyle.CE_ItemViewItem, option, painter, table)
 
     def paintEvent(self, event) -> None:  # noqa: N802 - Qt naming
         super().paintEvent(event)

@@ -21,7 +21,7 @@ for _name in (
     "fluent_font_size", "fluent_text_width", "popup_gap", "fluent_widget_stylesheet",
     "fluent_scrollbar_thickness", "fluent_scrollbar_stylesheet", "status_dot_stylesheet",
     "stroke_card_border", "signals_blocked", "format_compact_number",
-    "align_to_resolution", "FluentStatusDot", "FluentLabel", "muted_note_label",
+    "align_to_resolution", "FluentStatusDot", "FluentLabel", "muted_note_label", "column_header_label",
     "FluentFrame", "FluentOverlayFrame", "FluentPopup", "show_fluent_popup_for_anchor",
     "FluentSettingsPopupAnchor", "FluentGroupBox", "FluentButton", "FluentLineEdit",
     "FluentReadoutEdit", "FluentReadoutMultiline", "FluentPathEdit",
