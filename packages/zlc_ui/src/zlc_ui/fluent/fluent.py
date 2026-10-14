@@ -5712,7 +5712,17 @@ class FluentTriSwitch(QtWidgets.QAbstractButton):
     position = QtCore.pyqtProperty(float, fget=_get_position, fset=_set_position)
 
 
-def fluent_spinbox_stylesheet(selector: str) -> str:
+def fluent_spinbox_stylesheet(
+    selector: str,
+    *,
+    edge: str = _FIELD_EDGE_REST,
+    focus_edge: str = _FIELD_EDGE_FOCUS,
+    fill: str = "white",
+    ink: str = TEXT,
+) -> str:
+    # ``edge``/``fill``/``ink`` are the field's state colours: a bound field
+    # (Config, Scan, API) wears its binding's colours on the frame.
+    #
     # The steppers are BORDER-origin boxes whose ``margin`` is the edge
     # width: the margin box starts one edge-width left of the cell, and that
     # margin column is where the divider is painted, so neither the digits
@@ -5721,14 +5731,14 @@ def fluent_spinbox_stylesheet(selector: str) -> str:
     # from the frame by _paint_fluent_spin_buttons.
     return f"""
     {selector} {{
-        background: white;
-        border: {FIELD_BORDER_PX}px solid {_FIELD_EDGE_REST};
+        background: {fill};
+        border: {FIELD_BORDER_PX}px solid {edge};
         border-radius: {_radius()}px;
         padding: {scaled_px(PADDING_V)}px {scaled_px(EDIT_PADDING_H)}px;
         font: {fluent_font_size()}pt "{FONT}";
-        color: {TEXT};
+        color: {ink};
     }}
-    {selector}:focus {{ border: {FIELD_BORDER_PX}px solid {_FIELD_EDGE_FOCUS}; }}
+    {selector}:focus {{ border: {FIELD_BORDER_PX}px solid {focus_edge}; }}
     {selector}:disabled {{ background: {BG}; color: {DISABLED_INK}; }}
     {selector}::up-button, {selector}::down-button {{
         subcontrol-origin: border;
@@ -5741,6 +5751,17 @@ def fluent_spinbox_stylesheet(selector: str) -> str:
     {selector}::down-button {{ subcontrol-position: bottom right; }}
     {selector}::up-arrow, {selector}::down-arrow {{ image: none; }}
     """
+
+
+def fluent_inner_edit_stylesheet(ink: str = TEXT) -> str:
+    """The sheet of a line edit a spin box has adopted: no frame, fill or
+    padding of its own -- the box draws those -- only the digits' ink."""
+
+    return (
+        f'QLineEdit {{ background: transparent; border: none; padding: 0px; color: {ink}; '
+        f'font: {fluent_font_size()}pt "{FONT}"; }}'
+        f"QLineEdit:disabled {{ color: {DISABLED_INK if ink == TEXT else ink}; }}"
+    )
 
 
 def _spin_field_chrome() -> int:
@@ -5807,7 +5828,8 @@ def _paint_fluent_spin_buttons(widget: QtWidgets.QAbstractSpinBox) -> None:
         painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
         painter.fillPath(inner.intersected(tile), QtGui.QColor(ACCENT_TINT))
         painter.restore()
-    paint_frame_divider(painter, widget, divider, frame_edge_colour(option))
+    rest, focus = widget._frame_edges
+    paint_frame_divider(painter, widget, divider, frame_edge_colour(option, rest=rest, focus=focus))
     ink = QtGui.QColor(GRAPHITE if live else PLACEHOLDER)
     paint_chevron(painter, widget, up_cell.center(), up=True, colour=ink)
     paint_chevron(painter, widget, down_cell.center(), up=False, colour=ink)
@@ -5837,6 +5859,8 @@ class FluentSpinBox(_WheelFocusGuardMixin, QtWidgets.QSpinBox):
     valueNormalized = QtCore.pyqtSignal()
     _normalization_pending = False
     _number_geometry = None
+    #: The frame's edge at rest and focused; the stepper divider continues it.
+    _frame_edges = (_FIELD_EDGE_REST, _FIELD_EDGE_FOCUS)
 
     def sizeHint(self) -> QtCore.QSize:  # noqa: N802
         size = super().sizeHint()
@@ -6318,6 +6342,11 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
 
     _normalization_pending = False
     _step_chip = None
+    #: The frame's edge at rest and focused; the stepper divider continues it.
+    _frame_edges = (_FIELD_EDGE_REST, _FIELD_EDGE_FOCUS)
+    #: The right text margin the step chip added: an owner's line edit may
+    #: keep a margin of its own (a binding badge), which the chip never takes.
+    _chip_margin = 0
     _display_text = ""
     _text_width = 0
     _number_metrics = None
@@ -6397,7 +6426,7 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
         # The chip yields to what is TYPED as well as to what is shown: an
         # operator's long number takes the chip's room the moment it needs
         # it, and the chip comes back when the number fits beside it again.
-        self.lineEdit().textChanged.connect(lambda _text: self._place_step_chip())
+        self.lineEdit().textChanged.connect(self._on_text_for_chip)
 
         # No range of its own: a bound is the owner's, declared through
         # setRange, and until then the box holds whatever it is given.
@@ -6918,8 +6947,50 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
     def _digit_room(self) -> int:
         """The width the digits have with no chip beside them."""
 
+        return max(1, _numeric_text_width(self.lineEdit()) + self._chip_margin)
+
+    def set_tone(self, *, edge: str | None = None, fill: str = "white", ink: str = TEXT) -> None:
+        """Wear a state's colours on the frame -- a bound field's edge, fill
+        and ink -- or, with no ``edge``, the plain field's.  A bound edge
+        keeps its colour under focus, as a bound line edit's does."""
+
+        self._frame_edges = (_FIELD_EDGE_REST, _FIELD_EDGE_FOCUS) if edge is None else (edge, edge)
+        rest, focus = self._frame_edges
+        self.setStyleSheet(fluent_spinbox_stylesheet(
+            "QDoubleSpinBox", edge=rest, focus_edge=focus, fill=fill, ink=ink))
+
+    def _set_chip_margin(self, room: int) -> None:
+        """Give the chip ``room`` of the right text margin, on top of the
+        edit's own: only the chip's share changes."""
+
+        if room == self._chip_margin:
+            return
         edit = self.lineEdit()
-        return max(1, _numeric_text_width(edit) + edit.textMargins().right())
+        margins = edit.textMargins()
+        edit.setTextMargins(margins.left(), margins.top(),
+                            margins.right() - self._chip_margin + room, margins.bottom())
+        self._chip_margin = room
+
+    def _on_text_for_chip(self, _text: str) -> None:
+        self._place_step_chip()
+
+    def setLineEdit(self, edit: QtWidgets.QLineEdit) -> None:  # noqa: N802 - Qt API name
+        """Adopt an owner's line edit (a bound field) as the editor inside
+        this frame.
+
+        The box draws the frame, so the edit draws none and takes exactly
+        the room the frame leaves -- a field's own minimum height would push
+        it, its digits and its badge below the frame's centre.  It keeps its
+        own text margins (a badge's room); the chip follows what is typed
+        into it as it did the box's own edit."""
+
+        edit.setMinimumHeight(0)
+        edit.setStyleSheet(fluent_inner_edit_stylesheet())
+        super().setLineEdit(edit)
+        self._chip_margin = 0
+        edit.textChanged.connect(self._on_text_for_chip)
+        self._number_geometry = None
+        self._refresh_step_chip()
 
     def _place_step_chip(self) -> None:
         chip = self._step_chip
@@ -6932,11 +7003,9 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
             metrics = self._number_metrics or edit.fontMetrics()
             needed = metrics.horizontalAdvance(edit.text()) + 2
             shown = needed <= self._digit_room() - room
-        margins = edit.textMargins()
         if not shown:
             chip.hide()
-            if margins.right():
-                edit.setTextMargins(margins.left(), margins.top(), 0, margins.bottom())
+            self._set_chip_margin(0)
             return
         width, gap, vertical, _text_gap = self._step_chip_metrics()
         divider, _up, _down = _spin_stepper_cells(self)
@@ -6952,8 +7021,7 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
                else f"Step {text[1:]}")
         if chip.toolTip() != tip:
             chip.setToolTip(tip)
-        if margins.right() != room:
-            edit.setTextMargins(margins.left(), margins.top(), room, margins.bottom())
+        self._set_chip_margin(room)
         if chip.isHidden():
             chip.show()
             chip.raise_()

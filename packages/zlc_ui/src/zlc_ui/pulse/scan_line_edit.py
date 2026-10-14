@@ -7,9 +7,9 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 from zlc_ui.fluent import (
     API_VIOLET, API_VIOLET_DARK, CONFIG_GREEN, CONFIG_GREEN_DARK, CONFIG_GREEN_TINT,
     EDIT_PADDING_H, FIELD_BORDER_PX, FONT, ORANGE, ORANGE_DARK, PADDING_V, PLACEHOLDER,
-    RADIUS, SURFACE, FluentCheckBox, FluentComboBox, FluentTriSwitch, FluentLabel,
-    FluentLineEdit, FluentPopup, FluentSettingsPopupAnchor, device_snap, fluent_font_size, scaled_px,
-    signals_blocked,
+    RADIUS, SURFACE, FluentCheckBox, FluentComboBox, FluentDoubleSpinBox, FluentTriSwitch,
+    FluentLabel, FluentLineEdit, FluentPopup, FluentSettingsPopupAnchor, device_snap,
+    fluent_font_size, fluent_inner_edit_stylesheet, scaled_px, signals_blocked,
     read_editable_combo, show_fluent_popup_for_anchor,
 )
 
@@ -244,23 +244,37 @@ class FluentScanLineEdit(FluentLineEdit):
         self.binding_button.setEnabled(binding_editable and (editable or config_active))
         if not self.binding_button.isEnabled() and self._popup is not None:
             self._popup.hide()
+        # The binding's colours: (ink, edge, fill), or None for a plain field.
         if not editable and not config_active:
             if self._popup is not None:
                 self._popup.hide()
-            style = self._base_style
+            tone = None
         elif config_active:
-            style = _bound_style(CONFIG_GREEN_DARK, CONFIG_GREEN,
-                                 background=CONFIG_GREEN_TINT)
+            tone = (CONFIG_GREEN_DARK, CONFIG_GREEN, CONFIG_GREEN_TINT)
         elif source == "config":
-            style = _bound_style(CONFIG_GREEN_DARK, CONFIG_GREEN)
+            tone = (CONFIG_GREEN_DARK, CONFIG_GREEN, SURFACE)
         elif source == "api":
-            style = _bound_style(SURFACE if effective_text else API_VIOLET_DARK, API_VIOLET,
-                                 background=API_VIOLET_DARK if effective_text else SURFACE)
+            tone = (SURFACE if effective_text else API_VIOLET_DARK, API_VIOLET,
+                    API_VIOLET_DARK if effective_text else SURFACE)
         elif scan:
-            style = _bound_style(ORANGE_DARK, ORANGE)
+            tone = (ORANGE_DARK, ORANGE, SURFACE)
         else:
-            style = self._base_style
-        self.setStyleSheet(style)
+            tone = None
+        host = self.parentWidget()
+        if isinstance(host, FluentDoubleSpinBox) and host.lineEdit() is self:
+            # Inside a spin box the frame is the box's: it wears the colours.
+            if tone is None:
+                host.set_tone()
+                self.setStyleSheet(fluent_inner_edit_stylesheet())
+            else:
+                ink, edge, fill = tone
+                host.set_tone(edge=edge, fill=fill, ink=ink)
+                self.setStyleSheet(fluent_inner_edit_stylesheet(ink))
+        elif tone is None:
+            self.setStyleSheet(self._base_style)
+        else:
+            ink, edge, fill = tone
+            self.setStyleSheet(_bound_style(ink, edge, background=fill))
         self._reserve_right()
         self._project_popup()
         if self._popup is not None and self._popup.isVisible():

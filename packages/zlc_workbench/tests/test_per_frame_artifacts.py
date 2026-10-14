@@ -64,7 +64,7 @@ def test_finalization_resolves_each_file_and_hands_the_claims_to_the_build(works
         assert finalization.can_start, finalization.issues
         claims = finalization.artifacts["calibrations"]
         assert [claim.value.path for claim in claims] == [load.resolve(), readout.resolve()]
-        assert [claim.frames for claim in claims] == [(0,), ("rest",)]
+        assert [claim.frames for claim in claims] == [("first",), ("rest",)], "frame 0 is stored as first"
         arguments = build_arguments(OCCUPANCY_NODE, signal_plane=plane, finalization=finalization)
         assert arguments["calibrations"] is claims
         assert all(isinstance(claim, FrameClaim) for claim in claims)
@@ -93,8 +93,8 @@ def test_claims_are_refused_by_name_and_against_a_known_frame_count(workspace) -
         claims = ({"path": str(load), "frames": [2]}, {"path": str(readout), "frames": ["rest"]})
         assert _finalize(workspace, plane, claims).can_start, "no count known: nothing to check yet"
         assert _finalize(workspace, plane, claims, source_frames=2).issues == (
-            "load.json names frame 2, but the source carries 2 frames (0-1); "
-            "numbered middle frames cannot stand for the last frame",
+            "load.json names middle frame 2, but the source carries 2 frames (0-1); "
+            "a numbered middle frame never stands for the first or the last",
         )
         assert _finalize(workspace, plane, claims, source_frames=4).can_start
         empty_row = _finalize(workspace, plane, ({"path": "", "frames": ["rest"]},))
@@ -124,7 +124,7 @@ def test_a_saved_layout_keeps_the_claims_as_written() -> None:
     )
     (binding,) = resolved.logic
     assert binding.draft.artifact_inputs == {"calibrations": (
-        {"path": "load.json", "frames": (0,)}, {"path": "readout.json", "frames": ("last", "rest")},
+        {"path": "load.json", "frames": ("first",)}, {"path": "readout.json", "frames": ("last", "rest")},
     )}
     broken = LogicLayoutEntry(
         "occupancy", "occupancy", {}, "", {}, {"calibrations": [{"path": "a.json", "frames": ["second"]}]},
