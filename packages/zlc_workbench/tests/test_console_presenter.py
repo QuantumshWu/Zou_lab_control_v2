@@ -6413,7 +6413,7 @@ def test_a_following_processor_survives_its_camera_stop_and_restart(
     assert survival.host.running and survival.following
     result = session.signal_plane.freeze().value(survival_signal)
     assert result.snapshot.block.schema.point_domain.axes[0].coordinate_labels == (
-        "0-1", "0-2", "1-2",
+        "0→1", "0→2", "1→2",
     )
 
     # A later incompatible run waits again, without leaving the old result

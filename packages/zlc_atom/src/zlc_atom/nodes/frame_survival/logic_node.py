@@ -12,7 +12,7 @@ from zlc_atom.nodes._framework.frames import frame_identity
 
 from .processor import (
     SURVIVAL_OUTPUTS, FrameSurvivalProcessor, _checked_pairs, _checked_overrides,
-    _rule_pairs, _selected_pairs,
+    _rule_pairs, _selected_pairs, pair_label,
 )
 
 #: What the operator picks: a question that follows the frames the source
@@ -24,7 +24,7 @@ _SELECTIONS = (
     AuthoringChoice("consecutive", "Consecutive"),
     AuthoringChoice("from_first", "From first"),
     AuthoringChoice("to_last", "To last"),
-    AuthoringChoice("custom", "Selected pairs"),
+    AuthoringChoice("custom", "Selected"),
 )
 
 
@@ -34,12 +34,12 @@ def _validate(values):
     if values["selection"] == "custom":
         _checked_pairs(tuple((start, end) for start, end, selected in overrides if selected))
         if any(not selected for _start, _end, selected in overrides):
-            raise ValueError("Selected pairs lists only included pairs")
+            raise ValueError("Selected lists only included pairs")
 
 FRAME_SURVIVAL_SCHEMA = AuthoringSchema((
     AuthoringField("selection", "choice", "Published pairs", "all", required=True, choices=_SELECTIONS,
                    description="A named choice follows the frames the source carries: All forward pairs, "
-                               "Consecutive (k→k+1), From first (0→k) or To last (k→last); Selected pairs "
+                               "Consecutive (k→k+1), From first (0→k) or To last (k→last); Selected "
                                "lists them. Grid edits override only the changed pairs; first/last follow "
                                "the cycle."),
     AuthoringField("pairs", "rows", "Pair selections", (), columns=(
@@ -106,7 +106,7 @@ def _editor_factory(parent=None):
             layout.setSpacing(row_gap())
             # None clears every mark: an explicit, still-empty selection to mark pairs into.
             self.presets = FluentSegmentedButtons(
-                (*((rule, labels[rule]) for rule in PAIR_RULES), ("none", "None"), ("custom", "Selected")), self)
+                (*((rule, labels[rule]) for rule in PAIR_RULES), ("none", "None"), ("custom", labels["custom"])), self)
             self.presets.activated.connect(self._preset)
             self.summary = muted_note_label("")
             self.title, header = section_header("Pairs", lead=(self.presets,), summary=self.summary)
@@ -181,7 +181,7 @@ def _editor_factory(parent=None):
                 self.table.set_grid(
                     tuple(f"{frames[start]} →" for start in range(count - 1)),
                     tuple(f"→ {frames[end]}" for end in range(1, count)),
-                    {(start, end - 1): f"{frames[start]}→{frames[end]}"
+                    {(start, end - 1): pair_label(frames[start], frames[end])
                      for start in range(count - 1) for end in range(start + 1, count)},
                 )
             selection = values["selection"]
@@ -212,7 +212,7 @@ def _editor_factory(parent=None):
             derived = tuple(pair for pair in wanted if pair in rule)
             self.table.set_cell_states(
                 {(start, end - 1): "derived" for start, end in derived},
-                {(start, end - 1): f"{frames[start]}→{frames[end]} follows {labels[selection]}; "
+                {(start, end - 1): f"{pair_label(frames[start], frames[end])} follows {labels[selection]}; "
                                    "Ctrl-click to leave it out" for start, end in derived},
             )
             cells = tuple(sorted((start, end - 1) for start, end in wanted))
@@ -222,7 +222,7 @@ def _editor_factory(parent=None):
             self.summary.setText(
                 f"{self.presets.button(current).text()} · {len(wanted)} of {count * (count - 1) // 2} pairs")
             show_note(self.note, "" if not absent else "Not in this source: " + ", ".join(
-                f"{start}-{end}" for start, end, _selected in absent))
+                pair_label(start, end) for start, end, _selected in absent))
 
         def set_mutation_enabled(self, enabled):
             self.setEnabled(enabled)

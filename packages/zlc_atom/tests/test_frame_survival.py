@@ -2,7 +2,7 @@
 
 The processor consumes judged occupancy (cycles x frames x sites, bool)
 and publishes one dataset whose LABELLED pair point axis carries the
-forward frame pairs ("0-1", "0-2", "1-2"), one identity per pair.  The
+forward frame pairs ("0→1", "0→2", "1→2"), one identity per pair.  The
 pinned identity is the one the design stands on: a MEAN over the
 published validity equals the pooled survival fraction computed from the
 raw pool -- averaging the dataset IS pooling the data.
@@ -29,7 +29,7 @@ from zlc_data import (
 from zlc_runtime import DatasetCoverage, SignalValue
 
 from zlc_atom.nodes.frame_survival import FrameSurvivalProcessor
-from zlc_atom.nodes.frame_survival.processor import _forward_pairs
+from zlc_atom.nodes.frame_survival.processor import _forward_pairs, pair_label
 
 
 def _occupied_snapshot(
@@ -78,7 +78,7 @@ def test_pairing_identity_per_entry(pairs) -> None:
     validity = np.asarray(survival.expanded_validity())
     assert values.shape == (40, len(selected), 6)  # (cycles, selected pairs, sites)
     assert survival.block.schema.point_domain.axes[0].coordinate_labels == tuple(
-        f"{start}-{end}" for start, end in selected
+        pair_label(start, end) for start, end in selected
     )
     assert processor.describe_run({"occupied": SignalValue("occupied", source, None)})[
         "parameters"
@@ -121,7 +121,7 @@ def test_pair_axis_carries_one_label_per_pair() -> None:
     assert pair_axis.axis_id == AxisId("fs.pair")
     assert pair_axis.role == READOUT_EVENT
     assert tuple(pair_axis.coordinate_values()) == (0, 1, 2)
-    assert pair_axis.coordinate_labels == ("0-1", "0-2", "1-2")
+    assert pair_axis.coordinate_labels == ("0→1", "0→2", "1→2")
     (site_axis,) = schema.cell_domain.axes
     assert site_axis.axis_id == AxisId("occupancy.site")
 
@@ -140,7 +140,7 @@ def test_pair_axis_carries_one_label_per_pair() -> None:
         owned_snapshot_from_arrays(named, np.zeros((1, 2, 2), dtype=bool), 0)
     )
     assert labelled.block.schema.point_domain.axes[0].coordinate_labels == (
-        "before-after",
+        "before→after",
     )
     from zlc_atom.nodes.scan.dataset import scan_dataset_schema
 
@@ -184,7 +184,7 @@ def test_single_frame_and_wrong_shapes_are_refused() -> None:
     with pytest.raises(ValueError, match="need frame 3"):
         selected._pair(_occupied_snapshot(np.zeros((1, 3, 2), dtype=bool)))
     restored = selected._pair(_occupied_snapshot(np.zeros((1, 5, 2), dtype=bool)))
-    assert restored.block.schema.point_domain.axes[0].coordinate_labels == ("1-3",)
+    assert restored.block.schema.point_domain.axes[0].coordinate_labels == ("1→3",)
 
 
 @pytest.mark.parametrize("rule, expected", (
@@ -197,12 +197,12 @@ def test_a_named_selection_follows_the_frames_the_source_carries(rule, expected)
     processor = FrameSurvivalProcessor(pairs=rule)
     four = processor._pair(_occupied_snapshot(np.zeros((2, 4, 3), dtype=bool)))
     assert four.block.schema.point_domain.axes[0].coordinate_labels == tuple(
-        f"{start}-{end}" for start, end in expected)
+        pair_label(start, end) for start, end in expected)
     # One more photograph: the same question, asked of five frames.
     five = processor._pair(_occupied_snapshot(np.zeros((2, 5, 3), dtype=bool)))
     from zlc_atom.nodes.frame_survival.processor import _rule_pairs
     assert five.block.schema.point_domain.axes[0].coordinate_labels == tuple(
-        f"{start}-{end}" for start, end in _rule_pairs(rule, 5))
+        pair_label(start, end) for start, end in _rule_pairs(rule, 5))
     with pytest.raises(ValueError, match="selection must be one of"):
         FrameSurvivalProcessor(pairs="every")
 
@@ -224,15 +224,15 @@ def test_pair_overrides_keep_the_rule_and_last_identity() -> None:
     for count in (22, 25, 3, 22):
         result = built._pair(_occupied_snapshot(np.zeros((1, count, 2), dtype=bool)))
         assert result.block.schema.point_domain.axes[0].coordinate_labels == tuple(
-            f"0-{end}" for end in range(1, count - 1))
+            pair_label(0, end) for end in range(1, count - 1))
     with pytest.raises(ValueError, match="at least two frames"):
         built._pair(_occupied_snapshot(np.zeros((1, 1, 2), dtype=bool)))
     assert built.pair_overrides == ((0, "last", False),)
     # Excluding an absent middle pair stays dormant, then works again on restoration.
     built = LOGIC_NODE.build(source_signal="@logic/occupancy/occupied", selection="from_first",
                              pairs=({"start": "0", "end": "2", "selected": False},))
-    for count, expected in ((4, ("0-1", "0-3")), (3, ("0-1", "0-2")),
-                            (4, ("0-1", "0-3"))):
+    for count, expected in ((4, ("0→1", "0→3")), (3, ("0→1", "0→2")),
+                            (4, ("0→1", "0→3"))):
         result = built._pair(_occupied_snapshot(np.zeros((1, count, 2), dtype=bool)))
         assert result.block.schema.point_domain.axes[0].coordinate_labels == expected
     # A middle index never becomes the last frame when the source shrinks.
@@ -332,7 +332,7 @@ def test_pair_matrix_selects_like_a_table_and_writes_the_draft() -> None:
         # Pairs the source no longer carries are named, not dropped silently.
         drafts.clear()
         project(selection="custom", pairs=({"start": "0", "end": "1"}, {"start": "2", "end": "5"}))
-        assert marked() == [(0, 1)] and "2-5" in form.note.text() and drafts == []
+        assert marked() == [(0, 1)] and form.note.text() == "Not in this source: 2→5" and drafts == []
         # The strip always marks one choice: a list with pairs is Selected.
         assert derived() == [] and form.presets.current() == "custom"
         # The reported 22-frame case: a real Ctrl click excludes only first→last.
@@ -717,7 +717,7 @@ def test_live_monitor_chain_camera_occupancy_survival() -> None:
             for axis in schema.point_domain.axes
             if axis.role == READOUT_EVENT
         )
-        assert pair_axis.coordinate_labels == ("0-1", "0-2", "1-2")
+        assert pair_axis.coordinate_labels == ("0→1", "0→2", "1→2")
         coverage = survival_value.coverage
         assert coverage.total_cells == cycles * pairs
 
