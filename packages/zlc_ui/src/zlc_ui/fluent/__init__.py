@@ -15,7 +15,7 @@ for _name in (
     "ensure_fluent_scale",
     "set_fluent_scale", "scaled_px", "screen_fit_window_size",
     "FIELD_BORDER_PX", "scaled_even_px", "device_snap", "frame_border_px", "frame_inner_rect",
-    "stepper_column", "fluent_stepper_extent", "field_room_end", "line_edit_text_right",
+    "stepper_column", "fluent_stepper_extent", "field_room_end", "field_text_inset", "line_edit_text_right",
     "paint_chevron", "paint_centred_ink",
     "center_window_on_primary_screen", "release_window", "retain_window",
     "fluent_font_size", "fluent_text_width", "popup_gap", "fluent_widget_stylesheet",

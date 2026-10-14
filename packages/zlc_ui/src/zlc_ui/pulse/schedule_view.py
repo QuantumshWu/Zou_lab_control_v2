@@ -17,7 +17,7 @@ from zlc_ui.form import FormChoice, being_edited
 from zlc_ui.fluent import (
     retire_widget,
     ACCENT, BG, MUTED_INK, TEXT, CONFIG_GREEN, CONFIG_GREEN_DARK,
-    CONFIG_GREEN_TINT, FluentButton, FluentCheckBox, FluentSwitch,
+    CONFIG_GREEN_TINT, FluentButton, FluentCheckBox, FluentSegmentedButtons, FluentSwitch,
     FluentComboBox, FluentFrame, FluentGroupBox, fluent_count_box,
     FluentLabel, FluentLineEdit, FluentReadoutEdit, FluentScrollArea, LinkedScrollPanes,
     ElidedLabel, FluentPopup, FluentSettingsPopupAnchor,
@@ -958,6 +958,8 @@ class ComponentCard(FluentGroupBox):
         value_layout.setContentsMargins(0, 0, 0, 0)
         value_layout.setSpacing(0)
         self.source_button = _BindingButton()
+        # No field frame here: the badge column stands in the row itself.
+        self.source_button.stand_alone(row_height())
         self.source_button.setAccessibleName("Subpulse source")
         self.source_button.clicked.connect(self._toggle_source)
         value_layout.addSpacing(self.source_button.width())
@@ -1016,10 +1018,10 @@ class ComponentCard(FluentGroupBox):
             layout.setContentsMargins(px(10), px(10), px(10), px(10))
             layout.setSpacing(px(6))
             layout.addWidget(FluentLabel("Source"))
-            self.source_switch = FluentSwitch("Default")
-            self.source_switch.setFixedWidth(self.source_switch.sizeHint().width())
+            # The same choice, in the same control, as a value slot's Source.
+            self.source_switch = FluentSegmentedButtons((("default", "Default"), ("config", "Config")))
             layout.addWidget(self.source_switch)
-            self.source_switch.toggled.connect(self._commit_source)
+            self.source_switch.activated.connect(self._commit_source)
         self._source_anchor.toggle(self._source_popup, prepare=self._project_source,
                                    present=self._place_source)
 
@@ -1032,12 +1034,9 @@ class ComponentCard(FluentGroupBox):
 
     def _project_source(self) -> None:
         if self._source_popup is not None:
-            with signals_blocked(self.source_switch):
-                self.source_switch.setChecked(self._component.source == "config")
-                self.source_switch.setText("Config" if self._component.source == "config" else "Default")
+            self.source_switch.set_current(self._component.source)
 
-    def _commit_source(self, checked: bool) -> None:
-        source = "config" if checked else "default"
+    def _commit_source(self, source: str) -> None:
         if source != self._component.source:
             self.action_requested.emit("source", (self.component_id, source, self._component.config_path))
         self._project_source()

@@ -11,7 +11,7 @@ from zlc_ui.fluent import (
     EDIT_PADDING_H, FIELD_BORDER_PX, FONT, ORANGE, ORANGE_DARK, PADDING_V, PLACEHOLDER,
     RADIUS, SURFACE, FluentComboBox, FluentDoubleSpinBox, FluentLabel, FluentLineEdit,
     FluentPopup, FluentSegmentedButtons, FluentSettingsPopupAnchor, FluentSwitch,
-    device_snap, field_room_end, fluent_font_size, fluent_inner_edit_stylesheet,
+    device_snap, field_room_end, field_text_inset, fluent_font_size, fluent_inner_edit_stylesheet,
     frame_inner_rect, line_edit_text_right, paint_centred_ink, scaled_even_px, scaled_px,
     signals_blocked, read_editable_combo, show_fluent_popup_for_anchor,
 )
@@ -68,6 +68,17 @@ class _BindingButton(QtWidgets.QAbstractButton):
         y0, y1 = int(math.ceil(inner.top())), int(math.floor(inner.bottom()))
         self.setGeometry(x0, y0, x1 - x0, max(1, y1 - y0))
         self._column = QtCore.QRectF(left - x0, inner.top() - y0, right - left, inner.height())
+        self.update()
+
+    def stand_alone(self, height: int) -> None:
+        """Size the button for a place with no field frame around it (a
+        Subpulse card's duration row): one badge column, centred in a box
+        ``height`` tall the way a field's inner rect centres it."""
+
+        pad = scaled_px(1)
+        self.setFixedSize(self.diameter() + 2 * pad, int(height))
+        self._column = QtCore.QRectF(
+            pad, FIELD_BORDER_PX, self.diameter(), int(height) - 2 * FIELD_BORDER_PX)
         self.update()
 
     def column_left(self) -> int:
@@ -251,6 +262,9 @@ class FluentScanLineEdit(FluentLineEdit):
                 widget.setFixedWidth(content_width)
             for widget in (self.default_value, self.effective_value):
                 widget.setFixedHeight(widget.fontMetrics().height())
+                # The values read in the column of the Config name's TEXT,
+                # not from the edge of its box.
+                widget.setIndent(field_text_inset())
             self.source_note.setFixedWidth(
                 self.config_name_label.sizeHint().width() + layout.horizontalSpacing() + content_width)
             self.source_note.setFixedHeight(self.source_note.fontMetrics().lineSpacing() * 3)

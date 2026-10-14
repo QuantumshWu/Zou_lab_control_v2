@@ -1761,6 +1761,18 @@ def _line_edit_text_line(edit: QtWidgets.QLineEdit) -> QtCore.QRect:
     )
 
 
+def field_text_inset() -> int:
+    """Where a field's text starts inside its box, from the box's left
+    edge: the edge, the padding and Qt's own text margin (logical px).
+
+    A read-only value standing in a column of fields -- a popup's Default
+    and Effective under its Config name, a card's Total under its Name --
+    indents its text by this, so the values and the typed text start on
+    one x instead of the values starting at the boxes' edge."""
+
+    return FIELD_BORDER_PX + scaled_px(EDIT_PADDING_H) + _QLINEEDIT_HMARGIN
+
+
 def line_edit_text_right(edit: QtWidgets.QLineEdit) -> int:
     """Where the text of ``edit`` may end with NO right text margin, in its
     own coordinates: its contents (inside a sheet's border and padding)
@@ -8528,12 +8540,11 @@ class FluentSegmentedButtons(QtWidgets.QWidget):
     A DIVIDER track with no edge holds the choices flush, each a
     transparent face in TEXT ink.  The pointer lays the ACCENT_TINT hover
     wash on a choice and a press the SELECTED fill; the current one IS the
-    SELECTED fill with a semibold label -- SELECTED_HOVER under the pointer
-    -- and no outline.  Every face is rounded at the field radius and the
-    track at that radius plus its rim, so the current face is concentric
-    with the track rather than a near-square block in a rounded one.  Every
-    choice is as wide as its semibold label, so marking one never shifts
-    the others.  A row of separate tinted buttons read as a row of
+    SELECTED fill -- SELECTED_HOVER under the pointer -- in the same weight
+    as the others, and no outline: the fill alone says which is chosen.
+    Every face is rounded at the field radius and the track at that radius
+    plus its rim, so the current face is concentric with the track rather
+    than a near-square block in a rounded one.  A row of separate tinted buttons read as a row of
     commands, which these are not.
 
     A choice the owner WITHHOLDS (``button(value).setEnabled(False)``) keeps
@@ -8559,15 +8570,13 @@ class FluentSegmentedButtons(QtWidgets.QWidget):
         layout.setSpacing(0)
         self._buttons: dict[object, QtWidgets.QPushButton] = {}
         pad = scaled_px(10, minimum=6)
-        strong = QtGui.QFont(FONT, fluent_font_size())
-        strong.setWeight(QtGui.QFont.DemiBold)
-        strong_metrics = QtGui.QFontMetrics(strong)
+        metrics = QtGui.QFontMetrics(QtGui.QFont(FONT, fluent_font_size()))
         for value, label in choices:
             button = QtWidgets.QPushButton(label, self)
             button.setCursor(QtCore.Qt.PointingHandCursor)
             button.setFocusPolicy(QtCore.Qt.TabFocus)
             button.setMinimumHeight(scaled_px(30, minimum=22) - 2 * rim)
-            button.setMinimumWidth(fluent_text_width(strong_metrics, str(label)) + 2 * pad + 2)
+            button.setMinimumWidth(fluent_text_width(metrics, str(label)) + 2 * pad + 2)
             button.setProperty("current", False)
             button.clicked.connect(lambda _checked=False, value=value: self.activated.emit(value))
             layout.addWidget(button)
@@ -8590,7 +8599,7 @@ class FluentSegmentedButtons(QtWidgets.QWidget):
             QPushButton:enabled:hover {{ background: {ACCENT_TINT}; border-color: {ACCENT_TINT}; }}
             QPushButton:enabled:pressed {{ background: {SELECTED}; border-color: {SELECTED}; }}
             QPushButton[current="true"] {{
-                background: {SELECTED}; border-color: {SELECTED}; font-weight: 600;
+                background: {SELECTED}; border-color: {SELECTED};
             }}
             QPushButton[current="true"]:enabled:hover, QPushButton[current="true"]:enabled:pressed {{
                 background: {SELECTED_HOVER}; border-color: {SELECTED_HOVER};

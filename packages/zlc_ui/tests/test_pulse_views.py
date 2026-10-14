@@ -2105,24 +2105,32 @@ main.channel_panel.config_refresh_button.click()
 assert refreshes == [True] and modes == [True]
 card = main._component_cards[("component", "mot")]
 assert card.title() == "Subpulse"
+# The duration row holds the total and the source badge, both inside the
+# card: the badge has no field frame here and sizes itself.
+assert card.source_button.isVisible() and card.total_label.isVisible()
+assert 0 < card.source_button.width() < card.width() // 4
+assert card.total_label.width() > card.total_label.fontMetrics().horizontalAdvance("0 ms")
+assert card.source_button.mapTo(card, card.source_button.rect().bottomRight()).x() < card.width()
 configured = replace(component, source="config", config_path="cooling.subpulse.json")
 vm = replace(vm, revision=5, components=(configured,))
 handle.set_schedule(vm)
 card.source_button.click(); app.processEvents()
-assert card._source_popup.isVisible() and card.source_switch.isChecked()
+from zlc_ui.fluent import FluentButton, FluentSegmentedButtons
+assert card._source_popup.isVisible() and card.source_switch.current() == "config"
+assert isinstance(card.source_switch, FluentSegmentedButtons), "the same Source control as a value slot's"
 assert not card._source_popup.findChildren(QtWidgets.QLineEdit), "source popup only selects Default/Config"
-assert not card._source_popup.findChildren(QtWidgets.QPushButton)
+assert not card._source_popup.findChildren(FluentButton), "a choice, not commands"
 popup_size = card._source_popup.size()
-card.source_switch.click()
+card.source_switch.button("default").click()
 assert actions[-1] == ("source", ("mot", "default", "cooling.subpulse.json"))
-assert card.source_switch.isChecked(), "rejected source intent must restore its accepted state"
+assert card.source_switch.current() == "config", "rejected source intent must restore its accepted state"
 count = len(actions)
 card.set_component(replace(configured, source="default"))
-assert len(actions) == count and not card.source_switch.isChecked()
+assert len(actions) == count and card.source_switch.current() == "default"
 assert card._source_popup.size() == popup_size
-card.source_switch.click()
+card.source_switch.button("config").click()
 assert actions[-1] == ("source", ("mot", "config", "cooling.subpulse.json"))
-assert not card.source_switch.isChecked()
+assert card.source_switch.current() == "default"
 card.source_button.click()
 assert not card._source_popup.isVisible()
 # A popup holds the mouse while open, so the operator's click outside it --
