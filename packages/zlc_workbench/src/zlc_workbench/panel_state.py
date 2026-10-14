@@ -77,11 +77,26 @@ def panel_data_shape(
 ) -> dict[str, object]:
     """Three-domain shape and the exact publication's written Repeat counts."""
 
+    from zlc_plot.data_contract import resolve_axis
+    from zlc_plot.kinds import AxisDomain, AxisRef
     from zlc_plot.semantics import (
+        FATE_PREFIX,
         is_scope_fate,
         schema_structure,
         scope_coordinate_from_fate,
     )
+
+    def declared_label(field: object, coordinate: object) -> str | None:
+        """The producer's own name for a pinned coordinate -- a Frame
+        Survival pair is ``0-5``, not its position ``3`` on the pair axis."""
+
+        domain, _colon, axis_id = str(field.name).removeprefix(FATE_PREFIX).partition(":")
+        resolved = resolve_axis(schema, AxisRef(AxisDomain(domain), axis_id))
+        if resolved.coordinate_labels is None:
+            return None
+        axis = next(axis for axis in resolved.domain.axes if axis.axis_id == resolved.axis_id)
+        position = axis.coordinate_position(coordinate)
+        return None if position is None else str(resolved.coordinate_labels[position])
 
     def pinned_text(field: object) -> str:
         value = getattr(field, "value", None)
@@ -91,6 +106,9 @@ def panel_data_shape(
         coordinate = scope_coordinate_from_fate(value)
         if coordinate is None:
             return "(null)"
+        label = declared_label(field, coordinate)
+        if label is not None:
+            return label
         if isinstance(coordinate, (int, float)):
             return f"{coordinate:g}"
         return str(coordinate)
