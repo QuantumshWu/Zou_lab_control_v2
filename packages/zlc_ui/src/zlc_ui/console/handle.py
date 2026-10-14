@@ -134,7 +134,8 @@ class TaskConsoleHandle(QtCore.QObject):
         self._panel_sizes: tuple[str, ...] = ()
         self._panel_default_size = ""
         self._grid_cell_kinds: tuple[str, ...] = ()
-        self._task_takeover = False
+        #: The node id of the Task that holds the console; "" when none does.
+        self._task_owner = ""
         self._point_review: tuple[str, PointReviewView] | None = None
         for name in (
             "add_panel_requested", "add_logic_requested", "pause_toggled",
@@ -263,15 +264,22 @@ class TaskConsoleHandle(QtCore.QObject):
     def show_status(self, text: str, severity: str) -> None:
         self._view.show_status(text, severity)
 
-    def set_task_takeover(self, active: bool) -> None:
-        """Project one application admission gate onto every existing view."""
+    def set_task_takeover(self, owner: str) -> None:
+        """Project one application admission gate onto every existing view.
 
-        self._task_takeover = bool(active)
-        self._view.set_task_takeover(self._task_takeover)
-        for row in self._rows.values():
-            row.set_task_takeover(self._task_takeover)
-        for editor in self._logic_editors.values():
-            editor.set_mutation_enabled(not self._task_takeover)
+        ``owner`` is the node id of the running Task that holds the console,
+        "" when none does.  Every other command waits for it; its own row and
+        Edit page keep their Stop.
+        """
+
+        self._task_owner = str(owner)
+        self._view.set_task_takeover(bool(self._task_owner))
+        for key, row in self._rows.items():
+            row.set_task_takeover(bool(self._task_owner), owns_task=key == self._task_owner)
+        for key, editor in self._logic_editors.items():
+            editor.set_mutation_enabled(
+                not self._task_owner, owns_task=key == self._task_owner
+            )
 
     def choose_signal(self, rows) -> str | None:
         """Ask which signal to show; None when the operator declines."""
@@ -612,7 +620,7 @@ class TaskConsoleHandle(QtCore.QObject):
                 lambda _=None, nid=key: self.logic_remove_requested.emit(nid)
             )
             self._rows[key] = row
-            row.set_task_takeover(self._task_takeover)
+            row.set_task_takeover(bool(self._task_owner), owns_task=key == self._task_owner)
         self._show_logic_rows()
 
     def remove_logic_row(self, node_id: str) -> None:
@@ -627,11 +635,12 @@ class TaskConsoleHandle(QtCore.QObject):
         self._rows[str(node_id)].set_state(state, status_text)
 
     def set_logic_commands(
-        self, node_id: str, *, can_start: bool, can_stop: bool
+        self, node_id: str, *, can_start: bool, can_stop: bool, pending: bool = False
     ) -> None:
         self._rows[str(node_id)].set_commands(
             can_start=can_start,
             can_stop=can_stop,
+            pending=pending,
         )
 
     def set_logic_auto_preview(self, node_id: str, enabled: bool) -> None:
@@ -652,16 +661,22 @@ class TaskConsoleHandle(QtCore.QObject):
             row = self._panel_publisher_rows.get(key)
             if row is None:
                 row = LogicRowView(key, "panel publisher")
-                row.dot.hide()
-                row.status_label.hide()
-                for button in (
-                    row.run_button,
-                    # No node behind this row, so nothing here can be started
-                    # and nothing decides what a Start would open.
+                # No node behind this row, so nothing here can be started or
+                # removed and nothing decides what a Start would open.  Each
+                # keeps its place while hidden: the name and Edit then stand
+                # in the same columns as on every node row above.
+                for widget in (
+                    row.dot,
+                    row.status_label,
                     row.preview_switch,
-                    row.more_button,
+                    row.start_button,
+                    row.stop_button,
+                    row.remove_button,
                 ):
-                    button.hide()
+                    policy = widget.sizePolicy()
+                    policy.setRetainSizeWhenHidden(True)
+                    widget.setSizePolicy(policy)
+                    widget.hide()
                 row.edit_requested.connect(
                     lambda _=None, pid=key: self.panel_publisher_edit_requested.emit(pid)
                 )
@@ -724,7 +739,9 @@ class TaskConsoleHandle(QtCore.QObject):
         editor = self._logic_editors.get(key)
         if editor is None:
             editor = LogicEditorView(key, projection)
-            editor.set_mutation_enabled(not self._task_takeover)
+            editor.set_mutation_enabled(
+                not self._task_owner, owns_task=key == self._task_owner
+            )
             editor.draft_changed.connect(
                 lambda patch, nid=key: self.logic_draft_changed.emit(nid, patch)
             )

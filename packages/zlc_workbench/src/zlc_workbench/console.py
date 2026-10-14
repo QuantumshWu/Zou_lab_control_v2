@@ -808,7 +808,9 @@ class ConsolePresenter:
         # Task identity is a command-admission projection only.  Its lifecycle,
         # phase and progress continue to come exclusively from the row's host.
         self._active_task_id: str | None = None
-        self._shown_task_takeover: bool | None = None
+        #: The Task id last projected as owning the console ("" for none);
+        #: None until the first projection.
+        self._shown_task_owner: str | None = None
         self._shown_task_status: tuple[str, str] | None = None
         #: A whole board waiting to go up -- loaded or empty -- and the words
         #: for when it has, held until every node it replaces has stopped.
@@ -7779,10 +7781,12 @@ class ConsolePresenter:
 
     def _project_task_takeover(self) -> None:
         active = self._active_task()
-        takeover = active is not None
-        if takeover != self._shown_task_takeover:
-            self.view.set_task_takeover(takeover)
-            self._shown_task_takeover = takeover
+        owner = "" if active is None else active.node_id
+        if owner != self._shown_task_owner:
+            # The owner, not just the fact: its own row and Edit page keep
+            # the Stop that the status strip's "Stop task" also sends.
+            self.view.set_task_takeover(owner)
+            self._shown_task_owner = owner
             for panel in tuple(self.panels.values()):
                 self._publish_panel_state(panel)
         if active is None:
@@ -9095,6 +9099,7 @@ class ConsolePresenter:
             binding.following or binding.pending is not None
             or (host is not None and host.running)
         )
+        pending = binding.pending is not None
         shown = (
             state,
             status,
@@ -9102,6 +9107,7 @@ class ConsolePresenter:
             artifacts,
             can_start,
             can_stop,
+            pending,
             binding.auto_preview,
         )
         if shown == binding.shown:
@@ -9112,6 +9118,7 @@ class ConsolePresenter:
             binding.node_id,
             can_start=can_start,
             can_stop=can_stop,
+            pending=pending,
         )
         self.view.set_logic_publishes(binding.node_id, published)
         self.view.set_logic_auto_preview(binding.node_id, binding.auto_preview)

@@ -17,26 +17,58 @@ from zlc_ui.fluent import (
     FluentStatusDot,
     FluentSwitch,
     add_row_switch,
-    popup_gap,
-    retire_widget,
     scaled_px,
     setting_label_width,
 )
 from zlc_ui.fluent import PublishedItemsLegend
-from zlc_ui.fluent.fluent import _FluentRoundedMenu
 
 #: Every kind a row can carry, so the kind column is one width on every row
 #: and the status beside it starts at one x down the page.
 _KINDS = ("(measurement)", "(processor)", "(task)", "(panel publisher)")
 
+#: Every word the Start slot can say, on the row and on the node's Edit page.
+START_LABELS = ("Start", "Restart", "Starting…")
+
+
+def start_label(*, pending: bool, active: bool) -> str:
+    """What Start does now: one rule, so the row and its Edit page agree.
+
+    ``active`` is the presenter's ``can_stop`` -- running, following its
+    source (a failed follower included) or queued -- which is exactly when
+    a Start replaces something instead of beginning from nothing.
+    """
+
+    if pending:
+        return "Starting…"
+    return "Restart" if active else "Start"
+
+
+def fit_start_button(button: FluentButton) -> None:
+    """Size ``button`` for the widest of :data:`START_LABELS`.
+
+    Measured through the button itself, so its padding and font count; the
+    slot then keeps one width whatever it says, and Stop beside it never
+    moves.
+    """
+
+    shown = button.text()
+    widths = []
+    for label in START_LABELS:
+        button.setText(label)
+        widths.append(button.sizeHint().width())
+    button.setText(shown)
+    button.setMinimumWidth(max(widths))
+
 
 class LogicRowView(FluentFrame):
     """A lifecycle-free row that emits only operator intent.
 
-    One lifecycle button says the next thing the node can do -- Start while
-    it is stopped, Stop while it runs -- so a row no longer carries two
-    commands of which one is always dead.  Restart and Remove, the rare and
-    the destructive, sit behind the row's ``⋯``.
+    Start and Stop are two fixed slots that are always there: Start reads
+    Restart while the node is active and Starting… while its start waits,
+    and Stop is enabled whenever there is anything to stop.  One button
+    that flipped between Start and Stop left a failed follower with nothing
+    to stop, and a Restart that appeared only after a Start moved the
+    controls beside it.
     """
 
     start_requested = QtCore.pyqtSignal()
@@ -51,12 +83,13 @@ class LogicRowView(FluentFrame):
         super().__init__(parent)
         self.title = str(title)
         self.kind = str(kind)
-        self._state = "idle"
         self._status_text = "idle"
         self._status_colour = ""
         self._can_start = False
         self._can_stop = False
+        self._pending = False
         self._task_takeover = False
+        self._owns_task = False
         outer = QtWidgets.QVBoxLayout(self)
         outer.setContentsMargins(scaled_px(12), scaled_px(8), scaled_px(12), scaled_px(8))
         outer.setSpacing(scaled_px(6, minimum=4))
@@ -82,23 +115,21 @@ class LogicRowView(FluentFrame):
             "Open this node's plot panel when it starts"
         )
         self.preview_switch.toggled.connect(self.auto_preview_changed.emit)
-        self.run_button = FluentButton("Stop")
-        stop_width = self.run_button.sizeHint().width()
-        self.run_button.setText("Start")
-        # Wide enough for either word, so the row does not shift when it flips.
-        self.run_button.setMinimumWidth(max(stop_width, self.run_button.sizeHint().width()))
-        self.run_button.setEnabled(False)
-        self.run_button.clicked.connect(self._run_clicked)
+        self.start_button = FluentButton("Start")
+        fit_start_button(self.start_button)
+        self.start_button.setEnabled(False)
+        self.start_button.clicked.connect(self.start_requested.emit)
+        self.stop_button = FluentButton("Stop", role="destructive")
+        self.stop_button.setEnabled(False)
+        self.stop_button.clicked.connect(self.stop_requested.emit)
         self.edit_button = FluentButton("Edit")
         self.edit_button.clicked.connect(self.edit_requested.emit)
-        self.more_button = FluentButton("⋯")
-        self.more_button.setFixedWidth(self.more_button.minimumHeight())
-        self.more_button.setToolTip("More: Restart, Remove")
-        self.more_button.clicked.connect(self._show_more)
-        self.restart_action = QtWidgets.QAction("Restart", self)
-        self.restart_action.triggered.connect(self.start_requested.emit)
-        self.remove_action = QtWidgets.QAction("Remove", self)
-        self.remove_action.triggered.connect(self.remove_requested.emit)
+        # On the row, where it is looked for: a per-row delete is the quiet
+        # ghost x that turns red under the pointer, as on every other list.
+        self.remove_button = FluentButton("×", role="destructive")
+        self.remove_button.setFixedWidth(self.remove_button.minimumHeight())
+        self.remove_button.setToolTip("Remove this node")
+        self.remove_button.clicked.connect(self.remove_requested.emit)
         top.addWidget(self.dot)
         top.addWidget(self.name_label)
         top.addWidget(self.kind_label)
@@ -106,9 +137,10 @@ class LogicRowView(FluentFrame):
         # Air after the "Plot" label, so it does not read as part of Start.
         add_row_switch(top, self.preview_switch, lead=False)
         for button in (
-            self.run_button,
+            self.start_button,
+            self.stop_button,
             self.edit_button,
-            self.more_button,
+            self.remove_button,
         ):
             top.addWidget(button)
         outer.addLayout(top)
@@ -116,28 +148,6 @@ class LogicRowView(FluentFrame):
         self.publishes_label = PublishedItemsLegend()
         outer.addWidget(self.publishes_label)
         self._project_commands()
-
-    def _running(self) -> bool:
-        return self._state == "running"
-
-    def _run_clicked(self) -> None:
-        if self._running():
-            self.stop_requested.emit()
-        else:
-            self.start_requested.emit()
-
-    def _show_more(self) -> None:
-        """The row's rare commands, below its ``⋯`` -- built for this click."""
-
-        menu = _FluentRoundedMenu(self)
-        if self._running():
-            menu.addAction(self.restart_action)
-        menu.addAction(self.remove_action)
-        button = self.more_button
-        try:
-            menu.exec_(button.mapToGlobal(QtCore.QPoint(0, button.height() + popup_gap())))
-        finally:
-            retire_widget(menu)
 
     def set_preview_offered(self, offered: bool) -> None:
         """Show the switch only for a node that declares something to open.
@@ -166,7 +176,6 @@ class LogicRowView(FluentFrame):
         state = str(state)
         if state not in self._STATE_COLORS:
             raise ValueError("state must be idle, running, or error")
-        self._state = state
         self._status_text = str(status_text or state)
         self.dot.set_color(self._STATE_COLORS[state])
         self.status_label.setText(self._status_text)
@@ -180,39 +189,43 @@ class LogicRowView(FluentFrame):
             self.status_label.setStyleSheet(
                 f"color: {colour}; background: transparent; border: none;"
             )
-        self._project_commands()
 
-    def set_commands(self, *, can_start: bool, can_stop: bool) -> None:
-        """Project presenter-owned command admission onto this row."""
+    def set_commands(self, *, can_start: bool, can_stop: bool, pending: bool = False) -> None:
+        """Project presenter-owned command admission onto this row.
+
+        ``pending`` is a Start queued behind a device release: the slot says
+        Starting… until it runs, and Stop cancels it.
+        """
 
         self._can_start = bool(can_start)
         self._can_stop = bool(can_stop)
+        self._pending = bool(pending)
         self._project_commands()
 
-    def set_task_takeover(self, active: bool) -> None:
-        """Leave the row readable while the status strip owns all commands."""
+    def set_task_takeover(self, active: bool, *, owns_task: bool = False) -> None:
+        """Leave the row readable while a running Task owns the console.
+
+        The Task's own row keeps its Stop -- the same endpoint as the status
+        strip's "Stop task" -- so the run can be ended where it is listed.
+        """
 
         self._task_takeover = bool(active)
+        self._owns_task = self._task_takeover and bool(owns_task)
         self._project_commands()
 
     def _project_commands(self) -> None:
         enabled = not self._task_takeover
-        running = self._running()
-        self.run_button.setText("Stop" if running else "Start")
-        self.run_button.setEnabled(enabled and (self._can_stop if running else self._can_start))
+        self.start_button.setText(start_label(pending=self._pending, active=self._can_stop))
+        self.start_button.setEnabled(enabled and self._can_start and not self._pending)
+        self.stop_button.setEnabled(self._can_stop and (enabled or self._owns_task))
         # It says what the next Start will do, so a row that cannot Start
         # cannot re-aim Start either.
         self.preview_switch.setEnabled(enabled)
         self.edit_button.setEnabled(enabled)
-        self.more_button.setEnabled(enabled)
-        self.restart_action.setEnabled(enabled and running and self._can_start)
-        self.remove_action.setEnabled(enabled)
-        # A running Task's Stop is the status strip's; the row does not
-        # offer a second one beside it.
-        self.run_button.setVisible(not (self._task_takeover and self.kind == "task"))
+        self.remove_button.setEnabled(enabled)
 
     def set_publishes(self, rows: tuple[tuple[str, str, str], ...]) -> None:
         self.publishes_label.set_rows(tuple(tuple(str(value) for value in row) for row in rows))
 
 
-__all__ = ["LogicRowView"]
+__all__ = ["START_LABELS", "LogicRowView", "fit_start_button", "start_label"]
