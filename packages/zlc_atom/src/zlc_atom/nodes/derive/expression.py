@@ -896,13 +896,6 @@ def typed_outputs(rows, inputs: Mapping[str, DatasetSchema] | None) -> tuple[dic
     return tuple(answers)
 
 
-def admit(rows, inputs: Mapping[str, DatasetSchema]) -> None:
-    """Refuse the first output these inputs cannot type."""
-    for answer in typed_outputs(rows, inputs):
-        if answer["error"] is not None:
-            raise answer["error"]
-
-
 def compiled(rows):
     """(row, code program or None) for every output; code compiled once."""
     programs = []
@@ -989,7 +982,7 @@ def error_stage(text: str) -> tuple[str, str, str] | None:
 
 __all__ = [
     "DeriveError", "OPERATIONS", "OUTPUT_COLUMNS", "Operand", "ROW_DEFAULTS", "STAGES", "STATISTICS",
-    "admit", "axes_text", "compact_row", "compiled", "complete_row", "describe_schema", "error_stage",
+    "axes_text", "compact_row", "compiled", "complete_row", "describe_schema", "error_stage",
     "event_labels", "execute", "input_members", "number", "output_rows", "over_axes", "readout_axis",
     "references", "typed_outputs", "within_shot_axes",
 ]

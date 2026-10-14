@@ -8231,7 +8231,12 @@ class ConsolePresenter:
             id(self.session.installation),
             int(getattr(self.session.installation, "revision", 0)),
             source_options,
-            publication is not None,
+            # The run the source last published from, not merely whether it
+            # has: what a draft can compute from it is admitted against its
+            # members, and another run can carry other ones.
+            None if publication is None else (
+                publication.event_ref.stream_id, publication.event_ref.generation
+            ),
             armed,
             acquisition_options,
         )

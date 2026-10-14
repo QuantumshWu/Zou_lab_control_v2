@@ -12,7 +12,7 @@ from zlc_atom.nodes._framework.descriptor import (
 )
 from zlc_runtime import DatasetOutputDeclaration, split_signal_key
 
-from .expression import OUTPUT_COLUMNS, DeriveError, admit, input_members, output_rows
+from .expression import OUTPUT_COLUMNS, DeriveError, input_members, output_rows, typed_outputs
 from .processor import DeriveProcessor, declared_outputs
 
 
@@ -59,6 +59,28 @@ def _draft_outputs(
         return ()
 
 
+def _admit_source(values: Mapping[str, object], publication: object) -> tuple[str, ...]:
+    """What the outputs cannot compute from the producer's latest publication.
+
+    Every structured output typed against the schemas the next evaluation
+    reads, by the evaluation's own rules -- the typing the editor shows
+    under each card -- and each refusal in its ``<output> · <stage>: …``
+    words.  Asked with the rest of the draft's admission, so the Edit page
+    says it as a draft and Start waits, as for an output left unfinished;
+    refused by the build instead, the page read "not started" under three
+    red errors and Start was there to press.
+    """
+
+    inputs = {
+        parts[1]: value.schema for key, value in publication.signals.items()
+        if (parts := split_signal_key(key)) is not None
+    }
+    return tuple(
+        str(answer["error"]) for answer in typed_outputs(values["outputs"], inputs)
+        if answer["error"] is not None
+    )
+
+
 def _build(*, signal_plane: object, source_signal: str, **values: object) -> DeriveProcessor:
     """The processor for the outputs over the bound producer's bundle.
 
@@ -66,9 +88,8 @@ def _build(*, signal_plane: object, source_signal: str, **values: object) -> Der
     output reads that the producer never publishes is refused here, by
     output and stage, before anything runs -- and the bound signal is
     recognised among them by the plane's own resolution, never by taking
-    its name apart.  Once the producer has published, every structured
-    output is typed against the schemas the next evaluation reads, by the
-    evaluation's own rules: an output that cannot be computed refuses Start.
+    its name apart.  What the outputs cannot compute from the producer's
+    latest publication was admitted with the draft (``_admit_source``).
     """
 
     rows = DERIVE_SCHEMA.project_values(values)["outputs"]
@@ -89,12 +110,6 @@ def _build(*, signal_plane: object, source_signal: str, **values: object) -> Der
         if item.owner_id == source.owner_id and (parts := split_signal_key(item.name)) is not None
     )
     names = tuple(dict.fromkeys((primary, *input_members(rows, members))))
-    publication = signal_plane.latest_publication(selected_source)
-    if publication is not None:
-        admit(rows, {
-            parts[1]: value.schema for key, value in publication.signals.items()
-            if (parts := split_signal_key(key)) is not None
-        })
     signal_plane.resolve_sibling_signals(selected_source, names)
     return DeriveProcessor(outputs=rows, primary_output=primary, input_outputs=names)
 
@@ -124,6 +139,7 @@ LOGIC_NODE = LogicNodeDescriptor(
     ),
     input_specs=(DatasetInputSpec("a", None, "exact", select_bundle=True),),
     declare_outputs=_draft_outputs,
+    admit_source=_admit_source,
     ui_contributions=(_editor_factory,),
     build=_build,
 )

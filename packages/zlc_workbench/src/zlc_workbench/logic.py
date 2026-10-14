@@ -504,6 +504,17 @@ def finalize_logic_draft(
         if not any(isinstance(spec, DatasetInputSpec) for spec in descriptor.input_specs):
             issues.append(f"{descriptor.api_name} has no Dataset source input")
         source = ""
+    # What the draft cannot compute from what its source last published is
+    # admitted here with everything else, not refused by the build at
+    # Start: the Edit page says it, as a draft, and Start waits for it.
+    if (
+        descriptor.admit_source is not None
+        and authored
+        and source in compatible_sources
+    ):
+        publication = signal_plane.latest_publication(source)
+        if publication is not None:
+            issues.extend(descriptor.admit_source(values, publication))
 
     offered_artifacts = dict(draft.artifact_inputs)
     artifact_specs = artifact_input_specs(descriptor)

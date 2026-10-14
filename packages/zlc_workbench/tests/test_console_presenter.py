@@ -5014,6 +5014,15 @@ def test_a_derive_publishes_the_counts_of_the_occupied_sites(
     assert presenter._logic_state(presenter.logic[derive_id]) == (
         "draft", "Draft: how_many · statistic: choose the axes it reduces over"
     )
+    # What the counts' own members cannot give is the same kind of draft
+    # problem, admitted against the source's latest publication: said, and
+    # Start waits, rather than a page reading "not started" over red errors.
+    typo = {**program[1], "over": "calibration.sties"}
+    assert presenter.update_logic_draft(derive_id, values={"outputs": (program[0], typo)})
+    mistyped = presenter.logic_editor_projection(derive_id)
+    assert not mistyped["can_start"]
+    assert mistyped["issues"][0].startswith("how_many · statistic: "), mistyped["issues"]
+    assert presenter._logic_state(presenter.logic[derive_id])[0] == "draft"
     assert presenter.update_logic_draft(derive_id, values={"outputs": program})
     assert presenter.logic_editor_projection(derive_id)["can_start"]
     # Named by the draft, before anything ran: the board's own listing of

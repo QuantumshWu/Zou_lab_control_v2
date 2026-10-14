@@ -441,6 +441,16 @@ class LogicNodeDescriptor:
         Callable[[Mapping[str, object], Mapping[str, object]], Mapping[str, object]]
         | None
     ) = None
+    #: What one authored draft cannot compute from its source as the source
+    #: last published -- a Start admission fact the schema's validator,
+    #: which sees only the draft, cannot check: a derive's output typed
+    #: against the members it reads.  Called with the projected values and
+    #: the selected source's latest publication once it has published; each
+    #: answer is one draft issue in the draft's own words, so the Edit page
+    #: says it and Start waits, as for a field left unfinished.
+    admit_source: (
+        Callable[[Mapping[str, object], object], tuple[str, ...]] | None
+    ) = None
     #: Optional plugin-owned read-only budget projection over frozen authoring,
     #: resolved devices and workspace resources. Called on the device worker,
     #: never while constructing a node or running an acquisition.
@@ -554,6 +564,8 @@ class LogicNodeDescriptor:
             raise TypeError("resolve_field_availability must be callable or None")
         if self.resolve_defaults is not None and not callable(self.resolve_defaults):
             raise TypeError("resolve_defaults must be callable or None")
+        if self.admit_source is not None and not callable(self.admit_source):
+            raise TypeError("admit_source must be callable or None")
         if self.estimate_run is not None and not callable(self.estimate_run):
             raise TypeError("estimate_run must be callable or None")
         if self.describe_output_frames is not None and not callable(self.describe_output_frames):
