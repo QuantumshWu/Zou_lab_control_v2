@@ -49,6 +49,7 @@ from .models import (
 #: The address the pulse server prints for a client on the same machine.  One
 #: constant so the seeded field, the tooltip and any host default agree.
 from .scan_line_edit import FluentScanLineEdit, _BindingButton
+from zlc_ui.status import counted
 
 
 def _apply_field(widget: FluentScanLineEdit, field: FieldVM) -> None:
@@ -2125,11 +2126,11 @@ class PulseScheduleView(QtWidgets.QWidget):
     def _reconcile(self, vm: ScheduleVM) -> None:
         """Update existing rows and move timeline items only when their order changes."""
         card_width = period_card_width(ports=vm.ports, analog_mode_choices=vm.analog_mode_choices)
-        visible_count = sum(1 for port in vm.ports if port.visible)
-        self.visible_label.setText(
-            f"Visible {visible_count}/{len(vm.ports)} ports · "
-            f"Hidden {max(0, len(vm.ports) - visible_count)}"
-        )
+        # How many ports are visible is the Port Catalog's line; this card,
+        # which holds the commands that hide and show them, says only what
+        # that line does not: how many are hidden.
+        hidden = sum(1 for port in vm.ports if not port.visible)
+        self.visible_label.setText(f"{counted(hidden, 'port')} hidden")
         self.names_panel.set_ports(vm.document_name, vm.ports)
         self.names_panel.set_summary(vm.total_text, vm.total_tooltip, vm.period_count, vm.visible_text)
         self.channel_panel.set_delay_rows(self._visible_delay_rows(vm), vm.ports)
