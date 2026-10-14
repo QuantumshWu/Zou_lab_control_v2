@@ -40,12 +40,18 @@ first = QtWidgets.QLabel("first"); second = QtWidgets.QLabel("second")
 view.set_panel_surface('panel-1', first); view.set_panel_surface('panel-1', second)
 assert view._cards['panel-1'].surface is second and first.parentWidget() is None
 view.resize(1200, 700); view.show(); app.processEvents()
-assert view._panel_bar.height() == view._panel_bar.sizeHint().height()
-for first, second in ((view.data_combo, view.kind_combo),
-                      (view.edit_data_button, view.add_panel_button),
-                      (view.new_data_button, view.save_image_button)):
-    assert first.mapTo(view, QtCore.QPoint()).x() == second.mapTo(view, QtCore.QPoint()).x()
-    assert first.size() == second.size()
+# The two panes are built alike: the data band as tall as the path band,
+# its row on the path row's centre line, the two tab strips on one top.
+def centre(widget):
+    return widget.mapTo(view, QtCore.QPoint()).y() + widget.height() / 2
+band = view.info_pane.path_edit.parentWidget()
+assert view._panel_bar.height() == band.height()
+assert abs(centre(view.data_combo) - centre(view.info_pane.path_edit.edit)) <= 1
+assert (view.tabs.mapTo(view, QtCore.QPoint()).y()
+        == view.info_pane.info_tabs.mapTo(view, QtCore.QPoint()).y())
+# Adding a panel and saving the board's picture head the board's own tab.
+assert view.tabs.widget(0).isAncestorOf(view.add_panel_button)
+assert view.tabs.widget(0).isAncestorOf(view.save_image_button)
 assert view.board._cards['panel-1'] is view._cards['panel-1']
 assert view.scroll.isVisible() and not view._placeholder.isVisible()
 
@@ -298,6 +304,19 @@ roles = {
 }
 assert roles.get('spatial-y') == 'Rows ↓', roles
 assert roles.get('spatial-x') == 'Columns →', roles
+# The three cards share one label column, wide enough for each axis row's
+# name, size and unit: the size is what the suffix is there to show.
+from zlc_ui.fluent import FluentSettingRow
+assert len({row._label.width() for row in editor.findChildren(FluentSettingRow)}) == 1
+for _holder, label, _mode in editor._axis_view_widgets.values():
+    assert label.fontMetrics().horizontalAdvance(label.text()) < label.width(), label.text()
+# Add axis is the Axes card's command on its title line; the values end on
+# the first column of the fields above them.
+def right(widget):
+    return widget.mapTo(editor, QtCore.QPoint(widget.width(), 0)).x()
+from zlc_ui.fluent import CARD_PAD, scaled_px
+assert editor.add_axis_button.mapTo(editor.axes_group, QtCore.QPoint()).y() == scaled_px(CARD_PAD)
+assert right(editor.axis_value_table) == right(editor.axis_name_edit)
 assert editor.value_model.rowCount() == 100_000
 assert editor.value_model.columnCount() == 1_000
 assert editor.value_table.verticalScrollBar().maximum() > 0
