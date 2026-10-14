@@ -181,14 +181,20 @@ assert card.y() > title_row.geometry().bottom()
 assert card._rule and not manager._loaded_cards['slm']._rule
 assert manager.lifecycle_button.role() == 'primary'
 manager.set_lifecycle('Shutdown devices', enabled=True, active=True)
-assert manager.lifecycle_button.role() == 'standard', 'taking the session down is not the run command'
+assert manager.lifecycle_button.role() == 'destructive', 'taking the session down ends every device'
+manager.set_apparatus('bench', dirty=True, saved=False)
+assert manager.lifecycle_button.role() == 'destructive', 'an unsaved apparatus does not soften Shutdown'
 manager.set_lifecycle('Apply device changes', enabled=True, active=True, changed=True)
+assert manager.lifecycle_button.role() == 'standard', 'Save holds the one primary while unsaved'
+manager.set_apparatus('bench', dirty=False, saved=True)
 assert manager.lifecycle_button.role() == 'primary'
 manager.set_loaded_devices((('camera', 'qCMOS', 'camera.dcam'),))
 assert not card._rule, 'the last item closes no list'
 assert card.role_label.text() == 'qCMOS'
 assert card.control_button.text() == 'Control'
 assert card.close_button.text() == 'Close'
+assert card.close_button.role() == 'destructive', 'Close retires a live device'
+assert card.control_button.role() == card.log_button.role() == 'standard'
 assert card.findChildren(FluentParameterForm) == []
 manager.set_lifecycle('Applying device changes', enabled=True, active=True, busy=True)
 assert not card.isEnabled()
