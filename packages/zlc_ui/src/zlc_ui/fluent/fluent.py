@@ -1424,14 +1424,17 @@ class FluentGroupBox(QtWidgets.QGroupBox):
     def set_selected(self, selected: bool) -> None:
         """Mark this card as the one the next edit acts on, or unmark it.
 
-        Selection is a FILL, not a frame: the body takes the accent tint and
-        the edge stays the card's own (a spacer's dashes, a bracket's
-        colour, the divider grey).  A 2 px accent border was tried first and
-        read as an outline drawn around the card rather than as the card
-        being picked; a softer accent edge was still a second line.  Painted
-        in paintEvent, never via stylesheet -- an unscoped ``border:``
-        cascades to every CHILD widget, so each inner checkbox/lineedit grew
-        its own box.
+        Selection is a FILL, not a frame: the body takes the ACCENT_TINT
+        wash and the edge stays the card's own (a spacer's dashes, a
+        bracket's colour, the divider grey).  A 2 px accent border was tried
+        first and read as an outline drawn around the card rather than as
+        the card being picked; a softer accent edge was still a second line.
+        The wash, not SELECTED: a card holds fields, muted names and
+        disabled ports, which SELECTED would sink to 3.3:1 and 2.1:1; and a
+        card takes no hover wash, so on a card the wash means only
+        selected.  Painted in paintEvent, never via stylesheet -- an
+        unscoped ``border:`` cascades to every CHILD widget, so each inner
+        checkbox/lineedit grew its own box.
         """
 
         value = bool(selected)

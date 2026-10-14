@@ -17,12 +17,18 @@ ACCENT_HOVER = "#6DA2D5"
 #: The hover wash, EVERYWHERE the pointer can act: a list or table row, a
 #: popup item, a stepper cell, an empty grid card, a segmented choice, a
 #: clickable row label.  Also the face of a grid card a rule reached rather
-#: than a click, and of a Period card that is selected.
+#: than a click, and the body of a selected CARD (a FluentGroupBox: a Period,
+#: a Subpulse).  A card takes no hover wash, so on a card this wash says
+#: only "selected"; and a card holds words of its own -- muted names (4.8:1
+#: here), disabled ports (3.0:1) -- that SELECTED would sink to 3.3:1 and
+#: 2.1:1 and the accent title of a Subpulse to 1.4:1.
 ACCENT_TINT = "#E4EFF9"
 #: What is chosen, and what is being pressed: a chosen grid card, the
 #: current segmented choice, the picked row of a popup list, a table, a tree
 #: or the Add panel list, an active cycle combo -- and the face of a
 #: standard command while it is held down, because a press IS choosing it.
+#: Each is an item whose content is its own name; a selected card, which
+#: holds controls and words of its own, is the ACCENT_TINT body instead.
 #: The mid-point of ACCENT_TINT and ACCENT (TEXT ink 7.6:1), CIEDE2000 12.3
 #: from the hover wash and 8.8 from a resting BUTTON_TINT command, so hover,
 #: rest and chosen are three different things.  A selection is this fill
