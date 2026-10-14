@@ -79,6 +79,7 @@ from .logic import (
     draft_devices,
     finalize_logic_draft,
     make_host,
+    source_label,
     task_input_summary,
 )
 from .panel_save import (
@@ -8230,7 +8231,12 @@ class ConsolePresenter:
             id(self.session.installation),
             int(getattr(self.session.installation, "revision", 0)),
             source_options,
-            publication is not None,
+            # The run the source last published from, not merely whether it
+            # has: what a draft can compute from it is admitted against its
+            # members, and another run can carry other ones.
+            None if publication is None else (
+                publication.event_ref.stream_id, publication.event_ref.generation
+            ),
             armed,
             acquisition_options,
         )
@@ -8438,12 +8444,7 @@ class ConsolePresenter:
             "auto_preview": binding.auto_preview,
             "preview_offered": binding.descriptor.offers_a_preview,
             "source_required": bool(source_specs),
-            "source_label": (
-                source_specs[0].name.replace("_", " ").title()
-                + (" · Signal bundle" if source_specs[0].select_bundle else "")
-                if source_specs
-                else "Signal"
-            ),
+            "source_label": source_label(source_specs[0]) if source_specs else "Signal",
             "source_bundle": bool(source_specs and source_specs[0].select_bundle),
             "source_signal": binding.draft.source_signal,
             "source_schema": None if source_description is None else source_description.schema,

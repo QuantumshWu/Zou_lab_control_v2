@@ -628,13 +628,23 @@ class ScanPlanEditor(QtWidgets.QWidget):
         hand" before a manual axis, and the API values' labels."""
 
         manual = (_BY_HAND,) if any(row.manual for row in self._rows) else ()
-        return (*manual, *(field.row_label for field in self.values_form.spec.fields))
+        return (*manual, *self.values_form.shown_labels())
 
     def set_label_width(self, width: int) -> None:
         """The editor's label column: the axes and the API values start on its field edge."""
 
         self._columns.set_width("kind", int(width))
         self.values_form.set_label_width(int(width))
+
+    def number_edge_hint(self) -> int:
+        """How wide the API values' number boxes need to be."""
+
+        return self.values_form.number_edge_hint()
+
+    def set_number_edge(self, edge: int) -> None:
+        """The editor's number edge: the API values end where its other number boxes do."""
+
+        self.values_form.set_number_edge(int(edge))
 
     def update_projection(self, projection: Mapping[str, object]) -> None:
         if projection.get("read_only_fields"):

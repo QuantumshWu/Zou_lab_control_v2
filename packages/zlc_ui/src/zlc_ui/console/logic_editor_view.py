@@ -27,15 +27,14 @@ from zlc_ui.fluent import (
     add_row_switch,
     FluentTreeComboBox,
     FONT,
-    field_text_inset,
     fill_grouped_choice_combo,
     fluent_font_size,
     retire_widget,
-    scaled_px,
+    row_gap,
+    section_gap,
     setting_label_width,
-    window_pad,
+    status_dot_gap,
 )
-from zlc_ui.fluent import row_gap
 from zlc_ui.form import FluentParameterForm, FormSpec
 from zlc_ui.form.qt_form import _form_label_width
 from .logic_row_view import (
@@ -113,9 +112,11 @@ class LogicEditorView(QtWidgets.QWidget):
         header.setStyleSheet("background: transparent;")
         header_layout = QtWidgets.QVBoxLayout(header)
         header_layout.setContentsMargins(0, 0, 0, 0)
-        header_layout.setSpacing(scaled_px(4, minimum=3))
+        # Two lines a row gap apart, the title and its kind a row gap apart:
+        # the page's one rhythm, not private 4s and 8s.
+        header_layout.setSpacing(row_gap())
         title_row = QtWidgets.QHBoxLayout()
-        title_row.setSpacing(scaled_px(8, minimum=5))
+        title_row.setSpacing(row_gap())
         self.title_label = FluentLabel(self.node_id)
         self.title_label.setStyleSheet(
             f'QLabel {{ color: {TEXT}; font: {fluent_font_size()}pt "{FONT}"; '
@@ -128,7 +129,9 @@ class LogicEditorView(QtWidgets.QWidget):
         title_row.addStretch(1)
         header_layout.addLayout(title_row)
         status_row = QtWidgets.QHBoxLayout()
-        status_row.setSpacing(scaled_px(8, minimum=5))
+        # The air between a dot and its words is the status strip's, so this
+        # dot reads as the node row's and the strip's.
+        status_row.setSpacing(status_dot_gap())
         self.status_dot = FluentStatusDot(size=STATUS_DOT, color=GREY)
         self.status_label = FluentLabel("stopped")
         self.status_label.setWordWrap(True)
@@ -286,7 +289,9 @@ class LogicEditorView(QtWidgets.QWidget):
             # contribution that takes the column.  A field a contribution
             # manages is not a form row, and its label -- Frame Survival's
             # "Published pairs" -- had pushed every control right of a
-            # column nobody's words filled.
+            # column nobody's words filled; nor is the unit of a row whose
+            # picker says it (the forms measure the words their rows show,
+            # a scan's API values its shown_labels).
             label_width = max(
                 _form_label_width((*visible_spec.fields, *artifact_spec.fields)),
                 setting_label_width(_row_labels(incoming)),
@@ -308,6 +313,7 @@ class LogicEditorView(QtWidgets.QWidget):
                 {key: values[key] for key in visible_spec.keys},
             )
             self.form.setVisible(bool(visible_spec.keys))
+            self._align_number_edges()
             self._reconcile_selectors(incoming)
             self._rebuild_artifact_results(incoming.get("artifact_results", ()))
             self._space_sections()
@@ -326,8 +332,8 @@ class LogicEditorView(QtWidgets.QWidget):
         issues = tuple(str(issue) for issue in incoming.get("issues", ()) or ())
         self._project_commands()
         # The row's own state, drawn from the row's own table; the page only
-        # puts the draft's first problem first, since a Restart is what this
-        # page edits for.
+        # says the draft's problems first, since a Restart is what this page
+        # edits for.
         state = str(incoming.get("state") or "idle")
         status = str(
             incoming.get("status")
@@ -336,7 +342,7 @@ class LogicEditorView(QtWidgets.QWidget):
         if error:
             state, status = "error", error
         elif issues:
-            state, status = "draft", f"Draft: {issues[0]}"
+            state, status = "draft", _draft_status(issues, incoming.get("artifact_claims"))
         self.status_label.setText(status)
         # Written when they CHANGE: the sheet is re-parsed and the widget
         # repolished on every write.
@@ -421,6 +427,27 @@ class LogicEditorView(QtWidgets.QWidget):
                 setter(self._mutation_enabled)
         return frozenset(managed)
 
+    def _align_number_edges(self) -> None:
+        """End every number box of the page on one x.
+
+        Both forms and every contribution with a form of its own (the scan
+        plan's API values) end their number boxes on the widest need among
+        them, as they share one label column: each evening out only its own
+        boxes left the page two number edges, Repeats 49 px short of the API
+        values under the same column.  A contribution takes part by
+        declaring ``number_edge_hint`` and ``set_number_edge``.
+        """
+
+        holders = (
+            self.artifact_form,
+            self.form,
+            *(widget for widget in self._contributions.values()
+              if callable(getattr(widget, "set_number_edge", None))),
+        )
+        edge = max(holder.number_edge_hint() for holder in holders)
+        for holder in holders:
+            holder.set_number_edge(edge)
+
     def _space_sections(self) -> None:
         """Size the spacers so each shown boundary gets one gap.
 
@@ -431,7 +458,7 @@ class LogicEditorView(QtWidgets.QWidget):
         it, and before the action bar.  A hidden block takes no gap at all.
         """
 
-        extra = window_pad() - row_gap()
+        extra = section_gap() - row_gap()
         rows_above = any(
             not block.isHidden()
             for block in (self._selector_frame, self.artifact_form, self.form)
@@ -666,16 +693,9 @@ class LogicEditorView(QtWidgets.QWidget):
             self._artifact_result_rows.clear()
             self._artifact_result_readouts.clear()
             for name, path, contract in results:
+                # A value in the field column: the readout's own inset starts
+                # its text where the fields' text starts.
                 readout = FluentReadoutEdit(path)
-                # A value standing in the field column starts where the
-                # fields' text starts, not on the boxes' edge: a readout is
-                # flush with its own left edge, so it is indented by a
-                # field's text inset.
-                margins = readout.textMargins()
-                readout.setTextMargins(
-                    margins.left() + field_text_inset(), margins.top(),
-                    margins.right(), margins.bottom(),
-                )
                 self._artifact_result_readouts[name] = readout
                 row = FluentSettingRow(
                     _device_label(name), readout, label_width=self._label_width,
@@ -713,6 +733,28 @@ class LogicEditorView(QtWidgets.QWidget):
 
 def _device_label(name: str) -> str:
     return str(name).replace("_", " ").title()
+
+
+def _draft_status(issues: tuple[str, ...], claims: object) -> str:
+    """The header's line for a draft Start refuses: each problem said once.
+
+    A frame-claims input's problems stand in red under the grid whose cards
+    they are about, in the node's own editor, so the header counts them and
+    names their section rather than repeating the first one in grey above
+    -- one problem in two colours, and silence about the second.  A problem
+    nothing below shows is the header's to say, and it comes first.
+    """
+
+    shown_below: dict[str, str] = {}
+    for item in dict(claims or {}).values():
+        for problem in item.get("problems", ()):
+            shown_below.setdefault(str(problem), str(item.get("label") or ""))
+    own = [issue for issue in issues if issue not in shown_below]
+    if own:
+        return f"Draft: {own[0]}"
+    sections = " and ".join(dict.fromkeys(shown_below[issue] for issue in issues))
+    count = len(issues)
+    return f"Draft: {count} problem{'' if count == 1 else 's'} in {sections}"
 
 
 def _row_labels(projection: Mapping[str, object]) -> tuple[str, ...]:

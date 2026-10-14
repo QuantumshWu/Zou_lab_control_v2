@@ -247,6 +247,14 @@ def dataset_inputs(descriptor: Any, values: Mapping[str, Any] | None = None) -> 
     return descriptor.active_dataset_inputs(values or {})
 
 
+def source_label(spec: Any) -> str:
+    """The words a node's source chooser stands under on its Edit page --
+    the input's own name, and what a bundle input selects -- and so the
+    words a draft names it by."""
+
+    return spec.name.replace("_", " ").title() + (" · Signal bundle" if spec.select_bundle else "")
+
+
 def artifact_input_specs(descriptor: Any) -> tuple[Any, ...]:
     """Saved-file inputs one node reads, as its descriptor declares them."""
 
@@ -460,7 +468,8 @@ def finalize_logic_draft(
     processor_kind = getattr(descriptor.kind, "value", None) == "processor"
     if wants_source:
         if not source:
-            issues.append("source_signal must be selected")
+            # Named as the row the operator sees, not by the draft's key.
+            issues.append(f"{source_label(wants_source[0])} must be selected")
         elif source not in compatible_sources:
             declared_elsewhere = any(
                 str(row.name) == source
@@ -495,6 +504,17 @@ def finalize_logic_draft(
         if not any(isinstance(spec, DatasetInputSpec) for spec in descriptor.input_specs):
             issues.append(f"{descriptor.api_name} has no Dataset source input")
         source = ""
+    # What the draft cannot compute from what its source last published is
+    # admitted here with everything else, not refused by the build at
+    # Start: the Edit page says it, as a draft, and Start waits for it.
+    if (
+        descriptor.admit_source is not None
+        and authored
+        and source in compatible_sources
+    ):
+        publication = signal_plane.latest_publication(source)
+        if publication is not None:
+            issues.extend(descriptor.admit_source(values, publication))
 
     offered_artifacts = dict(draft.artifact_inputs)
     artifact_specs = artifact_input_specs(descriptor)
@@ -640,6 +660,7 @@ def _resolve_workspace_resources(
     resources: dict[str, Any] = {}
     issues: list[str] = []
     workspace_root = Path(getattr(workspace, "root", Path.cwd())).resolve()
+    labels = {field.name: field.label for field in descriptor.authoring_schema.fields}
     for spec in descriptor.workspace_resources:
         if not descriptor.authoring_schema.is_enabled(spec.field_name, draft.values):
             continue
@@ -653,8 +674,10 @@ def _resolve_workspace_resources(
             selected = directory / selected
         selected = selected.resolve()
         if not selected_text or selected.parent != directory:
+            # The row's label and the folder as the workspace names it: the
+            # key and an absolute temp path were elided mid-word on the row.
             issues.append(
-                f"{spec.field_name} must choose a file from {directory}"
+                f"{labels[spec.field_name]} must be a file in {spec.directory}/"
             )
             continue
         kept = held.get(spec.field_name)

@@ -162,12 +162,16 @@ class TaskConsoleView(QtWidgets.QWidget):
         self.board.order_committed.connect(self.panel_order_committed.emit)
         # An empty Monitor said nothing at all; it says how a panel arrives.
         self.monitor_hint = muted_note_label(
-            "No panels yet.  Choose a Plot in the header and Add Panel, or turn on "
+            "No panels yet. Choose a Plot in the header and Add Panel, or turn on "
             "Plot on a Logic row before starting it."
         )
         self.monitor_hint.setWordWrap(True)
+        # Where the board's first card will stand: its words start where a
+        # card's title does and end where its text would, and its top is a
+        # card's top -- the board's gap under the tabs.
+        words = self.board.text_left()
         self.monitor_hint.setContentsMargins(
-            scaled_px(10, minimum=6), scaled_px(10, minimum=6), scaled_px(10, minimum=6), 0
+            words, words - PanelCardView.strip_text_inset(), words, 0
         )
         monitor_layout.addWidget(self.monitor_hint)
         self.scroll = FluentScrollArea()
@@ -190,7 +194,7 @@ class TaskConsoleView(QtWidgets.QWidget):
         # Logic page's (mount_logic_page).
         self.logic_layout.setSpacing(row_gap())
         self.logic_hint = FluentLabel(
-            "No logic nodes yet.  Add a Measurement / Processor / Task from the header "
+            "No logic nodes yet. Add a Measurement / Processor / Task from the header "
             "(it starts STOPPED); open its Edit to set parameters and Start it."
         )
         self.logic_hint.setWordWrap(True)

@@ -1243,10 +1243,11 @@ def test_a_processor_adds_with_an_unresolved_source_and_no_modal(
     # With no source, Start is disabled before the click and refused at it.
     projection = presenter.logic_editor_projection(node_id)
     assert projection["can_start"] is False
-    assert any("source_signal" in issue for issue in projection["issues"])
+    # Said by the row's label, as the operator sees it, not the draft's key.
+    assert "Frames must be selected" in projection["issues"]
     assert presenter.start_logic(node_id) is False
     assert presenter.logic[node_id].host is None
-    assert "source_signal" in presenter.logic[node_id].draft_error
+    assert presenter.logic[node_id].draft_error == "Frames must be selected"
 
     camera_id = presenter.add_logic("camera_measurement")
     assert presenter.view.logic_editors[node_id]["source_options"] == (
@@ -1550,6 +1551,9 @@ def test_calibration_pulse_is_a_workspace_file_picker(
     assert projection["form_values"]["repeats"] == 200
     assert "timeout_seconds" not in projection["form_values"]
     assert projection["can_start"] is False
+    # The row's label and the workspace's folder name, not the field key
+    # and an absolute path the row elides mid-word.
+    assert "Calibration pulse template must be a file in pulses/" in projection["issues"]
 
     presenter.update_logic_draft(node_id, values={"pulse_template": template.name})
     projection = presenter.logic_editor_projection(node_id)
