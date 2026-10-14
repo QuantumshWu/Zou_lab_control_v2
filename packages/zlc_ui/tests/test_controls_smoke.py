@@ -746,7 +746,7 @@ def test_one_save_rule_one_destructive_look_and_a_flush_readout(run_qt) -> None:
 
     run_qt(
         """
-from PyQt5 import QtGui, QtWidgets
+from PyQt5 import QtCore, QtGui, QtWidgets
 from zlc_ui.qt import ensure_qt_app
 from zlc_ui.fluent import FluentButton, FluentLabel, FluentLineEdit, FluentReadoutEdit
 from zlc_ui.fluent.fluent import FluentReadoutMultiline
@@ -831,6 +831,15 @@ assert abs(first_ink(flush) - first_ink(header)) <= 1.0, (first_ink(flush), firs
 left = first_ink(field)
 for widget in (single, multi):
     assert abs(first_ink(widget) - left) <= 1.0, (type(widget).__name__, first_ink(widget), left)
+# Nothing to type: a readout takes focus by a click (to select and copy),
+# never by Tab and never as the window's first focus.
+for widget in (flush, single, multi):
+    assert widget.focusPolicy() == QtCore.Qt.ClickFocus, type(widget).__name__
+column.activateWindow()
+field.clearFocus()
+column.focusNextChild()
+app.processEvents()
+assert column.focusWidget() is field, column.focusWidget()
 """
     )
 

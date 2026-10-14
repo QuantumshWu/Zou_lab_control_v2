@@ -2510,6 +2510,10 @@ class FluentReadoutEdit(FluentLineEdit):
         self.setTextMargins(left, margins.top(), margins.right(), margins.bottom())
         self.setReadOnly(True)
         self.setCursor(QtCore.Qt.IBeamCursor)        # the I-beam signals "selectable text"
+        # Focus by a click only, for selecting and copying: there is nothing to
+        # type, so the readout is neither a Tab stop nor a window's first focus
+        # -- a focused readout drops its middle elision and scrolls to its tail.
+        self.setFocusPolicy(QtCore.Qt.ClickFocus)
         self.set_display_elide(QtCore.Qt.ElideMiddle)
         self.setToolTip(self.text())
 
@@ -2587,12 +2591,13 @@ class FluentReadoutMultiline(QtWidgets.QPlainTextEdit):
         inset = 0 if self._plain else field_text_inset()
         self.setViewportMargins(inset - scaled_px(PADDING_V), 0, 0, 0)
         self._apply_style()
+        # Not an input, like the single-line readout: focus by a click only, so it is neither a
+        # Tab stop nor a dialog's initial focus (which lands on the OK button -> Enter dismisses).
+        # Mouse selection + copy still work.
+        self.setFocusPolicy(QtCore.Qt.ClickFocus)
         if self._plain:
-            # A MESSAGE body is not an input: hide the blinking text caret and don't steal the dialog's
-            # initial focus (so it lands on the OK button -> Enter dismisses).  Mouse selection + copy
-            # still work regardless of focus policy.
+            # A MESSAGE body also hides the blinking text caret.
             self.setCursorWidth(0)
-            self.setFocusPolicy(QtCore.Qt.ClickFocus)
         if text:
             self.setPlainText(str(text))
         # Recompute height when the text changes AND when the wrapped layout size changes (a resize
