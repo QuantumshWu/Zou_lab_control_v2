@@ -158,7 +158,7 @@ class _OutputCard(FluentFrame):
         # stay where the operator last found them.
         self.add = {}
         for stage in ("where", "combine", "statistic"):
-            button = hold_place(FluentButton(f"+ {stage}", self))
+            button = hold_place(FluentButton(f"+ {stage.capitalize()}", self))
             button.clicked.connect(lambda _checked=False, stage=stage: self._open(stage))
             self.add[stage] = button
         line.place("actions", *self.add.values())
