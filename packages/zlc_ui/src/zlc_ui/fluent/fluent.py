@@ -3319,6 +3319,11 @@ class FluentComboBox(QtWidgets.QAbstractButton):
                 f'QLineEdit {{ background: transparent; border: none; padding: 0; '
                 f'color: {TEXT}; font: {fluent_font_size()}pt "{FONT}"; }}'
             )
+            # The combo draws the field; its editor takes exactly the text
+            # room inside it.  A field's own minimum height made the editor
+            # taller than that room, so the typed text sat below the
+            # collapsed text's line and below every label beside the box.
+            self._line_edit.setMinimumHeight(0)
             self._line_edit.textChanged.connect(self.currentTextChanged)
             self._line_edit.installEventFilter(self)
             self.setFocusProxy(self._line_edit)
