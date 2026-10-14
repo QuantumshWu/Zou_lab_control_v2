@@ -3,13 +3,17 @@
 The operator says which file reads which frames the way they think it --
 this one the load frame, that one the rest -- by marking cells: "Last" and
 "Rest" follow the frame count, a frame number keeps its position.  A frame
-reached through Last or Rest shows as a dashed card in its file's row; a
-frame nobody reads, or two files reach, or a number the source does not
-carry, is edged in red with the reason below.  Nothing here changes a claim
+reached through Last or Rest shows as a dashed card in its file's row, and
+as an empty dashed outline in the other rows when it is a Last (only
+un-marking that Last gives it away); a frame nobody reads is an empty red
+card in every row, and one two files reach, or a number the source does not
+carry, is a red-edged card with the reason below.  Nothing here changes a claim
 because the frame count changed: what was authored stays until the operator
 edits it.  A file is removed by the × that ends its row and replaced by
 clicking its name.  The readout model -- which model each file is read
-with -- is chosen under the files it applies to.  The console resolves the
+with -- is chosen under the files it applies to.  The title and the model's label
+sit in the editor's one label column, so Add and the model buttons start
+where the form's fields do.  The console resolves the
 files and projects how the source's frames read them; this widget only
 draws that and writes the edits back.
 """
@@ -22,6 +26,7 @@ from PyQt5 import QtCore, QtWidgets
 
 from zlc_ui.fluent import (
     RED_DARK,
+    TEXT,
     FluentButton,
     FluentLabel,
     FluentSectionLabel,
@@ -39,7 +44,8 @@ from zlc_atom.nodes.calibration import READOUT_MODEL_CHOICES
 CALIBRATIONS = "calibrations"
 _NAMED = ((LAST, "Last"), (REST, "Rest"))
 _GAP = None
-_HINT = "Click a cell to give that frame to a file · Last and Rest follow the frame count"
+_HINT = ("Click a cell to give that frame to a file · Last and Rest follow the frame count"
+         " · click a file name to replace it")
 _EMPTY = "Add a calibration file; the first one reads every frame"
 
 
@@ -54,11 +60,13 @@ class CalibrationsEditor(QtWidgets.QWidget):
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         header = QtWidgets.QHBoxLayout()
-        header.setSpacing(scaled_px(12))
-        title = FluentSectionLabel("Calibrations")
+        # The label-to-field spacing of a setting row: with the title in the
+        # label column, Add starts on the form's field edge.
+        header.setSpacing(scaled_px(6, minimum=4))
+        self.title = FluentSectionLabel("Calibrations")
         # Centred on the button beside it, not dropped below it like an own-line section.
-        title.setContentsMargins(0, 0, 0, 0)
-        header.addWidget(title)
+        self.title.setContentsMargins(0, 0, 0, 0)
+        header.addWidget(self.title)
         self.add_button = FluentButton("Add calibration…")
         self.add_button.clicked.connect(self._browse_new)
         header.addWidget(self.add_button)
@@ -85,8 +93,11 @@ class CalibrationsEditor(QtWidgets.QWidget):
         self.model_row = QtWidgets.QWidget(self)
         model_layout = QtWidgets.QHBoxLayout(self.model_row)
         model_layout.setContentsMargins(0, scaled_px(6), 0, 0)
-        model_layout.setSpacing(scaled_px(12))
-        model_layout.addWidget(muted_note_label("Readout model"))
+        model_layout.setSpacing(scaled_px(6, minimum=4))
+        # A field label like "Frames" above it, not a second hint line.
+        self.model_label = FluentLabel("Readout model")
+        self.model_label.setStyleSheet(f"color: {TEXT}; background: transparent; border: none;")
+        model_layout.addWidget(self.model_label)
         self.model = FluentSegmentedButtons(
             tuple((choice.value, choice.label) for choice in READOUT_MODEL_CHOICES), self.model_row)
         self.model.activated.connect(
@@ -99,6 +110,12 @@ class CalibrationsEditor(QtWidgets.QWidget):
         self._shown: tuple = ()
         self._base_dir = ""
         self._filter = "All files (*)"
+
+    def set_label_width(self, width: int) -> None:
+        """The editor's label column, shared with the form's "Frames" row."""
+
+        self.title.setFixedWidth(int(width))
+        self.model_label.setFixedWidth(int(width))
 
     # ---------------------------------------------------------------- reading
 
@@ -151,18 +168,22 @@ class CalibrationsEditor(QtWidgets.QWidget):
                     )
                 elif isinstance(token, int) and reach is not None:
                     readers = reach.readers[token]
-                    # A frame another file reads as its Last is that file's:
-                    # no cell to take it from here.
-                    if any(reader != row and how == LAST for reader, how in readers):
-                        continue
                     mine = next((how for reader, how in readers if reader == row), None)
-                    if len(readers) > 1 and mine is not None:
+                    last = next((reader for reader, how in readers if how == LAST), None)
+                    if mine is None and last is not None:
+                        # Another file's Last: only un-marking it gives the frame away.
+                        states[(row, column)] = "held"
+                        tips[(row, column)] = (
+                            f"read as Last by {names[last]}; un-mark its Last to give frame "
+                            f"{token} away")
+                    elif len(readers) > 1 and mine is not None:
                         states[(row, column)] = "warning"
                         tips[(row, column)] = "read by " + " and ".join(
                             f"{names[reader]} ({how})" for reader, how in readers)
                     elif not readers:
-                        states[(row, column)] = "warning"
-                        tips[(row, column)] = f"frame {token} has no calibration"
+                        states[(row, column)] = "missing"
+                        tips[(row, column)] = (
+                            f"frame {token} has no calibration; click to give it to this file")
                     elif mine in (LAST, REST):
                         states[(row, column)] = "derived"
                         tips[(row, column)] = f"read as {mine}"

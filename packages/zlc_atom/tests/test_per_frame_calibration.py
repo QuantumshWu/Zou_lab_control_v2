@@ -332,6 +332,7 @@ def test_the_calibrations_editor_gives_frames_to_files_by_clicking(monkeypatch) 
         assert claims == (load, {"path": readout["path"], "frames": ("last", "rest")})
         project(claims)
         assert not grid.model().index(0, 5).flags() & QtCore.Qt.ItemIsSelectable
+        assert grid.model().index(0, 5).data(QtCore.Qt.UserRole + 1) == "held", "an outline, not a hole"
         # A frame taken here is taken from whichever file had it.
         claims = click(1, 3)
         assert claims == ({"path": load["path"], "frames": ()},

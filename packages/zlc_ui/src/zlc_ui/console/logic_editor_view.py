@@ -195,6 +195,9 @@ class LogicEditorView(QtWidgets.QWidget):
         actions.addWidget(self.restart_button)
         actions.addWidget(self.run_button)
         actions.addWidget(self.preview_switch)
+        # The node's own commands stand apart from what it edits: a Remove
+        # right under a section read as that section's remove.
+        self._body_layout.addSpacing(scaled_px(14, minimum=8))
         self._body_layout.addLayout(actions)
         self._show_actions = bool(show_actions)
         for button in (self.remove_button, self.restart_button, self.run_button, self.preview_switch):
