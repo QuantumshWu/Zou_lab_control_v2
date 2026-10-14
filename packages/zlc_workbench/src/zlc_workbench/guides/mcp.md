@@ -158,6 +158,31 @@ Panels consume native signals. `lab_catalog()` lists plot capabilities;
 editable semantic/display/fit fields. `panel.add` creates a panel and returns its
 ID; `panel.update` applies a patch through the same editor as the GUI.
 
+The bound catalog's `panel.update` record gives the exact `lab_action` arguments
+and `patch_fields` accepted by that owner. Send
+`lab_action(action='panel.update', arguments={'panel_id': ID, 'patch': {...}})`.
+Use `parameter_surface.semantic`, `.display` and `.fit` for the current nested
+field keys, values and choices. A field's `edit_section` takes precedence over
+the section where it appears: `facet_fit_parameter` appears beside the fit
+controls but belongs to `patch.display`. The panel's kind is fixed at creation;
+add a new panel to use another kind.
+
+A same-value patch can return `accepted=false` with the generic message
+`The requested action was not accepted` because no state changed. Check the
+catalog's current settings and the panel's `configuration_pending`/`panel_error`
+in `lab_results`: when the requested settings have already settled without a
+panel error, continue without replaying the update. A concrete validation or
+panel error still needs correction.
+
+The catalog's `panel.state` is a complete Layout persistence record. It is not
+a valid patch to copy wholesale into `panel.update`: `published_outputs`,
+`interaction`, `selector`, `crosshair`, `classifier_thresholds` and `focused_cell`
+have their own owners. Available fit parameters are published by default;
+`published_outputs={}` in a Layout means default-enabled, not no outputs. If
+publication policy needs editing, the existing Console public method is
+`update_panel_published_outputs(panel_id, values)`; the developer `lab_call`
+can invoke it. Plot configuration does not require that extra operation.
+
 Choose X for the scanned coordinate, Facet for independent cells such as sites,
 Group for overlaid series, Reduce with Mean for repeated trials, and Scope for
 one exact coordinate such as a frame pair. Keep all three Dataset domains; do
@@ -235,6 +260,120 @@ Plot the scan's survival signal with a Curve Facet Grid: hold time X, sites Face
 repeat axes Mean, pair0→1 Scope; enable Exponential and fit_all_facets. Use the
 operator's offset/amplitude constraints, not a different external likelihood.
 
+The recipe requires `panel_semantic` as well as `scan_plan`; it does not rely on
+automatic X selection. Read `lab_recipes(name='trap_lifetime')`, copy its
+`defaults.panel_semantic` mapping, and add the chosen hold-time fate as `'x'`.
+For the recipe's single Pulse/API axis, the native Scan contract maps the exact
+Pulse `FIELD_ID` to Point axis `scan.FIELD_ID`. Thus the same field selected from
+the Pulse catalog for `pulse:param:FIELD_ID` (or `api:FIELD_ID`) supplies the key
+`fate:point:scan.FIELD_ID`. This is the Scan contract for this single-axis recipe,
+not a rule for other producers or a guessed Period ID.
+
+```text
+lab_recipes(name='trap_lifetime')
+# SEMANTIC = a copy of recipes[0].defaults.panel_semantic
+# FIELD_ID = the chosen hold-duration field_id from lab_editor_catalog
+SEMANTIC['fate:point:scan.' + FIELD_ID] = 'x'
+lab_run_recipe(name='trap_lifetime', parameters={
+  'camera': CAMERA_ID, 'sequencer': SEQUENCER_ID,
+  'pulse_path': VERIFIED_PULSE_PATH, 'calibration_path': COMPATIBLE_CALIBRATION_PATH,
+  'scan_plan': SCAN_PLAN_JSON, 'panel_semantic': SEMANTIC,
+  'repeats': CHOSEN_SWEEPS, 'shots_per_point': CHOSEN_SHOTS,
+  'frames_per_cycle': ALL_TRIGGER_FRAMES, 'start_frame': EARLIER_FRAME,
+  'end_frame': LATER_FRAME, 'fit_fixed': FIT_FIXED
+}, start=false)
+```
+
+`start=false` prepares the stopped board for inspection; use `start=true` to
+prepare and start it in one call. To start a board already prepared, use the
+returned follower/entry nodes and their current revisions with ordinary
+`logic.start`, not another Layout replacement. One-point pilots keep the authored
+X even though they cannot produce a meaningful fit. Later changes to point
+values/counts retain it. Changing the scanned field itself requires a matching
+axis assignment. Without explicit fates, generic plots prefer an axis that
+varies; a site Facet can otherwise displace their default X and leave a vacancy.
+
+For a three-panel view, use a 2x2 mean curve, a 4x4 per-site Facet Grid, and a
+2x2 decay-time-versus-site curve. Here `size` is the panel size preset, not a
+request to discard sites beyond a 4-by-4 array. `show_grid=false` removes axis
+grid lines while retaining the facets and their borders; `uncertainty=true`
+shows the native errors. These are display choices for this example.
+
+The following is MCP call notation. Substitute values returned by the tools;
+capitalized names are not literal signal names or axis IDs. `SITE_PANEL` is the
+actual result panel ID returned by the recipe, and `SURVIVAL_SIGNAL` is its
+`lab_catalog(panel_id=SITE_PANEL).panel.state.signal`.
+
+First create and bind the mean panel, then read its bound fields:
+
+```text
+lab_action(action='panel.add', arguments={'kind': 'curve'})
+# MEAN_PANEL = the returned panel_id
+lab_action(action='panel.update', arguments={'panel_id': MEAN_PANEL, 'patch': {
+  'signal': SURVIVAL_SIGNAL, 'size': '2x2', 'title': 'Mean conditional survival',
+  'display': {'show_grid': false, 'uncertainty': true}
+}})
+lab_catalog(panel_id=MEAN_PANEL)
+lab_catalog(panel_id=SITE_PANEL)
+```
+
+From those catalogs, select `HOLD_FATE`, the semantic field for the chosen scan
+coordinate; `SITE_FATE`, the calibrated-site field; and `PAIR_FATE` plus
+`PAIR_SCOPE`, the real Scope value for the intended earlier/later frame pair.
+`REDUCED_REPEATS` is a mapping from each actual Repeat fate key to `'reduce'`.
+Use the complete field keys, including their domains. Do not guess a duration
+field such as `period4` or infer a site axis from an array dimension. When the
+catalog says semantic fields are unavailable, wait for its source schema rather
+than inventing them.
+
+Apply the mean and per-site projections explicitly. `FIT_FIXED` is the user's
+chosen native fixed-parameter mapping, or `{}` to leave the parameters free;
+read the model's actual parameter identities before setting it. A normalization
+constraint is a scientific choice, not a default imposed by this example.
+
+```text
+lab_action(action='panel.update', arguments={'panel_id': MEAN_PANEL, 'patch': {
+  'semantic': {**REDUCED_REPEATS, HOLD_FATE: 'x', SITE_FATE: 'reduce',
+               PAIR_FATE: PAIR_SCOPE, 'reduction': 'mean'},
+  'fit': {'model': 'exponential_decay', 'fixed': FIT_FIXED}
+}})
+lab_action(action='panel.update', arguments={'panel_id': SITE_PANEL, 'patch': {
+  'size': '4x4', 'title': 'Conditional survival by site',
+  'semantic': {**REDUCED_REPEATS, HOLD_FATE: 'x', SITE_FATE: 'facet',
+               PAIR_FATE: PAIR_SCOPE, 'reduction': 'mean'},
+  'display': {'show_grid': false, 'uncertainty': true,
+              'facet_fit_parameter': 'decay_time'},
+  'fit': {'model': 'exponential_decay', 'fit_all_facets': true, 'fixed': FIT_FIXED}
+}})
+lab_results(panel_id=MEAN_PANEL)
+lab_results(panel_id=SITE_PANEL)
+```
+
+In the site result's `published_signals`, take the actual `name` whose
+`parameter` is `decay_time` as `TAU_SIGNAL`; do not construct it from an assumed
+panel number. Each parameter signal carries its own uncertainty, so no separate
+`decay_time_err` signal is needed. Bind the comparison panel and inspect its own
+catalog:
+
+```text
+lab_action(action='panel.add', arguments={'kind': 'curve'})
+# TAU_PANEL = the returned panel_id
+lab_action(action='panel.update', arguments={'panel_id': TAU_PANEL, 'patch': {
+  'signal': TAU_SIGNAL, 'size': '2x2', 'title': 'Decay time by site',
+  'display': {'show_grid': false, 'uncertainty': true}
+}})
+lab_catalog(panel_id=TAU_PANEL)
+lab_action(action='panel.update', arguments={'panel_id': TAU_PANEL, 'patch': {
+  'semantic': {**FIT_REDUCED_REPEATS, FIT_SITE_FATE: 'x', 'reduction': 'mean'}
+}})
+```
+
+`FIT_REDUCED_REPEATS` and `FIT_SITE_FATE` come from this comparison panel's
+catalog. Fit outputs move non-Repeat sample axes into Point: the survival
+input's site field can be `fate:cell_data:calibration.site`, while its published
+fit parameter uses `fate:point:calibration.site`. Verify the returned schema;
+copying the input's Cell-data fate key into this panel is invalid.
+
 Reuse a compatible existing Calibration and verified Pulse/ROI/Context. Start
 the following processors, then the Scan once; it owns acquisition ready/Fire.
 Use Scan's timing estimate to distinguish first full sweep from all planned
@@ -243,6 +382,15 @@ do not wait for an unnecessarily large final batch before showing any result.
 Save the native Figure and Layout and return the per-site decay_time table with
 uncertainties and source references. Longer or different statistical analysis is
 an additional scientific choice, not the prerequisite for this ordinary workflow.
+
+Display updates, `lab_results`, and native `lab_save(..., refresh=true)` can run
+while acquisition continues. Save each of the three panel IDs with its own path;
+wait for its save to finish and preserve the source references. Do not Stop a
+scan merely to show or save these figures. Choose scan points, complete sweeps
+and shots per point for the current question and requested statistics; this
+example supplies no apparatus-specific scan budget. Native fit success and
+validity describe numerical results, not proof of a correct physical model,
+sufficient precision or significant differences between sites.
 
 ## errors
 

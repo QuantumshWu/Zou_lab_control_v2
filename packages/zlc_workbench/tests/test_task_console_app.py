@@ -2038,6 +2038,134 @@ def test_a_queued_value_the_drain_refuses_is_said_on_its_field(workspace) -> Non
     coordinator.assert_idle()
 
 
+@pytest.mark.parametrize("single_first", (False, True), ids=("direct-multipoint", "single-to-multipoint"))
+def test_mcp_lifetime_recipe_keeps_the_scan_axis_as_x(workspace, single_first):
+    """The native recipe draws both a fresh scan and a one-point scan expanded in place."""
+    pytest.importorskip("mcp")
+    from dataclasses import replace
+    from zlc_pulse import PulseBinding, PulseFieldRef
+    from zlc_atom.devices.simulation.world import DEFAULT_SIMULATION_IMAGE_SHAPE_YX
+    from pulse_fixtures import ordinary_imaging_sequence
+    from test_console_presenter import _box_calibration
+
+    sequence = ordinary_imaging_sequence()
+    write_ordinary_pulse(workspace, sequence=replace(sequence, bindings=(
+        PulseBinding(PulseFieldRef("duration", "gap_1"), "s", scan=True),
+    )))
+    (workspace / "data").mkdir()
+    height, width = DEFAULT_SIMULATION_IMAGE_SHAPE_YX
+    _box_calibration(("site-1",), ((width / 2, height / 2),), (0.0,),
+                     (height, width)).save(workspace / "data" / "calibration.json")
+    result = _run_script(r'''
+import asyncio, json, time
+from concurrent.futures import ThreadPoolExecutor
+import httpx2
+from mcp import ClientSession
+from mcp.client.streamable_http import streamable_http_client
+from zlc_ui import ensure_qt_app
+from zlc_workbench.apps.task_console import create_experiment_flow
+from zlc_workbench.apps.mcp import start_server
+app = ensure_qt_app([])
+flow = create_experiment_flow(workspace=WORKSPACE, template="virtual")
+close_mcp = start_server(flow, port=0, token="lifetime-test")
+points = [.003, .006, .012, .024, .048]
+def plan(values):
+    return json.dumps({"axes":[{"port":"pulse:param:duration:gap_1", "unit":"s", "values":values}]})
+
+async def client():
+    async with httpx2.AsyncClient(headers={"Authorization":"Bearer lifetime-test"}, timeout=45.) as http:
+        async with streamable_http_client(close_mcp.connection_info["url"], http_client=http) as (read, write, *_):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                await session.list_tools()
+                async def call(name, arguments=None):
+                    reply = await session.call_tool(name, arguments or {}, read_timeout_seconds=45)
+                    assert not reply.is_error, reply.content
+                    return reply.structured_content
+                assert (await call("lab_initialize"))["accepted"]
+                ready = await call("lab_wait_for", {"tool_name":"lab_state", "arguments":{},
+                    "path":["session_open"], "equals":True, "timeout_seconds":10})
+                assert ready["matched"], ready
+                description = (await call("lab_recipes", {"name":"trap_lifetime"}))["recipes"][0]
+                semantic = dict(description["defaults"]["panel_semantic"])
+                semantic["fate:point:scan.duration:gap_1"] = "x"
+                recipe = await call("lab_run_recipe", {"name":"trap_lifetime", "parameters":{
+                    "camera":"camera", "sequencer":"sequencer", "pulse_path":"imaging_test.json",
+                    "calibration_path":"calibration.json", "frames_per_cycle":3, "start_frame":0,
+                    "end_frame":2, "repeats":1, "shots_per_point":2,
+                    "fit_fixed":{"amplitude":1., "offset":0.},
+                    "panel_semantic":semantic,
+                    "scan_plan":plan(points[:1] if SINGLE_FIRST else points)}})
+                assert recipe["accepted"] and recipe["started"], recipe
+                panel_id, node_id = recipe["result_panels"][0], recipe["node_id"]
+                generation = recipe["generation"]
+                done = await call("lab_wait", {"node_id":node_id, "generation":generation,
+                    "until":"terminal", "timeout_seconds":30})
+                assert done["reached"] and done["error"] is None, done
+                if SINGLE_FIRST:
+                    first = (await call("lab_catalog", {"panel_id":panel_id}))["panel"]
+                    first_fates = {field["key"]:field["value"] for field in first["parameter_surface"]["semantic"]}
+                    assert first_fates["fate:point:scan.duration:gap_1"] == "x", first_fates
+                    changed = await call("lab_action", {"action":"logic.update",
+                        "arguments":{"node_id":node_id, "values":{"plan":plan(points)}}})
+                    assert changed["accepted"], changed
+                    restarted = await call("lab_action", {"action":"logic.start", "arguments":{"node_id":node_id}})
+                    assert restarted["accepted"], restarted
+                    generation = next(row["generation"] for row in restarted["state"]["logic"] if row["node_id"] == node_id)
+                    done = await call("lab_wait", {"node_id":node_id, "generation":generation,
+                        "until":"terminal", "timeout_seconds":30})
+                    assert done["reached"] and done["error"] is None, done
+                deadline = time.monotonic() + 20
+                while True:
+                    table = await call("lab_results", {"panel_id":panel_id})
+                    if table.get("rows") and table.get("source_is_latest"):
+                        break
+                    if "no axis holds" in table["panel_error"] or time.monotonic() >= deadline:
+                        break
+                    await asyncio.sleep(.05)
+                panel = (await call("lab_catalog", {"panel_id":panel_id}))["panel"]
+                patch_fields = panel["update"]["patch_fields"]
+                assert "published_outputs" not in patch_fields and {
+                    "signal", "kind", "cell_kind", "size", "interval_ms", "title",
+                    "semantic", "display", "fit", "overlay_signal",
+                } <= set(patch_fields), patch_fields
+                fates = {field["key"]:field["value"] for field in panel["parameter_surface"]["semantic"]}
+                print("MULTIPOINT_RESULT", json.dumps({"single_first":SINGLE_FIRST, "fates":fates,
+                    "status":table["status"], "panel_error":table["panel_error"], "rows":table["rows"]}), flush=True)
+                assert fates.get("fate:point:scan.duration:gap_1") == "x", fates
+                assert table["status"] == "current" and table["fit_matches_display"], table
+                assert table["rows"] and all(row["success"] for row in table["rows"]), table
+                source = await call("lab_signal", {"signal":table["signal"], "dataset":True})
+                assert table["source_generation"] == source["ref"]["stream_generation"]
+                assert table["source_revision"] == source["ref"]["revision"]
+                assert table["source_publication"] is not None and table["source_is_latest"]
+                print("LIFETIME_RECIPE_MCP_PASS", flush=True)
+
+pool = ThreadPoolExecutor(max_workers=1)
+future = pool.submit(lambda: asyncio.run(client()))
+try:
+    deadline = time.monotonic() + 80
+    while not future.done() and time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(.002)
+    future.result(timeout=1)
+finally:
+    close_mcp()
+    deadline = time.monotonic() + 20
+    while not flow.close(present=False, discard_changes=True) and time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(.005)
+    assert flow.close(present=False, discard_changes=True), "virtual lifetime flow did not close"
+    while not close_mcp() and time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(.005)
+    pool.shutdown(wait=True)
+'''.replace("WORKSPACE", repr(str(workspace))).replace("SINGLE_FIRST", repr(single_first)),
+        cwd=workspace, timeout=110)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "LIFETIME_RECIPE_MCP_PASS" in result.stdout
+
+
 def test_mcp_uses_current_virtual_session_and_keeps_stop_available(workspace):
     """The actual HTTP protocol, Qt owner and existing virtual lifecycle agree."""
     pytest.importorskip("mcp")

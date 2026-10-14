@@ -459,6 +459,8 @@
 
 ### 2.5 Device Control与settings provenance
 
+- 2026-10-13 处理实验机寿命反馈（资料包标记2026-10-14、基线6c4599c0）：真实Qt/HTTP复现首次多点正常，单点试采后改同一Scan为多点仍保留scan=reduce并报缺X。现有recipe原生字段绑定增加必填panel_semantic，显式保留实际Scan X；没有新增解析/执行框架或改变通用Plot默认。原同一用例两路径均通过actual fate、原生fit success与当前generation/revision核对。panel.update目录与原校验共享允许字段，guide补全2x2平均、4x4逐site、2x2 tau误差三图调用、Fit输出Site域、非停止显示/保存和科学解释边界；配方示例关闭坐标网格但保留facet。临时真实Qt/HTTP三图验收确认Site转Point域、三张PNG与三份原生NPZ的plot/dataset读回、Frozen ref及Layout preset/display一致，未调用Stop；测试进程及临时workspace已清理。未改solver、实验机扫描点/次数、系数约束或原始数据；验收仅虚拟设备。
+
 - 2026-10-13 MCP关闭确认：`lab_close`把原Pulse owner的未保存Pulse/Config/Subpulse问题、路径与discard/cancel选项返回AI，AI按当前任务自主决策再提交选择，不要求每次人工审批。确认前不启动关闭；cancel保留草稿和Session，discard复用原窗口guard、worker与Shutdown。旧公开整体/单设备关闭也贯通非模态参数，异步关闭失败保留last_warning且不弹框。既有真实HTTP/Qt/STDIO用例先复现Shutdown弹出Unsaved pulse，再验证确认、取消、三稿丢弃与完成后状态可读；相关手动GUI关闭及Devices生命周期7项通过。正式exec_退出探针经正常工具发现后HTTP/STDIO均收到关闭成功并清理连接记录；未改传输生命周期。仅虚拟设备，测试进程已退出，未操作真实实验。
 
 - 2026-10-13 MCP原生实验工作流完成：客户端配置生成/连接诊断；必填插件用途与GUI同源说明、无Init能力目录；`lab_guide`；原生Layout寿命配方及有限配置/启动组合；Scan自己的只读时间预算；原生Fit表与Figure reader读回。批量支持前步JSON字段引用，拒绝、未就绪、过期generation和取消终态均阻止后续写；长等待不要求模型逐次维持且审核请求提前返回。科学点选沿原审核窗口确认/Stop，物理操作仍交人。保存最新结果必须等原Frozen更新成功，失败明确保留旧图并拒绝冒充新图保存；GUI与MCP共用snapshot_error。operator/developer分层覆盖直接及batch调用。

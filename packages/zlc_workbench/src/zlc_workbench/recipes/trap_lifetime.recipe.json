@@ -28,7 +28,12 @@
     "scan_plan": {
       "path": ["logic", 3, "values", "plan"],
       "required": true,
-      "description": "Native Scan Plan JSON text with one chosen hold-time axis: {\"axes\":[{\"port\":\"pulse:param:<actual duration field_id>\",\"values\":[...],\"unit\":\"ms\"}]}. Values are explicit points, not [start,stop,count]. Read the chosen Pulse catalog for the real field ID; api:<field_id> is also supported. The sole scan axis becomes X automatically."
+      "description": "Native Scan Plan JSON text with one chosen hold-time axis: {\"axes\":[{\"port\":\"pulse:param:<actual duration field_id>\",\"values\":[...],\"unit\":\"ms\"}]}. Values are explicit points, not [start,stop,count]. Read the chosen Pulse catalog for the real field ID; api:<field_id> is also supported. The plan declares scan coordinates; panel_semantic explicitly assigns X even for a one-point pilot."
+    },
+    "panel_semantic": {
+      "path": ["panels", 0, "semantic"],
+      "required": true,
+      "description": "Complete native panel semantic mapping. Copy defaults.panel_semantic from lab_recipes(name='trap_lifetime') and add the chosen hold-time axis with fate x. For this recipe's single Pulse/API axis, the native Scan contract maps the actual field_id to Point axis scan.<field_id>, so add fate:point:scan.<field_id>: x. Keep the existing pair Scope, site Facet and repeat Mean entries. Use the actual Pulse field ID, never a guessed period name. This explicit assignment survives a single-point pilot followed by a multi-point scan; generic plot defaults do not promise to keep a degenerate axis as X."
     },
     "repeats": {
       "path": ["logic", 3, "values", "repeats"],
@@ -69,7 +74,7 @@
   "requirements": [
     "Read the workspace EXPERIMENT_CONTEXT.md and check current device/SLM preparation; the recipe does not Init or Send an SLM phase.",
     "Use the user's verified imaging/hold Pulse and count all its trigger frames. Confirm the chosen camera, exposure and Calibration are compatible.",
-    "Choose one hold-duration Scan/API axis with enough distinct points to constrain an Exponential fit; no physical field is guessed.",
+    "Choose one hold-duration Scan/API axis and explicitly assign it X in panel_semantic. A one-point pilot can check acquisition but cannot constrain an Exponential fit; fitting needs enough distinct points. No physical field is guessed.",
     "Camera ROI is preserved. Verify it includes the full calibrated array before starting."
   ],
   "completion": "Observe the returned Seamless Scan generation. A complete first sweep supplies a full curve, not guaranteed valid fits: low loading or insufficient data remain explicitly invalid. Formal completion is that same generation done without error, followed by native fit results tied to its data publication. Never manually Fire in parallel.",

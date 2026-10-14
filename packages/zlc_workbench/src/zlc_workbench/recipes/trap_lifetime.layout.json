@@ -63,7 +63,7 @@
       "signal": "@logic/seamless_scan/scan",
       "kind": "facet_grid",
       "cell_kind": "curve",
-      "size": "2x2",
+      "size": "4x4",
       "interval_ms": 400,
       "title": "Conditional survival by site",
       "semantic": {
@@ -73,7 +73,7 @@
         "fate:cell_data:calibration.site": "facet",
         "reduction": "mean"
       },
-      "display": {"facet_fit_parameter": "decay_time"},
+      "display": {"facet_fit_parameter": "decay_time", "show_grid": false, "uncertainty": true},
       "interaction": {"series_lock": null},
       "fit": {"model": "exponential_decay", "fit_all_facets": true, "fixed": {}},
       "overlay_signal": "",

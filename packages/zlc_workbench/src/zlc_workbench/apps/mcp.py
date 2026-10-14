@@ -885,6 +885,8 @@ def start_server(flow, *, host="127.0.0.1", port: int, token: str, allow_control
             layout.save/load take path (workspace JSON); load restores stopped drafts. Loading over active Logic
             requires explicit stop_running=true; poll state.layout_pending until the replacement completes.
             Panel kind must be one of lab_catalog.panel_kinds (for example image, not Image).
+            For panel.update read lab_catalog(panel_id).panel.update for accepted patch fields and the
+            current parameter_surface for nested keys. The catalog's state is a Layout record, not a patch.
             Save: panel_id,selected workspace image path ending .png/.pdf/.svg; the standard matching science .npz
             is saved too. Saving is asynchronous: inspect subsequent reports/errors. Manual requests stay human.
             Use observed expected_draft_revision for Start and expected_generation for Stop to reject stale intents.

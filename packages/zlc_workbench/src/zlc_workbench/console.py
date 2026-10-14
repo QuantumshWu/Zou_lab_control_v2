@@ -124,6 +124,10 @@ __all__ = ["ConsolePresenter", "PanelBinding", "PanelState", "control_capabiliti
 
 
 _UNCHANGED = object()
+_PANEL_UPDATE_FIELDS = (
+    "signal", "kind", "cell_kind", "size", "interval_ms", "title",
+    "semantic", "display", "fit", "overlay_signal",
+)
 
 
 def control_capabilities(
@@ -2855,19 +2859,7 @@ class ConsolePresenter:
             return False
         changes = dict(patch)
         fit_override: object = _UNCHANGED
-        allowed = {
-            "signal",
-            "kind",
-            "cell_kind",
-            "size",
-            "interval_ms",
-            "title",
-            "semantic",
-            "display",
-            "fit",
-            "overlay_signal",
-        }
-        unknown = tuple(name for name in changes if name not in allowed)
+        unknown = tuple(name for name in changes if name not in _PANEL_UPDATE_FIELDS)
         if unknown:
             self._report(
                 f"{panel_id}: unknown panel state field {unknown[0]!r}",
@@ -7288,6 +7280,22 @@ class ConsolePresenter:
                 "Scope choices are [label, value] pairs from the real axis. "
                 "For further coordinates use lab_signal(dataset=true); producer details use lab_catalog(node_id=producer_node_id)."
             )
+            result["panel"]["update"] = {
+                "action": "panel.update",
+                "arguments": {"panel_id": str(panel_id), "patch": {}},
+                "patch_fields": list(_PANEL_UPDATE_FIELDS),
+                "nested_fields": {
+                    group: f"parameter_surface.{group}" for group in ("semantic", "display", "fit")
+                },
+                "notes": (
+                    "Use each parameter field's key and declared choices; edit_section overrides its displayed group. "
+                    "For example, facet_fit_parameter is shown with fit but belongs to patch.display. "
+                    "kind is fixed at panel.add; changing it requires another panel. "
+                    "state is the Layout persistence document, not a panel.update patch. "
+                    "published_outputs is edited by update_panel_published_outputs(panel_id, values), not panel.update; "
+                    "available fit outputs are enabled by default when absent from that mapping."
+                ),
+            }
         return result
 
     def control_estimate(self, node_id: str) -> Future:
