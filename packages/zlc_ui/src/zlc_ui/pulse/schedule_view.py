@@ -1590,7 +1590,6 @@ class PulseScheduleView(QtWidgets.QWidget):
         self._schedule: ScheduleVM | None = None
         self._connection: ConnectionVM | None = None
         self._version = (-1, -1)
-        self._capabilities = {"can_sync": True, "can_hold": True, "can_step": True}
         self._cards: dict[str, PeriodCard] = {}
         self._component_cards: dict[tuple[str, str], ComponentCard] = {}
         self._expanded_components: set[str] = set()
@@ -1725,7 +1724,9 @@ class PulseScheduleView(QtWidgets.QWidget):
         controls.setHorizontalSpacing(bar_gap)
         controls.setVerticalSpacing(bar_gap)
         self.run_button = FluentButton("On Pulse*")
-        self.stop_button = FluentButton("Stop Pulse")
+        # Stop takes the board safe: it ends what the hardware is doing, and
+        # every Stop in the suite wears the one destructive face for it.
+        self.stop_button = FluentButton("Stop Pulse", role="destructive")
         self.sync_button = FluentButton("Sync")
         self.add_button = FluentButton("Add Period")
         self.spacer_button = FluentButton("Add Spacer")
@@ -2186,8 +2187,6 @@ class PulseScheduleView(QtWidgets.QWidget):
                 )
             self.connection_combo.setCurrentIndex(selected)
         self.connection_endpoint.setText(vm.endpoint)
-        self.connection_combo.setEnabled(not vm.locked)
-        self.connection_button.setEnabled(not vm.locked)
         self._sync_endpoint_enabled()
         self.connection_status.setText(vm.status)
         self.connection_status.setToolTip(vm.status)
@@ -2263,17 +2262,20 @@ class PulseScheduleView(QtWidgets.QWidget):
             "primary" if bool(can_run) and not bool(file_dirty) else "standard"
         )
         self.stop_button.setEnabled(bool(can_stop))
-        self.sync_button.setEnabled(bool(can_run) and self._capabilities["can_sync"])
         self.save_button.set_dirty(bool(file_dirty))
 
     def set_capabilities(self, can_sync: bool, can_hold: bool, can_step: bool) -> None:
-        """Apply presenter-advertised command availability without probing a controller."""
+        """Apply presenter-advertised command availability without probing a controller.
 
-        self._capabilities = {
-            "can_sync": bool(can_sync),
-            "can_hold": bool(can_hold),
-            "can_step": bool(can_step),
-        }
+        Sync is the one command here it gates; hold and step are the Scan
+        page's, which the shell gates beside this call.  Sync's availability
+        has this ONE writer.  :meth:`set_control_state` also disabled it
+        whenever On Pulse could not run, and the presenter's refresh calls
+        both, so every refresh disabled Sync and enabled it again a moment
+        later -- and disabling a focused button hands Qt's focus to the next
+        one in the chain, so clicking Sync landed focus on Add Period.
+        """
+
         # Its own answer, not Run's.  Sync READS the board, so what it needs
         # is a board; ANDing it with Run meant it also needed a pulse, which
         # is exactly the case where reading one back is worth doing.

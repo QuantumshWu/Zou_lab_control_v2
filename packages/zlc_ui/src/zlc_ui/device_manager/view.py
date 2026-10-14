@@ -8,11 +8,10 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 
 from zlc_ui.fluent import (
     ACCENT,
-    BG,
+    ACCENT_TINT,
     FONT,
     GREEN,
     GREY,
-    HOVER,
     MUTED_INK,
     ORANGE,
     RED,
@@ -110,7 +109,9 @@ class _DeviceCard(FluentFrame):
         outer.setSpacing(window_pad(0.35))
         header = QtWidgets.QHBoxLayout()
         # A disclosure, not a command: a ghost chevron, which a tonal
-        # square with a minus sign beside the Role box was read as.
+        # square with a minus sign beside the Role box was read as.  Under
+        # the pointer it takes the one hover wash every control shares, in
+        # body ink: the dark command blue would make it a command again.
         self.collapse_button = QtWidgets.QToolButton()
         self.collapse_button.setCursor(QtCore.Qt.PointingHandCursor)
         self.collapse_button.setFixedSize(scaled_px(24, minimum=20), scaled_px(30, minimum=22))
@@ -118,7 +119,7 @@ class _DeviceCard(FluentFrame):
             f"QToolButton {{ border: none; background: transparent; color: {MUTED_INK}; "
             f"border-radius: {scaled_px(4)}px; padding: 0px; "
             f"font-size: {round(fluent_font_size() * 1.5)}pt; }} "
-            f"QToolButton:hover {{ background: {BG}; color: {HOVER}; }}"
+            f"QToolButton:hover {{ background: {ACCENT_TINT}; color: {TEXT}; }}"
         )
         self._show_collapsed()
         self.name_label = muted_note_label("Role")
@@ -244,7 +245,10 @@ class _LiveDeviceCard(FluentFrame):
         #: The device's own console: who is on its knobs -- local tunes,
         #: its in-process server, and remote clients once published.
         self.log_button = FluentButton("Log")
-        self.close_button = FluentButton("Close")
+        # Close retires a live device on the spot, with no question asked:
+        # it ends hardware, so it wears the destructive face, never the
+        # light-blue one of Control and Log beside it.
+        self.close_button = FluentButton("Close", role="destructive")
         identity = QtWidgets.QVBoxLayout()
         identity.setContentsMargins(0, 0, 0, 0)
         identity.setSpacing(0)
@@ -1175,8 +1179,8 @@ class DeviceManagerView(QtWidgets.QWidget):
         self._lifecycle_enabled = bool(enabled)
         self.lifecycle_button.setText(str(text))
         # Init and Apply commit the authored graph -- the surface's one
-        # run command.  Shutdown takes the session down: an ordinary
-        # command, not the thing the window is asking for.
+        # run command.  Shutdown takes the session down and every device
+        # with it: a destructive command, red like each device's Close.
         self._lifecycle_commits = not (active and not changed)
         self._show_lifecycle_role()
         pending = bool(active and changed)
@@ -1191,8 +1195,11 @@ class DeviceManagerView(QtWidgets.QWidget):
         self._refresh_controls()
 
     def _show_lifecycle_role(self) -> None:
-        primary = self._lifecycle_commits and not self._apparatus_dirty
-        self.lifecycle_button.set_role("primary" if primary else "standard")
+        if not self._lifecycle_commits:
+            self.lifecycle_button.set_role("destructive")
+            return
+        # One primary at a time: an unsaved apparatus hands it to Save.
+        self.lifecycle_button.set_role("standard" if self._apparatus_dirty else "primary")
 
     def set_form_spec(
         self,

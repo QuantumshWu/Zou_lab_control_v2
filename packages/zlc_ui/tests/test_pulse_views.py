@@ -222,6 +222,46 @@ for protected in (
     )
 
 
+def test_stop_is_destructive_and_a_refresh_never_bounces_sync(run_qt) -> None:
+    """Stop Pulse ends what the board plays, so it wears the destructive
+    face.  Sync's availability has one writer: the presenter's refresh calls
+    set_control_state and then set_capabilities, and when the first also
+    disabled Sync every refresh switched it off and on again -- which hands
+    a focused Sync's focus to the next button."""
+
+    run_qt(
+        """
+from PyQt5 import QtCore
+from zlc_ui.qt import ensure_qt_app
+from zlc_ui.pulse import PulseScheduleView
+app = ensure_qt_app(["pulse-control-roles"])
+view = PulseScheduleView()
+assert view.stop_button.role() == "destructive"
+view.set_control_state(False, False, False, can_run=False, can_stop=False)
+assert view.stop_button.role() == "destructive", "a disabled Stop is still a Stop"
+
+class EnabledChanges(QtCore.QObject):
+    seen = []
+
+    def eventFilter(self, watched, event):
+        if event.type() == QtCore.QEvent.EnabledChange:
+            self.seen.append(watched.isEnabled())
+        return False
+
+view.set_capabilities(True, False, False)
+watch = EnabledChanges()
+view.sync_button.installEventFilter(watch)
+for can_run in (False, True, False):
+    view.set_control_state(False, False, False, can_run=can_run, can_stop=True)
+    view.set_capabilities(True, False, False)
+assert view.sync_button.isEnabled() and watch.seen == [], watch.seen
+view.set_capabilities(False, False, False)
+assert watch.seen == [False]
+view.close(); view.deleteLater()
+"""
+    )
+
+
 def test_schedule_projects_scan_and_api_bindings_into_fields(run_qt) -> None:
     run_qt(
         """
@@ -1879,6 +1919,49 @@ post.show(); app.processEvents()
 assert post.width() == post.count_spin.width() + 2 * px(7)
 assert post.count_edit.contentsRect().width() - post.count_edit.textMargins().right() >= post.count_edit.fontMetrics().horizontalAdvance("10000")
 assert post.count_edit.text() == "10000" and not post.count_edit.property("numericError")
+post.close(); post.deleteLater()
+"""
+    )
+
+
+def test_a_bracket_count_wears_its_binding_without_changing_the_post_width(run_qt) -> None:
+    """The repeat box is a bound field like any other: its frame -- the
+    spin box's, since the adopted edit draws none -- wears the binding's
+    edge (Config green, Scan orange, API violet) and a plain count the
+    plain field's.  The badge's room is reserved whatever the binding, so
+    binding a count never moves the post; only a longer count widens it."""
+
+    run_qt(
+        """
+from dataclasses import replace
+from zlc_ui.qt import ensure_qt_app
+from zlc_ui.fluent import API_VIOLET, CONFIG_GREEN, ORANGE
+from zlc_ui.pulse import FieldVM
+from zlc_ui.pulse.schedule_view import BracketPost
+from zlc_ui.pulse._layout import px
+
+app = ensure_qt_app(["post-binding"])
+plain = FieldVM("4", can_scan=True, validator_kind="int", validator_lo=1,
+                validator_hi=(1 << 32) - 1, field_id="b.count")
+post = BracketPost("b", "end", count_field=plain)
+post.show(); app.processEvents()
+plain_edges = post.count_spin._frame_edges
+width = post.width()
+for field, edge in (
+    (replace(plain, scan=True), ORANGE),
+    (replace(plain, source="config", config_key="n"), CONFIG_GREEN),
+    (replace(plain, source="config", config_key="n", config_active=True,
+             config_enabled=True, effective_text="7"), CONFIG_GREEN),
+    (replace(plain, source="api"), API_VIOLET),
+    (plain, None),
+):
+    post.set_count_field(field); app.processEvents()
+    assert post.count_spin._frame_edges == (plain_edges if edge is None else (edge, edge)), field
+    assert edge is None or edge in post.count_spin.styleSheet()
+    assert "border: none" in post.count_edit.styleSheet(), "the edit draws no second frame"
+    assert post.width() == width == post.count_spin.width() + 2 * px(7), field
+post.set_count_field(replace(plain, text="123456789")); app.processEvents()
+assert post.width() > width and post.width() == post.count_spin.width() + 2 * px(7)
 post.close(); post.deleteLater()
 """
     )
