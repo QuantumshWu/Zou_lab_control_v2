@@ -180,6 +180,181 @@ def scaled_px(value: int | float, *, minimum: int = 1) -> int:
     return max(int(minimum), int(round(float(value) * _FLUENT_SCALE)))
 
 
+# ---------------------------------------------------------------- frame geometry
+#
+# THE ONE GEOMETRY RULE for a frame with parts inside it (a spin box's
+# stepper, a combo's drop column, a table's rules, a card's title band):
+# every inner part is placed FROM THE FRAME, snapped to device pixels --
+# never from a sub-control rectangle nudged by a magic offset.  Offsets tuned
+# at one display scale broke at the next: the spin divider stopped half a
+# pixel under the top edge and ran into the bottom one at every DPR.
+#
+#   * A divider is a FRAME SEGMENT: a filled rectangle, a whole number of
+#     device pixels wide, the frame's full outer height, in the frame's
+#     current edge colour, antialiasing off -- so its T-joints have no seam.
+#   * A fill (a hover tint, a band) tiles exactly the room between the
+#     dividers and the frame's inner edges, concentric at a rounded corner.
+#   * A one-edge stroke is a filled rectangle or a whole-device-pixel pen on
+#     a half-device-pixel centre with a flat cap.
+#   * A round thing has an even size.
+
+#: Logical px of every field/card frame edge.  Sheets write
+#: ``f"{FIELD_BORDER_PX}px"`` and Qt's high-DPI scaling makes it
+#: ``FIELD_BORDER_PX * devicePixelRatioF()`` device px; painted code reads the
+#: same constant.  Nothing else defines the edge width.
+FIELD_BORDER_PX = 1
+#: QLineEditPrivate::horizontalMargin / verticalMargin: the text inset Qt
+#: keeps inside a line edit's contents rect (logical px, never scaled).
+_QLINEEDIT_HMARGIN = 2
+_QLINEEDIT_VMARGIN = 1
+
+
+def scaled_even_px(value: float, *, minimum: int = 2) -> int:
+    """``scaled_px`` rounded up to an even number: a circle drawn as a
+    ``size / 2`` radius is only round on a whole-pixel centre."""
+
+    size = scaled_px(value, minimum=minimum)
+    return size + (size & 1)
+
+
+def device_snap(
+    widget: QtWidgets.QWidget, value: float, mode: str = "round", *, axis: str = "x"
+) -> float:
+    """``value`` (a logical ``axis`` coordinate in ``widget``) moved onto a
+    device-pixel boundary of the window it is painted into.
+
+    At a whole device-pixel ratio every logical pixel is one; at a
+    fractional one (1.25, 1.5) a widget's own origin can fall inside a
+    device pixel, so the boundary is found in window coordinates."""
+
+    ratio = float(widget.devicePixelRatioF())
+    snap = {"round": lambda v: math.floor(v + 0.5), "floor": math.floor, "ceil": math.ceil}[mode]
+    offset = 0.0
+    if ratio != int(ratio):
+        window = widget.window()
+        if window is not widget:
+            origin = widget.mapTo(window, QtCore.QPoint(0, 0))
+            offset = float(origin.x() if axis == "x" else origin.y())
+    return snap((float(value) + offset) * ratio) / ratio - offset
+
+
+def frame_border_px(widget: QtWidgets.QWidget) -> float:
+    """The frame edge in LOGICAL px, as a whole number (>= 1) of device px."""
+
+    ratio = float(widget.devicePixelRatioF())
+    return max(1, round(FIELD_BORDER_PX * ratio)) / ratio
+
+
+def frame_inner_rect(widget: QtWidgets.QWidget) -> QtCore.QRectF:
+    """``widget.rect()`` minus its edge, snapped INWARD to the first device
+    pixel the edge leaves untouched (ceil top/left, floor bottom/right)."""
+
+    edge = FIELD_BORDER_PX
+    left = device_snap(widget, edge, "ceil")
+    top = device_snap(widget, edge, "ceil", axis="y")
+    right = device_snap(widget, widget.width() - edge, "floor")
+    bottom = device_snap(widget, widget.height() - edge, "floor", axis="y")
+    return QtCore.QRectF(left, top, right - left, bottom - top)
+
+
+#: The edge a field sheet gives a resting / focused field.  The field sheets
+#: (``fluent_spinbox_stylesheet``, ``FluentLineEdit``) are written from these,
+#: and a part painted as a segment of that edge reads them back.
+_FIELD_EDGE_REST = PLACEHOLDER
+_FIELD_EDGE_FOCUS = ACCENT
+
+
+def frame_edge_colour(
+    option: QtWidgets.QStyleOption,
+    *,
+    rest: str = _FIELD_EDGE_REST,
+    focus: str = _FIELD_EDGE_FOCUS,
+) -> QtGui.QColor:
+    """The colour the field sheet paints the edge in for this state.
+
+    The same predicate the style sheet uses for ``:focus`` --
+    ``State_HasFocus`` as ``initStyleOption`` sets it -- so a painted segment
+    of the edge can never disagree with the edge it continues.
+    """
+
+    focused = bool(option.state & QtWidgets.QStyle.State_HasFocus)
+    return QtGui.QColor(focus if focused else rest)
+
+
+def paint_frame_divider(
+    painter: QtGui.QPainter,
+    widget: QtWidgets.QWidget,
+    x: float,
+    colour: QtGui.QColor,
+) -> QtCore.QRectF:
+    """Fill one vertical frame segment at logical ``x`` (snapped), the frame's
+    full outer height, and return it so a neighbouring fill starts exactly at
+    its right edge."""
+
+    rect = QtCore.QRectF(device_snap(widget, x), 0.0, frame_border_px(widget), float(widget.height()))
+    painter.save()
+    painter.setRenderHint(QtGui.QPainter.Antialiasing, False)
+    painter.fillRect(rect, colour)
+    painter.restore()
+    return rect
+
+
+def stepper_column(widget: QtWidgets.QWidget) -> QtCore.QRectF:
+    """The right-hand stepper / drop cell inside the edge.
+
+    One source for a spin box's tint and chevrons AND a combo's chevron
+    column, so the two chevrons of a form column share a centre."""
+
+    inner = frame_inner_rect(widget)
+    right = widget.width() - FIELD_BORDER_PX
+    left = right - scaled_px(COMBO_WIDTH)
+    return QtCore.QRectF(left, inner.top(), right - left, inner.height())
+
+
+def fluent_stepper_extent() -> int:
+    """The logical width a spin box's stepper adds over a plain field: the
+    divider (the margin column its sheet reserves), the cell and the edge
+    beside it."""
+
+    return scaled_px(COMBO_WIDTH) + 2 * FIELD_BORDER_PX
+
+
+def paint_chevron(
+    painter: QtGui.QPainter,
+    widget: QtWidgets.QWidget,
+    centre: QtCore.QPointF,
+    *,
+    up: bool,
+    colour: QtGui.QColor,
+) -> None:
+    """The one chevron a spin box and a combo draw: one size, one pen, its
+    ink centred on ``centre`` (x on a device pixel, or on a pixel's middle
+    when the stroke is an odd number of device pixels wide)."""
+
+    ratio = float(widget.devicePixelRatioF())
+    half = scaled_px(COMBO_TRI_SIZE) / 2.0
+    width = max(1.0, scaled_px(3) / 2.0)
+    cx = device_snap(widget, centre.x())
+    if round(width * ratio) % 2:
+        cx += 0.5 / ratio
+    cy = device_snap(widget, centre.y(), axis="y")
+    sign = -1.0 if up else 1.0
+    pen = QtGui.QPen(colour)
+    pen.setWidthF(width)
+    pen.setCapStyle(QtCore.Qt.RoundCap)
+    pen.setJoinStyle(QtCore.Qt.RoundJoin)
+    painter.save()
+    painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
+    painter.setPen(pen)
+    painter.setBrush(QtCore.Qt.NoBrush)
+    painter.drawPolyline(QtGui.QPolygonF([
+        QtCore.QPointF(cx - half, cy - sign * half / 2.0),
+        QtCore.QPointF(cx, cy + sign * half / 2.0),
+        QtCore.QPointF(cx + half, cy - sign * half / 2.0),
+    ]))
+    painter.restore()
+
+
 def _available_geometry_at(
     point: QtCore.QPoint, *, widget: QtWidgets.QWidget | None = None
 ) -> QtCore.QRect | None:
@@ -1603,13 +1778,13 @@ class FluentLineEdit(QtWidgets.QLineEdit):
             f"""
             QLineEdit {{
                 background: white;
-                border: 1px solid {PLACEHOLDER};
+                border: {FIELD_BORDER_PX}px solid {_FIELD_EDGE_REST};
                 border-radius: {_radius()}px;
                 padding: {scaled_px(PADDING_V)}px {scaled_px(EDIT_PADDING_H)}px;
                 color: {TEXT};
                 font: {fluent_font_size()}pt "{FONT}";
             }}
-            QLineEdit:focus {{ border: 1px solid {ACCENT}; }}
+            QLineEdit:focus {{ border: {FIELD_BORDER_PX}px solid {_FIELD_EDGE_FOCUS}; }}
             QLineEdit:disabled {{ background: {BG}; color: {DISABLED_INK}; }}
             """
         )
@@ -2974,7 +3149,7 @@ class FluentComboBox(QtWidgets.QAbstractButton):
             self._line_edit.textChanged.connect(self.currentTextChanged)
             self._line_edit.installEventFilter(self)
             self.setFocusProxy(self._line_edit)
-            self._line_edit.setGeometry(self._collapsed_text_rect())
+            self._line_edit.setGeometry(self._editor_rect())
             self._line_edit.show()
         else:
             self.setFocusProxy(None)
@@ -3002,7 +3177,7 @@ class FluentComboBox(QtWidgets.QAbstractButton):
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
         if self._line_edit is not None:
-            self._line_edit.setGeometry(self._collapsed_text_rect())
+            self._line_edit.setGeometry(self._editor_rect())
 
     def modelColumn(self) -> int:  # noqa: N802 - Qt API name
         return 0
@@ -3294,15 +3469,44 @@ class FluentComboBox(QtWidgets.QAbstractButton):
 
     @staticmethod
     def _collapsed_text_chrome() -> tuple[int, int, int]:
-        """Return ``(left inset, right pad, drop width)`` for collapsed text."""
+        """Return ``(left inset, right pad, drop width)`` for collapsed text.
+
+        The inset is a line edit's own: the edge, the field padding and the
+        text margin Qt keeps inside a QLineEdit, so the text of a combo
+        starts on the column a line edit or spin box beside it starts on.
+        The drop width is the stepper column and the edge beside it."""
 
         pad = scaled_px(EDIT_PADDING_H)
-        return pad + scaled_px(2), pad, scaled_px(COMBO_WIDTH)
+        return (
+            FIELD_BORDER_PX + pad + _QLINEEDIT_HMARGIN,
+            pad,
+            scaled_px(COMBO_WIDTH) + FIELD_BORDER_PX,
+        )
 
     def _collapsed_text_rect(self) -> QtCore.QRect:
+        """Where the collapsed text's line box sits, laid out the way
+        QLineEdit lays out its own (an integer centring inside the edge,
+        padding and vertical text margin), so baselines in a row agree."""
+
         left, right, drop_width = self._collapsed_text_chrome()
         width = max(0, self.width() - drop_width - left - right)
-        return QtCore.QRect(left, 0, width, self.height())
+        line = QtGui.QFontMetrics(self._collapsed_font()).height()
+        inner_top = FIELD_BORDER_PX + scaled_px(PADDING_V) + _QLINEEDIT_VMARGIN
+        inner_height = self.height() - 2 * inner_top
+        top = inner_top + (inner_height - line + 1) // 2
+        return QtCore.QRect(left, top, width, line)
+
+    def _editor_rect(self) -> QtCore.QRect:
+        """The editable combo's line edit: the collapsed text rect plus the
+        margins the line edit keeps around its own text, so typed text sits
+        exactly where the collapsed text was."""
+
+        text = self._collapsed_text_rect()
+        edge = FIELD_BORDER_PX + scaled_px(PADDING_V)
+        return QtCore.QRect(
+            text.left() - _QLINEEDIT_HMARGIN, edge,
+            text.width() + 2 * _QLINEEDIT_HMARGIN, max(0, self.height() - 2 * edge),
+        )
 
     def _collapsed_text_candidates(self) -> tuple[str, ...]:
         return tuple(self.itemText(index) for index in range(self.count()))
@@ -3378,23 +3582,15 @@ class FluentComboBox(QtWidgets.QAbstractButton):
             text = painter.fontMetrics().elidedText(
                 self._display_text(), QtCore.Qt.ElideRight, text_rect.width()
             )
-            painter.drawText(text_rect, QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter, text)
+            painter.drawText(text_rect, QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop, text)
 
-        _left, _right, drop_width = self._collapsed_text_chrome()
-        half = scaled_px(COMBO_TRI_SIZE) / 2.0
-        cx = self.width() - drop_width / 2.0 - scaled_px(2)
-        cy = self.height() / 2.0
-        chevron = QtGui.QPen(QtGui.QColor(TEXT if current else GRAPHITE if enabled else PLACEHOLDER))
-        chevron.setWidthF(max(1.0, scaled_px(3) / 2.0))
-        chevron.setCapStyle(QtCore.Qt.RoundCap)
-        chevron.setJoinStyle(QtCore.Qt.RoundJoin)
-        painter.setPen(chevron)
-        painter.setBrush(QtCore.Qt.NoBrush)
-        painter.drawPolyline(QtGui.QPolygonF([
-            QtCore.QPointF(cx - half, cy - half / 2.0),
-            QtCore.QPointF(cx, cy + half / 2.0),
-            QtCore.QPointF(cx + half, cy - half / 2.0),
-        ]))
+        # The one chevron, on the stepper column a spin box below would use.
+        paint_chevron(
+            painter, self,
+            QtCore.QPointF(stepper_column(self).center().x(), self.height() / 2.0),
+            up=False,
+            colour=QtGui.QColor(TEXT if current else GRAPHITE if enabled else PLACEHOLDER),
+        )
         painter.end()
 
     def focusInEvent(self, event) -> None:  # noqa: N802 - Qt API name
@@ -5216,83 +5412,103 @@ class FluentTriSwitch(QtWidgets.QAbstractButton):
 
 
 def fluent_spinbox_stylesheet(selector: str) -> str:
-    # The steppers sit INSIDE the border (padding origin), so the tint under
-    # the pointer never paints over the field's own edge.
-    inner = max(0, _radius() - 1)
+    # The steppers are BORDER-origin boxes whose ``margin`` is the edge
+    # width: the margin box starts one edge-width left of the cell, and that
+    # margin column is where the divider is painted, so neither the digits
+    # nor the cell move.  They are transparent and serve geometry and hit
+    # testing only -- the tint, the divider and the chevrons are painted
+    # from the frame by _paint_fluent_spin_buttons.
     return f"""
     {selector} {{
         background: white;
-        border: 1px solid {PLACEHOLDER};
+        border: {FIELD_BORDER_PX}px solid {_FIELD_EDGE_REST};
         border-radius: {_radius()}px;
         padding: {scaled_px(PADDING_V)}px {scaled_px(EDIT_PADDING_H)}px;
         font: {fluent_font_size()}pt "{FONT}";
         color: {TEXT};
     }}
-    {selector}:focus {{ border: 1px solid {ACCENT}; }}
+    {selector}:focus {{ border: {FIELD_BORDER_PX}px solid {_FIELD_EDGE_FOCUS}; }}
     {selector}:disabled {{ background: {BG}; color: {PLACEHOLDER}; }}
     {selector}::up-button, {selector}::down-button {{
         subcontrol-origin: border;
         width: {scaled_px(COMBO_WIDTH)}px;
-        margin: 1px;
+        margin: {FIELD_BORDER_PX}px;
         border: none;
-        background-color: transparent;
+        background: transparent;
     }}
-    {selector}::up-button {{
-        subcontrol-position: top right;
-        border-top-right-radius: {inner}px;
-    }}
-    {selector}::down-button {{
-        subcontrol-position: bottom right;
-        border-bottom-right-radius: {inner}px;
-    }}
-    {selector}::up-button:hover, {selector}::down-button:hover {{
-        background-color: {ACCENT_TINT};
-    }}
-    {selector}::up-button:disabled, {selector}::down-button:disabled {{
-        background-color: transparent;
-    }}
+    {selector}::up-button {{ subcontrol-position: top right; }}
+    {selector}::down-button {{ subcontrol-position: bottom right; }}
     {selector}::up-arrow, {selector}::down-arrow {{ image: none; }}
     """
 
 
-def _paint_fluent_spin_buttons(widget: QtWidgets.QAbstractSpinBox) -> None:
-    """Paint the quiet stepper: two graphite chevrons beside a hairline.
+def _spin_field_chrome() -> int:
+    """What a spin box's frame takes beside its digits: both edges, the
+    padding, the line edit's own text inset and the stepper."""
 
-    The steppers were solid accent blocks with white triangles, repeated on
-    every number of every form.  They are drawn in the field's own white
-    now, tinted only under the pointer (the sheet does that), and this
-    supplies the glyphs -- Windows offscreen Qt paints no native spin
-    indicator at all -- and the hairline that marks where the digits end.
+    return (
+        fluent_stepper_extent() + 2 * FIELD_BORDER_PX
+        + scaled_px(2 * EDIT_PADDING_H) + 2 * _QLINEEDIT_HMARGIN
+    )
+
+
+def _spin_stepper_cells(widget: QtWidgets.QAbstractSpinBox) -> tuple[float, QtCore.QRectF, QtCore.QRectF]:
+    """``(divider x, up cell, down cell)`` in logical px, from the frame.
+
+    The divider fills the margin column one edge-width left of the stepper
+    column; the cells tile the room from its far side to the right edge,
+    split at a device pixel."""
+
+    cell = stepper_column(widget)
+    divider = device_snap(widget, cell.left() - FIELD_BORDER_PX)
+    start = divider + frame_border_px(widget)
+    right = frame_inner_rect(widget).right()
+    mid = device_snap(widget, cell.center().y(), axis="y")
+    up = QtCore.QRectF(start, cell.top(), right - start, mid - cell.top())
+    down = QtCore.QRectF(start, mid, right - start, cell.bottom() - mid)
+    return divider, up, down
+
+
+def _paint_fluent_spin_buttons(widget: QtWidgets.QAbstractSpinBox) -> None:
+    """Paint the stepper: a frame segment, the hovered cell's tint, two chevrons.
+
+    The field is a two-cell frame, the classic numeric up-down.  The divider
+    is a segment OF the frame -- its full height, in the edge's own colour
+    for the state (the accent while focused) -- so its joints with the top
+    and bottom edge are one colour and cannot show a seam at any scale.  The
+    tint under the pointer fills exactly the hovered cell, from the
+    divider's far side to the inner edge, concentric at the corner; the
+    chevrons sit on the cells' centres.  Nothing is offset from a
+    sub-control rectangle.
     """
 
     if widget.buttonSymbols() == QtWidgets.QAbstractSpinBox.NoButtons:
         return
     option = QtWidgets.QStyleOptionSpinBox()
     widget.initStyleOption(option)
-    style = widget.style()
-    up = QtCore.QRectF(style.subControlRect(
-        QtWidgets.QStyle.CC_SpinBox, option, QtWidgets.QStyle.SC_SpinBoxUp, widget))
-    down = QtCore.QRectF(style.subControlRect(
-        QtWidgets.QStyle.CC_SpinBox, option, QtWidgets.QStyle.SC_SpinBoxDown, widget))
+    divider, up_cell, down_cell = _spin_stepper_cells(widget)
+    live = widget.isEnabled() and not widget.isReadOnly()
     painter = QtGui.QPainter(widget)
-    painter.setRenderHint(QtGui.QPainter.Antialiasing)
-    left = min(up.left(), down.left()) - 0.5
-    painter.setPen(QtGui.QPen(QtGui.QColor(DIVIDER), 1.0))
-    painter.drawLine(QtCore.QPointF(left, up.top() + 2), QtCore.QPointF(left, down.bottom() - 1))
-    enabled = widget.isEnabled() and not widget.isReadOnly()
-    pen = QtGui.QPen(QtGui.QColor(GRAPHITE if enabled else PLACEHOLDER))
-    pen.setWidthF(max(1.0, scaled_px(3) / 2.0))
-    pen.setCapStyle(QtCore.Qt.RoundCap)
-    pen.setJoinStyle(QtCore.Qt.RoundJoin)
-    painter.setPen(pen)
-    half = scaled_px(COMBO_TRI_SIZE) / 2.0 - 0.5
-    for rect, sign in ((up, -1.0), (down, 1.0)):
-        centre = rect.center()
-        painter.drawPolyline(QtGui.QPolygonF([
-            QtCore.QPointF(centre.x() - half, centre.y() - sign * half / 2.0),
-            QtCore.QPointF(centre.x(), centre.y() + sign * half / 2.0),
-            QtCore.QPointF(centre.x() + half, centre.y() - sign * half / 2.0),
-        ]))
+    hovered = (
+        live and bool(option.state & QtWidgets.QStyle.State_MouseOver)
+        and int(option.activeSubControls)
+        & int(QtWidgets.QStyle.SC_SpinBoxUp | QtWidgets.QStyle.SC_SpinBoxDown)
+    )
+    if hovered:
+        cell = up_cell if option.activeSubControls & QtWidgets.QStyle.SC_SpinBoxUp else down_cell
+        corner = max(0.0, _radius() - FIELD_BORDER_PX)
+        inner = QtGui.QPainterPath()
+        inner.addRoundedRect(frame_inner_rect(widget), corner, corner)
+        tile = QtGui.QPainterPath()
+        tile.addRect(cell)
+        painter.save()
+        painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
+        painter.fillPath(inner.intersected(tile), QtGui.QColor(ACCENT_TINT))
+        painter.restore()
+    paint_frame_divider(painter, widget, divider, frame_edge_colour(option))
+    ink = QtGui.QColor(GRAPHITE if live else PLACEHOLDER)
+    paint_chevron(painter, widget, up_cell.center(), up=True, colour=ink)
+    paint_chevron(painter, widget, down_cell.center(), up=False, colour=ink)
     painter.end()
 
 
@@ -5322,7 +5538,7 @@ class FluentSpinBox(_WheelFocusGuardMixin, QtWidgets.QSpinBox):
 
     def sizeHint(self) -> QtCore.QSize:  # noqa: N802
         size = super().sizeHint()
-        size.setWidth(self.fontMetrics().horizontalAdvance("100000") + scaled_px(2 * EDIT_PADDING_H + COMBO_WIDTH + 4))
+        size.setWidth(self.fontMetrics().horizontalAdvance("100000") + _spin_field_chrome())
         return size
 
     def minimumSizeHint(self) -> QtCore.QSize:  # noqa: N802
@@ -5346,6 +5562,9 @@ class FluentSpinBox(_WheelFocusGuardMixin, QtWidgets.QSpinBox):
         self.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
         self.lineEdit().setTextMargins(0, 0, 0, 0)
         self.setStyleSheet(fluent_spinbox_stylesheet("QSpinBox"))
+        # The stepper tint is painted from the hovered sub-control, which Qt
+        # tracks only for a widget that asks for hover events.
+        self.setAttribute(QtCore.Qt.WA_Hover, True)
 
     def _visible_integer(self, value: int, low: int, high: int) -> int:
         bounded = min(high, max(low, value))
@@ -5706,7 +5925,7 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
 
     def sizeHint(self) -> QtCore.QSize:  # noqa: N802
         size = super().sizeHint()
-        size.setWidth(self.fontMetrics().horizontalAdvance("-123.456e-12") + scaled_px(2 * EDIT_PADDING_H + COMBO_WIDTH + 4))
+        size.setWidth(self.fontMetrics().horizontalAdvance("-123.456e-12") + _spin_field_chrome())
         return size
 
     def minimumSizeHint(self) -> QtCore.QSize:  # noqa: N802
@@ -5729,6 +5948,9 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
         self.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
         self.lineEdit().setTextMargins(0, 0, 0, 0)
         self.setStyleSheet(fluent_spinbox_stylesheet("QDoubleSpinBox"))
+        # The stepper tint is painted from the hovered sub-control, which Qt
+        # tracks only for a widget that asks for hover events.
+        self.setAttribute(QtCore.Qt.WA_Hover, True)
         self.editingFinished.connect(self._update_number_geometry)
 
         # No range of its own: a bound is the owner's, declared through

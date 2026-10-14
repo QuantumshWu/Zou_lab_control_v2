@@ -30,7 +30,6 @@ from .form import (
 )
 
 from ..fluent import (
-    COMBO_WIDTH,
     FluentButton,
     FluentComboBox,
     FluentCycleComboBox,
@@ -41,6 +40,7 @@ from ..fluent import (
     FluentSwitch,
     FluentTreeComboBox,
     fluent_integer_box,
+    fluent_stepper_extent,
     fluent_unit_picker,
     fluent_switch_width,
     retire_widget,
@@ -1426,7 +1426,7 @@ class FluentParameterForm(QtWidgets.QWidget):
             # put its stepper a screen away from them.  A blank-or-number
             # edit has no stepper but keeps its room, so every number box
             # of a form ends at the same edge.
-            stepper = 0 if isinstance(widget, FluentDoubleSpinBox) else scaled_px(COMBO_WIDTH)
+            stepper = 0 if isinstance(widget, FluentDoubleSpinBox) else fluent_stepper_extent()
             widget.setMaximumWidth(widget.width_for(_NUMBER_SAMPLE) + stepper)
         cell = widget
         if picker is not None:
