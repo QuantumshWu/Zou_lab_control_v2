@@ -6379,6 +6379,9 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
             self.valueChanged[str].emit(self.text())
         if number != requested:
             self._queue_normalization()
+        if value is not None:
+            # A value projected with its range is the owner's value too.
+            self._derive_step()
         return True
 
     def setMinimum(self, minimum: float) -> None:  # noqa: N802 - Qt API name
@@ -6851,9 +6854,9 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
         operator names one, a notch is one unit of the number's second
         digit (0.02 -> 0.001, 1.5 -> 0.1, 250 -> 10), never finer than the
         declared resolution.  It is taken once, from the first non-zero
-        value the owner sets (again when the unit on screen changes): an
-        owner that projects every notch back must not change the step the
-        operator is stepping with."""
+        value the owner sets (setValue, or setRange with a value), and again
+        when the unit on screen changes: an owner that projects every notch
+        back must not change the step the operator is stepping with."""
 
         if self._step_declared or (self._step_derived and not again) or self.decimals() == 0:
             return

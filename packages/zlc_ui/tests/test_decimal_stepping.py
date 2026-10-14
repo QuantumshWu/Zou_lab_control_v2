@@ -495,3 +495,22 @@ def test_the_step_is_shown_in_the_box_and_a_click_changes_it(box, monkeypatch) -
     assert chip.isEnabled()
     box.setDecimals(0)
     assert not chip.isVisible() and edit.textMargins().right() == 0
+
+
+def test_an_undeclared_step_follows_the_owners_first_number(box) -> None:
+    """With no step declared, a notch is one unit of the number's second
+    digit -- taken once, from the owner's first non-zero value, through
+    setValue or a range projected with its value -- not 1 whatever the
+    box holds; a declared step is never replaced."""
+
+    box.setRange(0.0, 10.0, value=0.02)
+    assert box.singleStep() == 0.001 and box._step_chip.text() == "±0.001"
+    box.setValue(5.0)
+    assert box.singleStep() == 0.001, "an owner projecting values back keeps the operator's step"
+    other = type(box)()
+    other.setDecimals(1)
+    other.setValue(0.25)
+    assert other.singleStep() == 0.1, "never finer than the declared resolution"
+    other.setSingleStep(0.5)
+    other.setShownUnit(other.shownUnit())
+    assert other.singleStep() == 0.5
