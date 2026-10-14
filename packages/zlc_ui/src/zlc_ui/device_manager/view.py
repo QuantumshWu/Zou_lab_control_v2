@@ -29,6 +29,7 @@ from zlc_ui.fluent import (
     FluentStatusDot,
     FluentSwitch,
     add_row_switch,
+    command_gap,
     FluentTabWidget,
     fluent_font_size,
     muted_note_label,
@@ -42,6 +43,45 @@ from zlc_data.units import DEFAULT_UNITS, NO_PREFIX, UnitError, format_quantity
 from zlc_ui.form.form import FormSpec
 from zlc_ui.form.qt_form import FluentParameterForm, being_edited
 from zlc_ui.console.status_strip import StatusStrip
+
+
+def card_title_row(
+    title: str, trailing: QtWidgets.QWidget | None = None
+) -> tuple[QtWidgets.QHBoxLayout, FluentLabel]:
+    """One card's title row: its name on the left, its one command (if
+    any) on the right, a control's height whether or not it has one.
+
+    Every card of the window lays its title out with this, so cards that
+    stand side by side have their names on one baseline -- a painted title
+    strip beside a laid-out row put Camera four pixels below Discovered
+    hardware."""
+
+    row = QtWidgets.QHBoxLayout()
+    row.setContentsMargins(0, 0, 0, 0)
+    heading = FluentLabel(title)
+    heading.setStyleSheet(
+        f'QLabel {{ color: {TEXT}; font: {fluent_font_size()}pt "{FONT}"; '
+        "font-weight: 600; background: transparent; }"
+    )
+    row.addWidget(heading)
+    row.addStretch(1)
+    if trailing is not None:
+        row.addWidget(trailing)
+    row.addItem(QtWidgets.QSpacerItem(
+        0, scaled_px(30, minimum=22), QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed))
+    return row, heading
+
+
+def _rule_between(layout: QtWidgets.QLayout) -> None:
+    """Rule every item of a list but the last: a rule separates items, it
+    never closes the list -- the card's own edge does that."""
+
+    frames = [
+        item.widget() for item in (layout.itemAt(i) for i in range(layout.count()))
+        if isinstance(item.widget(), FluentFrame) and not item.widget().isHidden()
+    ]
+    for index, frame in enumerate(frames):
+        frame.set_rule(index < len(frames) - 1)
 
 
 class _DeviceCard(FluentFrame):
@@ -181,7 +221,9 @@ class _LiveDeviceCard(FluentFrame):
         self.instance_id = str(instance_id)
         outer = QtWidgets.QHBoxLayout(self)
         outer.setContentsMargins(0, window_pad(0.35), 0, window_pad(0.35))
-        outer.setSpacing(window_pad(0.3))
+        # The row's commands stand the standard gap apart, as commands do
+        # in every other row; packed tighter they read as one segmented bar.
+        outer.setSpacing(command_gap())
         self.role_label = ElidedLabel("")
         self.detail_label = muted_note_label("")
         self.control_button = FluentButton("Control")
@@ -750,6 +792,8 @@ class DeviceManagerView(QtWidgets.QWidget):
         self._remoted: set[str] = set()
         self._busy = False
         self._lifecycle_enabled = False
+        self._lifecycle_commits = True
+        self._apparatus_dirty = False
         self._discovery_enabled = False
         self._discovery_disabled_reason = (
             "No installed device type declares discovery"
@@ -808,12 +852,17 @@ class DeviceManagerView(QtWidgets.QWidget):
         right.setContentsMargins(0, 0, 0, 0)
         right.setSpacing(window_pad(0.45))
 
-        self.discovered_group = FluentGroupBox("Discovered hardware", self.right_body)
+        card_pad = window_pad(0.7)
+        self.discovered_group = FluentGroupBox(
+            "Discovered hardware", self.right_body, title_strip_px=0
+        )
         self.discovered_layout = QtWidgets.QVBoxLayout(self.discovered_group)
-        self.discovered_layout.setContentsMargins(pad, pad, pad, pad)
+        self.discovered_layout.setContentsMargins(card_pad, card_pad, card_pad, card_pad)
         self.discovered_layout.setSpacing(window_pad(0.4))
         self.discover_button = FluentButton("Scan hardware")
-        self.discovered_layout.addWidget(self.discover_button)
+        self.discovered_layout.addLayout(
+            card_title_row("Discovered hardware", self.discover_button)[0]
+        )
         self.discovered_cards_layout = QtWidgets.QVBoxLayout()
         self.discovered_cards_layout.setSpacing(window_pad(0.4))
         self.discovered_layout.addLayout(self.discovered_cards_layout)
@@ -822,10 +871,11 @@ class DeviceManagerView(QtWidgets.QWidget):
         self.discovered_layout.addWidget(self.discovered_empty)
         right.addWidget(self.discovered_group)
 
-        self.loaded_group = FluentGroupBox("Loaded session", self.right_body)
+        self.loaded_group = FluentGroupBox("Loaded session", self.right_body, title_strip_px=0)
         self.loaded_layout = QtWidgets.QVBoxLayout(self.loaded_group)
-        self.loaded_layout.setContentsMargins(pad, pad, pad, pad)
+        self.loaded_layout.setContentsMargins(card_pad, card_pad, card_pad, card_pad)
         self.loaded_layout.setSpacing(window_pad(0.35))
+        self.loaded_layout.addLayout(card_title_row("Loaded session")[0])
         self.loaded_empty = muted_note_label("No active installation")
         self.loaded_empty.setWordWrap(True)
         self.loaded_layout.addWidget(self.loaded_empty)
@@ -876,9 +926,10 @@ class DeviceManagerView(QtWidgets.QWidget):
         shown = f"{name}{'*' if dirty else ''}"
         self.document_name.setText(shown)
         # One primary at a time: Save, with its star, while the apparatus
-        # has unsaved edits; Init devices again once it is saved.
+        # has unsaved edits; the lifecycle command again once it is saved.
+        self._apparatus_dirty = bool(dirty)
         self.save_button.set_dirty(bool(dirty))
-        self.lifecycle_button.set_role("standard" if dirty else "primary")
+        self._show_lifecycle_role()
         self.document_name.setToolTip(
             f"{name} ({'saved' if saved and not dirty else 'unsaved draft'})"
         )
@@ -956,6 +1007,8 @@ class DeviceManagerView(QtWidgets.QWidget):
                 self._card_domains[instance_id] = domain
             card.set_choices(self._choices_for_type(type_key, domain))
             card.set_record(role, type_key)
+        for layout in self.domain_card_layouts.values():
+            _rule_between(layout)
         self._refresh_controls()
 
     def set_templates(self, templates: tuple[tuple[str, str], ...]) -> None:
@@ -1009,6 +1062,7 @@ class DeviceManagerView(QtWidgets.QWidget):
             log = self._device_log_windows.get(instance_id)
             if log is not None:
                 log.setWindowTitle(f"{role} log@Zou lab")
+        _rule_between(self.loaded_layout)
         self.loaded_empty.setVisible(not devices)
 
     def open_device_log(self, instance_id: str, snapshot, *, label: str) -> None:
@@ -1095,6 +1149,7 @@ class DeviceManagerView(QtWidgets.QWidget):
             title.setText(str(role))
             detail.setText(f"{type_id} · {instance_id}")
             self.discovered_cards_layout.insertWidget(index, frame)
+        _rule_between(self.discovered_cards_layout)
         self.discovered_empty.setVisible(not devices)
         self._refresh_controls()
 
@@ -1110,6 +1165,11 @@ class DeviceManagerView(QtWidgets.QWidget):
         self._busy = bool(busy)
         self._lifecycle_enabled = bool(enabled)
         self.lifecycle_button.setText(str(text))
+        # Init and Apply commit the authored graph -- the surface's one
+        # run command.  Shutdown takes the session down: an ordinary
+        # command, not the thing the window is asking for.
+        self._lifecycle_commits = not (active and not changed)
+        self._show_lifecycle_role()
         pending = bool(active and changed)
         self.status_dot.set_color(ORANGE if pending else GREEN if active else GREY)
         self.status_dot.setToolTip(
@@ -1120,6 +1180,10 @@ class DeviceManagerView(QtWidgets.QWidget):
             else "No active installation"
         )
         self._refresh_controls()
+
+    def _show_lifecycle_role(self) -> None:
+        primary = self._lifecycle_commits and not self._apparatus_dirty
+        self.lifecycle_button.set_role("primary" if primary else "standard")
 
     def set_form_spec(
         self,
@@ -1153,24 +1217,15 @@ class DeviceManagerView(QtWidgets.QWidget):
         group = FluentGroupBox(title, self.left_body, title_strip_px=0)
         group_layout = QtWidgets.QVBoxLayout(group)
         pad = window_pad(0.7)
-        # The title row stands where a painted title strip would: its name
-        # level with the neighbouring cards' titles.
-        group_layout.setContentsMargins(pad, scaled_px(2), pad, pad)
+        # The title row is laid out the way every card of this window lays
+        # its own: its name level with the neighbouring cards' names.
+        group_layout.setContentsMargins(pad, pad, pad, pad)
         group_layout.setSpacing(window_pad(0.4))
-        header = QtWidgets.QHBoxLayout()
-        heading = FluentLabel(title)
-        heading.setStyleSheet(
-            f'QLabel {{ color: {TEXT}; font: {fluent_font_size()}pt "{FONT}"; '
-            "font-weight: 600; background: transparent; }"
-        )
         button = FluentButton("Add device")
         button.clicked.connect(
             lambda _checked=False, value=domain: self._add_domain_clicked(value)
         )
-        header.addWidget(heading)
-        header.addStretch(1)
-        header.addWidget(button)
-        group_layout.addLayout(header)
+        group_layout.addLayout(card_title_row(title, button)[0])
         cards = QtWidgets.QVBoxLayout()
         cards.setContentsMargins(0, 0, 0, 0)
         cards.setSpacing(window_pad(0.4))
