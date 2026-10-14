@@ -9,12 +9,18 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 from zlc_ui.fluent import (
     ACCENT,
     ACCENT_TINT,
+    CARD_PAD,
+    DISABLED_INK,
+    FIELD_BORDER_PX,
     FONT,
     GREEN,
     GREY,
     MUTED_INK,
+    MUTED_LABEL_STYLE,
     ORANGE,
+    RADIUS,
     RED,
+    SELECTED,
     TEXT,
     ElidedLabel,
     FluentLabel,
@@ -25,55 +31,123 @@ from zlc_ui.fluent import (
     FluentLineEdit,
     FluentScrollArea,
     FluentSectionLabel,
+    FluentSettingRow,
     FluentStatusDot,
+    FluentStatusStrip,
     FluentSwitch,
     add_row_switch,
     command_gap,
     FluentTabWidget,
     fluent_font_size,
+    fluent_scrollbar_thickness,
     muted_note_label,
+    paint_chevron,
+    popup_gap,
     retire_widget,
     scaled_px,
+    setting_label_width,
     signals_blocked,
     window_pad,
 )
+from zlc_ui.fluent.fluent import _FluentRoundedMenu
 from zlc_data.units import DEFAULT_UNITS, NO_PREFIX, UnitError, format_quantity
 
 from zlc_ui.form.form import FormSpec
-from zlc_ui.form.qt_form import FluentParameterForm, being_edited
+from zlc_ui.form.qt_form import (
+    _CAPPED_KINDS,
+    FluentParameterForm,
+    _form_label_width,
+    being_edited,
+)
 from zlc_ui.console.status_strip import StatusStrip
 
 
-def card_title_row(
-    title: str, trailing: QtWidgets.QWidget | None = None
-) -> tuple[QtWidgets.QHBoxLayout, FluentLabel]:
-    """One card's title row: its name on the left, its one command (if
-    any) on the right, a control's height whether or not it has one.
+def control_height() -> int:
+    """The one height of a row's controls: fields, combos and buttons."""
 
-    Every card of the window lays its title out with this, so cards that
-    stand side by side have their names on one baseline -- a painted title
-    strip beside a laid-out row put Camera four pixels below Discovered
-    hardware."""
+    return scaled_px(30, minimum=22)
+
+
+def row_gap() -> int:
+    """The gap between the rows of a form and between the cells of one row,
+    the gap FluentSettingRow and FluentParameterForm keep -- so a title row,
+    a device's header row and the form rows under it step at one pitch."""
+
+    return scaled_px(6, minimum=4)
+
+
+def _rule_gap() -> int:
+    """The room on EACH side of the rule between two items of a list: half
+    a section gap, so the rule sits in the middle of a break visibly wider
+    than a row gap, and the items read as groups of rows."""
+
+    return window_pad(0.5)
+
+
+def card_title_row(
+    title: str,
+    *trailing: QtWidgets.QWidget,
+    summary: QtWidgets.QWidget | None = None,
+) -> tuple[QtWidgets.QHBoxLayout, QtWidgets.QLabel]:
+    """One card's title row: its name on the left, a muted ``summary`` and
+    its commands (if any) on the right, a control's height whether or not it
+    has any.
+
+    Every card of the Device Manager and the Figure Viewer lays its title out
+    with this, so cards that stand side by side have their names on one
+    baseline -- a painted title strip beside a laid-out row put Camera four
+    pixels below Discovered hardware -- and a card's command sits on its
+    title line, never alone on a row of its own under it.  The title wears
+    the one section-title style: a weight chosen here made a third look
+    beside the page title and the painted titles of other windows."""
 
     row = QtWidgets.QHBoxLayout()
     row.setContentsMargins(0, 0, 0, 0)
-    heading = FluentLabel(title)
-    heading.setStyleSheet(
-        f'QLabel {{ color: {TEXT}; font: {fluent_font_size()}pt "{FONT}"; '
-        "font-weight: 600; background: transparent; }"
-    )
+    row.setSpacing(row_gap())
+    heading = FluentSectionLabel(title)
     row.addWidget(heading)
-    row.addStretch(1)
-    if trailing is not None:
-        row.addWidget(trailing)
+    if summary is None:
+        row.addStretch(1)
+    else:
+        row.addWidget(summary, 1)
+    for widget in trailing:
+        row.addWidget(widget)
     row.addItem(QtWidgets.QSpacerItem(
-        0, scaled_px(30, minimum=22), QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed))
+        0, control_height(), QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed))
     return row, heading
+
+
+def muted_summary_label(text: str = "") -> ElidedLabel:
+    """A card's one-line summary for its title row: muted, right-aligned
+    against the commands after it, eliding (the whole text in its tooltip)
+    rather than widening the card."""
+
+    label = ElidedLabel(text, align=QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+    label.setStyleSheet(f'QLabel {{ {MUTED_LABEL_STYLE} font: {fluent_font_size()}pt "{FONT}"; }}')
+    return label
+
+
+def seat_status_strip(strip: FluentStatusStrip, *, right: int = 0) -> None:
+    """Put a status strip's dot on the left edge of the padded page it sits on.
+
+    The strip pads itself for a strip that is a white card of its own; on a
+    page the window already pads, that inset moved the dot off the edge the
+    title, the cards and the action bar start on.  ``right`` keeps whatever
+    room the page reserves on its right (a scroll gutter) out of the line."""
+
+    layout = strip.layout()
+    margins = layout.contentsMargins()
+    layout.setContentsMargins(0, margins.top(), right, margins.bottom())
 
 
 def _rule_between(layout: QtWidgets.QLayout) -> None:
     """Rule every item of a list but the last: a rule separates items, it
     never closes the list -- the card's own edge does that.
+
+    The rule stands in the middle of the break: ``_rule_gap`` between an
+    item's last row and its rule, the list's own spacing (the same gap)
+    between the rule and the next item.  An unruled item ends on its last
+    row, so the card's padding alone closes the list.
 
     An item is in the list unless it was hidden ON PURPOSE.  ``isHidden``
     is not that: a card made under a window already on screen is hidden
@@ -88,7 +162,72 @@ def _rule_between(layout: QtWidgets.QLayout) -> None:
         )
     ]
     for index, frame in enumerate(frames):
-        frame.set_rule(index < len(frames) - 1)
+        ruled = index < len(frames) - 1
+        frame.set_rule(ruled)
+        rows = frame.layout()
+        margins = rows.contentsMargins()
+        bottom = _rule_gap() + FIELD_BORDER_PX if ruled else 0
+        if margins.bottom() != bottom:
+            rows.setContentsMargins(margins.left(), margins.top(), margins.right(), bottom)
+
+
+def _ruled_list() -> QtWidgets.QVBoxLayout:
+    """The layout of a ruled list: its items stand ``_rule_gap`` below the
+    rule of the item above (see :func:`_rule_between`)."""
+
+    items = QtWidgets.QVBoxLayout()
+    items.setContentsMargins(0, 0, 0, 0)
+    items.setSpacing(_rule_gap())
+    return items
+
+
+class _Disclosure(QtWidgets.QAbstractButton):
+    """Shows or hides a device's parameters: a quiet chevron, not a command.
+
+    As Fluent's expander has it: at the trailing end of the header, pointing
+    where the body will go -- down while it is hidden, up while it shows.  A
+    square as tall as the row's controls, the chevron the combos and spin
+    boxes paint, centred on it; a text glyph sat its ink a pixel low.  Under
+    the pointer it takes the one hover wash every control shares, in body
+    ink: a command's tinted face would make it a command again.
+    """
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        side = control_height()
+        self.setFixedSize(side, side)
+        self.setCursor(QtCore.Qt.PointingHandCursor)
+        self._expanded = True
+
+    def set_expanded(self, expanded: bool) -> None:
+        self._expanded = bool(expanded)
+        self.setToolTip("Hide parameters" if self._expanded else "Show parameters")
+        self.update()
+
+    def enterEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        super().enterEvent(event)
+        self.update()
+
+    def leaveEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        super().leaveEvent(event)
+        self.update()
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        del event
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
+        hovered = self.underMouse() and self.isEnabled()
+        if self.isDown() or hovered:
+            radius = float(scaled_px(RADIUS))
+            painter.setPen(QtCore.Qt.NoPen)
+            painter.setBrush(QtGui.QColor(SELECTED if self.isDown() else ACCENT_TINT))
+            painter.drawRoundedRect(QtCore.QRectF(self.rect()), radius, radius)
+        ink = TEXT if hovered else MUTED_INK if self.isEnabled() else DISABLED_INK
+        paint_chevron(
+            painter, self, QtCore.QRectF(self.rect()).center(),
+            up=self._expanded, colour=QtGui.QColor(ink),
+        )
+        painter.end()
 
 
 class _DeviceCard(FluentFrame):
@@ -105,35 +244,28 @@ class _DeviceCard(FluentFrame):
         self.form: FluentParameterForm | None = None
         self._collapsed = False
         outer = QtWidgets.QVBoxLayout(self)
-        outer.setContentsMargins(0, window_pad(0.3), 0, window_pad(0.6))
-        outer.setSpacing(window_pad(0.35))
-        header = QtWidgets.QHBoxLayout()
-        # A disclosure, not a command: a ghost chevron, which a tonal
-        # square with a minus sign beside the Role box was read as.  Under
-        # the pointer it takes the one hover wash every control shares, in
-        # body ink: the dark command blue would make it a command again.
-        self.collapse_button = QtWidgets.QToolButton()
-        self.collapse_button.setCursor(QtCore.Qt.PointingHandCursor)
-        self.collapse_button.setFixedSize(scaled_px(24, minimum=20), scaled_px(30, minimum=22))
-        self.collapse_button.setStyleSheet(
-            f"QToolButton {{ border: none; background: transparent; color: {MUTED_INK}; "
-            f"border-radius: {scaled_px(4)}px; padding: 0px; "
-            f"font-size: {round(fluent_font_size() * 1.5)}pt; }} "
-            f"QToolButton:hover {{ background: {ACCENT_TINT}; color: {TEXT}; }}"
-        )
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(row_gap())
+        self.collapse_button = _Disclosure()
         self._show_collapsed()
-        self.name_label = muted_note_label("Role")
+        # The header is the first row of the device's form, on the form's
+        # columns: Role in body ink at the label edge, its box on the control
+        # column -- as wide as the number boxes under it (set_columns), so
+        # the type beside it starts where they end -- and the commands at
+        # the row's end.
+        self.name_label = QtWidgets.QLabel("Role")
         self.role_edit = FluentLineEdit()
         self.role_edit.setPlaceholderText("role")
         self.role_edit.set_placeholder_prompt()
         self.type_combo = FluentComboBox()
         self.remove_button = FluentButton("Remove", role="destructive")
-        header.addWidget(self.collapse_button)
-        header.addWidget(self.name_label)
-        header.addWidget(self.role_edit, 1)
-        header.addWidget(self.type_combo, 1)
-        header.addWidget(self.remove_button)
-        outer.addLayout(header)
+        self.header_row = FluentSettingRow(
+            self.name_label,
+            self.role_edit,
+            label_width=setting_label_width(("Role",)),
+            after=((self.type_combo, 1), (self.remove_button, 0), (self.collapse_button, 0)),
+        )
+        outer.addWidget(self.header_row)
         self.form_host = QtWidgets.QVBoxLayout()
         outer.addLayout(self.form_host)
         self.role_edit.editingFinished.connect(
@@ -185,7 +317,9 @@ class _DeviceCard(FluentFrame):
     def set_form(self, spec: FormSpec, values: tuple[tuple[str, object], ...]) -> None:
         projected = dict(values)
         if self.form is None:
-            self.form = FluentParameterForm(spec, projected, parent=self)
+            self.form = FluentParameterForm(
+                spec, projected, parent=self, label_width=self.name_label.width()
+            )
             self.form.changed.connect(
                 lambda key: self.parameter_committed.emit(self.instance_id, key)
             )
@@ -206,6 +340,47 @@ class _DeviceCard(FluentFrame):
         if isinstance(value, str):
             self.type_picked.emit(self.instance_id, value)
 
+    def label_need(self) -> int:
+        """The label column this card's own rows need: Role and its form's."""
+
+        need = setting_label_width(("Role",))
+        if self.form is not None:
+            need = max(need, _form_label_width(self.form.spec.fields))
+        return need
+
+    def number_edge(self) -> int:
+        """How wide this card's form draws its number boxes; 0 with none."""
+
+        if self.form is None:
+            return 0
+        return max(
+            (
+                self.form.widget_for(field.key).maximumWidth()
+                for field in self.form.spec.fields
+                if field.kind in _CAPPED_KINDS
+            ),
+            default=0,
+        )
+
+    def set_columns(self, label_width: int, number_edge: int) -> None:
+        """Stand this card on the window's columns: its labels in the one
+        label column, its Role box as wide as the number boxes (a share of
+        the row like the type's when no card has one).
+
+        The box asks for twice the type's share up to that width, so it
+        reaches the number boxes' edge and the type takes the rest; at an
+        equal share it ended short of the boxes under it, and held at the
+        width it pushed the commands off the card in a narrow window."""
+
+        if self.name_label.width() != label_width:
+            self.header_row.set_label("Role", width=label_width)
+        if self.form is not None:
+            self.form.set_label_width(label_width)
+        cap = number_edge or QtWidgets.QWIDGETSIZE_MAX
+        if self.role_edit.maximumWidth() != cap:
+            self.role_edit.setMaximumWidth(cap)
+        self.header_row.layout().setStretchFactor(self.role_edit, 2 if number_edge else 1)
+
     def _toggle_collapsed(self) -> None:
         self._collapsed = not self._collapsed
         if self.form is not None:
@@ -213,8 +388,7 @@ class _DeviceCard(FluentFrame):
         self._show_collapsed()
 
     def _show_collapsed(self) -> None:
-        self.collapse_button.setText("▸" if self._collapsed else "▾")
-        self.collapse_button.setToolTip("Show parameters" if self._collapsed else "Hide parameters")
+        self.collapse_button.set_expanded(not self._collapsed)
 
 
 class _LiveDeviceCard(FluentFrame):
@@ -229,7 +403,7 @@ class _LiveDeviceCard(FluentFrame):
         super().__init__(parent, rule=True)
         self.instance_id = str(instance_id)
         outer = QtWidgets.QHBoxLayout(self)
-        outer.setContentsMargins(0, window_pad(0.35), 0, window_pad(0.35))
+        outer.setContentsMargins(0, 0, 0, 0)
         # The row's commands stand the standard gap apart, as commands do
         # in every other row; packed tighter they read as one segmented bar.
         outer.setSpacing(command_gap())
@@ -362,23 +536,21 @@ class DeviceControlView(QtWidgets.QWidget):
         outer = QtWidgets.QVBoxLayout(self)
         pad = window_pad()
         outer.setContentsMargins(pad, pad, pad, pad)
-        outer.setSpacing(window_pad(0.5))
+        outer.setSpacing(row_gap())
 
-        header = FluentFrame(self, bordered=True)
-        header_layout = QtWidgets.QHBoxLayout(header)
-        header_layout.setContentsMargins(pad, pad, pad, pad)
-        owner_stack = QtWidgets.QVBoxLayout()
-        self.owner_label = FluentSectionLabel("Owner: none")
-        self.reason_label = muted_note_label("No control policy projection")
-        self.reason_label.setWordWrap(True)
-        owner_stack.addWidget(self.owner_label)
-        owner_stack.addWidget(self.reason_label)
-        header_layout.addLayout(owner_stack, 1)
+        # The owner is the page's title line, on the page's own left edge
+        # with its commands at the right; the policy's reason under it.  A
+        # bordered card around the two put the title a card's padding right
+        # of the column headings and the rows under it.
         self.refresh_button = FluentButton("Refresh")
         self.risk_switch = FluentSwitch("Accept risk")
-        header_layout.addWidget(self.refresh_button)
-        header_layout.addWidget(self.risk_switch)
-        outer.addWidget(header)
+        title_row, self.owner_label = card_title_row("Owner: none", self.refresh_button)
+        add_row_switch(title_row, self.risk_switch, trail=False)
+        outer.addLayout(title_row)
+        self.reason_label = muted_note_label("No control policy projection")
+        self.reason_label.setWordWrap(True)
+        outer.addWidget(self.reason_label)
+        outer.addSpacing(pad - row_gap())
 
         self.columns = QtWidgets.QWidget(self)
         columns = QtWidgets.QHBoxLayout(self.columns)
@@ -424,6 +596,7 @@ class DeviceControlView(QtWidgets.QWidget):
         outer.addWidget(self.form)
         outer.addStretch(1)
         self.status_strip = StatusStrip(self)
+        seat_status_strip(self.status_strip)
         outer.addWidget(self.status_strip)
         self.refresh_button.clicked.connect(self.refresh_requested.emit)
         self.risk_switch.toggled.connect(self.risk_toggled.emit)
@@ -821,22 +994,34 @@ class DeviceManagerView(QtWidgets.QWidget):
         outer.addWidget(self.tabs, 1)
 
         page = QtWidgets.QVBoxLayout(self.config_page)
-        page.setContentsMargins(pad, pad, pad, pad)
-        page.setSpacing(window_pad(0.5))
+        # The right column scrolls in a gutter it keeps whether or not its
+        # bar shows (FluentScrollArea.set_width_bounded_widget).  That gutter
+        # lies in the page's right padding, so the right-hand cards end on
+        # the page's one right edge with the title line and the action bar,
+        # not a bar's width short of it.
+        gutter = fluent_scrollbar_thickness()
+        page.setContentsMargins(pad, pad, pad - gutter, pad)
+        page.setSpacing(0)
 
-        header = QtWidgets.QHBoxLayout()
-        self.heading_label = FluentSectionLabel("Devices")
-        header.addWidget(self.heading_label)
-        header.addStretch(1)
         # In the compact chrome, the left-hand title never changes; runtime state
         # and the edited document are a compact pair on the right.
+        self.status_strip = StatusStrip()
+        seat_status_strip(self.status_strip, right=gutter)
         self.status_dot = FluentStatusDot(size=12)
         self.status_dot.set_color(GREY)
-        self.document_name = ElidedLabel("untitled")
-        self.document_name.setMinimumWidth(window_pad(9.5))
-        header.addWidget(self.status_dot)
-        header.addWidget(self.document_name)
+        self.document_name = ElidedLabel(
+            "untitled", align=QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter
+        )
+        header, self.heading_label = card_title_row(
+            "Devices", self.status_dot, self.document_name
+        )
+        # The dot stands as far from the name as the status line's dot from
+        # its words.
+        header.setSpacing(self.status_strip.layout().spacing())
+        header.setContentsMargins(0, 0, gutter, 0)
+        self._fit_document_name()
         page.addLayout(header)
+        page.addSpacing(pad)
 
         columns = QtWidgets.QHBoxLayout()
         columns.setContentsMargins(0, 0, 0, 0)
@@ -846,7 +1031,7 @@ class DeviceManagerView(QtWidgets.QWidget):
         self.left_body = QtWidgets.QWidget()
         self.domain_column = QtWidgets.QVBoxLayout(self.left_body)
         self.domain_column.setContentsMargins(0, 0, 0, 0)
-        self.domain_column.setSpacing(window_pad(0.45))
+        self.domain_column.setSpacing(row_gap())
         self.domain_groups: dict[str, FluentGroupBox] = {}
         self.domain_card_layouts: dict[str, QtWidgets.QVBoxLayout] = {}
         self.domain_add_buttons: dict[str, FluentButton] = {}
@@ -862,21 +1047,20 @@ class DeviceManagerView(QtWidgets.QWidget):
         self.right_body = QtWidgets.QWidget()
         right = QtWidgets.QVBoxLayout(self.right_body)
         right.setContentsMargins(0, 0, 0, 0)
-        right.setSpacing(window_pad(0.45))
+        right.setSpacing(row_gap())
 
-        card_pad = window_pad(0.7)
+        card_pad = scaled_px(CARD_PAD)
         self.discovered_group = FluentGroupBox(
             "Discovered hardware", self.right_body, title_strip_px=0
         )
         self.discovered_layout = QtWidgets.QVBoxLayout(self.discovered_group)
         self.discovered_layout.setContentsMargins(card_pad, card_pad, card_pad, card_pad)
-        self.discovered_layout.setSpacing(window_pad(0.4))
+        self.discovered_layout.setSpacing(row_gap())
         self.discover_button = FluentButton("Scan hardware")
         self.discovered_layout.addLayout(
             card_title_row("Discovered hardware", self.discover_button)[0]
         )
-        self.discovered_cards_layout = QtWidgets.QVBoxLayout()
-        self.discovered_cards_layout.setSpacing(window_pad(0.4))
+        self.discovered_cards_layout = _ruled_list()
         self.discovered_layout.addLayout(self.discovered_cards_layout)
         self.discovered_empty = muted_note_label("No discovered hardware")
         self.discovered_empty.setWordWrap(True)
@@ -886,8 +1070,10 @@ class DeviceManagerView(QtWidgets.QWidget):
         self.loaded_group = FluentGroupBox("Loaded session", self.right_body, title_strip_px=0)
         self.loaded_layout = QtWidgets.QVBoxLayout(self.loaded_group)
         self.loaded_layout.setContentsMargins(card_pad, card_pad, card_pad, card_pad)
-        self.loaded_layout.setSpacing(window_pad(0.35))
+        self.loaded_layout.setSpacing(row_gap())
         self.loaded_layout.addLayout(card_title_row("Loaded session")[0])
+        self.loaded_cards_layout = _ruled_list()
+        self.loaded_layout.addLayout(self.loaded_cards_layout)
         self.loaded_empty = muted_note_label("No active installation")
         self.loaded_empty.setWordWrap(True)
         self.loaded_layout.addWidget(self.loaded_empty)
@@ -902,15 +1088,23 @@ class DeviceManagerView(QtWidgets.QWidget):
         self.right_scroll.set_width_bounded_widget(self.right_body)
         columns.addWidget(self.right_scroll, 2)
         page.addLayout(columns, 1)
+        # A section gap above the action bar, as above every section: at a
+        # row's gap the scrolled column's cut-off edge read as a stray rule
+        # over the buttons.
+        page.addSpacing(pad)
 
         actions = QtWidgets.QHBoxLayout()
-        self.new_combo = FluentComboBox()
-        self.new_combo.addItem("New…", None)
+        actions.setContentsMargins(0, 0, gutter, 0)
+        actions.setSpacing(command_gap())
+        # New is a command, a button among the file commands, whose menu
+        # names the templates; a combo box in the row read as a setting.
+        self.new_button = FluentButton("New…")
+        self._templates: tuple[tuple[str, str], ...] = ()
         self.load_button = FluentButton("Load…")
         self.save_button = FluentButton("Save")
         self.save_as_button = FluentButton("Save as…")
         self.lifecycle_button = FluentButton("Init devices", role="primary")
-        actions.addWidget(self.new_combo)
+        actions.addWidget(self.new_button)
         actions.addWidget(self.load_button)
         actions.addWidget(self.save_button)
         actions.addWidget(self.save_as_button)
@@ -918,15 +1112,44 @@ class DeviceManagerView(QtWidgets.QWidget):
         actions.addWidget(self.lifecycle_button)
         page.addLayout(actions)
 
-        self.status_strip = StatusStrip()
+        page.addSpacing(window_pad(0.5))
         page.addWidget(self.status_strip)
         self.discover_button.clicked.connect(self.discovery_requested.emit)
         self.save_button.clicked.connect(self.save_requested.emit)
-        self.new_combo.activated[int].connect(self._template_chosen)
+        self.new_button.clicked.connect(self._show_templates)
         self.load_button.clicked.connect(self.load_requested.emit)
         self.save_as_button.clicked.connect(self.save_as_requested.emit)
         self.lifecycle_button.clicked.connect(self.lifecycle_requested.emit)
         self._refresh_controls()
+
+    def _fit_document_name(self) -> None:
+        """As wide as the name, up to a cap past which it elides.
+
+        The name ends on the page's right edge and the dot stands just
+        before its first letter; a fixed width put a short name's dot a
+        word's width away from it."""
+
+        label = self.document_name
+        # ElidedLabel keeps scaled_px(2) of room it never writes into.
+        need = label.fontMetrics().horizontalAdvance(label.text()) + scaled_px(2) + 1
+        width = min(need, window_pad(24))
+        if label.minimumWidth() != width:
+            label.setMinimumWidth(width)
+
+    def _align_columns(self) -> None:
+        """One label column for every device card -- the widest any card
+        needs -- and one number edge, the widest number box any card has.
+
+        A card that sized its own column put its controls wherever its
+        longest label happened to end -- a device whose labels were all
+        short started its boxes forty pixels left of the card above it."""
+
+        if not self._cards:
+            return
+        width = max(card.label_need() for card in self._cards.values())
+        edge = max(card.number_edge() for card in self._cards.values())
+        for card in self._cards.values():
+            card.set_columns(width, edge)
 
     def set_apparatus(self, name: str, dirty: bool, saved: bool) -> None:
         """Project the document name and its ordinary unsaved ``*`` marker.
@@ -937,6 +1160,7 @@ class DeviceManagerView(QtWidgets.QWidget):
 
         shown = f"{name}{'*' if dirty else ''}"
         self.document_name.setText(shown)
+        self._fit_document_name()
         # One primary at a time: Save, with its star, while the apparatus
         # has unsaved edits; the lifecycle command again once it is saved.
         self._apparatus_dirty = bool(dirty)
@@ -1021,20 +1245,11 @@ class DeviceManagerView(QtWidgets.QWidget):
             card.set_record(role, type_key)
         for layout in self.domain_card_layouts.values():
             _rule_between(layout)
+        self._align_columns()
         self._refresh_controls()
 
     def set_templates(self, templates: tuple[tuple[str, str], ...]) -> None:
-        current = self.new_combo.currentData()
-        self.new_combo.blockSignals(True)
-        try:
-            self.new_combo.clear()
-            self.new_combo.addItem("New…", None)
-            for label, key in templates:
-                self.new_combo.addItem(str(label), str(key))
-            index = self.new_combo.findData(current)
-            self.new_combo.setCurrentIndex(max(0, index))
-        finally:
-            self.new_combo.blockSignals(False)
+        self._templates = tuple((str(label), str(key)) for label, key in templates)
         self._refresh_controls()
 
     def set_loaded_devices(
@@ -1046,7 +1261,7 @@ class DeviceManagerView(QtWidgets.QWidget):
             if instance_id in wanted:
                 continue
             card = self._loaded_cards.pop(instance_id)
-            self.loaded_layout.removeWidget(card)
+            self.loaded_cards_layout.removeWidget(card)
             retire_widget(card)
         # A log belongs to a loaded device and goes when the device does.
         # Left open, a window that belongs to nobody polled a device that
@@ -1065,8 +1280,7 @@ class DeviceManagerView(QtWidgets.QWidget):
                 card.device_remote_toggled.connect(self.device_remote_toggled)
                 card.device_log_requested.connect(self.device_log_requested)
                 self._loaded_cards[instance_id] = card
-                # After the card's title row, which is the layout's first item.
-                self.loaded_layout.insertWidget(index + 1, card)
+                self.loaded_cards_layout.insertWidget(index, card)
             card.set_record(
                 str(role),
                 str(type_id),
@@ -1075,7 +1289,7 @@ class DeviceManagerView(QtWidgets.QWidget):
             log = self._device_log_windows.get(instance_id)
             if log is not None:
                 log.setWindowTitle(f"{role} log@Zou lab")
-        _rule_between(self.loaded_layout)
+        _rule_between(self.loaded_cards_layout)
         self.loaded_empty.setVisible(not devices)
 
     def open_device_log(self, instance_id: str, snapshot, *, label: str) -> None:
@@ -1145,7 +1359,7 @@ class DeviceManagerView(QtWidgets.QWidget):
             if widgets is None:
                 frame = FluentFrame(self.discovered_group, rule=True)
                 row = QtWidgets.QHBoxLayout(frame)
-                row.setContentsMargins(0, window_pad(0.35), 0, window_pad(0.35))
+                row.setContentsMargins(0, 0, 0, 0)
                 title = ElidedLabel("")
                 detail = muted_note_label("")
                 button = FluentButton("Add")
@@ -1211,6 +1425,7 @@ class DeviceManagerView(QtWidgets.QWidget):
         if card is None:
             raise KeyError(f"unknown device instance id: {instance_id!r}")
         card.set_form(spec, values)
+        self._align_columns()
 
     def read_values(self, instance_id: str) -> tuple[tuple[str, object], ...]:
         card = self._cards.get(str(instance_id))
@@ -1232,19 +1447,18 @@ class DeviceManagerView(QtWidgets.QWidget):
         title = domain.replace("_", " ").title()
         group = FluentGroupBox(title, self.left_body, title_strip_px=0)
         group_layout = QtWidgets.QVBoxLayout(group)
-        pad = window_pad(0.7)
+        pad = scaled_px(CARD_PAD)
         # The title row is laid out the way every card of this window lays
-        # its own: its name level with the neighbouring cards' names.
+        # its own: its name level with the neighbouring cards' names, one
+        # row's gap above the first device's header row.
         group_layout.setContentsMargins(pad, pad, pad, pad)
-        group_layout.setSpacing(window_pad(0.4))
+        group_layout.setSpacing(row_gap())
         button = FluentButton("Add device")
         button.clicked.connect(
             lambda _checked=False, value=domain: self._add_domain_clicked(value)
         )
         group_layout.addLayout(card_title_row(title, button)[0])
-        cards = QtWidgets.QVBoxLayout()
-        cards.setContentsMargins(0, 0, 0, 0)
-        cards.setSpacing(window_pad(0.4))
+        cards = _ruled_list()
         group_layout.addLayout(cards)
         self.domain_groups[domain] = group
         self.domain_card_layouts[domain] = cards
@@ -1269,22 +1483,36 @@ class DeviceManagerView(QtWidgets.QWidget):
         if choices:
             self.device_add_requested.emit(choices[0][1])
 
-    def _template_chosen(self, index: int) -> None:
-        value = self.new_combo.itemData(index)
-        self.new_combo.blockSignals(True)
+    def templates_menu(self) -> QtWidgets.QMenu:
+        """New's menu: one entry per template, each choosing it."""
+
+        menu = _FluentRoundedMenu(self)
+        for label, key in self._templates:
+            action = menu.addAction(label)
+            action.triggered.connect(
+                lambda _checked=False, value=key: self.template_selected.emit(value)
+            )
+        return menu
+
+    def _show_templates(self) -> None:
+        """The templates under New, built for this click and retired after
+        it, so the list is the one the host projected last."""
+
+        menu = self.templates_menu()
+        anchor = self.new_button.mapToGlobal(
+            QtCore.QPoint(0, self.new_button.height() + popup_gap())
+        )
         try:
-            self.new_combo.setCurrentIndex(0)
+            menu.exec_(anchor)
         finally:
-            self.new_combo.blockSignals(False)
-        if isinstance(value, str):
-            self.template_selected.emit(value)
+            retire_widget(menu)
 
     def _remove_requested(self, instance_id: str) -> None:
         self.device_remove_requested.emit(str(instance_id))
 
     def _refresh_controls(self) -> None:
         enabled = not self._busy
-        self.new_combo.setEnabled(enabled)
+        self.new_button.setEnabled(enabled and bool(self._templates))
         self.load_button.setEnabled(enabled)
         self.save_button.setEnabled(enabled)
         self.save_as_button.setEnabled(enabled)

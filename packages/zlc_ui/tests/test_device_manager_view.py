@@ -32,7 +32,21 @@ assert view.status_strip.current_severity == 'idle'
 assert tuple(view.domain_groups) == ('sensor', 'camera')
 assert card.role_edit.text() == 'input'
 
-view.show(); app.processEvents()
+# Every card stands on one label column -- the widest any card needs -- and
+# its Role box ends where the number boxes under it end.
+view.set_devices((('id-1', 'input', 'sensor.fake', 'sensor'), ('id-2', 'cam', 'camera.fake', 'camera')))
+view.set_form_spec('id-2', FormSpec((FormFieldProps('note', 'text', 'A much longer label', default=''),)),
+                   (('note', ''),))
+view.resize(1100, 700); view.show(); app.processEvents()
+def x(widget):
+    return widget.mapTo(view, QtCore.QPoint()).x()
+count = form.widget_for('count')
+other = view._cards['id-2']
+assert x(card.role_edit) == x(count) == x(other.role_edit) == x(other.form.widget_for('note'))
+assert x(card.role_edit) + card.role_edit.width() == x(count) + count.width()
+assert x(card.name_label) == x(form._rows['count']._label)
+view.set_devices((('id-1', 'input', 'sensor.fake', 'sensor'),))
+app.processEvents()
 events = []
 view.device_add_requested.connect(lambda value: events.append(('add', value)))
 view.device_remove_requested.connect(lambda value: events.append(('remove', value)))
@@ -108,21 +122,10 @@ assert view.discover_button.toolTip() == 'No installed device type declares disc
 assert view.loaded_group.title() == 'Loaded session'
 group_titles = {group.title() for group in view.findChildren(type(view.loaded_group))}
 assert not {'Installation', 'Configured devices', 'Available', 'Loaded (session)'} & group_titles
-assert view.new_combo.itemText(0) == 'New…'
-assert tuple(view.new_combo.itemText(index) for index in range(1, view.new_combo.count())) == ('Virtual', 'Hardware')
-# FluentComboBox paints its own collapsed text, so its natural width must use
-# the same chrome budget as that painter.  Depending on QComboBox's unrelated
-# native size hint leaves less room than the widest item and visibly elides it.
-from zlc_ui.fluent import scaled_px
-from zlc_ui.fluent.style import COMBO_WIDTH, EDIT_PADDING_H
-pad = scaled_px(EDIT_PADDING_H)
-text_inset = pad + scaled_px(2)
-text_width = view.new_combo.width() - scaled_px(COMBO_WIDTH) - text_inset - pad
-measure = getattr(view.new_combo.fontMetrics(), 'horizontalAdvance', view.new_combo.fontMetrics().width)
-assert text_width >= max(
-    measure(view.new_combo.itemText(index))
-    for index in range(view.new_combo.count())
-)
+# New is a command among the file commands; its menu names the templates.
+assert view.new_button.text() == 'New…' and view.new_button.isEnabled()
+menu = view.templates_menu()
+assert tuple(action.text() for action in menu.actions()) == ('Virtual', 'Hardware')
 assert view.load_button.text() == 'Load…'
 assert view.save_button.text() == 'Save'
 assert view.save_as_button.text() == 'Save as…'
@@ -140,8 +143,7 @@ for button in (
     button.click()
 view.set_discovery_enabled(True)
 view.discover_button.click()
-view.new_combo.setCurrentIndex(1)
-view.new_combo.activated[int].emit(1)
+menu.actions()[0].trigger()
 view.set_lifecycle('Init devices', enabled=True, active=False)
 view.lifecycle_button.click()
 assert events == ['load', 'save-as', 'discover', ('template', 'virtual'), 'lifecycle']
@@ -649,9 +651,9 @@ assert frames == {'d1': True, 'd2': False}, frames
 # card's title row is card_title_row, so Camera and Discovered hardware
 # share one.
 app.processEvents()
-from zlc_ui.fluent import FluentLabel
+from PyQt5 import QtWidgets
 def title(text):
-    label = next(label for label in view.findChildren(FluentLabel) if label.text() == text and label.isVisible())
+    label = next(label for label in view.findChildren(QtWidgets.QLabel) if label.text() == text and label.isVisible())
     return label.mapTo(view, label.rect().topLeft()).y() + label.contentsRect().top()
 camera, discovered = title('Camera'), title('Discovered hardware')
 assert camera == discovered, (camera, discovered)

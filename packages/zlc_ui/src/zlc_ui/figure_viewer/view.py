@@ -23,9 +23,15 @@ from zlc_ui.console.panel_editor_view import (
     new_panel_editor,
     panel_editor_projection,
 )
+from zlc_ui.device_manager.view import (
+    card_title_row,
+    muted_summary_label,
+    row_gap,
+)
 from zlc_ui.form.qt_form import being_edited
 from zlc_ui.fluent import (
     retire_widget,
+    CARD_PAD,
     ElidedLabel,
     FluentPageBody,
     ORANGE_TINT,
@@ -45,12 +51,43 @@ from zlc_ui.fluent import (
     FluentTableView,
     FluentTabWidget,
     InfoPane,
+    add_row_switch,
+    command_gap,
     fluent_save_path,
+    fluent_scrollbar_thickness,
     muted_note_label,
+    scaled_px,
     setting_label_width,
     signals_blocked,
     window_pad,
 )
+
+
+#: The editor's fixed row labels.  Its label column is the widest of these
+#: and of the axis rows' labels, which carry each axis's size and unit.
+_STATIC_LABELS = (
+    "Name", "Type", "Value unit", "Note", "Editing", "Length", "Unit", "Domain", "Table shows",
+)
+
+
+def _tab_page_gap() -> int:
+    """The room between a tab strip and the first row of its page."""
+
+    return window_pad(0.5)
+
+
+def _two_column_grid() -> QtWidgets.QGridLayout:
+    """Two equal columns of setting rows, a section gap apart: at a row's
+    gap the second column's label read as a word trailing the first
+    column's field."""
+
+    grid = QtWidgets.QGridLayout()
+    grid.setContentsMargins(0, 0, 0, 0)
+    grid.setHorizontalSpacing(window_pad())
+    grid.setVerticalSpacing(row_gap())
+    grid.setColumnStretch(0, 1)
+    grid.setColumnStretch(1, 1)
+    return grid
 
 
 def _plain_scalar(value: object) -> str:
@@ -303,99 +340,90 @@ class _DataEditorView(QtWidgets.QWidget):
             ],
         ] = {}
 
+        #: Every labelled row of the editor and its label: the three cards
+        #: share ONE label column (see _set_label_width).
+        self._label_rows: list[tuple[FluentSettingRow, str]] = []
+        self._label_width = setting_label_width(_STATIC_LABELS, minimum=68)
+
         outer = QtWidgets.QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
+        # A section gap between the cards and the action bar under them.
+        outer.setSpacing(window_pad())
         self.editor_scroll = FluentScrollArea(self)
-        self.editor_scroll.setWidgetResizable(True)
         self.editor_scroll.setMinimumSize(0, 0)
         # The same opaque, surface-white page body the console's Edit page
         # scrolls: transparent content showed the viewport's own grey.
         content = FluentPageBody()
         root = QtWidgets.QVBoxLayout(content)
-        root.setContentsMargins(
-            window_pad(0.5), window_pad(0.5), window_pad(0.5), window_pad(0.5)
-        )
-        root.setSpacing(window_pad(0.5))
-        self.editor_scroll.setWidget(content)
-        outer.addWidget(self.editor_scroll)
+        # The cards stand on the surface's own edges -- the edges of the data
+        # bar over the tabs -- with only the strip's gap above the first.
+        root.setContentsMargins(0, _tab_page_gap(), 0, 0)
+        root.setSpacing(row_gap())
+        # The gutter is held whether or not the bar shows: the cards and the
+        # action bar end on one edge, and adding an axis that makes the page
+        # scroll does not narrow every card under the pointer.
+        self.editor_scroll.set_width_bounded_widget(content)
+        outer.addWidget(self.editor_scroll, 1)
+        gutter = fluent_scrollbar_thickness()
+        card_pad = scaled_px(CARD_PAD)
 
-        dataset_group = FluentGroupBox("Dataset", self)
+        dataset_group = FluentGroupBox("Dataset", self, title_strip_px=0)
         self.dataset_group = dataset_group
-        dataset_layout = QtWidgets.QGridLayout(dataset_group)
-        dataset_layout.setContentsMargins(window_pad(0.75), window_pad(0.75), window_pad(0.75), window_pad(0.6))
-        dataset_layout.setHorizontalSpacing(window_pad(0.5))
-        dataset_layout.setVerticalSpacing(window_pad(0.35))
-        label_width = setting_label_width(
-            ("Name", "Type", "Value unit", "Note", "Length", "Unit", "Domain", "Editing", "Table shows"),
-            minimum=68,
-        )
-        self._manual_label_width = label_width
-        dataset_layout.setColumnStretch(0, 1)
-        dataset_layout.setColumnStretch(1, 1)
+        dataset_layout = QtWidgets.QVBoxLayout(dataset_group)
+        dataset_layout.setContentsMargins(card_pad, card_pad, card_pad, card_pad)
+        dataset_layout.setSpacing(row_gap())
+        # Where this working copy came from, on the card's title line.
+        self.source_note = muted_summary_label()
+        dataset_layout.addLayout(card_title_row("Dataset", summary=self.source_note)[0])
         self.name_edit = FluentLineEdit()
         self.dtype_combo = FluentComboBox()
         self.dtype_combo.setMinimumContentsLength(9)
         self.unit_edit = FluentLineEdit()
         self.note_edit = FluentLineEdit()
         self.note_edit.setPlaceholderText("Optional reason for this manual edit")
-        dataset_layout.addWidget(FluentSettingRow("Name", self.name_edit, label_width=label_width), 0, 0)
-        dataset_layout.addWidget(FluentSettingRow("Type", self.dtype_combo, label_width=label_width), 0, 1)
-        dataset_layout.addWidget(FluentSettingRow("Value unit", self.unit_edit, label_width=label_width), 1, 0)
-        dataset_layout.addWidget(FluentSettingRow("Note", self.note_edit, label_width=label_width), 1, 1)
-        action_row = QtWidgets.QHBoxLayout()
-        action_row.setSpacing(window_pad(0.5))
-        self.source_note = muted_note_label("")
-        action_row.addWidget(self.source_note, 1)
-        # The same rule as every other Save, in two steps: while the fields
-        # hold edits not yet applied, Apply & Preview is the primary (with
-        # its star); once applied and not yet saved, Save As… is.
-        self.apply_button = FluentButton("Apply && Preview")
-        self.save_button = FluentButton("Save As…")
-        self.discard_button = FluentButton("Discard", role="destructive")
-        action_row.addWidget(self.apply_button)
-        action_row.addWidget(self.save_button)
-        action_row.addWidget(self.discard_button)
-        dataset_layout.addLayout(action_row, 2, 0, 1, 2)
+        dataset_grid = _two_column_grid()
+        dataset_grid.addWidget(self._labelled_row("Name", self.name_edit), 0, 0)
+        dataset_grid.addWidget(self._labelled_row("Type", self.dtype_combo), 0, 1)
+        dataset_grid.addWidget(self._labelled_row("Value unit", self.unit_edit), 1, 0)
+        dataset_grid.addWidget(self._labelled_row("Note", self.note_edit), 1, 1)
+        dataset_layout.addLayout(dataset_grid)
         root.addWidget(dataset_group)
 
         body = QtWidgets.QWidget(self)
         body.setStyleSheet("background: transparent;")
         body_layout = QtWidgets.QVBoxLayout(body)
         body_layout.setContentsMargins(0, 0, 0, 0)
-        body_layout.setSpacing(window_pad(0.5))
+        body_layout.setSpacing(row_gap())
 
-        axes_group = FluentGroupBox("Axes", body)
+        axes_group = FluentGroupBox("Axes", body, title_strip_px=0)
         self.axes_group = axes_group
         axes_layout = QtWidgets.QVBoxLayout(axes_group)
-        axes_layout.setContentsMargins(window_pad(0.75), window_pad(0.75), window_pad(0.75), window_pad(0.6))
-        axes_layout.setSpacing(window_pad(0.35))
-        axis_label_width = label_width
-        # Creating an axis and choosing which one to edit are two different
-        # sentences.  Sharing a row said they were one control with three
-        # buttons, so the row above is the CREATE action and the row below
-        # is the chooser -- labelled, because every other control in this
-        # form says what it is.
-        add_axis_row = QtWidgets.QHBoxLayout()
-        add_axis_row.setSpacing(window_pad(0.25))
+        axes_layout.setContentsMargins(card_pad, card_pad, card_pad, card_pad)
+        axes_layout.setSpacing(row_gap())
+        # Creating an axis is the card's own command, on its title line, with
+        # what the fields below are doing -- editing the chosen axis or
+        # drafting a new one -- said beside it.  Choosing which axis to edit
+        # is a different sentence: the labelled Editing row, whose Apply and
+        # Delete act on the axis it holds.
         self.add_axis_button = FluentButton("Add axis")
         self.add_axis_button.setToolTip("Create a new axis")
-        add_axis_row.addStretch(1)
-        add_axis_row.addWidget(self.add_axis_button)
-        axes_layout.addLayout(add_axis_row)
-        axis_choice_row = QtWidgets.QHBoxLayout()
-        axis_choice_row.setSpacing(window_pad(0.25))
+        self.axis_mode_label = muted_summary_label("Edit selected axis")
+        axes_layout.addLayout(
+            card_title_row("Axes", self.add_axis_button, summary=self.axis_mode_label)[0]
+        )
         self.axis_combo = FluentComboBox()
         self.axis_combo.setMinimumContentsLength(13)
+        self.apply_axis_button = FluentButton("Apply axis")
         self.remove_axis_button = FluentButton("Delete", role="destructive")
         self.remove_axis_button.setToolTip(
             "Delete selected axis and keep its current Scope slice"
         )
-        self.axis_choice_row = FluentSettingRow(
-            "Editing", self.axis_combo, label_width=axis_label_width
+        self.axis_choice_row = self._labelled_row(
+            "Editing",
+            self.axis_combo,
+            after=((self.apply_axis_button, 0), (self.remove_axis_button, 0)),
         )
-        axis_choice_row.addWidget(self.axis_choice_row, 1)
-        axis_choice_row.addWidget(self.remove_axis_button)
-        axes_layout.addLayout(axis_choice_row)
+        axes_layout.addWidget(self.axis_choice_row)
         # The presenter's closed sets -- the three domains here, the
         # components below -- are each one segmented choice, built with the
         # projection the editor opens on and only marked after that.
@@ -411,25 +439,22 @@ class _DataEditorView(QtWidgets.QWidget):
         self.axis_name_edit = FluentLineEdit()
         self.axis_unit_edit = FluentLineEdit()
         self._axis_rows: dict[str, FluentSettingRow] = {}
-        axis_form = QtWidgets.QGridLayout()
-        axis_form.setContentsMargins(0, 0, 0, 0)
-        axis_form.setHorizontalSpacing(window_pad(0.5))
-        axis_form.setVerticalSpacing(window_pad(0.25))
-        axis_form.setColumnStretch(0, 1)
-        axis_form.setColumnStretch(1, 1)
+        axis_form = _two_column_grid()
         for field, label, control, row_index, column_index in (
             ("name", "Name", self.axis_name_edit, 0, 0),
             ("size", "Length", self.axis_size_spin, 0, 1),
             ("unit", "Unit", self.axis_unit_edit, 1, 0),
             ("domain", "Domain", self.domain_choice, 1, 1),
         ):
-            row = FluentSettingRow(label, control, label_width=axis_label_width)
+            row = self._labelled_row(label, control)
             self._axis_rows[field] = row
             axis_form.addWidget(row, row_index, column_index)
-        axes_layout.addLayout(axis_form)
-        axes_layout.addWidget(FluentSectionLabel("Axis values"))
-        # One axis is one column of values, read down by index -- not a
-        # one-row strip read sideways past its scrollbar.
+        # The values are a block of their own under a heading, a section gap
+        # below the fields, and as wide as the first column of the grid:
+        # one axis is one column of values, read down by index.
+        values_heading = FluentSectionLabel("Axis values")
+        values_heading.setContentsMargins(0, window_pad() - row_gap(), 0, 0)
+        axis_form.addWidget(values_heading, 2, 0)
         self.axis_value_model = _VirtualTextTableModel(self)
         self.axis_value_table = FluentTableView(self)
         self.axis_value_table.setModel(self.axis_value_model)
@@ -438,23 +463,18 @@ class _DataEditorView(QtWidgets.QWidget):
             QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter
         )
         self.axis_value_table.horizontalHeader().setStretchLastSection(True)
-        self.axis_value_table.setMaximumWidth(window_pad(24))
         self.axis_value_table.set_value_columns()
         self.axis_value_table.set_content_rows_limit(12)
-        axes_layout.addWidget(self.axis_value_table, 0, QtCore.Qt.AlignLeft)
-        axis_actions = QtWidgets.QHBoxLayout()
-        self.axis_mode_label = muted_note_label("Edit selected axis")
-        axis_actions.addWidget(self.axis_mode_label, 1)
-        self.apply_axis_button = FluentButton("Apply axis")
-        axis_actions.addWidget(self.apply_axis_button)
-        axes_layout.addLayout(axis_actions)
+        axis_form.addWidget(self.axis_value_table, 3, 0)
+        axes_layout.addLayout(axis_form)
         body_layout.addWidget(axes_group, 0)
 
-        data_group = FluentGroupBox("Data", body)
+        data_group = FluentGroupBox("Data", body, title_strip_px=0)
         self.data_group = data_group
         data_layout = QtWidgets.QVBoxLayout(data_group)
-        data_layout.setContentsMargins(window_pad(0.75), window_pad(0.75), window_pad(0.75), window_pad(0.6))
-        data_layout.setSpacing(window_pad(0.35))
+        data_layout.setContentsMargins(card_pad, card_pad, card_pad, card_pad)
+        data_layout.setSpacing(row_gap())
+        data_layout.addLayout(card_title_row("Data")[0])
         self.structure_label = FluentLabel("")
         self.structure_label.setTextFormat(QtCore.Qt.RichText)
         self.structure_label.setWordWrap(True)
@@ -463,37 +483,30 @@ class _DataEditorView(QtWidgets.QWidget):
         self._axis_view_holder.setStyleSheet("background: transparent;")
         self._axis_view_layout = QtWidgets.QGridLayout(self._axis_view_holder)
         self._axis_view_layout.setContentsMargins(0, 0, 0, 0)
-        self._axis_view_layout.setHorizontalSpacing(window_pad(0.5))
-        self._axis_view_layout.setVerticalSpacing(window_pad(0.2))
+        self._axis_view_layout.setVerticalSpacing(row_gap())
         data_layout.addWidget(self._axis_view_holder)
         # One sentence, one row: what the table below is showing, and the
-        # switch that decides whether "sigma" is even on offer.  A setting
-        # row is a width CONSUMER, so the pair travels inside its control
-        # slot rather than beside it in a box that would collapse it.
+        # switch that decides whether the Dataset stores a sigma at all --
+        # named by that, not by the component it offers: a segment and a
+        # switch both called Sigma on one row were one word for two things.
+        # A setting row is a width CONSUMER, so the pair travels inside its
+        # control slot rather than beside it in a box that would collapse it.
         self.component_choice = FluentSegmentedButtons(
             tuple(
                 (row[0], str(row[1]))
                 for row in tuple(dict(opening.get("table", {})).get("component_choices", ()))
             )
         )
-        # A setting, so a switch -- the same control every on/off of
-        # these windows is -- named by what it turns on.
-        self.sigma_switch = FluentSwitch("Sigma")
+        self.sigma_switch = FluentSwitch("Store sigma")
         component_controls = QtWidgets.QWidget(data_group)
         component_controls.setStyleSheet("background: transparent;")
         component_layout = QtWidgets.QHBoxLayout(component_controls)
         component_layout.setContentsMargins(0, 0, 0, 0)
-        component_layout.setSpacing(window_pad(0.5))
+        component_layout.setSpacing(row_gap())
         component_layout.addWidget(self.component_choice)
-        component_layout.addWidget(self.sigma_switch)
+        add_row_switch(component_layout, self.sigma_switch, trail=False)
         component_layout.addStretch(1)
-        data_layout.addWidget(
-            FluentSettingRow(
-                "Table shows",
-                component_controls,
-                label_width=label_width,
-            )
-        )
+        data_layout.addWidget(self._labelled_row("Table shows", component_controls))
         self.blank_help_label = muted_note_label("")
         data_layout.addWidget(self.blank_help_label)
         self.value_model = _VirtualTextTableModel(self)
@@ -507,11 +520,34 @@ class _DataEditorView(QtWidgets.QWidget):
         self.value_table.set_value_columns()
         self.value_table.set_content_rows_limit(12)
         data_layout.addWidget(self.value_table, 1)
+        # Shown only while it has something to say: an empty line under the
+        # table was a second bottom padding on the card.
         self.message_label = muted_note_label("")
         self.message_label.setWordWrap(True)
+        self.message_label.setVisible(False)
         data_layout.addWidget(self.message_label)
         body_layout.addWidget(data_group, 1)
         root.addWidget(body, 1)
+
+        # Apply, save and discard act on the whole working copy, so they
+        # close the editor instead of sitting in its first card: Discard at
+        # the left edge, the two steps that keep the edit at the right, in
+        # the order they are taken.  Under the scrolled cards, always in
+        # reach, ending where the cards end.  The same rule as every other
+        # Save, in two steps: while the fields hold edits not yet applied,
+        # Apply & Preview is the primary (with its star); once applied and
+        # not yet saved, Save As… is.
+        self.apply_button = FluentButton("Apply && Preview")
+        self.save_button = FluentButton("Save As…")
+        self.discard_button = FluentButton("Discard", role="destructive")
+        actions = QtWidgets.QHBoxLayout()
+        actions.setContentsMargins(0, 0, gutter, 0)
+        actions.setSpacing(command_gap())
+        actions.addWidget(self.discard_button)
+        actions.addStretch(1)
+        actions.addWidget(self.apply_button)
+        actions.addWidget(self.save_button)
+        outer.addLayout(actions)
 
         self.name_edit.editingFinished.connect(lambda: self._dataset_field("name", self.name_edit.text()))
         self.dtype_combo.activated.connect(lambda _index: self._dataset_field("dtype", self.dtype_combo.currentData()))
@@ -541,6 +577,37 @@ class _DataEditorView(QtWidgets.QWidget):
         self.discard_button.clicked.connect(lambda: self._emit("discard"))
         self.update_projection(projection)
 
+    def _labelled_row(
+        self,
+        label: str,
+        control: QtWidgets.QWidget,
+        *,
+        after: tuple[tuple[QtWidgets.QWidget, int], ...] = (),
+    ) -> FluentSettingRow:
+        """A setting row on the editor's one label column."""
+
+        row = FluentSettingRow(label, control, label_width=self._label_width, after=after)
+        self._label_rows.append((row, label))
+        return row
+
+    def _set_label_width(self, axis_labels: tuple[str, ...]) -> None:
+        """One label column for the three cards: wide enough for every fixed
+        label and every axis row's name, size and unit, so no axis row cuts
+        off the size its suffix is there to show.  Capped at a third of a
+        typical card, past which an axis name elides into its tooltip."""
+
+        width = min(
+            setting_label_width(_STATIC_LABELS + axis_labels, minimum=68),
+            max(setting_label_width(_STATIC_LABELS, minimum=68), window_pad(16)),
+        )
+        if width == self._label_width:
+            return
+        self._label_width = width
+        for row, label in self._label_rows:
+            row.set_label(label, width=width)
+        for holder, label, _mode in self._axis_view_widgets.values():
+            holder.set_label(label.text(), width=width)
+
     def is_dirty(self) -> bool:
         return bool(getattr(self, "_dirty", False))
 
@@ -552,7 +619,12 @@ class _DataEditorView(QtWidgets.QWidget):
         self._emit("set_dataset_field", field=str(field), value=value)
 
     def _show_local_rejection(self, message: str) -> None:
-        self.message_label.setText(str(message))
+        self._show_message(message)
+
+    def _show_message(self, message: object) -> None:
+        text = str(message)
+        self.message_label.setText(text)
+        self.message_label.setVisible(bool(text))
 
     def _show_domain(self, domain: object) -> None:
         # Part of the axis draft: sent with its name and length by Apply or
@@ -689,7 +761,7 @@ class _DataEditorView(QtWidgets.QWidget):
                 mode = FluentCycleComboBox()
                 mode.setMinimumContentsLength(9)
                 holder = FluentSettingRow(
-                    label, mode, label_width=self._manual_label_width,
+                    label, mode, label_width=self._label_width,
                     parent=self._axis_view_holder,
                 )
                 mode.activated.connect(
@@ -705,7 +777,9 @@ class _DataEditorView(QtWidgets.QWidget):
                 self._axis_view_layout.addWidget(holder, position, 0)
             unit = str(row.get("unit") or "")
             suffix = f" ({int(row.get('size', 1))})" + (f" [{unit}]" if unit else "")
-            label.setText(str(row.get("name", axis_id)) + suffix)
+            text = str(row.get("name", axis_id)) + suffix
+            if label.text() != text:
+                holder.set_label(text)
             with signals_blocked(mode):
                 if not mode.count():
                     mode.addItem("Rows ↓", "rows")
@@ -716,6 +790,9 @@ class _DataEditorView(QtWidgets.QWidget):
                     mode.setCyclePosition(int(row.get("index", 0)))
                 else:
                     mode.setCurrentIndex(mode.findData(selected_mode))
+        self._set_label_width(
+            tuple(label.text() for _holder, label, _mode in self._axis_view_widgets.values())
+        )
         self._axis_view_holder.setVisible(bool(projected))
 
     def update_projection(self, projection: object) -> None:
@@ -793,7 +870,7 @@ class _DataEditorView(QtWidgets.QWidget):
                 self.sigma_switch.setChecked(bool(table.get("sigma_enabled", False)))
             self.value_model.set_projection(table)
             self.blank_help_label.setText(str(table.get("blank_help", "")))
-            self.message_label.setText(str(data.get("message", "")))
+            self._show_message(data.get("message", ""))
             self._dirty = bool(data.get("dirty", False))
             modified = bool(data.get("modified", False))
             self.apply_button.set_dirty(modified)
@@ -842,10 +919,6 @@ class FigureViewerView(QtWidgets.QWidget):
         self._info_tabs: tuple = ()
         self._flow_graph: object = {"nodes": (), "edges": ()}
         root = QtWidgets.QHBoxLayout(self)
-        # InfoPane owns the left/right window inset.  The host supplies only
-        # the top/bottom frame.
-        root.setContentsMargins(0, window_pad(1), 0, window_pad(1))
-        root.setSpacing(window_pad(0.5))
 
         self.info_pane = InfoPane(
             # These formal projection keys also determine the fixed left-pane
@@ -870,6 +943,15 @@ class FigureViewerView(QtWidgets.QWidget):
         )
         self.info_pane.path_committed.connect(self.path_committed)
         self.info_pane.action_requested.connect(self.info_action_requested)
+        # The window pads every side by one WINDOW_PAD and the two panes
+        # stand one WINDOW_PAD apart; whatever side inset the pane keeps
+        # itself counts toward those, so the right surface has the same
+        # margin at the window's edge as the pane has at its own.
+        pad = window_pad()
+        pane = self.info_pane.layout()
+        inset = pane.contentsMargins()
+        root.setContentsMargins(pad - inset.left(), pad, pad, pad)
+        root.setSpacing(pad - inset.right())
         root.addWidget(self.info_pane, 0)
 
         # The right half is one white Fluent work surface.  Cards remain
@@ -878,53 +960,47 @@ class FigureViewerView(QtWidgets.QWidget):
         holder = FluentFrame(parent=self, bordered=False)
         holder.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
         self._surface_layout = QtWidgets.QVBoxLayout(holder)
-        self._surface_layout.setContentsMargins(
-            window_pad(0.75), window_pad(0.5), window_pad(0.75), window_pad(0.75)
-        )
-        self._surface_layout.setSpacing(window_pad(0.5))
+        card_pad = scaled_px(CARD_PAD)
+        self._surface_layout.setContentsMargins(card_pad, 0, card_pad, card_pad)
+        # The two panes are built alike: a header band, the gap, a tab strip.
+        # The data band is as tall as the pane's path band and the gap is
+        # the pane's own, so the two first rows share one centre line and
+        # the two tab strips one top.
+        self._surface_layout.setSpacing(pane.spacing())
+        path_band = self.info_pane.path_edit.parentWidget()
 
         self._panel_bar = QtWidgets.QWidget(holder)
         self._panel_bar.setStyleSheet("background: transparent;")
-        self._panel_bar.setSizePolicy(
-            QtWidgets.QSizePolicy.Expanding,
-            QtWidgets.QSizePolicy.Fixed,
+        self._panel_bar.setFixedHeight(
+            max(path_band.minimumHeight(), min(path_band.maximumHeight(), path_band.sizeHint().height()))
         )
-        bar_layout = QtWidgets.QGridLayout(self._panel_bar)
-        bar_layout.setContentsMargins(0, 0, 0, 0)
-        bar_layout.setHorizontalSpacing(window_pad(0.5))
-        bar_layout.setVerticalSpacing(window_pad(0.25))
-        bar_layout.setColumnStretch(1, 1)
-        bar_layout.addWidget(FluentSectionLabel("Data"), 0, 0)
+        # The button beside a chooser acts ON what the chooser holds; the
+        # one after it does something else entirely: Edit data answers the
+        # box to its left, New data does not.
         self.data_combo = FluentComboBox()
         self.data_combo.setMinimumContentsLength(15)
         self.data_combo.setEnabled(False)
-        bar_layout.addWidget(self.data_combo, 0, 1)
-        # The button beside a chooser acts ON what the chooser holds; the
-        # one after it does something else entirely.  Both rows of this bar
-        # read that way now -- Edit data / Add panel answer the box to their
-        # left, New data and Save image do not -- so a creating action never
-        # sits between a chooser and the thing that reads it.
         self.edit_data_button = FluentButton("Edit data")
         self.edit_data_button.setEnabled(False)
         self.edit_data_button.clicked.connect(self._edit_selected_data)
-        bar_layout.addWidget(self.edit_data_button, 0, 2)
         self.new_data_button = FluentButton("New data")
         self.new_data_button.clicked.connect(self.new_data_requested)
-        bar_layout.addWidget(self.new_data_button, 0, 3)
-        bar_layout.addWidget(FluentSectionLabel("Panels"), 1, 0)
-        self.kind_combo = FluentComboBox()
-        self.kind_combo.setMinimumContentsLength(12)
-        bar_layout.addWidget(self.kind_combo, 1, 1)
-        self.add_panel_button = FluentButton("Add panel")
-        self.add_panel_button.clicked.connect(self._add_selected_panel)
-        self.add_panel_button.setEnabled(False)
-        bar_layout.addWidget(self.add_panel_button, 1, 2)
-        self.save_image_button = FluentButton("Save image")
-        self.save_image_button.clicked.connect(self.save_screenshot_requested)
-        bar_layout.addWidget(self.save_image_button, 1, 3)
-        for button in (self.edit_data_button, self.new_data_button,
-                       self.add_panel_button, self.save_image_button):
-            button.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+        data_label = QtWidgets.QLabel("Data")
+        bar_layout = QtWidgets.QHBoxLayout(self._panel_bar)
+        bar_layout.setContentsMargins(0, 0, 0, 0)
+        # One row of controls, as tall as they are, centred in the band: a
+        # row stretched to the band centred its label on the band and the
+        # controls on themselves, half a pixel apart.
+        bar_layout.addWidget(
+            FluentSettingRow(
+                data_label,
+                self.data_combo,
+                label_width=data_label.sizeHint().width(),
+                after=((self.edit_data_button, 0), (self.new_data_button, 0)),
+            ),
+            0,
+            QtCore.Qt.AlignVCenter,
+        )
         self._surface_layout.addWidget(self._panel_bar)
 
         self.tabs = FluentTabWidget(holder)
@@ -932,7 +1008,28 @@ class FigureViewerView(QtWidgets.QWidget):
         monitor = QtWidgets.QWidget()
         monitor.setStyleSheet("background: white;")
         monitor_layout = QtWidgets.QVBoxLayout(monitor)
-        monitor_layout.setContentsMargins(0, 0, 0, 0)
+        monitor_layout.setContentsMargins(0, _tab_page_gap(), 0, 0)
+        monitor_layout.setSpacing(row_gap())
+        # Adding a panel and saving the board's picture act on the board
+        # alone, so they head the board's own tab; in a second bar above
+        # every tab they pushed this pane's tab strip a row below the
+        # left pane's.
+        self.kind_combo = FluentComboBox()
+        self.kind_combo.setMinimumContentsLength(12)
+        self.add_panel_button = FluentButton("Add panel")
+        self.add_panel_button.clicked.connect(self._add_selected_panel)
+        self.add_panel_button.setEnabled(False)
+        self.save_image_button = FluentButton("Save image")
+        self.save_image_button.clicked.connect(self.save_screenshot_requested)
+        # A chooser and the command that reads it, spaced as the data row's.
+        board_actions = QtWidgets.QHBoxLayout()
+        board_actions.setContentsMargins(0, 0, 0, 0)
+        board_actions.setSpacing(row_gap())
+        board_actions.addWidget(self.kind_combo)
+        board_actions.addWidget(self.add_panel_button)
+        board_actions.addStretch(1)
+        board_actions.addWidget(self.save_image_button)
+        monitor_layout.addLayout(board_actions)
         self.board = ConsoleBoardView()
         self.board.order_committed.connect(self.panel_order_committed)
         self.scroll = FluentScrollArea()
