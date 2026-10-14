@@ -269,6 +269,9 @@ class _OutputCard(FluentFrame):
         _set_text(self.name, row["name"])
         self._fill(self.value, names, row["value"])
         labels = _labels_of(schema_of(row["value"]))
+        if labels is None and row["value"] in context["frames_of"]:
+            # Before the source publishes, its producer says which frames come.
+            labels = context["frames_of"][row["value"]]
         if row["at"] and not labels:
             labels = (row["at"],)
         self.at_label.setVisible(bool(labels))
@@ -284,7 +287,8 @@ class _OutputCard(FluentFrame):
             self.add[stage].setVisible(not (filled or stage in self._opened))
 
         self._fill(self.mask, context["booleans"], row["where"])
-        mask_labels = _labels_of(schema_of(row["where"])) or ((row["where_at"],) if row["where_at"] else ())
+        mask_labels = (_labels_of(schema_of(row["where"])) or context["frames_of"].get(row["where"])
+                       or ((row["where_at"],) if row["where_at"] else ()))
         self.where_at.show_choices((("", "All"), *((label, label) for label in mask_labels)), row["where_at"])
         self.where_is.set_current(bool(row["where_is"]))
 
@@ -294,8 +298,9 @@ class _OutputCard(FluentFrame):
         self.constant.setVisible(constant)
         if constant:
             _set_text(self.constant, row["with"])
-        with_labels = () if constant else _labels_of(schema_of(row["with"])) or (
-            (row["with_at"],) if row["with_at"] else ())
+        with_labels = () if constant else (
+            _labels_of(schema_of(row["with"])) or context["frames_of"].get(row["with"])
+            or ((row["with_at"],) if row["with_at"] else ()))
         self.with_at_label.setVisible(bool(with_labels))
         self.with_at.setVisible(bool(with_labels))
         if with_labels:
@@ -589,6 +594,8 @@ class DeriveEditor(QtWidgets.QWidget):
         published = {str(name): (snapshot.block.schema if snapshot is not None else schema)
                      for name, schema, snapshot in tuple(projection.get("output_bundle") or ())}
         failure = error_stage(str(projection.get("error") or ""))
+        frames = projection.get("source_frames")
+        frames_of = {} if typing_inputs is not None or not frames else {name: tuple(frames) for name in members}
         failed = {row["name"] for row, answer in zip(rows, answers) if answer["error"] is not None}
         inserts, example = self._code_help(members, schemas)
 
@@ -622,6 +629,7 @@ class DeriveEditor(QtWidgets.QWidget):
                     "answer": answers[index], "failed": failed,
                     "failure": failure if failure is not None and failure[0] == row["name"] else None,
                     "published": published.get(row["name"]), "inserts": inserts, "example": example,
+                    "frames_of": frames_of,
                 }
                 card = self._cards[index]
                 self._contexts[id(card)] = context

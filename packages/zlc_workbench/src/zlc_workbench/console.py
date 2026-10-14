@@ -452,6 +452,48 @@ def _control_plain(value: object) -> object:
     return {"type": type(value).__name__}
 
 
+def _plain_inputs(projection: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """What a node reads, as the plain facts an agent writes against.
+
+    One entry per input member: dtype, unit and every named axis with its
+    AxisId, domain, role, size and coordinate labels -- the exact names a
+    Derive output or a panel's axis choice must use.  Read from the latest
+    publication's event, or the declared schema before there is one.
+    """
+
+    bundle = tuple(projection.get("input_bundle") or ())
+    if not bundle and projection.get("source_schema") is not None:
+        bundle = ((signal_output_name(str(projection["source_signal"])), projection["source_schema"], None),)
+    inputs = []
+    for name, schema, snapshot in bundle:
+        schema = snapshot.block.schema if snapshot is not None else schema
+        if schema is None:
+            inputs.append({"member": str(name), "schema": "known after its first publication"})
+            continue
+        axes = []
+        for domain, spec in (("repeat", schema.repeat_domain), ("point", schema.point_domain),
+                             ("cell", schema.cell_domain)):
+            for axis in spec.axes:
+                if axis.role.value == "scalar":
+                    continue
+                shown = range(min(axis.size, 16))
+                labels = [
+                    axis.coordinate_labels[index] if axis.coordinate_labels is not None
+                    else value if isinstance(value, str) else str(value) if isinstance(value, int) else f"{value:g}"
+                    for index in shown for value in (axis.coordinate_at(index),)
+                ]
+                entry = {"name": axis.name, "id": axis.axis_id.value, "domain": domain,
+                         "role": axis.role.value, "size": axis.size, "labels": labels}
+                if axis.size > len(labels):
+                    entry["labels_truncated"] = True
+                if axis.coordinate_of is not None:
+                    entry["coordinate_of"] = axis.coordinate_of.value
+                axes.append(entry)
+        inputs.append({"member": str(name), "dtype": str(schema.value_schema.dtype),
+                       "unit": schema.value_schema.value_unit or "1", "axes": axes})
+    return inputs
+
+
 def _same_panel_plot_identity(left: PanelState, right: PanelState) -> bool:
     return _PLOT_IDENTITY(left) == _PLOT_IDENTITY(right)
 
@@ -7327,12 +7369,14 @@ class ConsolePresenter:
             if projection is None:
                 raise KeyError(f"unknown logic node {node_id!r}")
             # These excluded values hold scientific buffers, callbacks or
-            # plugin views. All editable values/fields/options are retained.
+            # plugin views. All editable values/fields/options are retained,
+            # and what the node reads is described plainly instead.
             result["node"] = _control_plain({
                 key: value for key, value in projection.items()
                 if key not in {"input_bundle", "output_bundle", "source_schema",
                                "workspace_resources", "ui_contributions", "bench_extras", "run_device_read"}
             })
+            result["node"]["inputs"] = _plain_inputs(projection)
         if panel_id is not None:
             projection = self.panel_editor_projection(panel_id)
             if projection is None:
