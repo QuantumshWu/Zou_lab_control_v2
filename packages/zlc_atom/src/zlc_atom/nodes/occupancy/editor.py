@@ -18,7 +18,7 @@ from pathlib import Path
 from PyQt5 import QtCore, QtWidgets
 
 from zlc_ui.fluent import (
-    RED,
+    RED_DARK,
     FluentButton,
     FluentLabel,
     FluentSectionLabel,
@@ -178,7 +178,7 @@ class CalibrationsEditor(QtWidgets.QWidget):
         else:
             self.summary.setText(f"{count} frames · each read once")
         self.note.setText("\n".join(problems))
-        self.note.setStyleSheet(f"color: {RED}; background: transparent; border: none;")
+        self.note.setStyleSheet(f"color: {RED_DARK}; background: transparent; border: none;")
         self.note.setVisible(bool(problems))
 
     # ---------------------------------------------------------------- editing

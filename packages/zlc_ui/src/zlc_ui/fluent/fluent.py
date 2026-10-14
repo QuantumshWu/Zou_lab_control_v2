@@ -6766,7 +6766,7 @@ class _SelectionGridDelegate(QtWidgets.QStyledItemDelegate):
         )
         painter.drawRoundedRect(rect, _radius(), _radius())
         if selected or hovered or state:
-            ink = (QtGui.QColor(RED) if state == "warning" else QtGui.QColor(HOVER) if selected
+            ink = (QtGui.QColor(RED_DARK) if state == "warning" else QtGui.QColor(HOVER) if selected
                    else _mixed(HOVER, SURFACE, 0.45) if derived else QtGui.QColor(PLACEHOLDER))
             painter.setPen(ink)
             painter.drawText(rect, QtCore.Qt.AlignCenter, str(index.data() or ""))
@@ -6830,7 +6830,7 @@ class _SelectionGridRowHeader(QtWidgets.QHeaderView):
         painter.setFont(label_font)
         painter.setPen(QtGui.QColor(
             ACCENT if self.activatable and hovered
-            else TEXT if self.activatable or hovered else GREY
+            else TEXT if self.activatable or hovered else GRAPHITE
         ))
         if not note:
             painter.drawText(inner, align | QtCore.Qt.AlignVCenter, label)
@@ -6943,7 +6943,7 @@ class FluentSelectionGrid(QtWidgets.QTableView):
             QTableCornerButton::section {{ background: transparent; border: none; }}
             QHeaderView::section {{
                 background: transparent;
-                color: {GREY};
+                color: {GRAPHITE};
                 border: none;
                 padding: 0px {scaled_px(6, minimum=4)}px;
                 font: {fluent_font_size()}pt "{FONT}";
