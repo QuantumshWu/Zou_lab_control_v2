@@ -111,6 +111,7 @@ from .selectors import (
     SelectorState,
     SelectorValue,
     _classifier_threshold_target_from_subject,
+    _classifier_threshold_key,
     normalize_classifier_threshold_targets,
 )
 from .specs import (
@@ -585,10 +586,8 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         self._fit_expression_failure: tuple[str, str] | None = None
         self._classifier_results: tuple[FitResult | None, ...] = ()
         self._classifier_overlays = ()
-        self._classifier_thresholds: dict[int, float | None] = {}
-        self._classifier_gaussian_components: tuple[
-            Mapping[str, float] | None, ...
-        ] = ()
+        self._classifier_thresholds: dict[tuple, float | None] = {}
+        self._classifier_gaussian_components: dict[tuple, Mapping[str, float] | None] = {}
         self._analysis_executor = ThreadPoolExecutor(
             max_workers=1,
             thread_name_prefix=_ANALYSIS_THREAD_PREFIX,
@@ -1570,9 +1569,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         *,
         image_overlay: ImagePointOverlay | None,
         solved: _SolvedLiveFit | None,
-        classifier: (
-            tuple[tuple[Mapping[str, float] | None, ...], FacetFitBatchResult] | None
-        ) = None,
+        classifier: tuple[object, dict] | None = None,
     ) -> tuple[_ProjectionPresentation, _FitResolution | None]:
         """Accept one data/overlay/fit answer for every data entry point."""
 
@@ -1602,9 +1599,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         *,
         image_overlay: ImagePointOverlay | None,
         accepted_fit: _AcceptedFit | None,
-        classifier: (
-            tuple[tuple[Mapping[str, float] | None, ...], FacetFitBatchResult] | None
-        ) = None,
+        classifier: tuple[object, dict] | None = None,
     ) -> _ProjectionPresentation:
         """Swap one complete projected frame, restoring the old frame on failure."""
 
@@ -3118,7 +3113,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 # facets.  The exact old targets captured above are remapped
                 # only after the new projection has resolved its identities.
                 self._classifier_thresholds = {}
-                self._classifier_gaussian_components = ()
+                self._classifier_gaussian_components = {}
                 self._layout_revision += 1
             try:
                 # Layout resolution can reject a spec (for example the facet
@@ -3972,7 +3967,8 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                     index = self._classifier_distribution_index(stored.facet_index)
                     if index is not None and index < len(self._classifier_results):
                         updated = dict(self._classifier_thresholds)
-                        updated[index] = float(stored.value)
+                        key = _classifier_threshold_key(self._classifier_threshold_target_for_index(index, None))
+                        updated[key] = float(stored.value)
                         self._classifier_thresholds = updated
                 affects_fit = self._selector_change_affects_fit(
                     stored.kind,
@@ -4218,7 +4214,9 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                     # several distributions, so a facet number is not one.
                     index = self._classifier_distribution_index(state.facet_index)
                     cleared = dict(self._classifier_thresholds)
-                    cleared.pop(index, None)
+                    if index is not None:
+                        key = _classifier_threshold_key(self._classifier_threshold_target_for_index(index, None))
+                        cleared.pop(key, None)
                     self._classifier_thresholds = cleared
                 if affects_fit:
                     self._fit_context_generation += 1
@@ -4368,16 +4366,19 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         distribution_index: int,
         value: object,
     ) -> Mapping[str, object]:
-        subject = self._view.selection_subject(
-            self._spec, self._payload,
-        )
-        facet_index, _group_index, group_key = self._projected._fit_targets()[distribution_index]
+        return self._classifier_threshold_target(self._classifier_targets()[distribution_index], value)
+
+    def _classifier_threshold_target(self, distribution, value, projection=None, *, subject=None):
+        projection = self._projected if projection is None else projection
+        if subject is None:
+            subject = projection._view.selection_subject(projection._spec, projection._payload)
+        facet_index, _group_index, group_key = distribution
         # Classifier thresholds are explicitly authored per distribution,
         # unlike the ordinary numeric selection shared across the grid.
-        if facet_index is not None and self._spec.facet is not None:
+        if facet_index is not None and projection._spec.facet is not None:
             subject = replace(subject, scope=subject.scope + ((
-                self._spec.facet,
-                self._payload.cells[facet_index].facet_value_canonical,
+                projection._spec.facet,
+                projection._payload.cells[facet_index].facet_value_canonical,
             ),))
         if group_key:
             subject = replace(subject, scope=subject.scope + tuple((entry.ref, entry.canonical) for entry in group_key))

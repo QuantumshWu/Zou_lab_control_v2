@@ -429,6 +429,8 @@
 
 ### 2.4 Domain Task artifacts
 
+- 2026-10-14 Calibration报告分布按参考标签分组：BOX/PSF/Uniform PSF的第2帧读出以第1/3帧一致且有效的Empty/Occupied标签作为普通Group，未一致仍invalid，每个有效sample只入一组。Gaussian科学拟合仍用全部finite短帧，不改阈值与actual fidelity。公共Histogram classifier用canonical scope作为唯一身份：显式facet-only scope汇总已有各Group bins并共用一套模型/阈值，完整group scope保留独立分类；Group颜色与hover/lock、Focus、空组和typed Figure重开均沿原路径。修正无Gaussian组件时漏画最终经验阈值线，只有阈值读数、不伪造模型/fidelity。Calibration实际保存读回用例通过7.79s，分组与原classifier相关4项通过，最后共享/fallback roundtrip通过6.27s；已查看公共导出PNG并从原NPZ重新渲染确认，未开硬件/GUI，研究图片不入Git。
+
 - 2026-10-14 用户报告同一光斑被列成多个近重合site，修订此前只合并相邻整数像素的高召回取舍：保留原候选准入，在Review前利用既有原始图像定位拟合的实测横纵PSF宽度做保守同核心去重；保留强代表、不链式吞并，删除候选后沿原定位重新拟合。无可信宽度时不使用设定值代替测量；最终读出PSF、阈值、保存格式仍沿原流程。固定单个pixel-integrated PSF、逐帧Poisson噪声的生产detect_sites红例原输出3点，修复后1点、定位误差0.00226px；窄PSF的2.2px双点与椭圆PSF短轴2.4px双点均保留2点。8项直接检测用例通过，涵盖弱点、罕见装载、密集阵列与边缘；保存帧→Review→完整读出分析/保存用例通过。用户未提供本次实机数据，以上为合成/虚拟路径验证，未重采硬件或重写旧Calibration。
 
 - 2026-10-13 新批次calibration-21证实先累加再找峰仍漏掉14次独立出现的真实峰。时间路径改为每次帧差先确定3×3峰及相对同次spot外环的局部对比，再原位累计有效峰次数/最大证据；删除total_change、汇总图峰否决及邻域借证据。保留原平均图、原始光子定位和固定尺寸统计；未扩大全局合并半径，也未降低作者sigma。真实21、20均恢复35个已知站点，但分别有19、18个额外候选，主要在强光斑近旁；旧8平均图仍35点，8项直接检测测试通过。这是偏重高召回并配合现有Review的明确取舍，不宣称零误检或未来绝不漏点；Review仍显示平均图，提示稀有站点可能不显眼，实际参考帧查看沿现有保存Figure。
@@ -436,7 +438,7 @@
 - 2026-10-13 实验交接复核：calibration-20的200张真实长参考基线为31点，四个稀有装载点被average共同峰门槛否决。时间证据改用Gaussian平滑原图相邻差值（transition median去共同漂移），避免abs(带通差值)把负环变伪峰；两图独立峰合并同一像素核，删除average吸附函数。修改后35个已知站点全部匹配、零额外；原31点最大位移0.0268px，旧calibration-8平均图仍35点。8项直接检测用例通过，包括原图输入的近邻稀有装载回归。未修改Calibration保存格式或旧文件，未进行新硬件采集；原始证据与前后JSON/对照图只留ignored research。
 - Calibration密集站点整改：保留带通/相邻差分admission，原始reference均值在同一遍历中累加供亚像素定位；像素积分局部多峰模型显式包含邻居贡献。BOX仍是原真实窗口总和，PSF读出的邻居耦合单独核查，不以窗口重叠拒绝站点、不自动挪成理想网格或修改旧artifact阈值。
 - 2026-10-13 按实验机弱邻峰反馈，将候选身份最大值窗口固定为3×3；原spot尺度窗口明确改名change_window，只用于帧差外环，不再负责峰间竞争。加入强邻点尾部8.178、独立弱峰2.611/7.224σ的合成回归，平均图与帧差路径均保留弱峰。仅改窗口曾令原有3项测试出现伪点，已确认旧窗口下对应测试通过；根因为变化凹底通过邻域max借入邻居的帧差证据，改为候选自身同时满足原change_peak外环判断。阈值、滤波、环尺度及定位不变，全部8项site detection测试通过；未取得/重算现场归档，不宣称现场35点复验。
-- PSF生成改为reference图对自身占据的联合回归及局部最小范数去混；复用signed psf_weights合同，在线无新矩阵求解。原短曝光的阈值/fidelity仍使用同一稳定cycle标签，模板学习不要求所有邻居在前后均保持占据。保存可辨识性与数值条件事实，不静默重解释旧Calibration。
+- PSF生成改为reference图对自身占据的联合回归及局部最小范数去混；复用signed psf_weights合同，在线无新矩阵求解。短曝光Gaussian阈值使用全部finite数据，Empirical阈值与actual fidelity使用稳定cycle标签；模板学习不要求所有邻居在前后均保持占据。保存可辨识性与数值条件事实，不静默重解释旧Calibration。
 - 回归和有效帧选择按各模板的实际空间邻居局部进行，避免大阵列被不必要的全局秩/全局valid_rows限制；不可辨识相关邻居的联合光响应仍进入去混，互不相交的光斑不因同占据而互相失效。
 
 - Calibration：每run一个folder，final Calibration JSON、summary JSON/text、精选报告Figure
