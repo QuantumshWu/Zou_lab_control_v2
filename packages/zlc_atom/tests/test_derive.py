@@ -438,9 +438,8 @@ def test_the_editor_lists_what_the_data_offers_and_commands_are_buttons() -> Non
         assert card.where_at.currentText() == "frame 1" and not card.lines["where"].isHidden()
         (close,) = card.lines["where"].findChildren(FluentButton)
         assert click(close) == ({"name": "output_1", "value": "counts", "at": "frame 1"},)
-        (remove,) = (button for button in card.findChildren(FluentButton)
-                     if button.text() == "×" and button.parentWidget() is card)
-        assert remove.role() == "destructive"
+        remove = card.remove
+        assert remove.text() == "×" and remove.role() == "destructive"
         assert click(remove) == () and editor._cards == []
         assert click(editor.add_code) == ({"name": "output_1"},)
         (code,) = project(drafts[-1])

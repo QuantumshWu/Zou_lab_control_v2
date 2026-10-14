@@ -4,6 +4,13 @@ This leaf edits plain draft values.  Its previews come from
 ``typed_outputs`` -- the evaluation's own plans applied to the schemas the
 Runtime already published -- so it neither evaluates outputs nor asks a
 device or Runtime to materialize data on the Qt thread.
+
+Every line of every output card is a line of ONE column set: the name (or a
+stage's word) in the lead column, the operand under the operand, ``at`` under
+``at``, the card's add commands in fixed slots and every × on one x, so a
+card reads as a row of a table rather than a sentence packed from its own
+left edge.  A problem or a result stands under its line, from the operand's
+text.
 """
 
 from __future__ import annotations
@@ -14,19 +21,18 @@ from html import escape
 from PyQt5 import QtCore, QtWidgets
 
 from zlc_ui.fluent import (
-    AXIS_GROUP_COLORS, FluentButton, FluentCheckBox, FluentCodeEdit, FluentComboBox, FluentFrame, FluentLabel,
-    FluentLineEdit, FluentSegmentedButtons, command_gap, muted_note_label, popup_gap, retire_widget, scaled_px,
-    signals_blocked,
+    AXIS_GROUP_COLORS, CARD_PAD, FluentButton, FluentCheckBox, FluentCodeEdit, FluentColumnLine, FluentColumnSet,
+    FluentComboBox, FluentFrame, FluentLabel, FluentLineEdit, FluentSectionLabel, FluentSegmentedButtons,
+    error_note_label, field_text_inset, hold_place, line_gap, muted_note_label, popup_gap, retire_widget,
+    scaled_px, show_note, signals_blocked,
 )
 from zlc_ui.fluent.fluent import _FluentRoundedMenu
 
 from .expression import (
-    OUTPUT_COLUMNS, OPERATIONS, ROW_DEFAULTS, STATISTICS, axes_text, compact_row, complete_row, describe_schema,
-    error_stage, event_labels, number, over_axes, readout_axis, references, typed_outputs, within_shot_axes,
+    OUTPUT_COLUMNS, ROW_DEFAULTS, STATISTICS, compact_row, complete_row, describe_schema, error_stage,
+    event_labels, number, over_axes, readout_axis, references, typed_outputs, within_shot_axes,
 )
 
-#: The Logic editor's own error text colour, beside the control at fault.
-_ERROR_COLOUR = "#D13438"
 _OPERATION_LABELS = {choice.value: choice.label for column in OUTPUT_COLUMNS if column.name == "op"
                      for choice in column.choices if choice.value}
 _NUMBER = "#number"
@@ -34,20 +40,14 @@ _NUMBER = "#number"
 #: takes instead of a signal, and "every frame" at an ``at``.
 _SHOWN = {_NUMBER: "number", "": "All"}
 _FOOTER = "Averages over shots, per-site probabilities and fits belong in a plot panel."
-
-
-def _error_label() -> QtWidgets.QLabel:
-    label = FluentLabel("")
-    label.setStyleSheet(f"color: {_ERROR_COLOUR}; background: transparent; border: none;")
-    label.setWordWrap(True)
-    label.hide()
-    return label
-
-
-def _show_error(label: QtWidgets.QLabel, text: str) -> None:
-    if label.text() != text:
-        label.setText(text)
-    label.setVisible(bool(text))
+#: The width of an output's name (design px), and so of the lead column the
+#: stage words under it share.
+_NAME_WIDTH = 150
+#: The columns of every card line: the name or stage word, the "=" gutter,
+#: the operand, the ``at`` pin (or a combine's number), the rest of the line,
+#: the card's add commands and the line's ×.
+_COLUMNS = (("lead", "fit"), ("gutter", "fit"), ("operand", "fit"), ("at", "fit"),
+            ("tail", "stretch"), ("actions", "slots"), ("remove", "glyph"))
 
 
 def _set_text(widget, text: str) -> None:
@@ -71,12 +71,34 @@ def _labels_of(schema) -> tuple[str, ...] | None:
 
 
 def _remove_button(parent, tooltip: str) -> FluentButton:
-    """A row's own ×: the quiet glyph that turns red under the pointer."""
+    """A line's own ×: the quiet glyph that turns red under the pointer."""
 
     button = FluentButton("×", parent, role="destructive")
-    button.setFixedWidth(scaled_px(30, minimum=24))
     button.setToolTip(tooltip)
     return button
+
+
+def _text_word(text: str) -> QtWidgets.QLabel:
+    """A word standing in a column of fields, its ink where their text starts."""
+
+    word = FluentLabel(text)
+    word.setContentsMargins(field_text_inset(), 0, 0, 0)
+    return word
+
+
+def _card_column(card: QtWidgets.QWidget) -> QtWidgets.QVBoxLayout:
+    column = QtWidgets.QVBoxLayout(card)
+    pad = scaled_px(CARD_PAD)
+    column.setContentsMargins(pad, pad, pad, pad)
+    column.setSpacing(line_gap())
+    return column
+
+
+def _under_lines(columns: FluentColumnSet, label: QtWidgets.QLabel) -> QtWidgets.QLabel:
+    """A note under a card's lines, from the operand's text to the card's edge."""
+
+    columns.follow(label, "operand", inset=field_text_inset())
+    return label
 
 
 class _OutputCard(FluentFrame):
@@ -90,111 +112,115 @@ class _OutputCard(FluentFrame):
         self.row = dict(ROW_DEFAULTS)
         #: Stages the operator opened and has not filled yet.
         self._opened: set[str] = set()
-        column = QtWidgets.QVBoxLayout(self)
-        pad = scaled_px(8)
-        column.setContentsMargins(pad, pad, pad, pad)
-        column.setSpacing(scaled_px(4))
+        column = _card_column(self)
 
-        line = QtWidgets.QHBoxLayout()
+        line, block = self._line(column)
         self.name = FluentLineEdit("")
         self.name.setPlaceholderText("name")
-        self.name.setFixedWidth(scaled_px(150))
         self.name.textEdited.connect(lambda text: self._edit(name=text))
-        line.addWidget(self.name)
-        line.addWidget(FluentLabel("="))
+        line.place("lead", self.name, fill=True)
+        line.place("gutter", FluentLabel("="))
         self.value = FluentComboBox()
         self.value.activated.connect(lambda _index: self._edit(value=self.value.currentData()))
-        line.addWidget(self.value)
-        self.at_label = FluentLabel("at")
-        line.addWidget(self.at_label)
+        line.place("operand", self.value, fill=True)
         # The frames come from the data -- one per readout event -- so they
-        # are a list to pick from, "All" first.
-        self.at = FluentComboBox()
+        # are a list to pick from, "All" first.  A value with no frames
+        # leaves the pin's place empty rather than pulling the line together.
+        self.at_label = hold_place(FluentLabel("at"))
+        self.at = hold_place(FluentComboBox())
         self.at.activated.connect(lambda _index: self._edit(at=self.at.currentData()))
-        line.addWidget(self.at)
-        self.value_error = _error_label()
-        line.addWidget(self.value_error, 1)
-        line.addStretch(0)
+        line.place("at", self.at_label)
+        line.place("at", self.at, fill=True)
+        # One slot each: a stage in use leaves its slot empty, so the others
+        # stay where the operator last found them.
         self.add = {}
         for stage in ("where", "combine", "statistic"):
-            button = FluentButton(f"+ {stage}", self)
+            button = hold_place(FluentButton(f"+ {stage}", self))
             button.clicked.connect(lambda _checked=False, stage=stage: self._open(stage))
             self.add[stage] = button
-            line.addWidget(button)
-        remove = _remove_button(self, "Remove this output")
-        remove.clicked.connect(lambda: self._editor.remove_card(self))
-        line.addWidget(remove)
-        column.addLayout(line)
+        line.place("actions", *self.add.values())
+        self.remove = _remove_button(self, "Remove this output")
+        self.remove.clicked.connect(lambda: self._editor.remove_card(self))
+        line.place("remove", self.remove)
+        self.value_error = self._error_under(block)
 
         self.lines = {}
         self.errors = {}
-        where, self.where_line = self._stage_line(column, "where")
+        where = self._stage_line(column, "where")
         self.mask = FluentComboBox()
         self.mask.activated.connect(lambda _index: self._edit(where=self.mask.currentData()))
-        where.addWidget(self.mask)
-        where.addWidget(FluentLabel("at"))
+        where.place("operand", self.mask, fill=True)
         self.where_at = FluentComboBox()
         self.where_at.activated.connect(lambda _index: self._edit(where_at=self.where_at.currentData()))
-        where.addWidget(self.where_at)
-        where.addWidget(FluentLabel("is"))
+        where.place("at", FluentLabel("at"))
+        where.place("at", self.where_at, fill=True)
         self.where_is = FluentSegmentedButtons(((True, "true"), (False, "false")), self)
         self.where_is.activated.connect(lambda keep: self._edit(where_is=keep))
-        where.addWidget(self.where_is)
-        self._finish_line(where, "where")
+        where.place("tail", FluentLabel("is"), self.where_is, to="actions")
 
-        combine, self.combine_line = self._stage_line(column, "combine")
-        self.op = FluentSegmentedButtons(tuple(_OPERATION_LABELS.items()), self)
-        self.op.activated.connect(lambda op: self._edit(op=op))
-        combine.addWidget(self.op)
+        # The operand stands under the value it combines with; the operation
+        # follows it, where the line has room for all of them.
+        combine = self._stage_line(column, "combine")
         self.other = FluentComboBox()
         self.other.activated.connect(self._other_chosen)
-        combine.addWidget(self.other)
-        self.constant = FluentLineEdit("")
-        self.constant.setPlaceholderText("number")
-        self.constant.setFixedWidth(scaled_px(90))
-        self.constant.textEdited.connect(lambda text: self._edit(**{"with": text.strip()}))
-        combine.addWidget(self.constant)
+        combine.place("operand", self.other, fill=True)
         self.with_at_label = FluentLabel("at")
-        combine.addWidget(self.with_at_label)
         self.with_at = FluentComboBox()
         self.with_at.activated.connect(lambda _index: self._edit(with_at=self.with_at.currentData()))
-        combine.addWidget(self.with_at)
-        self._finish_line(combine, "combine")
+        # A number has no frame to pin: it takes the pin's place.
+        self.constant = FluentLineEdit("")
+        self.constant.setPlaceholderText("number")
+        self.constant.textEdited.connect(lambda text: self._edit(**{"with": text.strip()}))
+        combine.place("at", self.with_at_label)
+        combine.place("at", self.with_at, self.constant, fill=True)
+        self.op = FluentSegmentedButtons(tuple(_OPERATION_LABELS.items()), self)
+        self.op.activated.connect(lambda op: self._edit(op=op))
+        combine.place("tail", FluentLabel("using"), self.op, to="actions")
 
-        statistic, self.statistic_line = self._stage_line(column, "statistic")
+        statistic = self._stage_line(column, "statistic")
         self.statistic = FluentSegmentedButtons(tuple((name, name) for name in STATISTICS), self)
         self.statistic.activated.connect(lambda name: self._edit(statistic=name))
-        statistic.addWidget(self.statistic)
-        statistic.addWidget(FluentLabel("over"))
-        self.over_host = QtWidgets.QHBoxLayout()
-        statistic.addLayout(self.over_host)
+        over = QtWidgets.QWidget(self)
+        self.over_host = QtWidgets.QHBoxLayout(over)
+        self.over_host.setContentsMargins(0, 0, 0, 0)
+        self.over_host.setSpacing(line_gap())
+        statistic.place("operand", self.statistic, FluentLabel("over"), over, to="actions")
         self.over: dict[str, QtWidgets.QCheckBox] = {}
-        self._finish_line(statistic, "statistic")
 
-        self.preview = muted_note_label("")
+        self.preview = _under_lines(editor.columns, muted_note_label(""))
         self.preview.setWordWrap(True)
         column.addWidget(self.preview)
 
     # -- construction -------------------------------------------------------
 
-    def _stage_line(self, column, stage):
-        host = QtWidgets.QWidget(self)
-        line = QtWidgets.QHBoxLayout(host)
-        line.setContentsMargins(scaled_px(24), 0, 0, 0)
-        title = FluentLabel(stage)
-        title.setMinimumWidth(scaled_px(62))
-        line.addWidget(title)
-        column.addWidget(host)
-        self.lines[stage] = host
-        return line, host
+    def _line(self, column) -> tuple[FluentColumnLine, QtWidgets.QWidget]:
+        """A line and the block that keeps its error under it."""
 
-    def _finish_line(self, line, stage):
-        self.errors[stage] = _error_label()
-        line.addWidget(self.errors[stage], 1)
-        line.addStretch(0)
+        block = QtWidgets.QWidget(self)
+        rows = QtWidgets.QVBoxLayout(block)
+        rows.setContentsMargins(0, 0, 0, 0)
+        rows.setSpacing(line_gap() // 2)
+        line = FluentColumnLine(self._editor.columns, block)
+        rows.addWidget(line)
+        column.addWidget(block)
+        return line, block
+
+    def _error_under(self, block) -> QtWidgets.QLabel:
+        label = _under_lines(self._editor.columns, error_note_label())
+        block.layout().addWidget(label)
+        return label
+
+    def _stage_line(self, column, stage) -> FluentColumnLine:
+        line, block = self._line(column)
+        # The stage's word is where the name's text is: one left edge in the
+        # card, the hierarchy told by the word, not by an indent.
+        line.place("lead", _text_word(stage))
         close = _remove_button(self, f"Remove the {stage} step")
         close.clicked.connect(lambda: self._close(stage))
-        line.addWidget(close)
+        line.place("remove", close)
+        self.lines[stage] = block
+        self.errors[stage] = self._error_under(block)
+        return line
 
     # -- edits -------------------------------------------------------------
 
@@ -325,9 +351,9 @@ class _OutputCard(FluentFrame):
             _output, stage, detail = context["failure"]
         else:
             stage, detail = None, ""
-        _show_error(self.value_error, detail if stage in ("name", "value") else "")
+        show_note(self.value_error, detail if stage in ("name", "value") else "")
         for name, label in self.errors.items():
-            _show_error(label, detail if stage == name else "")
+            show_note(label, detail if stage == name else "")
         self.preview.setVisible(stage is None)
         if stage is None:
             self.preview.setText(self._preview(row, answer, context))
@@ -364,46 +390,40 @@ class _CodeCard(FluentFrame):
         super().__init__(editor)
         self._editor = editor
         self.row = dict(ROW_DEFAULTS)
-        column = QtWidgets.QVBoxLayout(self)
-        pad = scaled_px(8)
-        column.setContentsMargins(pad, pad, pad, pad)
-        column.setSpacing(scaled_px(4))
-        line = QtWidgets.QHBoxLayout()
+        column = _card_column(self)
+        line = FluentColumnLine(editor.columns, self)
         self.name = FluentLineEdit("")
         self.name.setPlaceholderText("name")
-        self.name.setFixedWidth(scaled_px(150))
         self.name.textEdited.connect(lambda text: self._edit(name=text))
-        line.addWidget(self.name)
-        line.addWidget(FluentLabel("= code"))
-        line.addStretch(1)
-        remove = _remove_button(self, "Remove this output")
-        remove.clicked.connect(lambda: self._editor.remove_card(self))
-        line.addWidget(remove)
-        column.addLayout(line)
+        line.place("lead", self.name, fill=True)
+        line.place("gutter", FluentLabel("="))
+        line.place("operand", _text_word("code"))
+        # A command whose list is the data's -- every member and axis name --
+        # so the names wait behind it in a menu instead of lining the card.
+        # It is the card's command, so it stands in the card's command slot.
+        self.insert = hold_place(FluentButton("Insert", self))
+        self.insert.setToolTip("Insert a member or axis name at the cursor")
+        self.insert.clicked.connect(self._show_inserts)
+        line.place("actions", self.insert)
+        self.remove = _remove_button(self, "Remove this output")
+        self.remove.clicked.connect(lambda: self._editor.remove_card(self))
+        line.place("remove", self.remove)
+        column.addWidget(line)
         self.code = FluentCodeEdit("")
         self.code.setPlaceholderText("result = …  (ordinary Python over a.<member>, np and earlier outputs)")
         self.code.setLineWrapMode(QtWidgets.QPlainTextEdit.NoWrap)
         self.code.setTabStopDistance(self.code.fontMetrics().horizontalAdvance("    "))
         self.code.textChanged.connect(self._code_changed)
         column.addWidget(self.code)
-        # A command whose list is the data's -- every member and axis name --
-        # so the names wait behind it in a menu instead of lining the card.
-        insert = QtWidgets.QHBoxLayout()
-        self.insert = FluentButton("Insert", self)
-        self.insert.setToolTip("Insert a member or axis name at the cursor")
-        self.insert.clicked.connect(self._show_inserts)
-        insert.addWidget(self.insert)
-        insert.addStretch(1)
-        column.addLayout(insert)
         self._inserts: tuple[str, ...] = ()
-        self.example = muted_note_label("")
+        self.example = _under_lines(editor.columns, muted_note_label(""))
         self.example.setWordWrap(True)
         self.example.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
         column.addWidget(self.example)
-        self.status = muted_note_label("")
+        self.status = _under_lines(editor.columns, muted_note_label(""))
         self.status.setWordWrap(True)
         column.addWidget(self.status)
-        self.error = _error_label()
+        self.error = _under_lines(editor.columns, error_note_label())
         column.addWidget(self.error)
         self._fit_height()
 
@@ -456,7 +476,7 @@ class _CodeCard(FluentFrame):
         error = "" if not row["code"].strip() else (
             answer["error"].detail if answer["error"] is not None
             else failure[2] if failure is not None else "")
-        _show_error(self.error, error)
+        show_note(self.error, error)
         published = context["published"]
         self.status.setText(
             "Write Python; assign the Dataset answer to result." if not row["code"].strip()
@@ -478,15 +498,21 @@ class DeriveEditor(QtWidgets.QWidget):
         self._contexts: dict[int, Mapping[str, object]] = {}
         self._members: tuple[str, ...] = ()
         self._schemas: dict[str, object] = {}
+        #: The columns every line of every card shares.
+        self.columns = FluentColumnSet(_COLUMNS, self)
+        self.columns.set_width("lead", scaled_px(_NAME_WIDTH))
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(scaled_px(6))
+        layout.setSpacing(line_gap())
 
+        # A row of the editor's form: "Inputs" in its label column, the
+        # members' names where the bundle combo's text starts above them.
         inputs = QtWidgets.QHBoxLayout()
-        title = FluentLabel("Inputs")
-        title.setMinimumWidth(scaled_px(62))
-        inputs.addWidget(title, 0, QtCore.Qt.AlignTop)
+        inputs.setSpacing(line_gap())
+        self.inputs_title = FluentLabel("Inputs")
+        inputs.addWidget(self.inputs_title, 0, QtCore.Qt.AlignTop)
         self.inputs = QtWidgets.QGridLayout()
+        self.inputs.setContentsMargins(field_text_inset(), 0, 0, 0)
         self.inputs.setHorizontalSpacing(scaled_px(14))
         self.inputs.setVerticalSpacing(scaled_px(2))
         inputs.addLayout(self.inputs)
@@ -495,8 +521,11 @@ class DeriveEditor(QtWidgets.QWidget):
         self._input_rows: list[tuple[QtWidgets.QLabel, ...]] = []
 
         header = QtWidgets.QHBoxLayout()
-        header.setSpacing(command_gap())
-        header.addWidget(FluentLabel("Outputs"))
+        header.setSpacing(line_gap())
+        title = FluentSectionLabel("Outputs")
+        # Centred on the buttons beside it, not dropped below them like an own-line section.
+        title.setContentsMargins(0, 0, 0, 0)
+        header.addWidget(title)
         header.addStretch(1)
         self.add_output = FluentButton("Add output", self)
         self.add_output.clicked.connect(lambda: self._add("structured"))
@@ -510,11 +539,21 @@ class DeriveEditor(QtWidgets.QWidget):
         self.empty.setWordWrap(True)
         layout.addWidget(self.empty)
         self.cards = QtWidgets.QVBoxLayout()
-        self.cards.setSpacing(scaled_px(6))
+        self.cards.setSpacing(line_gap())
         layout.addLayout(self.cards)
         self.footer = muted_note_label(_FOOTER)
         self.footer.setWordWrap(True)
         layout.addWidget(self.footer)
+
+    def row_labels(self) -> tuple[str, ...]:
+        """The labels this editor puts in the editor's label column."""
+
+        return (self.inputs_title.text(),)
+
+    def set_label_width(self, width: int) -> None:
+        """The editor's label column, shared with the bundle row above."""
+
+        self.inputs_title.setFixedWidth(int(width))
 
     def set_mutation_enabled(self, enabled: bool) -> None:
         self.add_output.setEnabled(enabled)
@@ -543,9 +582,14 @@ class DeriveEditor(QtWidgets.QWidget):
     def remove_card(self, card) -> None:
         self._cards.remove(card)
         self._contexts.pop(id(card), None)
-        retire_widget(card)
+        self._retire(card)
+        self.columns.refresh()
         self.empty.setVisible(not self._cards)
         self.card_edited()
+
+    def _retire(self, card) -> None:
+        self.columns.forget(card)
+        retire_widget(card)
 
     def _card(self, kind):
         card = _CodeCard(self) if kind == "code" else _OutputCard(self)
@@ -563,6 +607,7 @@ class DeriveEditor(QtWidgets.QWidget):
             card.row["value"] = self._members[0]
         self._cards.append(card)
         self.cards.addWidget(card)
+        self.columns.refresh()
         self.empty.hide()
         self.card_edited()
         (card.code if kind == "code" else card.name).setFocus()
@@ -636,7 +681,7 @@ class DeriveEditor(QtWidgets.QWidget):
                         else self._cards[index].kind if index < len(self._cards) else "structured")
                 if index < len(self._cards) and self._cards[index].kind != kind:
                     self._contexts.pop(id(self._cards[index]), None)
-                    retire_widget(self._cards[index])
+                    self._retire(self._cards[index])
                     self._cards[index] = self._card(kind)
                     self.cards.insertWidget(index, self._cards[index])
                 elif index == len(self._cards):
@@ -665,7 +710,8 @@ class DeriveEditor(QtWidgets.QWidget):
             while len(self._cards) > len(rows):
                 card = self._cards.pop()
                 self._contexts.pop(id(card), None)
-                retire_widget(card)
+                self._retire(card)
+            self.columns.refresh()
             self.empty.setVisible(not rows)
         finally:
             self._loading = False
