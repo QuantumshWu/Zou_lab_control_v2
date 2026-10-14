@@ -53,12 +53,13 @@ from zlc_ui.fluent import (
     fluent_unit_picker,
     row_gap,
     muted_note_label,
+    scaled_px,
     section_gap,
     show_note,
     signals_blocked,
 )
 from zlc_ui.fluent.column_set import section_header
-from zlc_ui.form import FluentParameterForm, FormFieldProps, FormSpec, being_edited
+from zlc_ui.form import FluentParameterForm, FormFieldProps, FormSpec, being_edited, decimal_number_width
 
 from zlc_data.units import DEFAULT_UNITS
 from zlc_pulse import api_parameter_columns_for, authored_api_entries
@@ -87,6 +88,8 @@ from .plan import (
 
 #: The word a manual axis carries in the label column: a hand moves it.
 _BY_HAND = "by hand"
+#: Design px of label column an API value's name gets (see label_width_floor).
+_API_LABEL_ROOM = 180
 #: The columns of every axis row: "by hand" or nothing (the editor's label
 #: column), the axis, its values (the Range bank or the Values list), their
 #: unit, which of the two it plays, and its ×.
@@ -629,11 +632,22 @@ class ScanPlanEditor(QtWidgets.QWidget):
     # ------------------------------------------------------- host contract
 
     def row_labels(self) -> tuple[str, ...]:
-        """The labels this editor puts in the editor's label column: "by
-        hand" before a manual axis, and the API values' labels."""
+        """The labels that set the editor's label column: "by hand" before
+        a manual axis.  The API values' names stand in the column too, in
+        the room :meth:`label_width_floor` keeps for them, never setting it:
+        they come with the pulse, and the column -- and every field after
+        it -- stays put when a pulse that binds some is chosen."""
 
-        manual = (_BY_HAND,) if any(row.manual for row in self._rows) else ()
-        return (*manual, *self.values_form.shown_labels())
+        return (_BY_HAND,) if any(row.manual for row in self._rows) else ()
+
+    def label_width_floor(self) -> int:
+        """The room an API value's name gets in the label column: a name
+        the way pulses name their fields (``long_before.duration *``) shows
+        whole; a longer one is elided in the middle, whole in its tooltip.
+        Fixed, so the column is the same with no pulse, or with one that
+        binds none or ten."""
+
+        return scaled_px(_API_LABEL_ROOM)
 
     def set_label_width(self, width: int) -> None:
         """The editor's label column: the axes and the API values start on its field edge."""
@@ -642,9 +656,12 @@ class ScanPlanEditor(QtWidgets.QWidget):
         self.values_form.set_label_width(int(width))
 
     def number_edge_hint(self) -> int:
-        """How wide the API values' number boxes need to be."""
+        """How wide the API values' number boxes need to be: a decimal
+        box's, step chip and all, whether or not a pulse with API values is
+        chosen yet -- so the editor's other numbers end on that edge before
+        the values come, and do not move when they do."""
 
-        return self.values_form.number_edge_hint()
+        return max(self.values_form.number_edge_hint(), decimal_number_width())
 
     def set_number_edge(self, edge: int) -> None:
         """The editor's number edge: the API values end where its other number boxes do."""

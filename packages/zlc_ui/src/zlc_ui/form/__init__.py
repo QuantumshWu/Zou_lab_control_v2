@@ -14,6 +14,7 @@ _EXPORTS = {
     "FormRuntimeContext": ("zlc_ui.form.qt_form", "FormRuntimeContext"),
     "FluentParameterForm": ("zlc_ui.form.qt_form", "FluentParameterForm"),
     "being_edited": ("zlc_ui.form.qt_form", "being_edited"),
+    "decimal_number_width": ("zlc_ui.form.qt_form", "decimal_number_width"),
 }
 
 __all__ = tuple(sorted(_EXPORTS))
