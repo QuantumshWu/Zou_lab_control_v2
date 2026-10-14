@@ -55,8 +55,8 @@ from .style import (
     FLUENT_SCALE_MAX,
     FLUENT_SCALE_MIN,
     FONT,
+    CONFIG_GREEN_DARK,
     FONT_SIZE,
-    GREEN,
     GRAPHITE,
     GREY,
     HOVER,
@@ -6006,6 +6006,13 @@ class _PythonHighlighter(QtGui.QSyntaxHighlighter):
     sentence that says what its columns MEAN, and that sentence is the part a
     physicist reads.  Everything else is deliberately thin -- this is a code
     field in an instrument window, not an IDE.
+
+    Every colour is an ink at reading strength on the white field: keywords
+    the dark accent of a command's label (9.9:1), numbers and strings the
+    deep orange (6.8:1), comments the deep config green (6.2:1).  The accent
+    (2.6:1), the light orange (2.4:1) and the light green are marker
+    colours, and the words drawn in them were the hardest on the page to
+    read.
     """
 
     KEYWORDS = (
@@ -6025,14 +6032,12 @@ class _PythonHighlighter(QtGui.QSyntaxHighlighter):
                 fmt.setFontWeight(QtGui.QFont.DemiBold)
             return fmt
 
-        self._comment = _format(GREEN, italic=True)
-        self._string = _format(ORANGE_DARK)
-        self._number = _format(ORANGE)
-        self._keyword = _format(ACCENT, bold=True)
+        self._comment = _format(CONFIG_GREEN_DARK, italic=True)
+        literal = _format(ORANGE_DARK)
         self._rules = (
-            (re.compile(r"\b(" + "|".join(self.KEYWORDS) + r")\b"), self._keyword),
-            (re.compile(r"\b\d+\.?\d*([eE][-+]?\d+)?\b"), self._number),
-            (re.compile(r"'[^'\n]*'|\"[^\"\n]*\""), self._string),
+            (re.compile(r"\b(" + "|".join(self.KEYWORDS) + r")\b"), _format(HOVER, bold=True)),
+            (re.compile(r"\b\d+\.?\d*([eE][-+]?\d+)?\b"), literal),
+            (re.compile(r"'[^'\n]*'|\"[^\"\n]*\""), literal),
         )
 
     def highlightBlock(self, text: str) -> None:  # noqa: N802 - Qt naming
@@ -6065,20 +6070,29 @@ class FluentCodeEdit(QtWidgets.QPlainTextEdit):
     """A monospace code/expression editor with the house Fluent chrome (white card, light
     border, Consolas font, Fluent scrollbars).  ONE source for the look so every code editor
     -- a scan-tab generator + table view, or a source-choice popup -- renders
-    identically; changing the recipe here changes them all."""
+    identically; changing the recipe here changes them all.
+
+    Its text starts where a field's text starts (:func:`field_text_inset`), so code under a
+    name field reads in that field's column -- the document's own 4 px margin on top of the
+    padding put it 2.3 px further in -- and the first line sits as far below the top edge.
+    Only code being WRITTEN is coloured: a read-only view shows what a program produced, a
+    table or the sentence that says there is none yet, and Python colouring painted the
+    "and" of that sentence as a keyword."""
 
     def __init__(self, text: str = "", parent=None, *, read_only: bool = False):
         super().__init__(parent)
         if text:
             self.setPlainText(text)
         self.setReadOnly(read_only)
-        pad = scaled_px(4)
+        self.document().setDocumentMargin(0)
+        pad = field_text_inset() - FIELD_BORDER_PX
         self.setStyleSheet(
             f'QPlainTextEdit {{ background: white; color: {TEXT}; border: {FIELD_BORDER_PX}px solid {PLACEHOLDER}; '
             f'border-radius: {scaled_px(4)}px; font: {fluent_font_size()}pt "Consolas", "Courier New", '
             f'monospace; padding: {pad}px; }}')
         apply_fluent_scrollbars(self)
-        self._highlighter = _PythonHighlighter(self.document())
+        if not read_only:
+            self._highlighter = _PythonHighlighter(self.document())
 
     def contextMenuEvent(self, event) -> None:  # noqa: N802 - Qt naming
         _apply_fluent_context_menu(self, event)   # Fluent right-click (undo/cut/copy/paste), not the native menu
