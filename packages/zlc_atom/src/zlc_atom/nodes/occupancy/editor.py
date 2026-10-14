@@ -24,8 +24,10 @@ end its summary and "Add calibration…".  The file names stand in the
 editor's label column, shared with the form, so the first card, the model
 choice and the form's fields start on one edge.  The column is set by the
 labels that stay ("Readout model", the form's), never by a file name, so it
-does not move as files come and go: a name wider than the column is elided
-in the middle and read whole in its tooltip.  The console resolves the
+does not move as files come and go.  A row names its file by its stem --
+every calibration is a .json, so the extension tells no row from another --
+elided in the middle when it is wider than the column; the tooltip reads
+the whole path.  The console resolves the
 files and projects how the source's frames read them; this widget only
 draws that and writes the edits back.
 """
@@ -226,7 +228,7 @@ class CalibrationsEditor(QtWidgets.QWidget):
             ) if part)
             for index, (entry, item) in enumerate(zip(entries, files))
         )
-        fitted = tuple(_fitted(name, self._label_width) for name in names)
+        fitted = tuple(_fitted(_stem(entry), self._label_width) for entry in entries)
         shown = (fitted, labels, tuple(sorted(cells.items())), row_tips)
         if shown != self._shown:
             self._shown = shown
@@ -334,11 +336,16 @@ def _name(entry) -> str:
     return Path(entry["path"]).name if entry["path"] else "(no file)"
 
 
+def _stem(entry) -> str:
+    return Path(entry["path"]).stem if entry["path"] else "(no file)"
+
+
 def _fitted(name: str, width: int | None) -> str:
     """``name`` as the label column shows it: whole while it fits the room
     any label has in a ``width`` column (the column less the slack
     :func:`setting_label_width` leaves after its widest label), else elided
-    in the middle, keeping the start and the end that tell files apart."""
+    in the middle, keeping the start and the end that tell files apart
+    (``readout_50ms`` whole, ``backg…d_5ms``)."""
 
     if width is None:
         return name
