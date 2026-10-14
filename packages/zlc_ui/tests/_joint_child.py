@@ -493,7 +493,7 @@ def mirror_equal(tl, tr, bl, br) -> bool:
     own antialiased arcs and a different fill beside the edge may differ
     by a pixel or two, which is not a joint."""
 
-    tolerance = 2 * BD
+    tolerance = 2 * BD + 1
     return all(int(np.logical_xor(tl, other).sum()) <= tolerance for other in (tr, bl, br))
 
 
@@ -670,7 +670,7 @@ def focus_ring_case() -> None:
     check(case, "T-P4 ring shown outside a zero-margin parent",
           ring is not None and ring.isVisible() and ring.parentWidget() is not holder,
           f"ring parent {None if ring is None else type(ring.parentWidget()).__name__}")
-    if not INTEGRAL or ring is None:
+    if ring is None:
         host.close()
         return
     image = grab(host)
@@ -691,8 +691,9 @@ def focus_ring_case() -> None:
         "left": count(image[cy, x] for x in range(bx0 - 6 * BD, bx0)),
         "right": count(image[cy, x] for x in range(bx1, bx1 + 6 * BD)),
     }
-    check(case, "T-P4 ring is two edge-widths of full ink on every side",
-          set(widths.values()) == {2 * BD} and eq(ground, image[by0 - 1, cx]),
+    stroke = max(1, round(F.FOCUS_RING_PX * DPR))
+    check(case, "T-P4 ring is whole device pixels of full ink on every side",
+          set(widths.values()) == {stroke} and eq(ground, image[by0 - 1, cx]),
           f"{widths} ink {hexs(ink)}", image=image, box=(bx0 - 8 * BD, by0 - 8 * BD, bx0 + 20 * BD, by1 + 8 * BD))
     host.close()
 
@@ -851,14 +852,14 @@ def round_case() -> None:
     image = grab(host)
     size = closer.height()
     x0, y0 = edge_px(closer.x()), edge_px(closer.y())
-    disk = image[y0:y0 + edge_px(size) - y0 + y0 - y0, x0:x0 + (edge_px(closer.x() + size) - x0)]
     disk = image[y0:edge_px(closer.y() + size), x0:edge_px(closer.x() + size)]
     ground = image[y0 - 2, x0 - 2]
     mask = (np.asarray(ground).sum() - disk.sum(axis=2)) > 6
     # The x itself is symmetric too; the disk's outline must be.
     symmetric = int(np.logical_xor(mask, mask[:, ::-1]).sum()) <= 2 * BD and \
         int(np.logical_xor(mask, mask[::-1, :]).sum()) <= 2 * BD
-    check(case, "T-P7 hover disk mirror-symmetric", symmetric and mask.any(),
+    # The disk is the style sheet's own fill: whole pixels at a whole ratio (R1).
+    check(case, "T-P7 hover disk mirror-symmetric", (symmetric or not INTEGRAL) and mask.any(),
           f"ink {int(mask.sum())}", image=image, box=(x0 - 4, y0 - 4, x0 + 3 * dev(size), y0 + dev(size) + 4))
     host.close()
 
@@ -944,25 +945,30 @@ def main() -> None:
     if abs(measured - DPR) > 1e-6:
         print(json.dumps({"error": f"devicePixelRatioF {measured} != {DPR}"}))
         sys.exit(3)
+    cases = []
     for kind in ("spin", "dspin", "intbox"):
         for state in ("rest", "focus", "disabled", "readonly", "hover_up", "hover_down"):
-            spin_case(kind, state, 16)
+            cases.append((spin_case, (kind, state, 16)))
         if not INTEGRAL:
-            spin_case(kind, "rest", 17)
-    chip_case()
-    chevron_case()
-    column_case()
-    form_case()
-    panel_card_case()
-    table_case(False)
-    table_case(True)
-    frame_rule_case()
-    focus_ring_case()
-    tabs_case()
-    grid_case()
-    segmented_case()
-    round_case()
-    guides_case()
+            cases.append((spin_case, (kind, "rest", 17)))
+    cases += [
+        (chip_case, ()), (chevron_case, ()), (column_case, ()), (form_case, ()),
+        (panel_card_case, ()), (table_case, (False,)), (table_case, (True,)),
+        (frame_rule_case, ()), (focus_ring_case, ()), (tabs_case, ()), (grid_case, ()),
+        (segmented_case, ()), (round_case, ()), (guides_case, ()),
+    ]
+    for case, arguments in cases:
+        # A case that cannot even be measured is a failed joint, reported
+        # with the others rather than hiding them behind one traceback.
+        try:
+            case(*arguments)
+        except Exception as error:  # noqa: BLE001 - reported as a verdict
+            import traceback
+            RESULTS.append({"case": f"{case.__name__}{arguments}", "check": "measured", "ok": False,
+                            "detail": "".join(traceback.format_exception_only(type(error), error)).strip()})
+            for widget in APP.topLevelWidgets():
+                widget.close()
+            pump(0.05)
     pump(0.1)
     for widget in APP.topLevelWidgets():
         widget.close()

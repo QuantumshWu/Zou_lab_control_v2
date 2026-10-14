@@ -1769,17 +1769,29 @@ class _FocusRing(QtWidgets.QWidget):
         return False
 
     def paintEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        """The ring as the band between two concentric rounded rects whose
+        straight edges lie on device pixels and are a whole number of device
+        pixels apart, so it is crisp at a fractional ratio as well."""
+
         del event
-        inset = self._reach() - FOCUS_RING_GAP - FOCUS_RING_PX / 2.0
+        ratio = float(self.devicePixelRatioF())
+        stroke = max(1, round(FOCUS_RING_PX * ratio)) / ratio
+        reach = self._reach()
+        inner = QtCore.QRectF(
+            QtCore.QPointF(device_snap(self, reach - FOCUS_RING_GAP),
+                           device_snap(self, reach - FOCUS_RING_GAP, axis="y")),
+            QtCore.QPointF(device_snap(self, self.width() - reach + FOCUS_RING_GAP),
+                           device_snap(self, self.height() - reach + FOCUS_RING_GAP, axis="y")),
+        )
+        outer = inner.adjusted(-stroke, -stroke, stroke, stroke)
+        corner = self._corner + FOCUS_RING_GAP
+        band = QtGui.QPainterPath()
+        band.setFillRule(QtCore.Qt.OddEvenFill)
+        band.addRoundedRect(outer, corner + stroke, corner + stroke)
+        band.addRoundedRect(inner, corner, corner)
         painter = QtGui.QPainter(self)
         painter.setRenderHint(QtGui.QPainter.Antialiasing)
-        pen = QtGui.QPen(QtGui.QColor(HOVER))
-        pen.setWidthF(FOCUS_RING_PX)
-        painter.setPen(pen)
-        painter.setBrush(QtCore.Qt.NoBrush)
-        corner = self._corner + FOCUS_RING_GAP + FOCUS_RING_PX / 2.0
-        painter.drawRoundedRect(
-            QtCore.QRectF(self.rect()).adjusted(inset, inset, -inset, -inset), corner, corner)
+        painter.fillPath(band, QtGui.QColor(HOVER))
         painter.end()
 
 
