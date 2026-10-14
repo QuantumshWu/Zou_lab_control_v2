@@ -11,10 +11,9 @@ from __future__ import annotations
 from PyQt5 import QtCore, QtWidgets
 
 from zlc_ui.fluent import (
-    card_pad, row_gap, section_gap,
-    CARD_PAD, FONT, MUTED_INK, MUTED_LABEL_STYLE, ElidedLabel, FluentLabel, FluentReadoutEdit,
-    field_text_inset, fluent_font_size, line_edit_text_right, scaled_px,
-    setting_label_width, window_pad,
+    card_pad, row_gap,
+    FONT, MUTED_LABEL_STYLE, ElidedLabel,
+    fluent_font_size, scaled_px, setting_label_width,
 )
 
 
@@ -146,45 +145,11 @@ def form_label(text: str) -> ElidedLabel:
     return label
 
 
-def field_column_readout(readout: FluentReadoutEdit) -> FluentReadoutEdit:
-    """Start a read-only value's text where a field's text starts.
-
-    A readout has no box, so its text sits at its own left edge -- right
-    under a column header, but a field's padding to the left of the typed
-    text in the field above or below it.  Standing in a column of fields
-    it takes that padding as its left text margin, measured from where its
-    text starts now, so the value and the typed text share one x.
-    """
-
-    readout.ensurePolished()
-    option = QtWidgets.QStyleOptionFrame()
-    option.initFrom(readout)
-    contents = readout.style().subElementRect(QtWidgets.QStyle.SE_LineEditContents, option, readout)
-    margins = readout.textMargins()
-    text_left = contents.left() + margins.left() + (contents.right() + 1 - line_edit_text_right(readout))
-    readout.setTextMargins(margins.left() + field_text_inset() - text_left,
-                           margins.top(), margins.right(), margins.bottom())
-    return readout
-
-
 def quiet(label: QtWidgets.QLabel) -> QtWidgets.QLabel:
     """Draw a label's words in the muted ink of a summary or a status: they
     carry information, in a lighter voice than the values beside them."""
 
     label.setStyleSheet(f'QLabel {{ {MUTED_LABEL_STYLE} font: {fluent_font_size()}pt "{FONT}"; }}')
-    return label
-
-
-def column_header(text: str = "") -> FluentLabel:
-    """A column's header over a grid of rows, in a table header's look:
-    muted ink, semibold.  The weight is in the sheet because a FluentLabel's
-    sheet sets its font and overrides a bold set with setFont."""
-
-    label = FluentLabel(text)
-    label.setStyleSheet(
-        f'QLabel {{ color: {MUTED_INK}; font: {fluent_font_size()}pt "{FONT}"; '
-        f'font-weight: 600; background: transparent; }}'
-    )
     return label
 
 
@@ -205,16 +170,15 @@ def form_control_cell(widget: QtWidgets.QWidget) -> QtWidgets.QWidget:
 
 
 def add_labeled_widget(layout, label_text: str, widget: QtWidgets.QWidget) -> ElidedLabel:
-    """One ``label | control`` row of a side panel; a readout in the control
-    column starts its text where the fields' text starts."""
+    """One ``label | control`` row of a side panel.  A readout in the control
+    column is a :class:`~zlc_ui.fluent.FluentReadoutEdit` at its default
+    inset, so its text starts where the fields' text starts."""
 
     row = QtWidgets.QHBoxLayout()
     row.setContentsMargins(0, 0, 0, 0)
     row.setSpacing(row_gap())
     label = form_label(label_text)
     row.addWidget(label)
-    if isinstance(widget, FluentReadoutEdit):
-        field_column_readout(widget)
     row.addWidget(form_control_cell(widget), 1)
     layout.addLayout(row)
     return label
@@ -222,7 +186,7 @@ def add_labeled_widget(layout, label_text: str, widget: QtWidgets.QWidget) -> El
 
 __all__ = [
     "add_labeled_widget", "bound_field_width", "channel_label_width", "channel_name_edit_width",
-    "column_header", "config_name_width", "field_column_readout", "form_control_cell", "form_label",
+    "config_name_width", "form_control_cell", "form_label",
     "label_column_width", "panel_top_height", "quiet",
     "period_card_width", "period_control_width", "px", "row_height",
     "row_spacing", "spacer_card_width",

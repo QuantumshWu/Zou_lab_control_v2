@@ -2,17 +2,15 @@
 
 from __future__ import annotations
 
-from PyQt5 import QtCore, QtGui, QtWidgets
+from PyQt5 import QtCore, QtWidgets
 
 from zlc_ui.fluent import (
-    MUTED_INK, FluentButton, FluentCodeEdit, FluentFrame, FluentGroupBox, FluentLabel,
+    ElidedLabel, FluentButton, FluentCodeEdit, FluentFrame, FluentGroupBox, FluentLabel,
     FluentSectionLabel, fluent_count_box, retire_widget, signals_blocked,
 )
 from zlc_ui.form import being_edited
 
-from ._layout import (
-    row_height,
-)
+from ._layout import quiet, row_height
 from zlc_ui.fluent import card_pad, row_gap, section_gap
 from .models import BindingRecord, ScanPageRecord
 from .scan_line_edit import _SOURCES
@@ -50,7 +48,8 @@ class PulseScanView(QtWidgets.QWidget):
         self.scan_slots_label.setWordWrap(True)
         info_layout.addWidget(self.scan_slots_label)
         # The bound fields, under a section title per group when there are
-        # groups; rebuilt only when the list changes.
+        # groups; rebuilt only when the list changes.  One line per field,
+        # each as tall as a section title, so the list has one pitch.
         self.bindings_box = QtWidgets.QWidget()
         self.bindings_box.setStyleSheet("background: transparent;")
         self._bindings_layout = QtWidgets.QVBoxLayout(self.bindings_box)
@@ -135,11 +134,17 @@ class PulseScanView(QtWidgets.QWidget):
         preview_layout = QtWidgets.QVBoxLayout(preview_box)
         preview_layout.setContentsMargins(pad, pad, pad, pad)
         self.scan_table_view = FluentCodeEdit(read_only=True)
-        # A note where there is no table to show is quiet text, not table
-        # text: the placeholder, in the muted ink every such note wears.
-        palette = self.scan_table_view.palette()
-        palette.setColor(QtGui.QPalette.PlaceholderText, QtGui.QColor(MUTED_INK))
-        self.scan_table_view.setPalette(palette)
+        # Where there is no table, the box says why and what to do: muted
+        # ink, where the table's first line would start.  A label of its
+        # own over the viewport -- the read-only edit does not paint a
+        # placeholder.
+        self.table_note_label = quiet(FluentLabel(""))
+        self.table_note_label.setParent(self.scan_table_view.viewport())
+        self.table_note_label.setWordWrap(True)
+        self.table_note_label.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop)
+        self.table_note_label.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents)
+        self.table_note_label.hide()
+        self.scan_table_view.viewport().installEventFilter(self)
         preview_layout.addWidget(self.scan_table_view, 1)
         body.addWidget(preview_box, 2)
         layout.addLayout(body, 1)
@@ -147,6 +152,11 @@ class PulseScanView(QtWidgets.QWidget):
         self._scan_progress_timer = QtCore.QTimer(self)
         self._scan_progress_timer.setInterval(200)
         self._scan_progress_timer.timeout.connect(self._request_visible_progress)
+
+    def eventFilter(self, watched, event):  # noqa: N802 - Qt name
+        if watched is self.scan_table_view.viewport() and event.type() == QtCore.QEvent.Resize:
+            self.table_note_label.setGeometry(watched.rect())
+        return super().eventFilter(watched, event)
 
     def _on_code_changed(self) -> None:
         self.source_edited.emit(self.scan_code.toPlainText())
@@ -195,7 +205,8 @@ class PulseScanView(QtWidgets.QWidget):
         self.set_slots_text(record.slots_text)
         self.set_bindings(record.bindings)
         self.set_scan_table_text(record.table_text)
-        self.scan_table_view.setPlaceholderText(record.table_note)
+        self.table_note_label.setText(str(record.table_note))
+        self.table_note_label.setVisible(not record.table_text and bool(record.table_note))
         self.set_repeats(record.repeats)
         self.set_progress_text(record.progress_text)
         self.set_workspace_busy(record.busy)
@@ -224,14 +235,12 @@ class PulseScanView(QtWidgets.QWidget):
             label, members = groups[group_id]
             if show_groups:
                 self._bindings_layout.addWidget(FluentSectionLabel(label or "Pulse"))
-            lines = FluentLabel("\n".join(
-                f"{record.label} · " + " + ".join(
+            for record in members:
+                line = ElidedLabel(f"{record.label} · " + " + ".join(
                     (["Scan"] if record.scan else [])
-                    + ([sources[record.source]] if record.source != "default" else []))
-                for record in members
-            ))
-            lines.setWordWrap(True)
-            self._bindings_layout.addWidget(lines)
+                    + ([sources[record.source]] if record.source != "default" else [])))
+                line.setFixedHeight(row_height())
+                self._bindings_layout.addWidget(line)
         self.bindings_box.setVisible(bool(records))
 
     def set_progress_text(self, text: str) -> None:

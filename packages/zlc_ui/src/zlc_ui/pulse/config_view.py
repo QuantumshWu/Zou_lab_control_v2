@@ -9,12 +9,13 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 from zlc_ui.fluent import (
     FluentButton, FluentComboBox,
     ElidedLabel, FluentGroupBox, FluentLabel, FluentReadoutEdit, FluentScrollArea,
-    FluentSectionLabel, FluentTableView, field_text_inset, fluent_scrollbar_thickness,
+    FluentSectionLabel, FluentTableView, column_header_label, field_text_inset,
+    fluent_scrollbar_thickness,
     read_editable_combo, retire_widget, signals_blocked,
 )
 
 from ._layout import (
-    bound_field_width, column_header, config_name_width, px, row_height,
+    bound_field_width, config_name_width, px, row_height,
 )
 from zlc_ui.fluent import card_pad, row_gap, section_gap
 from .models import ConfigPageRecord
@@ -137,7 +138,7 @@ class PulseConfigView(QtWidgets.QWidget):
         self._binding_grid.setVerticalSpacing(row_gap())
         self._binding_grid.setColumnStretch(_STATUS, 1)
         self._grid_headers = tuple(
-            column_header(title)
+            column_header_label(title)
             for title in ("Pulse field", "Value name", "Default", "Config value", "Status")
         )
         # A header stands over its column's TEXT: the value names start a

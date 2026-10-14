@@ -172,9 +172,10 @@ class ComponentVM:
     name: str
     period_ids: tuple[str, ...]
     total_text: str = ""
-    bracket_count: int = 0
+    #: What the group holds, worded by the projection like every other
+    #: summary the page shows: "3 periods · 1 bracket".
+    summary_text: str = ""
     bracket_ids: tuple[str, ...] = ()
-    spacer_count: int = 0
     source: str = "default"
     config_path: str = ""
     config_active: bool = False

@@ -197,6 +197,24 @@ def _readable(nanoseconds: float) -> str:
     return format_quantity(seconds, "s")
 
 
+#: Between the parts of one summary line -- a file and its period count, a
+#: slot count and a point count, what is shown and what is hidden.  One
+#: mark for the whole editor, so no two of its summaries part their words
+#: differently.
+SUMMARY_SEPARATOR = " · "
+
+
+def counted(count: int, noun: str) -> str:
+    """``count`` of ``noun``, in the plural it takes: "1 period", "3 periods".
+
+    Every count the editor words goes through here, so none reads "3
+    period(s)" beside another that says "3 periods".
+    """
+
+    count = int(count)
+    return f"{count} {noun}{'' if count == 1 else 's'}"
+
+
 # ------------------------------------------------------------------ projection
 
 
@@ -244,7 +262,7 @@ def _connection_name(mode: str, endpoint: str) -> str:
     Not by whichever field happened to be non-empty.  This read
     ``endpoint or mode``, and the address box keeps the server's address
     whether or not remote is the selected mode -- so connecting to the
-    simulated board reported "127.0.0.1:18861 - 26 ports, 62 lanes, 50 MHz",
+    simulated board reported "127.0.0.1:18861 · 26 ports · 62 lanes · 50 MHz",
     the same line a real board gives, and nothing on screen said which one had
     answered.  Which board is talking is the single most consequential fact in
     this window: it decides whether pressing On Pulse moves atoms.
@@ -459,7 +477,7 @@ def _scan_table_text(rows: Sequence[Sequence[float]], columns: Sequence[object])
         for row in shown
     )
     if len(rows) > len(shown):
-        lines.append(f"... {len(rows) - len(shown)} more point(s)")
+        lines.append(f"... {counted(len(rows) - len(shown), 'more point')}")
     return "\n".join(lines)
 
 
@@ -555,6 +573,20 @@ def project_period(
     )
 
 
+def _component_summary(fragment: Subpulse) -> str:
+    """What a Subpulse holds, on its closed card: its periods, and its
+    spacers and brackets only when it has some -- "0 brackets" says
+    nothing and takes a second line."""
+
+    spacers = sum(period.kind == PERIOD_KIND_SPACER for period in fragment.periods)
+    parts = [counted(len(fragment.periods) - spacers, "period")]
+    if spacers:
+        parts.append(counted(spacers, "spacer"))
+    if fragment.brackets:
+        parts.append(counted(len(fragment.brackets), "bracket"))
+    return SUMMARY_SEPARATOR.join(parts)
+
+
 def _visible_text(ports: Sequence[PortRowVM]) -> str:
     """How many of the board's ports have rows, worded once for the page."""
 
@@ -636,8 +668,8 @@ def project_schedule(
                 if total_ns != pass_ns
                 else f"{format_quantity(float(total_ns), '1')} ns over "
             )
-            + f"{len(authored)} period(s)"
-            + (f" and {len(periods) - len(authored)} spacer(s)" if len(periods) > len(authored) else "")
+            + counted(len(authored), "period")
+            + (f" and {counted(len(periods) - len(authored), 'spacer')}" if len(periods) > len(authored) else "")
             if sequence is not None
             else ""
         ),
@@ -656,9 +688,8 @@ def project_schedule(
             ComponentVM(
                 component.component_id, component.name, component.period_ids,
                 _readable(fragment.to_sequence().played_nanoseconds()),
-                len(fragment.brackets),
-                tuple(bracket.bracket_id for bracket in fragment.brackets),
-                spacer_count=sum(period.kind == PERIOD_KIND_SPACER for period in fragment.periods),
+                summary_text=_component_summary(fragment),
+                bracket_ids=tuple(bracket.bracket_id for bracket in fragment.brackets),
                 source=original.source,
                 config_path=original.config_path,
                 config_active=bool(sequence.config_enabled and original.source == "config" and not config_error),
@@ -684,8 +715,7 @@ def project_schedule(
         # the other half is how many points will actually be played, which is
         # the number an operator checks before pressing On Pulse.
         scan_summary_text=(
-            f"{len(slots)} slot{'' if len(slots) == 1 else 's'} - "
-            f"{scan_points} pt{'' if scan_points == 1 else 's'}"
+            f"{counted(len(slots), 'slot')}{SUMMARY_SEPARATOR}{counted(scan_points, 'point')}"
             if slots
             else "no scan slots"
         ),
@@ -2627,7 +2657,7 @@ class PulseEditorPresenter:
         if candidate is None:
             return
         self._edit_state(sequence=candidate)
-        self.view.set_title(f"PulseGUI - {candidate.name}")
+        self.view.set_title(f"PulseGUI{SUMMARY_SEPARATOR}{candidate.name}")
         self._refresh_summary()
 
     def set_port_label(self, key: str, label: str) -> None:
@@ -3210,9 +3240,11 @@ class PulseEditorPresenter:
             self._align_sequence_to(board)
         self._adopt_board_state(state)
         where = (
-            f"{_connection_name(*self.connection)} - {len(board.target.ports)} ports, "
-            f"{len(board.target.raw_lanes)} lanes, "
-            f"{format_quantity(board.clock_hz / 1e6, '1')} MHz"
+            SUMMARY_SEPARATOR.join((
+                _connection_name(*self.connection), counted(len(board.target.ports), "port"),
+                counted(len(board.target.raw_lanes), "lane"),
+                f"{format_quantity(board.clock_hz / 1e6, '1')} MHz",
+            ))
         )
         self._show_connection(where)
         self.refresh()
@@ -3581,8 +3613,8 @@ class PulseEditorPresenter:
             f"the board is holding scan point {held + 1} of this pulse; "
             "the draft and its scan table are kept"
             if held is not None
-            else f"synced from the board - {len(source.periods)} period(s)"
-            + (f", {len(wire_rows)} scan point(s)" if wire_rows else "")
+            else f"synced from the board{SUMMARY_SEPARATOR}{counted(len(source.periods), 'period')}"
+            + (f"{SUMMARY_SEPARATOR}{counted(len(wire_rows), 'scan point')}" if wire_rows else "")
         )
         return True
 
@@ -4624,7 +4656,7 @@ class PulseEditorPresenter:
             if named is None:
                 return ""
             self._edit_state(sequence=named)
-            self.view.set_title(f"PulseGUI - {named.name}")
+            self.view.set_title(f"PulseGUI{SUMMARY_SEPARATOR}{named.name}")
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
             write_pulse(target, self._state)
@@ -4724,7 +4756,7 @@ class PulseEditorPresenter:
                 self.view.set_target_feedback("nothing to rename")
                 return False
             changes: dict[str, Any] = {"target": renamed}
-            feedback = f"renamed {sum(1 for name in wanted.values() if name)} output(s)"
+            feedback = f"renamed {counted(sum(1 for name in wanted.values() if name), 'output')}"
         else:
             try:
                 rewired = _target_from_records(target, records)
@@ -4740,7 +4772,7 @@ class PulseEditorPresenter:
             except ValueError as error:
                 self.view.set_target_feedback(str(error))
                 return False
-            feedback = f"applied {len(records)} output(s)"
+            feedback = f"applied {counted(len(records), 'output')}"
         if self.sequence is not None:
             candidate = self._rebuilt(**changes)
             if candidate is None:
@@ -5009,7 +5041,7 @@ class PulseEditorPresenter:
                 scan_source_dirty=self._state.scan_source != source,
             )
         )
-        self._scan_progress = f"{len(self._state.scan_rows)} scan point(s) ready"
+        self._scan_progress = f"{counted(len(self._state.scan_rows), 'scan point')} ready"
         self.refresh()
         return True
 
@@ -5071,7 +5103,7 @@ class PulseEditorPresenter:
             if error is not None:
                 self._scan_program_refused(f"cannot read {selected.name}: {error}", present=present)
                 return
-            self._scan_progress = f"loaded {len(rows)} scan point(s) from {selected}"
+            self._scan_progress = f"loaded {counted(len(rows), 'scan point')} from {selected}"
             self._done(self._scan_progress, present=present)
             self._refresh_scan_page()
 
@@ -5503,7 +5535,7 @@ class PulseEditorPresenter:
                 if target is not None
                 else replace(EMPTY_SCHEDULE, revision=self.revision)
             )
-            self.view.set_title("PulseGUI - no pulse")
+            self.view.set_title(f"PulseGUI{SUMMARY_SEPARATOR}no pulse")
             self.view.set_summary(self._document_summary())
             self.view.show_preview_placeholder("Load a pulse to see its timeline")
             self._show_connection(self._connection_status)
@@ -5524,7 +5556,7 @@ class PulseEditorPresenter:
                 scan_active=self._scan_armed(),
             )
         )
-        self.view.set_title(f"PulseGUI - {self.sequence.name}")
+        self.view.set_title(f"PulseGUI{SUMMARY_SEPARATOR}{self.sequence.name}")
         self.view.set_summary(f"Config error: {self._config_error}" if self._config_error else self._document_summary())
         self._show_connection(self._connection_status)
         self.refresh_target()
@@ -5536,11 +5568,11 @@ class PulseEditorPresenter:
 
         if self.sequence is not None:
             count = len(self._shown.periods) if self._shown is not None else len(self.sequence.periods)
-            return f"{self.path or self.sequence.name} - {count} period(s)"
+            return f"{self.path or self.sequence.name}{SUMMARY_SEPARATOR}{counted(count, 'period')}"
         target = self._current_target()
         if target is None:
             return EMPTY_SCHEDULE.summary_text
-        return f"{len(target.ports)} port(s) on this board - Add Period to start a pulse"
+        return f"{counted(len(target.ports), 'port')} on this board{SUMMARY_SEPARATOR}Add Period to start a pulse"
 
     def _on_include_off(self, _included: bool) -> None:
         """Showing every channel changes how many rows are drawn.
@@ -5696,10 +5728,9 @@ class PulseEditorPresenter:
         view.set_preview_size_names(PANEL_SIZE_NAMES)
         view.set_preview_size(size)
         view.set_preview_status(
-            f"{periods} period(s), "
-            f"{rows} channel(s), "
-            f"{_readable(total_ns)}"
-            f"  -  {size}"
+            SUMMARY_SEPARATOR.join((
+                counted(periods, "period"), counted(rows, "channel"), _readable(total_ns), size,
+            ))
         )
 
     def save_preview_image(self) -> None:
@@ -5895,11 +5926,11 @@ class PulseEditorPresenter:
         """The totals a value edit can move, without touching the cards.
 
         Read off the same projection that draws the page rather than worked out
-        a second time here.  The second derivation disagreed with the first: a
-        value edit rewrote the name label into "<path> - 3 period(s)" where the
-        page had been showing the file name, and the scan label into "1 scan
-        slot(s)" where the page says "1 slot - 21 pts".  Every label the page
-        shows is the projection's to word.
+        a second time here.  A second derivation words the same totals a
+        second way -- the name label as a path and a count where the page shows
+        the file name, the scan label as a slot count where the page counts
+        slots and points.  Every label the page shows is the projection's to
+        word.
         """
 
         if self.sequence is None:

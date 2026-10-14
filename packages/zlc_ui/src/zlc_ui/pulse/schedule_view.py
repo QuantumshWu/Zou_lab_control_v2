@@ -25,7 +25,7 @@ from zlc_ui.fluent import (
 )
 
 from ._layout import (
-    add_labeled_widget, channel_name_edit_width, field_column_readout, form_label, label_column_width,
+    add_labeled_widget, channel_name_edit_width, form_label, label_column_width,
     panel_top_height, px, period_card_width, period_control_width, quiet, row_height, row_spacing,
     spacer_card_width, spacer_control_width, time_unit_width,
 )
@@ -137,6 +137,10 @@ def _read_only(field: FieldVM) -> FieldVM:
     """
 
     return replace(field, editable=False, binding_editable=False)
+
+
+#: Past any viewport's far edge: a mask that only cuts its leading gap.
+_UNBOUNDED = 1 << 20
 
 
 def _place_rows_in_order(layout: QtWidgets.QVBoxLayout, holders) -> None:
@@ -1076,15 +1080,19 @@ class ComponentCard(FluentGroupBox):
         # The card shows no Name label: the placeholder carries it.
         self.name_edit.setPlaceholderText("Name")
         self.name_edit.editingFinished.connect(self._commit_name)
-        self.end_label = ElidedLabel(component.name)
-        end_line = self._value_line(self.end_label)
-        top_layout.addWidget(end_line if mode == "end" else self.name_edit)
-        if mode == "end":
+        # Expanded, the block's two ends carry its name alike: read, at the
+        # field's text inset -- the closed card and the Subpulse tab rename
+        # it.  A field on one end and bare text on the other would read as
+        # two kinds of thing.
+        self.name_label = ElidedLabel(component.name)
+        name_line = self._value_line(self.name_label)
+        top_layout.addWidget(self.name_edit if mode == "closed" else name_line)
+        if mode == "closed":
+            name_line.setParent(self)
+            name_line.hide()
+        else:
             self.name_edit.setParent(self)
             self.name_edit.hide()
-        else:
-            end_line.setParent(self)
-            end_line.hide()
         top_layout.addStretch(1)
         column.addWidget(top)
         self.edit_button = FluentButton("Edit")
@@ -1191,16 +1199,8 @@ class ComponentCard(FluentGroupBox):
         self.name_edit.setFixedWidth(width)
         self.name_edit.setText(component.name)
         self.name_edit.setToolTip(component.name)
-        self.end_label.setText(component.name)
-        periods = len(component.period_ids) - component.spacer_count
-        counts = [f"{periods} period{'s' if periods != 1 else ''}"]
-        # What a Subpulse holds besides its periods, only when it holds it:
-        # "0 brackets" said nothing and took a second line.
-        if component.spacer_count:
-            counts.append(f"{component.spacer_count} spacer{'s' if component.spacer_count != 1 else ''}")
-        if component.bracket_count:
-            counts.append(f"{component.bracket_count} bracket{'s' if component.bracket_count != 1 else ''}")
-        self.summary_label.setText(" · ".join(counts) if self.mode == "closed" else "")
+        self.name_label.setText(component.name)
+        self.summary_label.setText(component.summary_text if self.mode == "closed" else "")
         self.expand_button.setText("Expand" if self.mode == "closed" else "Collapse")
         self._project_source()
 
@@ -1725,6 +1725,9 @@ class PulseScheduleView(QtWidgets.QWidget):
         # Set by Add; the next schedule that brings exactly one new card is
         # what that Add produced, and the new card is picked.
         self._expect_new_card = False
+        #: Embedded: the edit and port commands, for the host page to stand
+        #: above its scrolling body.
+        self.toolbar: QtWidgets.QWidget | None = None
         layout = QtWidgets.QVBoxLayout(self)
         # The page owns its edges: every tab's content starts and ends one
         # section gap in from the tab pane.  Embedded in another page, the
@@ -1809,6 +1812,7 @@ class PulseScheduleView(QtWidgets.QWidget):
         self.timeline_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
         self.drag_container = PulseDragContainer()
         self.timeline_scroll.setWidget(self.drag_container)
+        self.timeline_scroll.horizontalScrollBar().valueChanged.connect(self._clip_scrolled_gutter)
         dataset_frame.add_pane(self.timeline_scroll, stretch=1)
         # THE PAGE OWNS ITS SURFACE: a white region of its own behind the
         # panes, not Qt's private stacked widget painted white by one CSS
@@ -1909,7 +1913,7 @@ class PulseScheduleView(QtWidgets.QWidget):
         self.connection_button = FluentButton("Connect")
         self.connection_button.setFixedHeight(control_height)
         # Read under two boxes: its words start where theirs do.
-        self.connection_status = field_column_readout(FluentReadoutEdit(""))
+        self.connection_status = FluentReadoutEdit("")
         self.connection_status.setFixedHeight(control_height)
         connection_layout.addWidget(self.connection_combo)
         connection_row = QtWidgets.QHBoxLayout()
@@ -1932,7 +1936,7 @@ class PulseScheduleView(QtWidgets.QWidget):
         self.add_port_button = FluentButton("Add")
         self.hide_off_button = FluentButton("Hide Off")
         self.show_all_button = FluentButton("Show All")
-        self.visible_label = field_column_readout(FluentReadoutEdit(""))
+        self.visible_label = FluentReadoutEdit("")
         for button in (self.add_port_button, self.hide_off_button, self.show_all_button):
             button.setFixedHeight(control_height)
         self.visible_label.setFixedHeight(control_height)
@@ -1957,8 +1961,8 @@ class PulseScheduleView(QtWidgets.QWidget):
             # Reuse the editing controls, but not the full Pulse execution bar.
             # Hidden execution buttons must not leave a three-row Ports panel
             # determining the height of this embedded editor.  The strip is
-            # the schedule's header: above it, its edit commands from the
-            # page's left edge and its port commands ending at the right.
+            # the schedule's header: its edit commands from the page's left
+            # edge and its port commands ending at the right.
             compact = FluentFrame(bordered=False)
             toolbar = QtWidgets.QHBoxLayout(compact)
             toolbar.setContentsMargins(0, 0, 0, 0)
@@ -1977,10 +1981,61 @@ class PulseScheduleView(QtWidgets.QWidget):
             # The unused controls remain owned and hidden by the original bar;
             # ordinary projection methods still address their existing widgets.
             self.button_frame.hide()
-            layout.insertWidget(0, compact)
-            layout.setSpacing(row_gap())
-            self._compact_bar = compact
+            # The host page scrolls, and it is the one vertical scroller: the
+            # panes are as tall as their rows, so they never scroll inside it
+            # with a second bar beside its own.  The commands are the host's
+            # to stand above that scrolling body, where they stay in reach.
+            self.toolbar = compact
+            self._fit_timer = QtCore.QTimer(self)
+            self._fit_timer.setSingleShot(True)
+            self._fit_timer.setInterval(0)
+            self._fit_timer.timeout.connect(self._fit_embedded_height)
+            self.left_body.installEventFilter(self)
+            self.drag_container.installEventFilter(self)
+            self.timeline_scroll.horizontalScrollBar().rangeChanged.connect(
+                lambda *_range: self._fit_timer.start()
+            )
             self._settle_left_pane_width()
+
+    def eventFilter(self, watched, event):  # noqa: N802 - Qt name
+        """Embedded: refit the panes to their rows when the rows change."""
+
+        if (watched is self.left_body and event.type() == QtCore.QEvent.LayoutRequest
+                or watched is self.drag_container and event.type() == QtCore.QEvent.Resize):
+            self._fit_timer.start()
+        return super().eventFilter(watched, event)
+
+    def _fit_embedded_height(self) -> None:
+        """As tall as the taller column of rows, and the timeline's own bar
+        when it scrolls sideways: nothing is left below the fold of the
+        panes, so their shared vertical bar never shows."""
+
+        rows = max(self.left_body.sizeHint().height(), self.drag_container.sizeHint().height())
+        bar = self.timeline_scroll.horizontalScrollBar()
+        height = rows + 2 * self.timeline_scroll.frameWidth() + (
+            bar.sizeHint().height() if bar.maximum() > bar.minimum() else 0
+        )
+        if self.dataset_panes.minimumHeight() != height or self.dataset_panes.maximumHeight() != height:
+            self.dataset_panes.setFixedHeight(height)
+
+    def _clip_scrolled_gutter(self, value: int) -> None:
+        """Keep the card gap after the side panels clear while the timeline
+        is scrolled.
+
+        The gap is the strip's own leading margin -- where gap 0's caret
+        stands and a click picks that gap -- so it scrolls away with the
+        cards, and a scrolled card's sliver would stand against the panel's
+        edge and read as part of it.  Scrolled, the viewport is masked by
+        that gap: the cards clip one card gap from the panel, where they
+        stand unscrolled.
+        """
+
+        viewport = self.timeline_scroll.viewport()
+        if value > 0:
+            gap = self.drag_container.layout_main.contentsMargins().left()
+            viewport.setMask(QtGui.QRegion(gap, 0, _UNBOUNDED, _UNBOUNDED))
+        else:
+            viewport.clearMask()
 
     def _wire_signals(self) -> None:
         self.names_panel.document_name_committed.connect(self.document_name_committed)
@@ -2072,7 +2127,7 @@ class PulseScheduleView(QtWidgets.QWidget):
         card_width = period_card_width(ports=vm.ports, analog_mode_choices=vm.analog_mode_choices)
         visible_count = sum(1 for port in vm.ports if port.visible)
         self.visible_label.setText(
-            f"Visible {visible_count}/{len(vm.ports)} ports | "
+            f"Visible {visible_count}/{len(vm.ports)} ports · "
             f"Hidden {max(0, len(vm.ports) - visible_count)}"
         )
         self.names_panel.set_ports(vm.document_name, vm.ports)
@@ -2215,7 +2270,10 @@ class PulseScheduleView(QtWidgets.QWidget):
             self.feedback_requested.emit("Select the timeline items to group; Shift-click adds or removes one item.")
 
     def focus_component_name(self, component_id: str) -> None:
-        card = next((card for card in self._component_cards.values() if card.component_id == component_id and card.mode != "end"), None)
+        """Put the cursor in a new block's name: the closed card's field,
+        the one place on the strip a block is named."""
+
+        card = self._component_cards.get(("component", component_id))
         if card is not None:
             self.timeline_scroll.ensureWidgetVisible(card)
             self.drag_container.show_selection((card.key,))
