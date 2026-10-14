@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-from zlc_atom.authoring import AuthoringChoice, AuthoringField, AuthoringSchema
+from zlc_atom.authoring import AuthoringField, AuthoringSchema
 from zlc_atom.nodes._framework.descriptor import (
     DatasetInputSpec,
     LogicNodeDescriptor,
@@ -12,56 +12,30 @@ from zlc_atom.nodes._framework.descriptor import (
 )
 from zlc_runtime import DatasetOutputDeclaration, split_signal_key
 
-from .expression import ExpressionError, compiled_rows, input_members
+from .expression import OUTPUT_COLUMNS, DeriveError, admit, input_members, output_rows
 from .processor import DeriveProcessor, declared_outputs
 
 
 def _readable(values: Mapping[str, object]) -> None:
-    """A complete draft is one whose signals can be read.
+    """A complete draft is one whose outputs can be read without data.
 
     Refused here, by what was written, while the draft is being edited --
     not at Start, where the same words would arrive as a failure to run.
     """
 
-    compiled_rows(values["expressions"])
+    output_rows(values["outputs"])
 
-
-#: One signal: the name it publishes under and the expression that computes it.
-_SIGNAL_COLUMNS = (
-    AuthoringField(
-        "name",
-        "text",
-        "Name",
-        "",
-        required=True,
-        description="name of the signal",
-    ),
-    AuthoringField(
-        "code",
-        "text",
-        "Python code",
-        "",
-        required=True,
-        description="ordinary Python over a.<output>; assign the Dataset answer to result",
-    ),
-)
 
 DERIVE_SCHEMA = AuthoringSchema(
     (
-        AuthoringField("input_view", "choice", "Input range", "event", choices=(
-            AuthoringChoice("event", "Current event"),
-            AuthoringChoice("run", "Current run"),
-            AuthoringChoice("window", "Recent events"),
-        )),
-        AuthoringField("window", "int", "Events", 50, minimum=1),
         AuthoringField(
-            "expressions",
+            "outputs",
             "rows",
-            "Signals",
+            "Outputs",
             (),
             required=True,
-            columns=_SIGNAL_COLUMNS,
-            description="one row per output: name and Python code",
+            columns=OUTPUT_COLUMNS,
+            description="one row per published signal: structured columns, or code",
         ),
     ),
     validator=_readable,
@@ -72,7 +46,7 @@ def _draft_outputs(
     values: Mapping[str, object],
     devices: Mapping[str, object],
 ) -> tuple[DatasetOutputDeclaration, ...]:
-    """What one draft publishes: the names of its signals.
+    """What one draft publishes: the names of its outputs.
 
     A draft that cannot be read publishes nothing yet; the schema's
     validator is what says why, to the editor, in the draft's own words.
@@ -80,22 +54,24 @@ def _draft_outputs(
 
     del devices
     try:
-        return declared_outputs(values.get("expressions") or ())
-    except ExpressionError:
+        return declared_outputs(values.get("outputs") or ())
+    except DeriveError:
         return ()
 
 
 def _build(*, signal_plane: object, source_signal: str, **values: object) -> DeriveProcessor:
-    """The processor for the signals over the bound producer's outputs.
+    """The processor for the outputs over the bound producer's bundle.
 
     The plane says which outputs the bound producer has, so a name an
-    expression reads that the producer never publishes is refused here, by
-    name, before anything runs -- and the bound signal is recognised among
-    them by the plane's own resolution, never by taking its name apart.
+    output reads that the producer never publishes is refused here, by
+    output and stage, before anything runs -- and the bound signal is
+    recognised among them by the plane's own resolution, never by taking
+    its name apart.  Once the producer has published, every structured
+    output is typed against the schemas the next evaluation reads, by the
+    evaluation's own rules: an output that cannot be computed refuses Start.
     """
 
-    authored = DERIVE_SCHEMA.project_values(values)
-    expressions = authored["expressions"]
+    rows = DERIVE_SCHEMA.project_values(values)["outputs"]
     selected_source = str(source_signal).strip()
     if not selected_source:
         raise ValueError("source_signal must be non-empty")
@@ -108,16 +84,19 @@ def _build(*, signal_plane: object, source_signal: str, **values: object) -> Der
     if selected is None:
         raise ValueError("select an available input bundle")
     primary = selected[1]
-    names = tuple(
+    members = tuple(
         parts[1] for item in described.values()
         if item.owner_id == source.owner_id and (parts := split_signal_key(item.name)) is not None
     )
-    names = tuple(dict.fromkeys((primary, *input_members(expressions, names))))
+    names = tuple(dict.fromkeys((primary, *input_members(rows, members))))
+    publication = signal_plane.latest_publication(selected_source)
+    if publication is not None:
+        admit(rows, {
+            parts[1]: value.schema for key, value in publication.signals.items()
+            if (parts := split_signal_key(key)) is not None
+        })
     signal_plane.resolve_sibling_signals(selected_source, names)
-    return DeriveProcessor(expressions=expressions,
-                           primary_output=primary,
-                           input_outputs=names, input_view=authored["input_view"],
-                           window=int(authored["window"]))
+    return DeriveProcessor(outputs=rows, primary_output=primary, input_outputs=names)
 
 
 def _editor_factory(parent=None):
@@ -130,10 +109,18 @@ LOGIC_NODE = LogicNodeDescriptor(
     NodeKind.PROCESSOR,
     DERIVE_SCHEMA,
     description=(
-        "Transform one producer's synchronized signal bundle with authored Python/NumPy "
-        "expressions and named-axis selection, masking or reduction. Outputs are dynamic: "
-        "each named code row declares a signal, preserving explicit axes and validity "
-        "for downstream processors, plots and scans."
+        "Within-shot algebra on one producer's synchronized bundle; each output row publishes a named "
+        "signal for plots, scans and processors. A structured row takes value (a member or an earlier "
+        "output), pins it with at (a readout-event label such as \"1\"; empty keeps every event), then "
+        "optionally masks it (where, where_at, where_is), combines it (op + - * / == != > < >= <= & | "
+        "with a member, an earlier output or a number in the value's unit; with_at) and reduces it "
+        "(statistic sum mean count min max std any all over comma-separated within-shot axes), in "
+        "that order; chain rows for more. On booleans sum is the number true, mean the fraction true, "
+        "count the valid samples; booleans do not mix with numbers. Operands whose axes are a subset "
+        "of the value's repeat along the rest. A code row has only name and code: Python over "
+        "a.<member>, assigning result. Example: {\"name\": \"loaded\", \"value\": \"occupied\", "
+        "\"at\": \"0\", \"statistic\": \"sum\", \"over\": \"Site\"}. Averages over shots, per-site "
+        "probabilities and fits belong in a plot panel."
     ),
     input_specs=(DatasetInputSpec("a", None, "exact", select_bundle=True),),
     declare_outputs=_draft_outputs,

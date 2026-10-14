@@ -1,7 +1,7 @@
-"""Derive processor: named signals, each an expression, over one publication."""
+"""Derive processor: named outputs, structured or code, over one publication."""
 
 from .expression import (
-    ExpressionError,
+    DeriveError,
     Operand,
 )
 from .logic_node import DERIVE_SCHEMA, LOGIC_NODE
@@ -9,8 +9,8 @@ from .processor import DeriveProcessor, declared_outputs
 
 __all__ = [
     "DERIVE_SCHEMA",
+    "DeriveError",
     "DeriveProcessor",
-    "ExpressionError",
     "LOGIC_NODE",
     "Operand",
     "declared_outputs",
