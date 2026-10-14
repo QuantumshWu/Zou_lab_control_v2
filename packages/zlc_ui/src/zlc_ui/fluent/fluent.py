@@ -7397,21 +7397,26 @@ class FluentScrollArea(QtWidgets.QScrollArea):
         self._reserve_scrollbar_gutter()
 
 
-class _RuledRowHeader(QtWidgets.QHeaderView):
-    """A table's row header whose row rules are painted like the cells'.
+class _TableHeader(QtWidgets.QHeaderView):
+    """A FluentTableView's header, either way.
 
-    The rules continue the viewport's own, one edge-width at each row's
-    bottom, and the rule that would lie on the frame's bottom edge is not
-    drawn -- as a section border it doubled the edge and squared the
-    rounded corner beside it.
+    Every label is drawn as a CELL, by the table's own item painter: a
+    column's name centred on its band the way a value is centred in its
+    row, a row's number on the line of the values beside it.  The header's
+    section painter centred its line box another way and put every label
+    a pixel under the cells'.  Labels are MUTED_INK, aligned as the model
+    says (``TextAlignmentRole``) or else as the header's default; a column's
+    name is a heading (Semibold, :data:`HEADING_CSS_WEIGHT`), and a row of
+    the selection names itself in bold, as Qt's own row header did.
 
-    A row's label is drawn as a CELL of its row, by the table's own item
-    painter: the header's section painter centred its line box another
-    way and put every row number a pixel under the values beside it."""
+    The row header's rules continue the viewport's own, one edge-width at
+    each row's bottom, and the rule that would lie on the frame's bottom
+    edge is not drawn -- as a section border it doubled the edge and
+    squared the rounded corner beside it."""
 
-    def __init__(self, parent=None):
-        super().__init__(QtCore.Qt.Vertical, parent)
-        # What QTableView gives the header it makes for itself.
+    def __init__(self, orientation, parent=None):
+        super().__init__(orientation, parent)
+        # What QTableView gives the headers it makes for itself.
         self.setSectionsClickable(True)
         self.setHighlightSections(True)
 
@@ -7421,24 +7426,32 @@ class _RuledRowHeader(QtWidgets.QHeaderView):
         if not isinstance(table, QtWidgets.QTableView) or model is None or not rect.isValid():
             super().paintSection(painter, rect, section)
             return
+        orientation = self.orientation()
         option = table.viewOptions()
         option.rect = rect
-        option.text = str(model.headerData(section, QtCore.Qt.Vertical, QtCore.Qt.DisplayRole) or "")
+        option.text = str(model.headerData(section, orientation, QtCore.Qt.DisplayRole) or "")
         option.features |= QtWidgets.QStyleOptionViewItem.HasDisplay
-        option.displayAlignment = self.defaultAlignment()
+        alignment = model.headerData(section, orientation, QtCore.Qt.TextAlignmentRole)
+        option.displayAlignment = (
+            self.defaultAlignment() if alignment is None else QtCore.Qt.Alignment(int(alignment))
+        )
         option.state &= ~(QtWidgets.QStyle.State_Selected | QtWidgets.QStyle.State_MouseOver
                           | QtWidgets.QStyle.State_HasFocus)
         option.palette.setColor(QtGui.QPalette.Text, QtGui.QColor(MUTED_INK))
-        selection = table.selectionModel()
-        # A row of the selection names itself in bold, as Qt's own header did.
-        option.font.setBold(bool(
-            self.highlightSections() and selection is not None
-            and selection.rowIntersectsSelection(section, table.rootIndex())
-        ))
+        if orientation == QtCore.Qt.Horizontal:
+            option.font.setWeight(QtGui.QFont.DemiBold)
+        else:
+            selection = table.selectionModel()
+            option.font.setBold(bool(
+                self.highlightSections() and selection is not None
+                and selection.rowIntersectsSelection(section, table.rootIndex())
+            ))
         table.style().drawControl(QtWidgets.QStyle.CE_ItemViewItem, option, painter, table)
 
     def paintEvent(self, event) -> None:  # noqa: N802 - Qt naming
         super().paintEvent(event)
+        if self.orientation() != QtCore.Qt.Vertical:
+            return
         viewport = self.viewport()
         edge = frame_border_px(viewport)
         width = float(viewport.width())
@@ -7575,7 +7588,8 @@ class FluentTableView(QtWidgets.QTableView):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setVerticalHeader(_RuledRowHeader(self))
+        self.setHorizontalHeader(_TableHeader(QtCore.Qt.Horizontal, self))
+        self.setVerticalHeader(_TableHeader(QtCore.Qt.Vertical, self))
         self.setFrameShape(QtWidgets.QFrame.NoFrame)
         # Rows, not boxes: one hairline under each row, no vertical rules.
         # No banding either -- every other Fluent surface is one white
@@ -7618,9 +7632,10 @@ class FluentTableView(QtWidgets.QTableView):
         self.verticalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Fixed)
         self.verticalHeader().setDefaultSectionSize(scaled_px(28, minimum=22))
         self.verticalHeader().setMinimumWidth(scaled_px(58, minimum=46))
-        # A cell's text sits the item padding PLUS the style's own item text
-        # margin in from its edge; a header section gets only its padding,
-        # so the same padding put every heading outboard of its column.
+        # A header label is painted as a cell (_TableHeader): its text sits
+        # the item padding PLUS the style's own item text margin in from its
+        # edge.  The section rule only sizes the header, so it pads by the
+        # same, and a column sized to its heading holds it whole.
         text_margin = self.style().pixelMetric(QtWidgets.QStyle.PM_FocusFrameHMargin, None, self) + 1
         header_pad = scaled_px(6, minimum=4) + text_margin
         # The header RULES are painted by _TableRules, one pass for both,
