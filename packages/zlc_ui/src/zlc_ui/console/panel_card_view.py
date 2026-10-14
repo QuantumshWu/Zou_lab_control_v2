@@ -3,11 +3,13 @@
 The board owns placement; this widget owns only the titled Fluent surface and
 the compact ``Setting`` / guarded ``×`` affordances.  Signal, size and update
 interval are edited in the Setting form and nowhere else: the card keeps no
-second control for any of them.
+second control for any of them.  The title strip is the card's one handle: a
+card is carried by it whether or not it holds a picture yet.
 """
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from typing import Any
 
@@ -16,6 +18,7 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 from zlc_data.units import figure_padded
 from zlc_ui.fluent import (
     detach_widget,
+    ACCENT_TINT,
     AXIS_GROUP_COLORS,
     BG,
     CARD_PAD,
@@ -366,7 +369,10 @@ class PanelCardView(FluentGroupBox):
         button_height = scaled_px(26, minimum=22)
         self.settings_button.setFixedHeight(button_height)
         self.settings_button.clicked.connect(self._open_settings)
-        self.close_button = FluentButton("×")
+        # A remover at rest is the quiet ghost every one-glyph × is -- red
+        # only under the pointer -- and the armed second click is the one
+        # white-on-red confirm.
+        self.close_button = FluentButton("×", role="destructive")
         self.close_button.setFixedSize(
             scaled_px(28, minimum=24),
             button_height,
@@ -429,6 +435,11 @@ class PanelCardView(FluentGroupBox):
         command_layout.addWidget(self.settings_button)
         command_layout.addWidget(self.close_button)
         band_layout.addWidget(self._title_commands, 0, QtCore.Qt.AlignVCenter)
+        # The strip is what the card is carried by (see mousePressEvent), so
+        # the hand is shown over it and nowhere else; its two commands are
+        # clicked, not carried.
+        self._title_band.setCursor(QtCore.Qt.OpenHandCursor)
+        self._title_commands.setCursor(QtCore.Qt.ArrowCursor)
         band_height = self._band_height()
         self._title_band.setFixedHeight(band_height)
         # Setting and x sit concentric in the band's corner: as far from its
@@ -448,11 +459,19 @@ class PanelCardView(FluentGroupBox):
         holder.setContentsMargins(pad - edge, scaled_px(2), pad - edge, pad)
         holder.setSpacing(0)
         outer.addLayout(holder)
+        # An empty card is taller than what it lays out -- a fixed strip and
+        # an empty body -- and a layout shorter than its widget is CENTRED
+        # in it unless told otherwise, which put an empty card's strip in
+        # the middle of its frame.  A card with a picture is exactly its
+        # layout, so this moves nothing there.
+        outer.setAlignment(QtCore.Qt.AlignTop)
         self._surface_layout = holder
-        self._placeholder = FluentLabel("Pick a signal in Setting")
-        self._placeholder.setAlignment(QtCore.Qt.AlignCenter)
-        holder.addWidget(self._placeholder)
-        self.setCursor(QtCore.Qt.OpenHandCursor)
+        # No body placeholder: an empty card is the blank frame its picture
+        # will fill, and its strip's second line says why it holds none (see
+        # _band_fragments).  A sentence centred in the body was a second
+        # layout -- one strip line instead of two, the caption sitting lower
+        # than every drawn neighbour's -- and it went on saying "pick a
+        # signal" on a card whose strip already named one.
         # A bare reusable card has no TaskConsole switch, so its plot remains
         # interactive.  TaskConsoleHandle projects the global switch onto every
         # card before a mounted panel can be used.
@@ -472,10 +491,19 @@ class PanelCardView(FluentGroupBox):
         """Two lines of text, or the command beside them, plus its padding.
 
         Two LINES, whatever they say: a card whose height followed its text
-        would reflow the whole board every time a signal was renamed.
+        would reflow the whole board every time a signal was renamed.  They
+        are measured as the strip's rich text stacks them, which rounds each
+        line UP to a whole pixel: twice the font's integer line spacing was
+        two pixels short of that at the body font, and the second line's
+        descenders -- the g of "Setting", the y of "spatial-y" -- were cut
+        off by the label's edge.
         """
 
-        lines = 2 * QtGui.QFontMetrics(self._title_label.font()).lineSpacing()
+        probe = QtGui.QTextDocument()
+        probe.setDocumentMargin(0)
+        probe.setDefaultFont(self._title_label.font())
+        probe.setHtml("&nbsp;<br>&nbsp;")
+        lines = math.ceil(probe.size().height())
         return max(lines, self.settings_button.height()) + 2 * scaled_px(CARD_TITLE_PAD)
 
     def _apply_card_size(self, size: str) -> None:
@@ -705,7 +733,20 @@ class PanelCardView(FluentGroupBox):
                     QtCore.Qt.ElideMiddle,
                 )
             )
+        if not names and self._surface is None:
+            # A card with no picture says why on the line a drawn card names
+            # its axes on, so the two strips are laid out alike: the caption
+            # on the first line level with every neighbour's, not centred
+            # alone in the band half a line lower.
+            names.append((self._vacancy_note(), MUTED_INK, QtCore.Qt.ElideRight))
         return tuple(sizes), tuple(names)
+
+    def _vacancy_note(self) -> str:
+        """Why this card holds no picture, in the operator's next step."""
+
+        if str(self._state_projection.get("signal") or ""):
+            return "No data yet"
+        return "Pick a signal in Setting"
 
     def _refresh_title_band(self) -> None:
         """Repaint the strip for the current state, projection and width."""
@@ -752,7 +793,7 @@ class PanelCardView(FluentGroupBox):
         return self._surface
 
     def set_surface(self, widget: QtWidgets.QWidget | None) -> None:
-        """Mount or replace an arbitrary view surface."""
+        """Mount or replace an arbitrary view surface; ``None`` empties the frame."""
 
         if widget is not None and not isinstance(widget, QtWidgets.QWidget):
             raise TypeError("surface must be QWidget or None")
@@ -776,10 +817,13 @@ class PanelCardView(FluentGroupBox):
             detach_widget(self._surface)
         self._surface = widget
         self._surface_framed = False
+        self._refresh_title_band()
         if widget is None:
-            self._placeholder.show()
+            # The picture left, so the card is the empty frame its preset
+            # plans again -- not the last picture's frame, which differs
+            # wherever a drawing widens its own margin.
+            self._apply_card_size(self.panel_size)
             return
-        self._placeholder.hide()
         widget.setParent(self)
         widget.installEventFilter(self)
         self._surface_error_connected = relay_surface_errors(
@@ -1312,6 +1356,16 @@ class PanelCardView(FluentGroupBox):
                 scaled_px(24, minimum=20),
             )
             close_button.setToolTip("Close settings")
+            # Closing the frame takes nothing away and commits nothing: a
+            # plain ghost, with no face until the pointer is over it, and
+            # never the red of the card's own remover.  The held face stays
+            # the button sheet's own, hence ``:!pressed``.
+            close_button.setStyleSheet(
+                close_button.styleSheet()
+                + "QPushButton { background: transparent; border-color: transparent; }"
+                + f"QPushButton:hover:!pressed {{ background: {ACCENT_TINT};"
+                + f" border-color: {ACCENT_TINT}; }}"
+            )
             close_button.clicked.connect(self.retire_settings_popup)
             header_layout.addWidget(close_button, 0)
             layout.addWidget(header)
@@ -1431,7 +1485,7 @@ class PanelCardView(FluentGroupBox):
 
     def _disarm_header_remove(self) -> None:
         self._remove_armed = False
-        self.close_button.set_role("standard")
+        self.close_button.set_role("destructive")
         self.close_button.setToolTip(
             "Click once to arm; click again to remove this panel"
         )
@@ -1474,8 +1528,24 @@ class PanelCardView(FluentGroupBox):
             return self._overlay_groups
         return ()
 
+    def _on_strip(self, point: QtCore.QPoint) -> bool:
+        """Whether a card-local point is on the strip -- the card's handle."""
+
+        return point.y() <= self._title_band.geometry().bottom()
+
     def mousePressEvent(self, event) -> None:  # noqa: N802 - Qt API
-        if event.button() == QtCore.Qt.LeftButton:
+        # The STRIP carries the card, whatever the card holds.  A drawn
+        # card's body is its plot's (a gesture with Selectors on, nothing
+        # with them off), so the strip was always the only grip it had;
+        # an empty card's body is blank and its presses arrived here too, so
+        # an empty card was picked up mid-body.  A drop snaps the card's
+        # TOP-LEFT, not the pointer, so a card held half a card below its
+        # top had to be dragged half a card past the row it was meant for --
+        # below the viewport for the last row on screen -- and let go over
+        # its target it landed a row up, where the same aim with a drawn
+        # card worked.  One grip for every card puts its top-left under the
+        # pointer, wherever it is held.
+        if event.button() == QtCore.Qt.LeftButton and self._on_strip(event.pos()):
             self._press_at = event.pos()
             self._drag_offset = None
             self.raise_()
@@ -1500,8 +1570,9 @@ class PanelCardView(FluentGroupBox):
                     return
                 self._drag_offset = self._press_at
                 # The closed hand marks the grab, so it appears when the
-                # card actually starts following the pointer.
-                self.setCursor(QtCore.Qt.ClosedHandCursor)
+                # card actually starts following the pointer -- on the strip,
+                # which is what stays under the pointer while it does.
+                self._title_band.setCursor(QtCore.Qt.ClosedHandCursor)
                 self.drag_started.emit(
                     (int(event.pos().x()), int(event.pos().y()))
                 )
@@ -1513,7 +1584,7 @@ class PanelCardView(FluentGroupBox):
             dragged = self._drag_offset is not None
             self._press_at = None
             self._drag_offset = None
-            self.setCursor(QtCore.Qt.OpenHandCursor)
+            self._title_band.setCursor(QtCore.Qt.OpenHandCursor)
             self.releaseMouse()
             # A press that reaches release without ever crossing the
             # threshold IS a click, and a click drops nothing.

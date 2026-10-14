@@ -116,7 +116,8 @@ wheel = QtGui.QWheelEvent(
 QtWidgets.QApplication.sendEvent(surface, wheel)
 assert bar.value() > 0, 'a wheel the surface ignores must still reach the board scroll'
 card.set_surface(None)
-assert not card._placeholder.isHidden()
+# An emptied card says why on its strip's second line; the body is its frame.
+assert card._title_label.text().endswith('Pick&nbsp;a&nbsp;signal&nbsp;in&nbsp;Setting</span>'), card._title_label.text()
 card.set_panel_projection(dict(state, size='1x4'), surface_projection)
 assert card.panel_size == '1x4'
 try:
@@ -163,7 +164,7 @@ assert events == []
 assert card.close_button.role() == 'destructive_primary'
 QtTest.QTest.mouseClick(card.close_button, QtCore.Qt.LeftButton)
 assert events == [('remove',)]
-assert card.close_button.role() == 'standard'
+assert card.close_button.role() == 'destructive'
 # Edit and the explicit text Remove remain available in Setting as well.
 QtTest.QTest.mouseClick(card.settings_button, QtCore.Qt.LeftButton)
 app.processEvents()

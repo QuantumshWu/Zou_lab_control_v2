@@ -137,6 +137,17 @@ grammar, never by the card.  The caption is display only -- the state's
 `title` stays the panel's editable name -- and a card no presenter has
 captioned is called by that name.
 
+A card is laid out the same with or without a picture.  Its strip always
+reads two lines -- the caption (and data sizes) above, the axis names below
+-- and a card with no picture says why on that second line instead: `Pick a
+signal in Setting`, or `No data yet` once a signal is picked.  Its body is
+the blank frame its size preset plans, and `set_surface(None)` returns a
+card to that frame.  The strip is the card's one handle: a drag that starts
+on it carries the card, a press in the body never does, so the card's
+top-left -- what a drop snaps -- stays under the pointer whatever the card
+holds.  The header `×` is the quiet one-glyph remover (red only under the
+pointer); its first click arms it as the white-on-red confirm.
+
 `set_selectors_enabled(False)` suspends the mounted plot's whole pointer
 transport -- area, zoom, pan, hover and double-click focus -- and the
 ordinary wheel stays with the surrounding page; On restores all of it.
