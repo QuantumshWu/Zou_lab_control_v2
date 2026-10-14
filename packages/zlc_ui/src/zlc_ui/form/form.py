@@ -47,6 +47,18 @@ _NUMBER_TEXT = re.compile(
 )
 
 
+def required_label(label: str, required: bool) -> str:
+    """The words a row shows for ``label``: a required input is marked `` *``.
+
+    The one marker rule for every label column -- a form's rows and the rows
+    an editor builds beside its forms (a Logic editor's Signal) -- so a
+    column never marks some required inputs and not others.
+    """
+
+    text = str(label).strip()
+    return f"{text} *" if required else text
+
+
 def parse_number_text(text: str, field: str = "number") -> int | float:
     """Parse one finite decimal leaf, preserving authored int-vs-float type."""
 
@@ -410,9 +422,7 @@ class FormFieldProps:
         label = self.label.strip()
         if self.unit:
             label = f"{label} ({self.unit})"
-        if self.required:
-            label = f"{label} *"
-        return label
+        return required_label(label, self.required)
 
     def choice_for(self, value: object) -> FormChoice | None:
         """Return the canonical typed choice matching ``value``, if any."""
@@ -494,4 +504,5 @@ __all__ = [
     "FormFieldProps",
     "FormSpec",
     "parse_number_text",
+    "required_label",
 ]

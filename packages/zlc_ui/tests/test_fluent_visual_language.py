@@ -337,6 +337,51 @@ def test_an_empty_code_view_says_why_in_muted_ink(app, host) -> None:
     assert min(lightness) >= muted - 8, "in the muted ink of a note, not the text's"
 
 
+def test_a_blank_choice_reads_as_a_placeholder(app, host) -> None:
+    """A combo's "(not selected)" is a missing input, not a value: muted ink
+    like an empty field's placeholder, flat or tree, while a row whose empty
+    key is a real choice keeps the text's ink."""
+
+    from PyQt5 import QtGui
+    from zlc_ui.fluent import FluentComboBox, FluentTreeComboBox
+    from zlc_ui.fluent.style import MUTED_INK, TEXT
+
+    flat = FluentComboBox(host)
+    flat.add_blank_item("(not selected)")
+    flat.addItem("sequencer", "sequencer")
+    flat.resize(200, flat.sizeHint().height())
+    tree = FluentTreeComboBox(host)
+    tree.move(0, 60)
+    tree.set_choice_tree((("signals", (("count", "count", "signals · count"),)),),
+                         current="", none_label="(not selected)")
+    tree.resize(200, tree.sizeHint().height())
+    keyed = FluentComboBox(host)
+    keyed.move(0, 120)
+    keyed.addItem("Subpulse file", "")
+    keyed.resize(200, keyed.sizeHint().height())
+    _shown(app, host, flat, tree, keyed)
+
+    def ink(combo):
+        image = combo.grab().toImage()
+        ratio = image.devicePixelRatio() or 1.0
+        rect = combo._collapsed_text_rect()
+        return min(
+            (QtGui.QColor(image.pixel(x, y)) for x in range(int(rect.left() * ratio), int(rect.right() * ratio))
+             for y in range(int(rect.top() * ratio), int(rect.bottom() * ratio))),
+            key=lambda colour: colour.lightness(),
+        ).name().upper()
+
+    assert flat.current_is_blank() and tree.current_is_blank() and not keyed.current_is_blank()
+    assert ink(flat) == MUTED_INK.upper()
+    assert ink(tree) == MUTED_INK.upper()
+    assert ink(keyed) == TEXT.upper()
+    flat.setCurrentIndex(1)
+    tree.select_choice_key("count")
+    app.processEvents()
+    assert ink(flat) == TEXT.upper()
+    assert ink(tree) == TEXT.upper()
+
+
 def test_a_glyph_is_centred_on_its_ink(app) -> None:
     from PyQt5 import QtCore, QtGui, QtWidgets
     from zlc_ui.fluent import paint_centred_ink

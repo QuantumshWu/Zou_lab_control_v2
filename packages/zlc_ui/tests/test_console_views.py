@@ -952,6 +952,10 @@ assert editor.source_combo.model().item(0).text() == '(not selected)'
 source_header = editor.source_combo.model().item(1)
 assert source_header.text() == 'camera-1'
 assert source_header.child(0).text() == 'frames  [1 × 1 × (3×96×128)]'
+# The draft refuses without its signal: the row carries the column's required
+# marker, and its blank choice reads as a missing input, not a value.
+assert editor._selector_rows[editor.source_combo][1] == 'Signal *'
+assert editor.source_combo.current_is_blank()
 handle.set_logic_commands('camera-1', can_start=False, can_stop=False)
 view.show()
 app.processEvents()

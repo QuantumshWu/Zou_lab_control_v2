@@ -3402,6 +3402,11 @@ QAbstractItemView::corner {{
     return style
 
 
+#: The item role that marks a combo's blank choice -- the row meaning
+#: "nothing chosen yet" (see :meth:`FluentComboBox.add_blank_item`).
+_BLANK_CHOICE_ROLE = QtCore.Qt.UserRole + 2
+
+
 class FluentComboBox(QtWidgets.QAbstractButton):
     """A Fluent combo with an optional, lazily created text editor.
 
@@ -3502,6 +3507,24 @@ class FluentComboBox(QtWidgets.QAbstractButton):
     def addItems(self, texts) -> None:  # noqa: N802 - Qt API name
         for text in texts:
             self.addItem(text)
+
+    def add_blank_item(self, text: object) -> None:
+        """Add the choice that means nothing is chosen yet ("(not selected)").
+
+        It carries the empty key like any other keyed row, and while it is
+        current the collapsed box paints its words as an empty field paints
+        its placeholder, in MUTED_INK: a missing input must not look like a
+        value someone picked.  A row whose empty key IS a choice ("Subpulse
+        file") is an ordinary ``addItem``.
+        """
+
+        self.addItem(text, "")
+        self._model.setData(self._model.index(self.count() - 1, 0), True, _BLANK_CHOICE_ROLE)
+
+    def current_is_blank(self) -> bool:
+        """Whether the current row is the blank choice of :meth:`add_blank_item`."""
+
+        return self.currentData(_BLANK_CHOICE_ROLE) is True
 
     def clear(self) -> None:
         previous = self._current_index
@@ -3885,7 +3908,9 @@ class FluentComboBox(QtWidgets.QAbstractButton):
 
         if self._line_edit is None:
             text_rect = self._collapsed_text_rect()
-            painter.setPen(QtGui.QColor(TEXT if enabled else DISABLED_INK))
+            # The blank choice reads as an empty field's placeholder does.
+            ink = DISABLED_INK if not enabled else MUTED_INK if self.current_is_blank() else TEXT
+            painter.setPen(QtGui.QColor(ink))
             painter.setFont(self._collapsed_font())
             text = painter.fontMetrics().elidedText(
                 self._display_text(), QtCore.Qt.ElideRight, text_rect.width()
@@ -4766,6 +4791,9 @@ class FluentTreeComboBox(FluentComboBox):
                 none_item.setData("", QtCore.Qt.UserRole)
             if none_item.data(QtCore.Qt.UserRole + 1) != "":
                 none_item.setData("", QtCore.Qt.UserRole + 1)
+            # The none row is this tree's blank choice (add_blank_item).
+            if none_item.data(_BLANK_CHOICE_ROLE) is not True:
+                none_item.setData(True, _BLANK_CHOICE_ROLE)
             if none_item.isEditable():
                 none_item.setEditable(False)
             desired_top.append(none_item)

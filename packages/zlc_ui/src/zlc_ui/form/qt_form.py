@@ -27,6 +27,7 @@ from .form import (
     FormFieldProps,
     FormSpec,
     parse_number_text,
+    required_label,
 )
 
 from ..fluent import (
@@ -1029,8 +1030,7 @@ def _shown_label(field: FormFieldProps) -> str:
 
     if not _picks_unit(field):
         return field.row_label
-    label = field.label.strip()
-    return f"{label} *" if field.required else label
+    return required_label(field.label, field.required)
 
 
 def _shown_unit_of(widget: object, unit: str | None) -> str:
