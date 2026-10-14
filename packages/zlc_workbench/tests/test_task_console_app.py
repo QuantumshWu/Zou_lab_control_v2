@@ -1031,16 +1031,16 @@ application.processEvents()
 editor = view._logic_editors['calibration']
 editor.form.widget_for('pulse_template').setText('imaging_template.json')
 application.processEvents()
-until(editor.start_button.isEnabled)
+until(editor.run_button.isEnabled)
 
-QtTest.QTest.mouseClick(editor.start_button, QtCore.Qt.LeftButton)
+QtTest.QTest.mouseClick(editor.run_button, QtCore.Qt.LeftButton)
 application.processEvents()
 assert presenter._active_task_id == 'calibration'
 assert view._view.status_strip.action_button.isVisible()
 assert view._view.kind_combo.isEnabled()
 assert not view._view.add_panel_button.isEnabled()
-assert not view._rows['calibration'].start_button.isEnabled()
-assert not view._rows['calibration'].stop_button.isVisible()
+assert not view._rows['calibration'].run_button.isEnabled()
+assert not view._rows['calibration'].run_button.isVisible()
 assert 'calibration:' in view._view.status_strip.text()
 
 # A board nobody is looking at draws nothing: the preview mounts once the
@@ -1067,7 +1067,7 @@ until(lambda: presenter._active_task_id is None)
 assert not view._view.status_strip.action_button.isVisible()
 assert view._view.kind_combo.isEnabled()
 assert view._view.add_panel_button.isEnabled()
-assert view._rows['calibration'].start_button.isEnabled()
+assert view._rows['calibration'].run_button.isEnabled()
 assert all(panel.state.signal != preview_signal for panel in presenter.panels.values())
 print('TASK_TAKEOVER_PREVIEW_OK')
 """ + _FORMAL_CONSOLE_EPILOGUE

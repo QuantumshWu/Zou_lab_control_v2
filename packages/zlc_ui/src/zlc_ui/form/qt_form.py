@@ -186,6 +186,8 @@ def _blank_placeholder(field: FormFieldProps) -> str:
 
     if not field.blank_allowed:
         return ""
+    if field.blank_label and not field.required:
+        return field.blank_label
     return "(required)" if field.required else "(optional)"
 
 

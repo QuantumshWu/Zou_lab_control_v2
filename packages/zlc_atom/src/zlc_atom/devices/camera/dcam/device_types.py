@@ -20,10 +20,10 @@ DCAM_CAMERA_SCHEMA = AuthoringSchema(
         AuthoringField("device_index", "int", "Device index", 0, minimum=0),
         AuthoringField("exposure_seconds", "float", "Exposure seconds", 0.02, minimum=1e-9),
         AuthoringField("readout_speed", "int", "Readout speed", 1, minimum=1),
-        AuthoringField("roi_x", "int", "ROI x", None, required=False, minimum=0),
-        AuthoringField("roi_y", "int", "ROI y", None, required=False, minimum=0),
-        AuthoringField("roi_width", "int", "ROI width", None, required=False, minimum=1),
-        AuthoringField("roi_height", "int", "ROI height", None, required=False, minimum=1),
+        AuthoringField("roi_x", "int", "ROI x", None, required=False, minimum=0, blank_label="full sensor"),
+        AuthoringField("roi_y", "int", "ROI y", None, required=False, minimum=0, blank_label="full sensor"),
+        AuthoringField("roi_width", "int", "ROI width", None, required=False, minimum=1, blank_label="full sensor"),
+        AuthoringField("roi_height", "int", "ROI height", None, required=False, minimum=1, blank_label="full sensor"),
         # What one count is worth, from this sensor's datasheet: the
         # ORCA-Quest's ultra-quiet readout is 0.107 electrons per count over
         # an offset of 200, which is also what the virtual sensor applies

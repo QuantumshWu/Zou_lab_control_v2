@@ -12,17 +12,27 @@ from collections.abc import Mapping
 from PyQt5 import QtCore, QtWidgets
 
 from zlc_ui.fluent import (
+    GREEN,
     GREY,
+    ORANGE,
+    ORANGE_DARK,
+    RED,
+    RED_DARK,
+    TEXT,
     FluentButton,
     FluentComboBox,
-    FluentFrame,
     FluentLabel,
     FluentReadoutEdit,
     FluentScrollArea,
+    FluentSettingRow,
+    FluentStatusDot,
     FluentTreeComboBox,
+    FONT,
     fill_grouped_choice_combo,
+    fluent_font_size,
     retire_widget,
     scaled_px,
+    setting_label_width,
 )
 from zlc_ui.form import FluentParameterForm, FormSpec
 from zlc_ui.form.qt_form import _form_label_width
@@ -54,7 +64,11 @@ class LogicEditorView(QtWidgets.QWidget):
         #: The projection minus what the status half applies, as last
         #: rebuilt from.  A beat that changes neither rebuilds nothing.
         self._applied_structure: dict[str, object] | None = None
-        self._status_colour = ""
+        self._status_colours: tuple[str, str] = ("", "")
+        #: The editor's ONE label column, shared by the selectors, both forms,
+        #: the results and every contribution, so their fields start at one x.
+        self._label_width = setting_label_width(())
+        self._selector_rows: dict[QtWidgets.QWidget, tuple[FluentSettingRow, str]] = {}
         self._device_combos: dict[str, FluentComboBox] = {}
         self._acquisition_combo: FluentComboBox | None = None
         self._artifact_result_readouts: dict[str, FluentReadoutEdit] = {}
@@ -72,23 +86,53 @@ class LogicEditorView(QtWidgets.QWidget):
         self._body_layout.setContentsMargins(margin, margin, margin, margin)
         self._body_layout.setSpacing(scaled_px(10, minimum=6))
 
-        header = FluentFrame(bordered=False)
-        header_layout = QtWidgets.QHBoxLayout(header)
+        # What this is on one line, how it stands on the next: the kind sat
+        # a third of the way across and a long draft error wrapped into a
+        # block beside it.  The status line is a dot and words, the way the
+        # console's status strip says things.
+        header = QtWidgets.QWidget()
+        header.setStyleSheet("background: transparent;")
+        header_layout = QtWidgets.QVBoxLayout(header)
         header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.setSpacing(scaled_px(4, minimum=3))
+        title_row = QtWidgets.QHBoxLayout()
+        title_row.setSpacing(scaled_px(8, minimum=5))
         self.title_label = FluentLabel(self.node_id)
+        self.title_label.setStyleSheet(
+            f'QLabel {{ color: {TEXT}; font: {fluent_font_size()}pt "{FONT}"; '
+            "font-weight: 600; background: transparent; }"
+        )
         self.kind_label = FluentLabel("")
         self.kind_label.setStyleSheet(f"color: {GREY}; background: transparent; border: none;")
+        title_row.addWidget(self.title_label)
+        title_row.addWidget(self.kind_label)
+        title_row.addStretch(1)
+        header_layout.addLayout(title_row)
+        status_row = QtWidgets.QHBoxLayout()
+        status_row.setSpacing(scaled_px(8, minimum=5))
+        self.status_dot = FluentStatusDot(size=10, color=GREY)
         self.status_label = FluentLabel("stopped")
         self.status_label.setWordWrap(True)
-        header_layout.addWidget(self.title_label, 1)
-        header_layout.addWidget(self.kind_label)
-        header_layout.addWidget(self.status_label, 2)
+        self.status_label.setMinimumWidth(0)
+        # The dot sits on the FIRST line of a status that wraps.
+        dot_column = QtWidgets.QVBoxLayout()
+        dot_column.setContentsMargins(
+            0, max(0, (self.status_label.fontMetrics().height() - self.status_dot.height()) // 2), 0, 0
+        )
+        dot_column.addWidget(self.status_dot)
+        dot_column.addStretch(1)
+        status_row.addLayout(dot_column)
+        status_row.addWidget(self.status_label, 1)
+        header_layout.addLayout(status_row)
         self._body_layout.addWidget(header)
 
-        self._selector_frame = FluentFrame()
-        self._selector_layout = QtWidgets.QFormLayout(self._selector_frame)
-        self._selector_layout.setContentsMargins(margin, margin, margin, margin)
-        self._selector_layout.setSpacing(scaled_px(8, minimum=5))
+        # The source and device choices are rows of the form, in its label
+        # column -- not a separately boxed card with its own label style.
+        self._selector_frame = QtWidgets.QWidget()
+        self._selector_frame.setStyleSheet("background: transparent;")
+        self._selector_layout = QtWidgets.QVBoxLayout(self._selector_frame)
+        self._selector_layout.setContentsMargins(0, 0, 0, 0)
+        self._selector_layout.setSpacing(scaled_px(6, minimum=4))
         self.source_combo: FluentComboBox | None = None
         self._body_layout.addWidget(self._selector_frame)
 
@@ -111,19 +155,33 @@ class LogicEditorView(QtWidgets.QWidget):
             lambda _key: self.refresh_requested.emit()
         )
 
-        self._artifact_result_frame = FluentFrame()
-        self._artifact_result_layout = QtWidgets.QFormLayout(
+        self._artifact_result_frame = QtWidgets.QWidget()
+        self._artifact_result_frame.setStyleSheet("background: transparent;")
+        self._artifact_result_layout = QtWidgets.QVBoxLayout(
             self._artifact_result_frame
         )
-        self._artifact_result_layout.setContentsMargins(
-            margin, margin, margin, margin
-        )
-        self._artifact_result_layout.setSpacing(scaled_px(8, minimum=5))
+        self._artifact_result_layout.setContentsMargins(0, 0, 0, 0)
+        self._artifact_result_layout.setSpacing(scaled_px(6, minimum=4))
+        self._artifact_result_rows: dict[str, FluentSettingRow] = {}
         self._body_layout.addWidget(self._artifact_result_frame)
 
+        # The lifecycle in one button, as on the node's row: Start while it is
+        # stopped, Stop while it runs.  Restart shows only while it runs, and
+        # Remove keeps to the far side, away from the button pressed most.
         actions = QtWidgets.QHBoxLayout()
+        self.remove_button = FluentButton("Remove", role="destructive")
+        self.remove_button.clicked.connect(self.remove_requested.emit)
+        actions.addWidget(self.remove_button)
         actions.addStretch(1)
-        self.start_button = FluentButton("Start", role="primary")
+        self.restart_button = FluentButton("Restart")
+        self.restart_button.clicked.connect(self.start_requested.emit)
+        self.run_button = FluentButton("Stop", role="primary")
+        stop_width = self.run_button.sizeHint().width()
+        self.run_button.setText("Starting…")
+        starting_width = self.run_button.sizeHint().width()
+        self.run_button.setText("Start")
+        self.run_button.setMinimumWidth(max(stop_width, starting_width, self.run_button.sizeHint().width()))
+        self.run_button.clicked.connect(self._run_clicked)
         # This is the Start an operator actually presses -- adding a node
         # opens its Edit and focuses it -- so the switch that says what Start
         # will do belongs here too.  Both views show the SAME preference: it
@@ -134,21 +192,13 @@ class LogicEditorView(QtWidgets.QWidget):
             "Open this node's plot panel when it starts"
         )
         self.preview_switch.toggled.connect(self.auto_preview_changed.emit)
-        self.stop_button = FluentButton("Stop")
-        self.remove_button = FluentButton("Remove", role="destructive")
-        self.start_button.clicked.connect(self.start_requested.emit)
-        self.stop_button.clicked.connect(self.stop_requested.emit)
-        self.remove_button.clicked.connect(self.remove_requested.emit)
-        actions.addWidget(self.start_button)
+        actions.addWidget(self.restart_button)
+        actions.addWidget(self.run_button)
         actions.addWidget(self.preview_switch)
-        actions.addWidget(self.stop_button)
-        actions.addWidget(self.remove_button)
         self._body_layout.addLayout(actions)
         self._show_actions = bool(show_actions)
-        self.start_button.setVisible(bool(show_actions))
-        self.preview_switch.setVisible(bool(show_actions))
-        self.stop_button.setVisible(bool(show_actions))
-        self.remove_button.setVisible(bool(show_actions))
+        for button in (self.remove_button, self.restart_button, self.run_button, self.preview_switch):
+            button.setVisible(bool(show_actions))
         self._body_layout.addStretch(1)
         scroll.setWidget(body)
         outer.addWidget(scroll)
@@ -201,7 +251,11 @@ class LogicEditorView(QtWidgets.QWidget):
         }
         if structure != self._applied_structure:
             self._applied_structure = structure
-            label_width = _form_label_width((*spec.fields, *artifact_spec.fields))
+            label_width = max(
+                _form_label_width((*spec.fields, *artifact_spec.fields)),
+                setting_label_width(_row_labels(incoming)),
+            )
+            self._label_width = label_width
             self.artifact_form.set_label_width(label_width)
             self.form.set_label_width(label_width)
             for widget in self._contributions.values():
@@ -231,19 +285,24 @@ class LogicEditorView(QtWidgets.QWidget):
         pending = bool(incoming.get("pending"))
         error = str(incoming.get("error") or "")
         issues = tuple(str(issue) for issue in incoming.get("issues", ()) or ())
-        self.start_button.setText("Starting…" if pending else ("Restart" if running else "Start"))
         self._project_commands()
         state = "waiting for device release" if pending else ("running" if running else "stopped")
         status = str(incoming.get("status") or state)
         issue = issues[0] if issues else ""
         self.status_label.setText(error or (f"Draft: {issue}" if issue else status))
-        # Written when it CHANGES: the sheet is re-parsed and the widget
-        # repolished on every write, and this one has two values.
-        colour = "#D13438" if error else GREY
-        if colour != self._status_colour:
-            self._status_colour = colour
+        # Written when they CHANGE: the sheet is re-parsed and the widget
+        # repolished on every write.
+        colours = (
+            (RED, RED_DARK) if error
+            else (ORANGE, ORANGE_DARK) if issue
+            else (GREEN, TEXT) if running
+            else (GREY, GREY)
+        )
+        if colours != self._status_colours:
+            self._status_colours = colours
+            self.status_dot.set_color(colours[0])
             self.status_label.setStyleSheet(
-                f"color: {colour}; background: transparent; border: none;"
+                f"color: {colours[1]}; background: transparent; border: none;"
             )
 
     def set_mutation_enabled(self, enabled: bool) -> None:
@@ -312,19 +371,39 @@ class LogicEditorView(QtWidgets.QWidget):
                 setter(self._mutation_enabled)
         return frozenset(managed)
 
+    def _run_clicked(self) -> None:
+        if bool(self._projection.get("running")):
+            self.stop_requested.emit()
+        else:
+            self.start_requested.emit()
+
     def _project_commands(self) -> None:
         pending = bool(self._projection.get("pending"))
+        running = bool(self._projection.get("running"))
         can_start = bool(self._projection.get("can_start"))
         can_stop = bool(self._projection.get("can_stop"))
-        self.start_button.setEnabled(
-            self._mutation_enabled and can_start and not pending
+        self.run_button.setText("Starting…" if pending else "Stop" if running else "Start")
+        self.run_button.set_role("standard" if running else "primary")
+        self.run_button.setEnabled(
+            self._mutation_enabled and not pending and (can_stop if running else can_start)
         )
+        self.restart_button.setVisible(self._show_actions and running)
+        self.restart_button.setEnabled(self._mutation_enabled and can_start and not pending)
         # It says what the next Start will do, so it follows Start's own gate.
         self.preview_switch.setEnabled(self._mutation_enabled)
-        self.stop_button.setEnabled(self._mutation_enabled and can_stop)
         self.remove_button.setEnabled(self._mutation_enabled)
 
+    def _add_selector_row(self, label: str, combo: FluentComboBox, *, first: bool = False) -> None:
+        row = FluentSettingRow(label, combo, label_width=self._label_width, parent=self._selector_frame)
+        self._selector_rows[combo] = (row, str(label))
+        if first:
+            self._selector_layout.insertWidget(0, row)
+        else:
+            self._selector_layout.addWidget(row)
+
     def _reconcile_selectors(self, projection: Mapping[str, object]) -> None:
+        for row, label in self._selector_rows.values():
+            row.set_label(label, width=self._label_width)
         device_options = projection.get("device_options") or {}
         device_keys = projection.get("device_keys") or {}
         if not isinstance(device_options, Mapping) or not isinstance(device_keys, Mapping):
@@ -351,8 +430,8 @@ class LogicEditorView(QtWidgets.QWidget):
                 # activation and the tree's own leaf-click re-emission --
                 # exactly as the shared keyed-choice form handler wires it.
                 self.source_combo.activated[int].connect(self._source_changed)
-                self._selector_layout.insertRow(
-                    0, str(projection.get("source_label") or "Signal"), self.source_combo
+                self._add_selector_row(
+                    str(projection.get("source_label") or "Signal"), self.source_combo, first=True
                 )
             # The one grouped signal chooser every other picker already uses:
             # a producer tree with keyed leaves, not a second flat list.
@@ -390,9 +469,7 @@ class LogicEditorView(QtWidgets.QWidget):
                     )
                 )
                 self._device_combos[name] = combo
-                self._selector_layout.addRow(
-                    name.replace("_", " ").title(), combo
-                )
+                self._add_selector_row(_device_label(name), combo)
             current = str(device_keys.get(name, ""))
             self._fill_combo(
                 combo, current, tuple(str(item) for item in offered), blank=True,
@@ -419,7 +496,7 @@ class LogicEditorView(QtWidgets.QWidget):
                     })
                 )
                 self._acquisition_combo = combo
-                self._selector_layout.addRow(field.label, combo)
+                self._add_selector_row(field.label, combo)
             combo.setToolTip(field.description)
             combo.setEnabled(bool(projection.get("acquisition_enabled", True)) and not field.unavailable)
             self._fill_combo(
@@ -436,13 +513,9 @@ class LogicEditorView(QtWidgets.QWidget):
         )
 
     def _retire_selector(self, combo: FluentComboBox) -> None:
-        row = self._selector_layout.takeRow(combo)
-        for item in (row.labelItem, row.fieldItem):
-            if item is None:
-                continue
-            widget = item.widget()
-            if widget is not None:
-                retire_widget(widget)
+        row, _label = self._selector_rows.pop(combo)
+        self._selector_layout.removeWidget(row)
+        retire_widget(row)
 
     @staticmethod
     def _fill_combo(
@@ -516,16 +589,22 @@ class LogicEditorView(QtWidgets.QWidget):
         if [name for name, _path, _contract in results] != list(
             self._artifact_result_readouts
         ):
-            while self._artifact_result_layout.rowCount():
-                self._artifact_result_layout.removeRow(0)
+            for row in self._artifact_result_rows.values():
+                self._artifact_result_layout.removeWidget(row)
+                retire_widget(row)
+            self._artifact_result_rows.clear()
             self._artifact_result_readouts.clear()
             for name, path, contract in results:
                 readout = FluentReadoutEdit(path)
                 self._artifact_result_readouts[name] = readout
-                self._artifact_result_layout.addRow(
-                    name.replace("_", " ").title(),
-                    readout,
+                row = FluentSettingRow(
+                    _device_label(name), readout, label_width=self._label_width,
+                    parent=self._artifact_result_frame,
                 )
+                self._artifact_result_rows[name] = row
+                self._artifact_result_layout.addWidget(row)
+        for name, row in self._artifact_result_rows.items():
+            row.set_label(_device_label(name), width=self._label_width)
         for name, path, contract in results:
             readout = self._artifact_result_readouts[name]
             readout.setText(path)
@@ -550,6 +629,23 @@ class LogicEditorView(QtWidgets.QWidget):
         self.draft_changed.emit(
             {"device_keys": {str(argument_name): str(combo.currentData() or "")}}
         )
+
+
+def _device_label(name: str) -> str:
+    return str(name).replace("_", " ").title()
+
+
+def _row_labels(projection: Mapping[str, object]) -> tuple[str, ...]:
+    """Every label the editor shows outside its two forms."""
+
+    labels = [_device_label(name) for name in (projection.get("device_options") or {})]
+    if projection.get("source_required"):
+        labels.append(str(projection.get("source_label") or "Signal"))
+    labels.extend(
+        _device_label(dict(raw).get("name") or "")
+        for raw in tuple(projection.get("artifact_results", ()) or ())
+    )
+    return tuple(labels)
 
 
 __all__ = ["LogicEditorView"]

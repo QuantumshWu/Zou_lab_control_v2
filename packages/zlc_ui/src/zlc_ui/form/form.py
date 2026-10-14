@@ -112,6 +112,8 @@ class FormFieldProps:
     required: bool = False
     unit: str = ""
     description: str = ""
+    #: What a blank optional box means, shown as its placeholder.
+    blank_label: str = ""
     minimum: int | float | None = None
     maximum: int | float | None = None
     choices: tuple[FormChoice, ...] = ()
@@ -173,8 +175,8 @@ class FormFieldProps:
             raise ValueError(f"field {self.key!r} label must be non-empty")
         if not isinstance(self.required, bool):
             raise TypeError(f"field {self.key!r} required must be bool")
-        if not isinstance(self.unit, str) or not isinstance(self.description, str):
-            raise TypeError(f"field {self.key!r} unit/description must be strings")
+        if not all(isinstance(text, str) for text in (self.unit, self.description, self.blank_label)):
+            raise TypeError(f"field {self.key!r} unit/description/blank_label must be strings")
         if not isinstance(self.unavailable_reason, str):
             raise TypeError(
                 f"field {self.key!r} unavailable_reason must be a string"

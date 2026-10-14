@@ -71,6 +71,9 @@ class AuthoringField:
     #: What the field wants written, for the operator: the syntax of an
     #: expression, the shape of a pair.  Shown where the value is typed.
     description: str = ""
+    #: What leaving an optional field blank DOES -- "camera's current", "full
+    #: sensor" -- shown in the empty box in place of a bare "(optional)".
+    blank_label: str = ""
     #: For a ``rows`` field: the fields of one row.  Its value is a tuple
     #: of rows, each a mapping of these names, built one row at a time --
     #: a derive's signals -- and every row is projected by these fields
@@ -80,8 +83,8 @@ class AuthoringField:
     def __post_init__(self) -> None:
         if not self.name or not self.value_type or not self.label:
             raise ValueError("authoring fields require name, value_type, and label")
-        if not isinstance(self.description, str):
-            raise TypeError("authoring field description must be text")
+        if not isinstance(self.description, str) or not isinstance(self.blank_label, str):
+            raise TypeError("authoring field description and blank_label must be text")
         if self.derived and (self.required or self.enabled_when is not None):
             raise ValueError(
                 f"derived field {self.name!r} is the node's to fill: it is neither "

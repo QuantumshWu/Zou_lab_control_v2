@@ -16,10 +16,10 @@ from .adapter import VirtualCamera, VirtualCameraConfig
 #: The ROI the camera opens with, as the real cameras configure theirs: four
 #: optional numbers, all blank for the whole sensor.
 _ROI_FIELDS = (
-    AuthoringField("roi_x", "int", "ROI x", None, required=False, minimum=0),
-    AuthoringField("roi_y", "int", "ROI y", None, required=False, minimum=0),
-    AuthoringField("roi_width", "int", "ROI width", None, required=False, minimum=1),
-    AuthoringField("roi_height", "int", "ROI height", None, required=False, minimum=1),
+    AuthoringField("roi_x", "int", "ROI x", None, required=False, minimum=0, blank_label="full sensor"),
+    AuthoringField("roi_y", "int", "ROI y", None, required=False, minimum=0, blank_label="full sensor"),
+    AuthoringField("roi_width", "int", "ROI width", None, required=False, minimum=1, blank_label="full sensor"),
+    AuthoringField("roi_height", "int", "ROI height", None, required=False, minimum=1, blank_label="full sensor"),
 )
 
 VIRTUAL_CAMERA_SCHEMA = AuthoringSchema(

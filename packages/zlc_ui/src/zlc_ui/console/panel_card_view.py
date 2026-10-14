@@ -411,7 +411,8 @@ class PanelCardView(FluentGroupBox):
             CARD_PAD, CARD_TITLE_PAD, CARD_TITLE_PAD, CARD_TITLE_PAD
         )
         band_layout.setSpacing(CARD_PAD)
-        band_layout.addWidget(self._title_label, 1)
+        # Centred on the band, so a one-line title sits level with Setting.
+        band_layout.addWidget(self._title_label, 1, QtCore.Qt.AlignVCenter)
         band_layout.addWidget(self.status_dot, 0, QtCore.Qt.AlignVCenter)
         self._title_commands = QtWidgets.QWidget(self._title_band)
         command_layout = QtWidgets.QHBoxLayout(self._title_commands)
@@ -665,9 +666,14 @@ class PanelCardView(FluentGroupBox):
         )
         # The caption is a NAME and names are read from the left, so it gives
         # up its tail; a shape is read from both ends and gives up its middle.
-        sizes: list[tuple[str, str | None, object]] = [
-            (self._caption(), None, QtCore.Qt.ElideRight)
-        ]
+        # The card's own id leads it in grey: it answers "which card", and
+        # the name after it is what the operator reads.
+        caption = self._caption()
+        sizes: list[tuple[str, str | None, object]] = (
+            [(self.panel_id, GREY, None), (caption[len(self.panel_id):], None, QtCore.Qt.ElideRight)]
+            if caption.startswith(self.panel_id) and len(caption) > len(self.panel_id)
+            else [(caption, None, QtCore.Qt.ElideRight)]
+        )
         if shape_sizes:
             sizes.append((" ", None, None))
             sizes.extend(shape_sizes)
@@ -718,7 +724,11 @@ class PanelCardView(FluentGroupBox):
                     )
                 )
             )
-        label.setText("<br>".join(lines))
+        # A line with nothing to say is not drawn: a blank second line held
+        # a one-line title at the top of the band, above its buttons.
+        label.setText("<br>".join(
+            line for line, plain in zip(lines, plain_lines) if plain.strip()
+        ))
         label.setToolTip("\n".join(line for line in plain_lines if line.strip()))
 
     def resizeEvent(self, event) -> None:  # noqa: N802 - Qt API

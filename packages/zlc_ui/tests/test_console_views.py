@@ -813,23 +813,28 @@ from zlc_ui.qt import ensure_qt_app
 from zlc_ui.console import LogicRowView
 app = ensure_qt_app(['test'])
 row = LogicRowView('Processor', 'processor'); row.show(); app.processEvents()
-assert not row.start_button.isEnabled()
-assert not row.stop_button.isEnabled()
+assert not row.run_button.isEnabled() and row.run_button.text() == 'Start'
 row.set_commands(can_start=True, can_stop=True)
 row.set_state('running', 'processing fake input')
 row.set_publishes((('out', '1', 'fake output'),))
 assert row.status_label.text() == 'processing fake input'
-assert row.stop_button.isEnabled()
-assert row.start_button.isEnabled()
-assert row.start_button.text() == 'Restart'
+# One lifecycle button: a running node offers Stop; Restart is in the menu.
+assert row.run_button.text() == 'Stop' and row.run_button.isEnabled()
+assert row.restart_action.isEnabled()
 assert 'out' in row.publishes_label.text()
 events = []
 row.start_requested.connect(lambda: events.append('start'))
+row.stop_requested.connect(lambda: events.append('stop'))
 row.edit_requested.connect(lambda: events.append('edit'))
-row.set_commands(can_start=True, can_stop=False)
-QtTest.QTest.mouseClick(row.start_button, QtCore.Qt.LeftButton)
+row.remove_requested.connect(lambda: events.append('remove'))
+QtTest.QTest.mouseClick(row.run_button, QtCore.Qt.LeftButton)
+row.restart_action.trigger()
+row.set_state('idle', 'stopped')
+assert row.run_button.text() == 'Start' and not row.restart_action.isEnabled()
+QtTest.QTest.mouseClick(row.run_button, QtCore.Qt.LeftButton)
 QtTest.QTest.mouseClick(row.edit_button, QtCore.Qt.LeftButton)
-assert events == ['start', 'edit']
+row.remove_action.trigger()
+assert events == ['stop', 'start', 'start', 'edit', 'remove']
 """
     )
 
@@ -915,8 +920,7 @@ publisher = handle._panel_publisher_rows['panel-1']
 assert tuple(view._logic_rows) == (handle._rows['camera-1'], publisher)
 assert not publisher.publishes_label.isHidden()
 assert all(button.isHidden() for button in (
-    publisher.start_button, publisher.preview_switch, publisher.stop_button,
-    publisher.remove_button,
+    publisher.run_button, publisher.preview_switch, publisher.more_button,
 ))
 assert not publisher.edit_button.isHidden()
 publisher_edits = []
@@ -946,15 +950,14 @@ handle.panel_publisher_draft_changed.connect(
 handle.open_panel_publisher_editor('panel-1', publisher_projection)
 publisher_editor = handle._panel_publisher_editors['panel-1']
 assert publisher_editor.source_combo is None
-assert publisher_editor.start_button.isHidden()
+assert publisher_editor.run_button.isHidden()
 publisher_editor.form.widget_for('roi_max').click()
 assert publisher_patches == [('panel-1', {'values': {'roi_max': False}})]
 assert view.tabs.indexOf(editor) >= 0
 assert view.tabs.indexOf(publisher_editor) >= 0
 assert view.tabs.currentWidget() is publisher_editor
-assert not editor.start_button.isEnabled()
-assert not editor.stop_button.isEnabled()
-assert not handle._rows['camera-1'].start_button.isEnabled()
+assert not editor.run_button.isEnabled()
+assert not handle._rows['camera-1'].run_button.isEnabled()
 editor.form.widget_for('repeat').setValue(3)
 artifact_picker = editor.artifact_form.widget_for('calibration_path')
 assert artifact_picker.browse.text() == 'Browse…'
@@ -1030,9 +1033,8 @@ running = dict(
 handle.set_logic_commands('camera-1', can_start=True, can_stop=True)
 handle.update_logic_editor('camera-1', running)
 assert not patches, patches
-assert editor.start_button.text() == 'Restart'
-assert editor.start_button.isEnabled()
-assert editor.stop_button.isEnabled()
+assert editor.run_button.text() == 'Stop' and editor.run_button.isEnabled()
+assert not editor.restart_button.isHidden() and editor.restart_button.isEnabled()
 # Mode-dependent inputs use this same editor and its ordinary Fluent forms.
 from zlc_atom.nodes.slm_feedback.logic_node import LOGIC_NODE as feedback
 from zlc_workbench.authoring_form import project_logic_schema, display_value
@@ -1877,14 +1879,14 @@ assert view.pause_switch.isEnabled()
 assert view.save_screenshot_button.isEnabled()
 assert preview.settings_button.isEnabled()
 for row in (task_row, camera_row):
-    assert not row.start_button.isEnabled()
-    assert not row.stop_button.isEnabled()
+    assert not row.run_button.isEnabled()
     assert not row.edit_button.isEnabled()
-    assert not row.remove_button.isEnabled()
-assert not task_row.stop_button.isVisible()
+    assert not row.more_button.isEnabled()
+    assert not row.remove_action.isEnabled()
+assert not task_row.run_button.isVisible()
 before = list(events)
 QtTest.QTest.mouseClick(view.add_panel_button, QtCore.Qt.LeftButton)
-QtTest.QTest.mouseClick(camera_row.start_button, QtCore.Qt.LeftButton)
+QtTest.QTest.mouseClick(camera_row.run_button, QtCore.Qt.LeftButton)
 assert events == before
 view.kind_combo.setCurrentIndex(0)
 assert view.kind_combo.currentData()[0] == 'plot'
@@ -1899,9 +1901,9 @@ assert not view.status_strip.action_button.isVisible()
 assert view.kind_combo.isEnabled()
 assert view.add_panel_button.isEnabled()
 assert preview.settings_button.isEnabled()
-assert camera_row.start_button.isEnabled()
+assert camera_row.run_button.isEnabled()
 assert camera_row.edit_button.isEnabled()
-assert camera_row.remove_button.isEnabled()
+assert camera_row.remove_action.isEnabled()
 
 """
     )
@@ -2241,11 +2243,10 @@ layout = row.layout().itemAt(0).layout()
 for index in range(layout.count()):
     widget = layout.itemAt(index).widget()
     if widget is not None and widget in (
-        row.start_button, row.preview_switch, row.stop_button,
-        row.edit_button, row.remove_button,
+        row.run_button, row.preview_switch, row.edit_button, row.more_button,
     ):
         order.append(widget)
-assert order.index(row.preview_switch) == order.index(row.start_button) + 1, (
+assert order.index(row.preview_switch) == order.index(row.run_button) + 1, (
     'the switch belongs immediately beside Start')
 
 row.set_task_takeover(True)
@@ -2301,7 +2302,7 @@ assert switch.isChecked() is False, 'the editor shows the stored preference'
 
 # Beside Start, in pixels: same row, immediately to its right.  A switch that
 # merely EXISTS somewhere is what an operator could not find.
-start = editor.start_button
+start = editor.run_button
 assert switch.isVisible() and start.isVisible()
 assert abs(switch.y() - start.y()) <= 2, (switch.geometry(), start.geometry())
 gap = switch.x() - (start.x() + start.width())
@@ -2367,8 +2368,10 @@ card.set_signal_choices((('source', (('Frames', '@logic/camera_measurement/frame
 signal = '@logic/camera_measurement/frames'
 project(card, signal, signal, 'panel-2@camera_measurement/frames')
 assert card._caption() == 'panel-2@camera_measurement/frames', card._caption()
-line = card._band_fragments()[0][0][0]
-assert line == 'panel-2@camera_measurement/frames', line
+line = card._band_fragments()[0]
+# The card's own id leads in grey; the name the operator reads follows it.
+assert line[0][:2] == ('panel-2', tested_module.GREY), line
+assert line[0][0] + line[1][0] == 'panel-2@camera_measurement/frames', line
 
 # The name itself is untouched, everywhere it is the NAME and not a caption.
 assert card._base_title == signal

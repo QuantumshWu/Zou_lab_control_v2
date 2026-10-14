@@ -23,6 +23,7 @@ from zlc_ui.fluent import (
     FluentStatusDot,
     FluentTabWidget,
     fluent_widget_stylesheet,
+    muted_note_label,
     scaled_px,
     window_pad,
 )
@@ -149,6 +150,16 @@ class TaskConsoleView(QtWidgets.QWidget):
         monitor_layout.setContentsMargins(0, 0, 0, 0)
         self.board = ConsoleBoardView()
         self.board.order_committed.connect(self.panel_order_committed.emit)
+        # An empty Monitor said nothing at all; it says how a panel arrives.
+        self.monitor_hint = muted_note_label(
+            "No panels yet.  Choose a Plot in the header and Add Panel, or turn on "
+            "Plot on a Logic row before starting it."
+        )
+        self.monitor_hint.setWordWrap(True)
+        self.monitor_hint.setContentsMargins(
+            scaled_px(10, minimum=6), scaled_px(10, minimum=6), scaled_px(10, minimum=6), 0
+        )
+        monitor_layout.addWidget(self.monitor_hint)
         self.scroll = FluentScrollArea()
         self.scroll.setWidgetResizable(True)
         self.scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
@@ -272,6 +283,7 @@ class TaskConsoleView(QtWidgets.QWidget):
 
     def set_cards(self, cards: tuple[PanelCardView, ...]) -> None:
         self.board.set_cards(tuple(cards))
+        self.monitor_hint.setVisible(not cards)
 
     def set_paused(self, paused: bool) -> None:
         """Show the state, so the button can ask for the other one."""

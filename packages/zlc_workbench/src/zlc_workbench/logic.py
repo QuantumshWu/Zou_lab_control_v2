@@ -665,7 +665,7 @@ def _resolve_workspace_resources(
             resources[spec.field_name] = spec.resolve(selected)
         except Exception as error:
             issues.append(
-                f"{spec.contract_id} resource {str(selected)!r} is invalid: {error}"
+                f"{spec.contract_id} resource “{selected}” is invalid: {error}"
             )
     return resources, issues
 

@@ -37,6 +37,7 @@ from .style import (
     BUTTON_PADDING_H,
     AUTO_SCALE_MARGIN,
     BG,
+    CARD_PAD,
     CARD_TITLE_PX,
     COMBO_TRI_SIZE,
     COMBO_WIDTH,
@@ -585,12 +586,16 @@ def muted_note_label(text: str) -> "QtWidgets.QLabel":
 
 
 class FluentFrame(QtWidgets.QFrame):
-    def __init__(self, parent=None, *, bordered: bool = True, round: tuple[str, ...] = ("NW", "NE", "SE", "SW")):
+    def __init__(self, parent=None, *, bordered: bool = True, rule: bool = False,
+                 round: tuple[str, ...] = ("NW", "NE", "SE", "SW")):
         super().__init__(parent)
         # ``bordered`` = a delineated flat card (1 px DIVIDER edge); False = a plain, edgeless region
-        # (a header / button strip that must not read as a boxed card).  The edge is PAINTED, never a
-        # stylesheet ``QFrame { border }`` rule -- that would cascade onto every child QFrame.
-        self._bordered = bool(bordered)
+        # (a header / button strip that must not read as a boxed card).  ``rule`` = one item of a
+        # list inside a card: no box, a DIVIDER hairline along its bottom -- a card inside a card
+        # doubled every border.  The edge is PAINTED, never a stylesheet ``QFrame { border }`` rule --
+        # that would cascade onto every child QFrame.
+        self._bordered = bool(bordered) and not rule
+        self._rule = bool(rule)
         corners = {corner.upper() for corner in round}
         top_left = _radius() if "NW" in corners else 0
         top_right = _radius() if "NE" in corners else 0
@@ -613,6 +618,11 @@ class FluentFrame(QtWidgets.QFrame):
         super().paintEvent(event)
         if self._bordered:
             stroke_card_border(self)
+        elif self._rule:
+            painter = QtGui.QPainter(self)
+            painter.setPen(QtGui.QPen(QtGui.QColor(DIVIDER), 1))
+            painter.drawLine(0, self.height() - 1, self.width(), self.height() - 1)
+            painter.end()
 
 
 class FluentPopup(QtWidgets.QFrame):
@@ -1038,11 +1048,12 @@ class FluentGroupBox(QtWidgets.QGroupBox):
 
     def _apply_chrome(self) -> None:
         # Flat card delineated by a CONTINUOUS 1 px DIVIDER border painted in ``paintEvent`` (below) --
-        # NOT Qt's own ``QGroupBox`` frame, which cuts a NOTCH in the top border where the title sits
-        # (the "border broken at the rounded title corner" look).  The stylesheet keeps ONLY a
-        # transparent body + the grey title pill; the white body and the unbroken border are painted
-        # UNDER the pill, so the pill draws on top and covers only its own segment of the full border.
-        # ``padding-top`` still reserves the title strip for child layout.
+        # NOT Qt's own ``QGroupBox`` frame, which cuts a NOTCH in the top border where the title sits.
+        # The title is a semibold heading INSIDE the card, inset like its content and centred in the
+        # strip ``padding-top`` reserves -- painted by paintEvent, because a sheet cannot set the
+        # weight of a group box title.  It was a grey pill on the card's corner, which read as the
+        # stub of a tab, and section titles came in two styles: the pill and the bold section label.
+        # The ::title rule only keeps Qt's own title text out of sight.
         self.setStyleSheet(
             f"""
             QGroupBox {{
@@ -1057,27 +1068,24 @@ class FluentGroupBox(QtWidgets.QGroupBox):
             QGroupBox::title {{
                 subcontrol-origin: margin;
                 subcontrol-position: top left;
-                background: {BG};
-                padding: {scaled_px(PADDING_V)}px {scaled_px(EDIT_PADDING_H)}px;
-                border-radius: {_radius()}px;
-                color: {self._zlc_title_color};
-                font: {fluent_font_size()}pt "{FONT}";
+                background: transparent;
+                color: transparent;
             }}
             """
         )
 
     def set_title_color(self, color: str) -> None:
-        """The ink of the title pill's text.
+        """The ink of the title.
 
         A bracket post wears its bracket's colour here, the colour the
-        preview's loop is drawn in; a spacer wears grey.  Re-applied through
-        the same stylesheet the constructor wrote, so there is one chrome.
+        preview's loop is drawn in; a spacer wears grey.  The title is
+        painted, so a new ink is a repaint.
         """
 
         value = str(color or TEXT)
         if getattr(self, "_zlc_title_color", None) != value:
             self._zlc_title_color = value
-            self._apply_chrome()
+            self.update()
 
     def set_selected(self, selected: bool) -> None:
         """Mark this card as the one the next edit acts on, or unmark it.
@@ -1125,9 +1133,9 @@ class FluentGroupBox(QtWidgets.QGroupBox):
             self.update()
 
     def paintEvent(self, event) -> None:
-        # Paint the body + a CONTINUOUS rounded border, THEN let Qt draw the grey title pill +
-        # text on top (super) -- so the pill covers its segment of the border, never the reverse,
-        # and the border is unbroken all the way round.
+        # The body, a CONTINUOUS rounded border, then the title.  Nothing of Qt's own is drawn: a
+        # Fluent group box is never checkable and has no frame of its own.
+        del event
         painter = QtGui.QPainter(self)
         painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
         radius = float(_radius())
@@ -1143,8 +1151,16 @@ class FluentGroupBox(QtWidgets.QGroupBox):
         painter.setPen(pen)
         painter.setBrush(QtCore.Qt.NoBrush)
         painter.drawRoundedRect(QtCore.QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), radius, radius)
+        if self.title() and self._zlc_strip_px:
+            font = QtGui.QFont(FONT, fluent_font_size())
+            font.setWeight(QtGui.QFont.DemiBold)
+            painter.setFont(font)
+            painter.setPen(QtGui.QColor(self._zlc_title_color))
+            pad = scaled_px(CARD_PAD)
+            band = QtCore.QRect(pad, 0, max(0, self.width() - 2 * pad), self._zlc_strip_px)
+            title = painter.fontMetrics().elidedText(self.title(), QtCore.Qt.ElideRight, band.width())
+            painter.drawText(band, QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter, title)
         painter.end()
-        super().paintEvent(event)
 
 
 #: What a button DOES, which is all its look may say.  A colour chosen per
@@ -1219,6 +1235,10 @@ def _button_stylesheet() -> str:
     QPushButton[dirty="true"] {{
         background: {ORANGE_TINT}; border-color: {ORANGE}; color: {ORANGE_DARK};
     }}
+    QPushButton[glyph="true"] {{
+        padding: 0px {scaled_px(4, minimum=2)}px;
+        font-size: {round(fluent_font_size() * 1.35)}pt;
+    }}
     QPushButton:disabled, QPushButton[role="primary"]:disabled,
     QPushButton[role="destructive_primary"]:disabled, QPushButton[dirty="true"]:disabled,
     QPushButton:checked:disabled {{
@@ -1246,8 +1266,25 @@ class FluentButton(QtWidgets.QPushButton):
         # (a button grid) keeps it.
         self.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
         self.setProperty("dirty", False)
+        self._mark_glyph()
         self.set_role(role)
         self.setStyleSheet(_button_stylesheet())
+
+    def setText(self, text: str) -> None:  # noqa: N802 - Qt API name
+        super().setText(text)
+        self._mark_glyph()
+
+    def _mark_glyph(self) -> None:
+        """A one-symbol label (×, ⋯, −) is drawn larger, with little padding.
+
+        At body size such a symbol was a speck in the middle of a button
+        padded for a word.
+        """
+
+        glyph = len(self.text()) == 1 and not self.text().isalnum()
+        if self.property("glyph") != glyph:
+            self.setProperty("glyph", glyph)
+            self._repolish()
 
     def role(self) -> str:
         return str(self.property("role"))
@@ -1369,6 +1406,9 @@ def _numeric_text_width(edit: QtWidgets.QLineEdit, right_edge: int | None = None
 
 class FluentLineEdit(QtWidgets.QLineEdit):
     valueNormalized = QtCore.pyqtSignal()
+    #: How the text is elided while the field is not being edited; None
+    #: scrolls it as any line edit does (see set_display_elide).
+    _display_elide = None
 
     def __init__(self, text: str = "", parent=None):
         super().__init__(text, parent)
@@ -1408,6 +1448,43 @@ class FluentLineEdit(QtWidgets.QLineEdit):
 
     def contextMenuEvent(self, event) -> None:  # noqa: N802 - Qt naming
         _apply_fluent_context_menu(self, event)
+
+    def set_display_elide(self, mode) -> None:
+        """Elide what does not fit (``QtCore.Qt.ElideMiddle``, ...) while the
+        field is not being edited; ``None`` scrolls as a line edit does.
+
+        A path shown from its head hid the very file name it was there to
+        name.  Only the PAINTING elides: ``text()`` stays whole, and the
+        field shows all of it again the moment it takes focus.
+        """
+
+        self._display_elide = mode
+        self.update()
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        mode = self._display_elide
+        if mode is None or self.hasFocus() or not self.text():
+            super().paintEvent(event)
+            return
+        option = QtWidgets.QStyleOptionFrame()
+        self.initStyleOption(option)
+        contents = self.style().subElementRect(QtWidgets.QStyle.SE_LineEditContents, option, self)
+        margins = self.textMargins()
+        # QLineEdit keeps two pixels either side of its text.
+        area = contents.adjusted(margins.left() + 2, margins.top(), -margins.right() - 2, -margins.bottom())
+        metrics = self.fontMetrics()
+        if metrics.horizontalAdvance(self.text()) <= area.width():
+            super().paintEvent(event)
+            return
+        painter = QtGui.QPainter(self)
+        self.style().drawPrimitive(QtWidgets.QStyle.PE_PanelLineEdit, option, painter, self)
+        painter.setPen(QtGui.QColor(TEXT if self.isEnabled() else PLACEHOLDER))
+        painter.setFont(self.font())
+        painter.drawText(
+            area, QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter,
+            metrics.elidedText(self.text(), mode, area.width()),
+        )
+        painter.end()
 
     def width_for(self, sample: str) -> int:
         """Width for complete text, including the actual style and text margins."""
@@ -2051,7 +2128,12 @@ class FluentPathEdit(QtWidgets.QWidget):
         # edit grows with the column via the stretch below); never a 150px floor that
         # pushes the Browse button off a narrow Edit tab.
         self.edit.setMinimumWidth(scaled_px(96, minimum=72))
+        # The file name is the end of a path: a field too narrow for all of it
+        # keeps the head and the name, and its tooltip carries the whole path.
+        self.edit.set_display_elide(QtCore.Qt.ElideMiddle)
+        self._hint = ""
         self.edit.textChanged.connect(lambda t: self.changed.emit(str(t)))
+        self.edit.textChanged.connect(lambda _text: self._show_tooltip())
         self.browse = FluentButton("Browse…", self)
         self.browse.clicked.connect(self._browse)
         self.refresh = FluentButton("Refresh", self)
@@ -2104,8 +2186,12 @@ class FluentPathEdit(QtWidgets.QWidget):
         self.edit.setPlaceholderText(str(text))
 
     def setToolTip(self, text: str) -> None:  # noqa: N802 - Qt API name
-        self.edit.setToolTip(str(text))
-        self.browse.setToolTip(str(text))
+        self._hint = str(text)
+        self._show_tooltip()
+        self.browse.setToolTip(self._hint)
+
+    def _show_tooltip(self) -> None:
+        self.edit.setToolTip("\n".join(part for part in (self.edit.text(), self._hint) if part))
 
 
 class FluentSectionLabel(QtWidgets.QLabel):
@@ -2149,12 +2235,13 @@ def setting_label_width(labels, *, minimum: int = 72) -> int:
 
 class FluentSettingRow(QtWidgets.QWidget):
     """One settings row -- the ONE param-row primitive for the whole frontend:
-    ``[grey fixed-width label | control flush-left, expanding]``.
+    ``[fixed-width label | control flush-left, expanding]``.
 
     THE design system (one logic everywhere): a form is built from exactly two primitives --
-    :class:`FluentSectionLabel` (bold, dark, own-line) for a GROUP header, and this row (grey
-    label, fixed-width column) for each control.  The section/row hierarchy is shown by
-    weight+colour ONLY -- never by indentation, never by a third colour.  Share ONE column width
+    :class:`FluentSectionLabel` (bold, dark, own-line) for a GROUP header, and this row (regular
+    weight, fixed-width column) for each control.  The section/row hierarchy is shown by
+    weight ONLY -- never by indentation.  Labels are TEXT: grey read as disabled beside a
+    required field, and grey is what a HINT wears.  Share ONE column width
     per form via :func:`setting_label_width` so the rows align.  Do NOT use a ``QFormLayout`` (its
     labels render dark + auto-width = a different style) and do NOT use a bare ``FluentLabel`` as a
     row/section label using the shared ``[QLabel | widget]`` row template."""
@@ -2189,7 +2276,7 @@ class FluentSettingRow(QtWidgets.QWidget):
         lbl.setFixedWidth(int(label_width) if label_width is not None else scaled_px(60, minimum=48))
         if isinstance(lbl, QtWidgets.QLabel):
             lbl.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
-            lbl.setStyleSheet(MUTED_LABEL_STYLE)
+            lbl.setStyleSheet(f"color: {TEXT}; background: transparent; border: none;")
         self._label = lbl                       # introspected by the layout-uniformity contract test
         h.addWidget(lbl)
         # Cells a host puts BESIDE the control -- a device's current reading
@@ -7569,8 +7656,9 @@ class FluentStatusStrip(FluentFrame):
     whole layout under the pointer every time a task started/finished).
 
     Severity is a DATA input mapped to the one palette here, in the one status vocabulary
-    (``zlc_ui.status.STATUS_SEVERITIES``): ``idle`` (grey), ``task`` (orange -- an ongoing
-    run's progress line), ``warning`` (amber advisory), ``error`` (red).
+    (``zlc_ui.status.STATUS_SEVERITIES``): ``idle`` (grey), ``task`` (accent dot, plain ink --
+    what just happened or is under way), ``warning`` (amber advisory), ``error`` (red).  Task
+    and warning shared the amber, so "added occupancy" read as something wrong.
     The shared precedent is the always-visible last-message-wins Log strip; this deviates
     consciously by adding severity colour + the action slot, which its separate popup/timer
     channels carried instead."""
@@ -7579,8 +7667,8 @@ class FluentStatusStrip(FluentFrame):
     #: by the status vocabulary itself: a word added there without a colour here fails at
     #: import, not in the first Qt slot that shows it.
     SEVERITIES = {
-        word: {"idle": (GREY, GREY), "task": (ORANGE, ORANGE_DARK),
-               "warning": (ORANGE, ORANGE_DARK), "error": (RED, RED)}[word]
+        word: {"idle": (GREY, GREY), "task": (ACCENT, TEXT),
+               "warning": (ORANGE, ORANGE_DARK), "error": (RED, RED_DARK)}[word]
         for word in STATUS_SEVERITIES
     }
 

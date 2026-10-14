@@ -655,12 +655,11 @@ class TaskConsoleHandle(QtCore.QObject):
                 row.dot.hide()
                 row.status_label.hide()
                 for button in (
-                    row.start_button,
+                    row.run_button,
                     # No node behind this row, so nothing here can be started
                     # and nothing decides what a Start would open.
                     row.preview_switch,
-                    row.stop_button,
-                    row.remove_button,
+                    row.more_button,
                 ):
                     button.hide()
                 row.edit_requested.connect(

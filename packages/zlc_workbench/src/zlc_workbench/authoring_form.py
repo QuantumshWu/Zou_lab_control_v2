@@ -224,6 +224,7 @@ def _project_field(field: AuthoringField) -> FormFieldProps:
             "pair": "two integers as y, x",
             "numeric_tuple": "comma-separated finite numbers",
         }.get(str(field.value_type), ""),
+        blank_label=field.blank_label,
         path_mode="dir" if str(field.value_type) == "folder" else "file",
         enabled_when=field.enabled_when,
     )

@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 from zlc_ui.fluent import (
+    ACCENT,
     GREEN,
     GREY,
     ORANGE,
@@ -42,12 +43,14 @@ class _DeviceCard(FluentFrame):
     parameter_committed = QtCore.pyqtSignal(str, str)
 
     def __init__(self, instance_id: str, parent=None) -> None:
-        super().__init__(parent)
+        # A row of its domain's card, ruled off from the next, not a card in
+        # a card: the nested borders doubled every edge.
+        super().__init__(parent, rule=True)
         self.instance_id = str(instance_id)
         self.form: FluentParameterForm | None = None
         self._collapsed = False
         outer = QtWidgets.QVBoxLayout(self)
-        outer.setContentsMargins(window_pad(0.6), window_pad(0.6), window_pad(0.6), window_pad(0.6))
+        outer.setContentsMargins(0, window_pad(0.3), 0, window_pad(0.6))
         outer.setSpacing(window_pad(0.35))
         header = QtWidgets.QHBoxLayout()
         self.collapse_button = FluentButton("−")
@@ -151,12 +154,10 @@ class _LiveDeviceCard(FluentFrame):
     device_log_requested = QtCore.pyqtSignal(str)
 
     def __init__(self, instance_id: str, parent=None) -> None:
-        super().__init__(parent, bordered=True)
+        super().__init__(parent, rule=True)
         self.instance_id = str(instance_id)
         outer = QtWidgets.QHBoxLayout(self)
-        outer.setContentsMargins(
-            window_pad(0.45), window_pad(0.35), window_pad(0.45), window_pad(0.35)
-        )
+        outer.setContentsMargins(0, window_pad(0.35), 0, window_pad(0.35))
         outer.setSpacing(window_pad(0.3))
         self.role_label = ElidedLabel("")
         self.detail_label = muted_note_label("")
@@ -542,7 +543,7 @@ class DeviceControlView(QtWidgets.QWidget):
         with signals_blocked(self.risk_switch):
             self.risk_switch.setChecked(bool(projection.get("risk_accepted", False)))
         self.risk_switch.setEnabled(bool(projection.get("risk_enabled", False)))
-        colours = {"ready": GREEN, "task": ORANGE, "warning": ORANGE, "error": RED}
+        colours = {"ready": GREEN, "task": ACCENT, "warning": ORANGE, "error": RED}
         units = {declared.key: declared.unit for declared in spec.fields}
         for key in spec.keys:
             field = fields[key]
@@ -1047,12 +1048,9 @@ class DeviceManagerView(QtWidgets.QWidget):
             instance_id = str(instance_id)
             widgets = self._discovered_widgets.get(instance_id)
             if widgets is None:
-                frame = FluentFrame(self.discovered_group, bordered=True)
+                frame = FluentFrame(self.discovered_group, rule=True)
                 row = QtWidgets.QHBoxLayout(frame)
-                row.setContentsMargins(
-                    window_pad(0.45), window_pad(0.35),
-                    window_pad(0.45), window_pad(0.35),
-                )
+                row.setContentsMargins(0, window_pad(0.35), 0, window_pad(0.35))
                 title = ElidedLabel("")
                 detail = muted_note_label("")
                 button = FluentButton("Add")

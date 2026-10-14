@@ -8,18 +8,33 @@ from zlc_ui.fluent import (
     GREEN,
     GREY,
     RED,
+    RED_DARK,
     ElidedLabel,
     FluentButton,
     FluentFrame,
     FluentLabel,
     FluentStatusDot,
+    popup_gap,
+    retire_widget,
     scaled_px,
+    setting_label_width,
 )
 from zlc_ui.fluent import PublishedItemsLegend
+from zlc_ui.fluent.fluent import _FluentRoundedMenu
+
+#: Every kind a row can carry, so the kind column is one width on every row
+#: and the status beside it starts at one x down the page.
+_KINDS = ("(measurement)", "(processor)", "(task)", "(panel publisher)")
 
 
 class LogicRowView(FluentFrame):
-    """A lifecycle-free row that emits only operator intent."""
+    """A lifecycle-free row that emits only operator intent.
+
+    One lifecycle button says the next thing the node can do -- Start while
+    it is stopped, Stop while it runs -- so a row no longer carries two
+    commands of which one is always dead.  Restart and Remove, the rare and
+    the destructive, sit behind the row's ``⋯``.
+    """
 
     start_requested = QtCore.pyqtSignal()
     stop_requested = QtCore.pyqtSignal()
@@ -41,20 +56,21 @@ class LogicRowView(FluentFrame):
         self._task_takeover = False
         outer = QtWidgets.QVBoxLayout(self)
         outer.setContentsMargins(scaled_px(12), scaled_px(8), scaled_px(12), scaled_px(8))
-        outer.setSpacing(scaled_px(4, minimum=3))
+        outer.setSpacing(scaled_px(6, minimum=4))
 
         top = QtWidgets.QHBoxLayout()
         top.setSpacing(scaled_px(8, minimum=5))
         self.dot = FluentStatusDot(size=14, color=GREY)
         self.name_label = ElidedLabel(self.title)
-        self.name_label.setMinimumWidth(0)
-        self.name_label.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
+        # Name and kind are fixed columns: every row's kind and status start
+        # at the same x, instead of floating with the length of the name.
+        self.name_label.setFixedWidth(scaled_px(200, minimum=150))
         self.kind_label = FluentLabel(f"({self.kind})")
         self.kind_label.setStyleSheet(f"color: {GREY}; background: transparent; border: none;")
+        self.kind_label.setFixedWidth(setting_label_width(_KINDS))
         self.status_label = ElidedLabel("idle")
         self.status_label.setMinimumWidth(0)
         self.status_label.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
-        self.start_button = FluentButton("Start", role="primary")
         #: Beside Start because it says what Start will DO: with it on, the
         #: node's declared preview opens as an ordinary panel, already wired
         #: to the signal.  A toggle CHIP, pressed in when on, so it reads as
@@ -65,31 +81,61 @@ class LogicRowView(FluentFrame):
             "Open this node's plot panel when it starts"
         )
         self.preview_switch.toggled.connect(self.auto_preview_changed.emit)
-        self.stop_button = FluentButton("Stop")
+        self.run_button = FluentButton("Stop", role="primary")
+        stop_width = self.run_button.sizeHint().width()
+        self.run_button.setText("Start")
+        # Wide enough for either word, so the row does not shift when it flips.
+        self.run_button.setMinimumWidth(max(stop_width, self.run_button.sizeHint().width()))
+        self.run_button.setEnabled(False)
+        self.run_button.clicked.connect(self._run_clicked)
         self.edit_button = FluentButton("Edit")
-        self.remove_button = FluentButton("Remove", role="destructive")
-        self.start_button.setEnabled(False)
-        self.stop_button.setEnabled(False)
-        self.start_button.clicked.connect(self.start_requested.emit)
-        self.stop_button.clicked.connect(self.stop_requested.emit)
         self.edit_button.clicked.connect(self.edit_requested.emit)
-        self.remove_button.clicked.connect(self.remove_requested.emit)
+        self.more_button = FluentButton("⋯")
+        self.more_button.setFixedWidth(self.more_button.minimumHeight())
+        self.more_button.setToolTip("More: Restart, Remove")
+        self.more_button.clicked.connect(self._show_more)
+        self.restart_action = QtWidgets.QAction("Restart", self)
+        self.restart_action.triggered.connect(self.start_requested.emit)
+        self.remove_action = QtWidgets.QAction("Remove", self)
+        self.remove_action.triggered.connect(self.remove_requested.emit)
         top.addWidget(self.dot)
-        top.addWidget(self.name_label, 1)
+        top.addWidget(self.name_label)
         top.addWidget(self.kind_label)
-        top.addWidget(self.status_label, 2)
+        top.addWidget(self.status_label, 1)
         for button in (
-            self.start_button,
+            self.run_button,
             self.preview_switch,
-            self.stop_button,
             self.edit_button,
-            self.remove_button,
+            self.more_button,
         ):
             top.addWidget(button)
         outer.addLayout(top)
 
         self.publishes_label = PublishedItemsLegend()
         outer.addWidget(self.publishes_label)
+        self._project_commands()
+
+    def _running(self) -> bool:
+        return self._state == "running"
+
+    def _run_clicked(self) -> None:
+        if self._running():
+            self.stop_requested.emit()
+        else:
+            self.start_requested.emit()
+
+    def _show_more(self) -> None:
+        """The row's rare commands, below its ``⋯`` -- built for this click."""
+
+        menu = _FluentRoundedMenu(self)
+        if self._running():
+            menu.addAction(self.restart_action)
+        menu.addAction(self.remove_action)
+        button = self.more_button
+        try:
+            menu.exec_(button.mapToGlobal(QtCore.QPoint(0, button.height() + popup_gap())))
+        finally:
+            retire_widget(menu)
 
     def set_preview_offered(self, offered: bool) -> None:
         """Show the switch only for a node that declares something to open.
@@ -126,14 +172,13 @@ class LogicRowView(FluentFrame):
         # status tick arrives ten times a second, so almost every write said
         # what the last one said -- and a stylesheet write re-parses the
         # sheet, repolishes the widget and schedules a repaint regardless.
-        colour = RED if state == "error" else GREY
+        colour = RED_DARK if state == "error" else GREY
         if colour != self._status_colour:
             self._status_colour = colour
             self.status_label.setStyleSheet(
                 f"color: {colour}; background: transparent; border: none;"
             )
-        running = state == "running"
-        self.start_button.setText("Restart" if running else "Start")
+        self._project_commands()
 
     def set_commands(self, *, can_start: bool, can_stop: bool) -> None:
         """Project presenter-owned command admission onto this row."""
@@ -150,14 +195,22 @@ class LogicRowView(FluentFrame):
 
     def _project_commands(self) -> None:
         enabled = not self._task_takeover
-        self.start_button.setEnabled(enabled and self._can_start)
+        running = self._running()
+        self.run_button.setText("Stop" if running else "Start")
+        # Starting is the row's one main action; stopping a running node is
+        # an ordinary command beside it.
+        self.run_button.set_role("standard" if running else "primary")
+        self.run_button.setEnabled(enabled and (self._can_stop if running else self._can_start))
         # It says what the next Start will do, so a row that cannot Start
         # cannot re-aim Start either.
         self.preview_switch.setEnabled(enabled)
-        self.stop_button.setEnabled(enabled and self._can_stop)
         self.edit_button.setEnabled(enabled)
-        self.remove_button.setEnabled(enabled)
-        self.stop_button.setVisible(not (self._task_takeover and self.kind == "task"))
+        self.more_button.setEnabled(enabled)
+        self.restart_action.setEnabled(enabled and running and self._can_start)
+        self.remove_action.setEnabled(enabled)
+        # A running Task's Stop is the status strip's; the row does not
+        # offer a second one beside it.
+        self.run_button.setVisible(not (self._task_takeover and self.kind == "task"))
 
     def set_publishes(self, rows: tuple[tuple[str, str, str], ...]) -> None:
         self.publishes_label.set_rows(tuple(tuple(str(value) for value in row) for row in rows))

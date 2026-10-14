@@ -20,10 +20,10 @@ PYLON_CAMERA_SCHEMA = AuthoringSchema(
         # and pixel format, and the camera refuses what it cannot do.
         AuthoringField("gain_db", "float", "Gain (dB)", 0.0),
         AuthoringField("trigger_source", "str", "Trigger source", "Line1"),
-        AuthoringField("roi_x", "int", "ROI x", None, required=False, minimum=0),
-        AuthoringField("roi_y", "int", "ROI y", None, required=False, minimum=0),
-        AuthoringField("roi_width", "int", "ROI width", None, required=False, minimum=1),
-        AuthoringField("roi_height", "int", "ROI height", None, required=False, minimum=1),
+        AuthoringField("roi_x", "int", "ROI x", None, required=False, minimum=0, blank_label="full sensor"),
+        AuthoringField("roi_y", "int", "ROI y", None, required=False, minimum=0, blank_label="full sensor"),
+        AuthoringField("roi_width", "int", "ROI width", None, required=False, minimum=1, blank_label="full sensor"),
+        AuthoringField("roi_height", "int", "ROI height", None, required=False, minimum=1, blank_label="full sensor"),
         # Unset by default, which is the honest answer for most machine-vision
         # sensors: no conversion stated, so its frames are the counts they are.
         AuthoringField(
