@@ -16,7 +16,11 @@ from zlc_ui.fluent import (
     signals_blocked, read_editable_combo, show_fluent_popup_for_anchor,
 )
 
-#: Where a value comes from, in the order the popup offers them.
+from ._layout import row_height
+
+#: Where a value comes from, in the order the popup offers them, by the
+#: words every surface says them in (the popup, a badge's tooltip, the Scan
+#: page's list of bound fields).
 _SOURCES = (("default", "Default"), ("api", "API"), ("config", "Config"))
 
 
@@ -129,7 +133,10 @@ class _BindingButton(QtWidgets.QAbstractButton):
             top = column.top() + ((room - stack) // 2 + index * (size + between)) / ratio
             rect = QtCore.QRectF(left, top, size / ratio, size / ratio)
             painter.setPen(QtCore.Qt.NoPen)
-            painter.setBrush(QtGui.QColor(color if self.isEnabled() else PLACEHOLDER).darker(
+            # A badge says what supplies the value whether or not it can be
+            # opened here: on a read-only card it keeps its binding's colour
+            # and only stops answering the pointer.
+            painter.setBrush(QtGui.QColor(color).darker(
                 120 if self.isEnabled() and self.underMouse() else 100))
             painter.drawEllipse(rect)
             if text:
@@ -235,6 +242,12 @@ class FluentScanLineEdit(FluentLineEdit):
             margin = scaled_px(10)
             layout.setContentsMargins(margin, margin, margin, margin)
             layout.setSpacing(scaled_px(6))
+            # Every row is a control's height, so the five rows keep one
+            # pitch and each label reads level with what it names: the read
+            # values were a text line tall and the rows came 31, 31, 27, 23
+            # apart.
+            for row in range(5):
+                layout.setRowMinimumHeight(row, row_height())
             layout.addWidget(FluentLabel("Scan"), 0, 0)
             self.scan_toggle = FluentSwitch("")
             layout.addWidget(self.scan_toggle, 0, 1, QtCore.Qt.AlignLeft)
@@ -261,13 +274,22 @@ class FluentScanLineEdit(FluentLineEdit):
             for widget in (self.config_name, self.default_value, self.effective_value):
                 widget.setFixedWidth(content_width)
             for widget in (self.default_value, self.effective_value):
-                widget.setFixedHeight(widget.fontMetrics().height())
+                widget.setFixedHeight(row_height())
                 # The values read in the column of the Config name's TEXT,
                 # not from the edge of its box.
                 widget.setIndent(field_text_inset())
             self.source_note.setFixedWidth(
                 self.config_name_label.sizeHint().width() + layout.horizontalSpacing() + content_width)
-            self.source_note.setFixedHeight(self.source_note.fontMetrics().lineSpacing() * 3)
+            # Two lines, whatever the source says: the popup keeps its shape
+            # as the source changes, and every note is worded to fit two
+            # (the name and the value are on the rows above it).  Three
+            # left a blank band under the usual two-line note.  Measured as
+            # the label lays out two lines, which is a pixel taller than two
+            # line spacings -- that cut the descenders of the second line.
+            self.source_note.ensurePolished()
+            self.source_note.setFixedHeight(self.source_note.fontMetrics().boundingRect(
+                QtCore.QRect(0, 0, self.source_note.width(), 1 << 16), QtCore.Qt.TextWordWrap, "Ag\nAg",
+            ).height())
             self.scan_toggle.toggled.connect(self._commit_binding)
             self.source_switch.activated.connect(self._choose_source)
             self.config_name.activated.connect(self._commit_config_key)
@@ -309,12 +331,12 @@ class FluentScanLineEdit(FluentLineEdit):
         if not source_text:
             if named:
                 source_text = (
-                    f"Saved Config '{config_key}' supplies this value." if effective else
+                    "The saved Config supplies this value." if effective else
                     "Config name is unassigned; using the Pulse default." if not config_key else
-                    f"Config '{config_key}' is not supplied; using the Pulse default."
+                    "That name is not supplied by Config; using the Pulse default."
                 )
             elif source == "api":
-                source_text = "An API caller may override this field; otherwise its Pulse default is used."
+                source_text = "An API caller may override it; otherwise the Pulse default is used."
             else:
                 source_text = "Using the Pulse default."
         default = default_text or self.text()
@@ -372,7 +394,10 @@ class FluentScanLineEdit(FluentLineEdit):
         self._field_state = state
         self.binding_button.scan = bool(scan)
         self.binding_button.source = source
-        summary = " + ".join((["Scan"] if scan else []) + ([source.upper()] if source != "default" else [])) or "Default"
+        # The note under the popup leaves the Config name to its own row;
+        # the tooltip, read alone, names it.
+        named = f"Config '{config_key}'" if source == "config" and config_key else dict(_SOURCES)[source]
+        summary = " + ".join((["Scan"] if scan else []) + ([named] if source != "default" else [])) or "Default"
         self.binding_button.setToolTip(f"{self._tooltip}\n{summary}\n{source_text}".strip())
         self.binding_button.update()
         self.setReadOnly(not editable or config_active)

@@ -729,7 +729,12 @@ def _binding_field_state(
     default_text: str = "",
     actual_text: str = "",
 ) -> dict[str, object]:
-    """Display the source of the next execution, distinct from its default."""
+    """Display the source of the next execution, distinct from its default.
+
+    The status is the note under the slot's popup, below its Config name and
+    its Effective value: it never repeats them, so it fits the note's two
+    lines whatever the name.
+    """
     state = dict(config_enabled=config_enabled, default_text=default_text)
     if binding is None:
         return state
@@ -743,15 +748,15 @@ def _binding_field_state(
         if value is None:
             status = (
                 "Config is off; using the Pulse default." if not config_enabled else
-                f"Config '{binding.config_key}' is not supplied; using the Pulse default."
+                "That name is not supplied by Config; using the Pulse default."
                 if binding.config_key else "Config name is unassigned; using the Pulse default."
             )
         else:
             active = True
             effective = actual_text or f"{format_quantity(value[0], '1')} {value[1]}"
-            status = f"Saved Config '{binding.config_key}' supplies {effective}. Open Config to edit its value."
+            status = "The saved Config supplies this value. Edit it on the Value Config page."
     elif binding.source == "api":
-        status = "An API caller may override this field; otherwise its Pulse default is used."
+        status = "An API caller may override it; otherwise the Pulse default is used."
     else:
         status = "Using the Pulse default."
     return dict(**state, scan=binding.scan, source=binding.source, config_active=active,
