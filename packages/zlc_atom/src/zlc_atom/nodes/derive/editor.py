@@ -293,7 +293,9 @@ class _OutputCard(FluentFrame):
         self.where_is.set_current(bool(row["where_is"]))
 
         self.op.set_current(row["op"] or None)
-        constant = number(row["with"]) is not None or (self.other.currentData() == _NUMBER and not row["with"])
+        # A number being typed stays in its box until it reads as one.
+        constant = number(row["with"]) is not None or (
+            self.other.currentData() == _NUMBER and (not row["with"] or self.constant.hasFocus()))
         self._fill(self.other, (*names, _NUMBER), _NUMBER if constant else row["with"])
         self.constant.setVisible(constant)
         if constant:
@@ -326,14 +328,17 @@ class _OutputCard(FluentFrame):
 
         # A run's failure names a row the schemas could not type; a row they
         # did type answers for itself.
-        error = answer["error"] or (context["failure"] if answer["schema"] is None else None)
-        stage = None if error is None else error.stage if hasattr(error, "stage") else error[1]
-        detail = "" if error is None else error.detail if hasattr(error, "detail") else error[2]
+        if answer["error"] is not None:
+            stage, detail = answer["error"].stage, answer["error"].detail
+        elif context["failure"] is not None and answer["schema"] is None:
+            _output, stage, detail = context["failure"]
+        else:
+            stage, detail = None, ""
         _show_error(self.value_error, detail if stage in ("name", "value") else "")
         for name, label in self.errors.items():
             _show_error(label, detail if stage == name else "")
-        self.preview.setVisible(error is None)
-        if error is None:
+        self.preview.setVisible(stage is None)
+        if stage is None:
             self.preview.setText(self._preview(row, answer, context))
 
     @staticmethod
@@ -343,6 +348,8 @@ class _OutputCard(FluentFrame):
             waiting = [name for _stage, name in references(row) if name in context["failed"]]
             if waiting:
                 return f"→ waits for {waiting[0]}"
+            if context["typed"]:
+                return "→ known after Start: it reads a code output"
             return "→ checked when the source publishes"
         notes = [describe_schema(schema)]
         reduced = answer["reducible"]
@@ -640,7 +647,7 @@ class DeriveEditor(QtWidgets.QWidget):
                     "answer": answers[index], "failed": failed,
                     "failure": failure if failure is not None and failure[0] == row["name"] else None,
                     "published": published.get(row["name"]), "inserts": inserts, "example": example,
-                    "frames_of": frames_of,
+                    "frames_of": frames_of, "typed": typing_inputs is not None,
                 }
                 card = self._cards[index]
                 self._contexts[id(card)] = context
