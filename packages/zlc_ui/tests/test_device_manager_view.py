@@ -170,9 +170,22 @@ opened = []
 closed_devices = []
 manager_handle.device_open_requested.connect(opened.append)
 manager_handle.device_close_requested.connect(closed_devices.append)
-manager.set_loaded_devices((('camera', 'qCMOS', 'camera.dcam'),))
+manager.set_loaded_devices((('camera', 'qCMOS', 'camera.dcam'), ('slm', 'SLM', 'slm.virtual')))
 manager.resize(900, 600); manager.show(); app.processEvents()
 card = manager._loaded_cards['camera']
+# The card's title row comes first; its devices stand under it, ruled
+# BETWEEN them and not under the last.
+title_row = manager.loaded_layout.itemAt(0).layout()
+assert title_row is not None and title_row.itemAt(0).widget().text() == 'Loaded session'
+assert card.y() > title_row.geometry().bottom()
+assert card._rule and not manager._loaded_cards['slm']._rule
+assert manager.lifecycle_button.role() == 'primary'
+manager.set_lifecycle('Shutdown devices', enabled=True, active=True)
+assert manager.lifecycle_button.role() == 'standard', 'taking the session down is not the run command'
+manager.set_lifecycle('Apply device changes', enabled=True, active=True, changed=True)
+assert manager.lifecycle_button.role() == 'primary'
+manager.set_loaded_devices((('camera', 'qCMOS', 'camera.dcam'),))
+assert not card._rule, 'the last item closes no list'
 assert card.role_label.text() == 'qCMOS'
 assert card.control_button.text() == 'Control'
 assert card.close_button.text() == 'Close'

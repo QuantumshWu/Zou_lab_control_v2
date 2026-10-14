@@ -1053,7 +1053,8 @@ class DeviceManagerView(QtWidgets.QWidget):
                 card.device_remote_toggled.connect(self.device_remote_toggled)
                 card.device_log_requested.connect(self.device_log_requested)
                 self._loaded_cards[instance_id] = card
-                self.loaded_layout.insertWidget(index, card)
+                # After the card's title row, which is the layout's first item.
+                self.loaded_layout.insertWidget(index + 1, card)
             card.set_record(
                 str(role),
                 str(type_id),
