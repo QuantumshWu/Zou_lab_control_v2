@@ -24,7 +24,9 @@ class ConsoleBoardView(QtWidgets.QWidget):
     an ordinary child widget at the operator's raw pointer position; the other
     cards do not move and there is no placeholder/ghost.  At release its
     top-left chooses the nearest grid anchor from the settled board, and that
-    anchor becomes the place that card was PUT.
+    anchor becomes the place that card was PUT.  Every card is held by its
+    strip, so that top-left is just above-left of the pointer whether or not
+    the card holds a picture: the operator aims with the pointer either way.
 
     Every card has one: authored by a drop, or seeded where it first appeared.
     The board keeps them and never writes over them -- what is on screen is
@@ -68,16 +70,23 @@ class ConsoleBoardView(QtWidgets.QWidget):
         # key is one card.  Kept, the replaced object stayed a shown, wired
         # child of the board behind the card that took its place.
         arriving = {card.panel_id: card for card in incoming}
-        for panel_id, card in tuple(self._cards.items()):
-            if arriving.get(panel_id) is not card:
-                card.retire_settings_popup()
-                # The host owns its adapter until asynchronous shutdown has
-                # drained replies. Retiring its temporary parent must not
-                # destroy that QObject underneath a completing gesture.
-                card.set_surface(None)
-                self._wired_cards.discard(card)
-                retire_widget(card)
+        leaving = tuple(
+            card
+            for panel_id, card in self._cards.items()
+            if arriving.get(panel_id) is not card
+        )
+        # The board's set changes BEFORE the leavers are emptied: an emptied
+        # card returns to its preset frame and says so, and a card still
+        # counted here would repack the board around itself on its way out.
         self._cards = arriving
+        for card in leaving:
+            card.retire_settings_popup()
+            # The host owns its adapter until asynchronous shutdown has
+            # drained replies. Retiring its temporary parent must not
+            # destroy that QObject underneath a completing gesture.
+            card.set_surface(None)
+            self._wired_cards.discard(card)
+            retire_widget(card)
         self._authored = {
             panel_id: place
             for panel_id, place in self._authored.items()
