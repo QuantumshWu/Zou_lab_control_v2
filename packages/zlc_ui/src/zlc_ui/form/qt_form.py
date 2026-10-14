@@ -96,6 +96,19 @@ class FormRuntimeContext:
     def labels(self) -> Mapping[str, object]:
         return coerce_choice_labels(self.choice_labels)
 
+
+def form_gap() -> int:
+    """The form's one gap: between two of its rows, and between two cells of
+    one row (the gap FluentSettingRow keeps between label and control).
+
+    Every row block of a form page keeps it -- a list field's rows, the
+    rows of a host that lays several forms out as one -- so a page has one
+    row pitch whichever widget holds its rows.
+    """
+
+    return scaled_px(6, minimum=4)
+
+
 def _value_error(field: FormFieldProps, message: str) -> ValueError:
     return ValueError(f"field {field.key!r}: {message}")
 
@@ -283,6 +296,10 @@ class _RowsEditor(QtWidgets.QWidget):
     entry, never a block of text with a syntax to get right -- and every
     cell is the ordinary control of its column's kind, wired live like
     every other control on the form.
+
+    Add stands on the field's own line, beside its label, and the rows
+    follow it a form gap apart: under the rows it was a button alone on a
+    line of its own, and the rows sat closer than the form's rows did.
     """
 
     def __init__(
@@ -303,22 +320,28 @@ class _RowsEditor(QtWidgets.QWidget):
         self.setSizePolicy(
             QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred
         )
-        gap = scaled_px(4, minimum=3)
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(gap)
-        self._rows_layout = QtWidgets.QVBoxLayout()
-        self._rows_layout.setContentsMargins(0, 0, 0, 0)
-        self._rows_layout.setSpacing(gap)
-        layout.addLayout(self._rows_layout)
+        layout.setSpacing(form_gap())
         self.add_button = FluentButton("Add")
         self.add_button.setToolTip(field.description)
         self.add_button.clicked.connect(self._add_pressed)
-        tail = QtWidgets.QHBoxLayout()
-        tail.setContentsMargins(0, 0, 0, 0)
-        tail.addWidget(self.add_button)
-        tail.addStretch(1)
-        layout.addLayout(tail)
+        head = QtWidgets.QHBoxLayout()
+        head.setContentsMargins(0, 0, 0, 0)
+        head.addWidget(self.add_button)
+        head.addStretch(1)
+        layout.addLayout(head)
+        self._rows_layout = QtWidgets.QVBoxLayout()
+        self._rows_layout.setContentsMargins(0, 0, 0, 0)
+        self._rows_layout.setSpacing(form_gap())
+        layout.addLayout(self._rows_layout)
+
+    def first_line_height(self) -> int:
+        """How tall the field's first line is: Add's, as the layout sizes it
+        (a control's height, which a button's text hint falls short of)."""
+
+        button = self.add_button
+        return button.sizeHint().expandedTo(button.minimumSize()).height()
 
     def rows(self) -> tuple[dict[str, object], ...]:
         return tuple(
@@ -374,7 +397,7 @@ class _RowsEditor(QtWidgets.QWidget):
         )
         beside = QtWidgets.QHBoxLayout(row)
         beside.setContentsMargins(0, 0, 0, 0)
-        beside.setSpacing(scaled_px(6, minimum=4))
+        beside.setSpacing(form_gap())
         cells: dict[str, QtWidgets.QWidget] = {}
         for column in self._field.columns:
             widget = FORM_WIDGET_HANDLERS[column.kind].build(
@@ -386,7 +409,8 @@ class _RowsEditor(QtWidgets.QWidget):
             cells[column.key] = widget
             beside.addWidget(widget, 1)
         remove = FluentButton("×", role="destructive")
-        remove.setFixedWidth(scaled_px(30, minimum=24))
+        # Square and as tall as the cells beside it, like every row's ×.
+        remove.setFixedWidth(remove.minimumHeight())
         remove.setToolTip("Remove this row")
         remove.clicked.connect(lambda _checked=False, row=row: self._remove(row))
         beside.addWidget(remove, 0)
@@ -1257,7 +1281,7 @@ class FluentParameterForm(QtWidgets.QWidget):
 
         self._layout = QtWidgets.QVBoxLayout(self)
         self._layout.setContentsMargins(0, 0, 0, 0)
-        self._layout.setSpacing(scaled_px(6, minimum=4))
+        self._layout.setSpacing(form_gap())
         self._layout.setSizeConstraint(QtWidgets.QLayout.SetMinimumSize)
         label_width = self._label_width or _form_label_width(spec.fields)
         # Built ONCE, with the values it opens on.  A form that was built on
@@ -1484,7 +1508,7 @@ class FluentParameterForm(QtWidgets.QWidget):
             )
             beside = QtWidgets.QHBoxLayout(holder)
             beside.setContentsMargins(0, 0, 0, 0)
-            beside.setSpacing(scaled_px(6, minimum=4))
+            beside.setSpacing(form_gap())
             beside.addWidget(widget, 1)
             beside.addWidget(picker, 0)
             if capped:
@@ -1502,6 +1526,10 @@ class FluentParameterForm(QtWidgets.QWidget):
                 )
             )
             label = automatic
+        elif isinstance(widget, _RowsEditor):
+            # A field of rows is lines tall; its label belongs on the first
+            # line, beside Add, not halfway down a list it does not name.
+            label = QtWidgets.QLabel(label)
         before, after = self._row_cells(field)
         row = FluentSettingRow(
             label,
@@ -1511,6 +1539,9 @@ class FluentParameterForm(QtWidgets.QWidget):
             after=after,
             parent=self,
         )
+        if isinstance(widget, _RowsEditor):
+            label.setFixedHeight(widget.first_line_height())
+            row.layout().setAlignment(label, QtCore.Qt.AlignTop)
         return row, automatic, cell, picker
 
     def _align_number_column(self) -> None:
