@@ -1172,7 +1172,6 @@ try:
     wait_for(lambda: console.logic[node].host is not None and console.logic[node].host.wait_ready(0))
     wait_for(lambda: schedule.acquisition_combo.currentText() == f'Auto \\u00b7 {node}')
     assert schedule.acquisition_combo.isVisible()
-    assert schedule.connection_card.title() == 'Connection \\u00b7 Acquisition'
     assert not schedule.connection_endpoint.isVisible() and not schedule.connection_button.isVisible()
     pulse_path = r'%s/pulses/imaging_test.json'
     assert editor.open_pulse(pulse_path, present=False)
@@ -1201,6 +1200,36 @@ try:
     play()
     assert console.logic[node].host.generation.value == generation
     assert seen and all(means[1] < means[0] and means[1] < means[2] for _value, means in seen.values())
+    # The operator's own path: On Pulse pressed again while the pulse still
+    # plays, wherever in its cycle the board is.  SAFE stops the triggers,
+    # the camera is restarted while none flow, and the new generation counts
+    # from the new pulse's first trigger -- every cycle bright, dim, bright.
+    schedule.acquisition_combo.setCurrentIndex(schedule.acquisition_combo.findData('auto'))
+    assert editor.control_action('run_repeats', {'repeats': 0})['accepted']
+
+    def press():
+        wait_for(schedule.run_button.isEnabled)
+        QtTest.QTest.mouseClick(schedule.run_button, QtCore.Qt.LeftButton)
+        wait_for(lambda: not editor._device_busy)
+        assert editor.running
+
+    def cycles_of(value):
+        return [means for gen, means in seen.values() if gen == value]
+
+    press()
+    playing = console.logic[node].host.generation.value
+    assert playing != generation
+    wait_for(lambda: len(cycles_of(playing)) >= 2)
+    press()
+    pressed = console.logic[node].host.generation.value
+    assert pressed != playing
+    assert editor.execution_snapshot()['acquisition']['armed'] == {'node_id': node, 'generation': pressed}
+    wait_for(lambda: len(cycles_of(pressed)) >= 4)
+    assert all(means[1] < means[0] and means[1] < means[2] for means in cycles_of(pressed)), cycles_of(pressed)
+    QtTest.QTest.mouseClick(schedule.stop_button, QtCore.Qt.LeftButton)
+    wait_for(lambda: not editor.running and not editor._stop_busy)
+    # Stop Pulse leaves the camera running.
+    assert console.logic[node].host.generation.value == pressed and console.logic[node].host.running
     assert console.stop_logic(node)
     wait_for(lambda: console.logic[node].host.observation.terminal)
     assert editor.control_action('open', {'path': pulse_path, 'discard_changes': True})['accepted']
@@ -2556,17 +2585,23 @@ async def client():
                 old = await call('lab_call', {'handle':'devices','method':'future_public_probe',
                     'arguments':{'note':'hold-editor','outcome':{'panel_id':panel_id}}})
                 await call('lab_action', {'action':'view.monitor','arguments':{}})
+                # The camera is idle now: choosing it as the Pulse's
+                # Acquisition makes Fire Start it and wait for its ready --
+                # no separate logic.start -> ready before the Fire.
                 again = await call('lab_batch', {'calls':[
-                    {'tool':'lab_action','arguments':{'action':'logic.start','arguments':{'node_id':node}}},
-                    {'tool':'lab_wait','arguments':{'node_id':node,'generation':{'$result':[0,'state','logic',0,'generation']},'until':'ready','timeout_seconds':10}},
+                    {'tool':'lab_editor_action','arguments':{'device_id':'sequencer','action':'acquisition','arguments':{'logic':node}}},
                     {'tool':'lab_pulse','arguments':{'action':'fire','device_id':'sequencer'}},
                     {'tool':'lab_wait_for','arguments':{'tool_name':'lab_pulse_state','arguments':{'device_id':'sequencer'},'path':['pending'],'equals':False,'timeout_seconds':10}},
                     {'tool':'lab_action','arguments':{'action':'logic.stop','arguments':{'node_id':node}}},
                 ]})
                 assert again['completed'], again
-                started_generation = again['results'][0]['result']['state']['logic'][0]['generation']
-                newest = again['results'][3]['result']['result']['acquisition']['armed']['generation']
-                assert newest != started_generation and newest != old['result']['generation']
+                chosen = again['results'][0]['result']
+                assert chosen['accepted'] and chosen['state']['acquisition']['choice'] == node, chosen
+                assert again['results'][1]['result']['accepted'], again['results'][1]
+                armed = again['results'][2]['result']['result']['acquisition']['armed']
+                assert armed['node_id'] == node, armed
+                newest = armed['generation']
+                assert newest != old['result']['generation']
                 latest = await call('lab_wait_for', {'tool_name':'lab_state','arguments':{'panel_id':panel_id},
                     'path':['console','panels',0,'dataset_ref','stream_generation','value'],'equals':newest,'timeout_seconds':15})
                 assert latest['matched'], latest

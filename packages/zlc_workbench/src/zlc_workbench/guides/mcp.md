@@ -69,9 +69,13 @@ never starts an idle one; a listed node id is Started when idle and Restarted
 when running; `''` (None) fires without touching any Measurement. Auto counts
 every running ready-reporting Measurement, a free-running waveform source
 (e.g. an IMU monitor) as much as a camera: with two running, Fire is refused
-before the board is touched until one is chosen or None is. If the camera is
+before the board is touched until one is chosen or None is. While a Task runs,
+Fire is refused the same way whenever it would re-arm something (Auto with
+nothing running, or None, still fires). A re-arm that fails after the load (an
+invalid Measurement draft, a run that ends before ready) does not fire and
+leaves the board SAFE holding the new program; read the error. If the camera is
 idle, either choose it explicitly so Fire starts it, or Start it once; do not
-add Start → ready before every Fire. A Task that is running refuses the re-arm.
+add Start → ready before every Fire.
 For a finite capture choose the Measurement explicitly. Wait for camera
 completion and the Pulse's pending/completion_pending flags to clear before
 beginning another capture. Cached board.firing=false alone is not

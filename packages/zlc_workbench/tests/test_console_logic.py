@@ -1092,8 +1092,10 @@ def test_on_pulse_rearm_resolves_and_waits_on_the_console_owner(presenter) -> No
 
     Auto counts every running Measurement that reports ready -- a
     free-running waveform source as much as a triggered camera -- so with
-    both running it refuses and restarts nothing.  A cancelled wait leaves
-    the restarted run running; a Task refuses the re-arm.
+    both running it refuses and restarts nothing.  A play superseded before
+    the owner turn restarts nothing; a cancelled wait leaves the restarted
+    run running; a Task refuses the re-arm, and is answered for the editor
+    to refuse it first.
     """
 
     from concurrent.futures import ThreadPoolExecutor
@@ -1152,15 +1154,32 @@ def test_on_pulse_rearm_resolves_and_waits_on_the_console_owner(presenter) -> No
             beat_until(answer.done)
             return answer.result()
 
-    assert presenter.acquisition_choices() == (("camera", False), ("imu_monitor", False))
+    assert presenter.acquisition_choices() == ("", (("camera", False), ("imu_monitor", False)))
     assert rearm("auto") is None and presenter.logic[camera].host is None
     # An explicit idle node is Started and answered once it is armed.
     node, first = rearm("camera")
     assert node == "camera" and first == generation(camera)
-    assert presenter.acquisition_choices() == (("camera", True), ("imu_monitor", False))
+    assert presenter.acquisition_choices() == ("", (("camera", True), ("imu_monitor", False)))
     # Auto restarts the one that runs.
     node, second = rearm("auto")
     assert node == "camera" and second != first and second == generation(camera)
+    # Stopped after the job was queued, before the owner turn ran it: the
+    # owner turn restarts nothing.
+    wanted = Event()
+    wanted.set()
+    with ThreadPoolExecutor(1) as pool:
+        answer = pool.submit(presenter._rearm_acquisition, "auto", wanted.is_set)
+        deadline = time.monotonic() + 2
+        while presenter._panel_interactions.empty() and time.monotonic() < deadline:
+            time.sleep(.0005)
+        assert not presenter._panel_interactions.empty()
+        wanted.clear()
+        beat_until(answer.done)
+        assert answer.result() is None
+    for _ in range(20):
+        presenter.beat()
+        time.sleep(.002)
+    assert generation(camera) == second
     # A free-running source running too: Auto refuses and restarts nothing.
     assert presenter.start_logic(imu)
     beat_until(lambda: presenter.logic[imu].host is not None and presenter.logic[imu].host.running)
@@ -1192,7 +1211,8 @@ def test_on_pulse_rearm_resolves_and_waits_on_the_console_owner(presenter) -> No
     beat_until(lambda: presenter.logic[imu].host.terminal)
     assert presenter.start_logic(holder)
     beat_until(lambda: presenter.logic[holder].host is not None and presenter.logic[holder].host.running)
-    with pytest.raises(RuntimeError, match="holder: stop the Task before On Pulse re-arms camera, "
+    assert presenter.acquisition_choices() == ("holder", (("camera", True), ("imu_monitor", False)))
+    with pytest.raises(RuntimeError, match="holder: stop the Task before this play re-arms camera, "
                        "or choose None under Acquisition"):
         rearm("auto")
     assert generation(camera) == restarted

@@ -9623,14 +9623,18 @@ class ConsolePresenter:
         host = binding.host
         return binding.pending is not None or (host is not None and host.running)
 
-    def acquisition_choices(self) -> tuple[tuple[str, bool], ...]:
-        """The Measurements an On Pulse can re-arm, each with whether it runs now.
+    def acquisition_choices(self) -> tuple[str, tuple[tuple[str, bool], ...]]:
+        """The running Task ("" when none), and the Measurements a play can re-arm.
 
-        The Seamless candidates (Measurements that report ready).  Owner
-        thread; reads only bindings, never finalizes a draft.
+        Each candidate -- a Seamless candidate, a Measurement that reports
+        ready -- comes with whether it runs now.  The Task is answered too,
+        so the Pulse Editor refuses a re-arm it would refuse before it
+        touches the board.  Owner thread; reads only bindings, never
+        finalizes a draft.
         """
 
-        return tuple(
+        active = self._active_task()
+        return "" if active is None else active.node_id, tuple(
             (node_id, self._acquiring(self.logic[node_id]))
             for node_id in self._acquisition_options("")
         )
@@ -9651,34 +9655,30 @@ class ConsolePresenter:
         Measurement, a free-running waveform source (an IMU) as much as a
         triggered camera, so with both running it refuses.  A node id is
         Started when idle and Restarted when running, as Seamless's
-        Acquisition logic is.  Returns the node and the generation that
-        reported ready; None when Auto found nothing running or
-        ``still_wanted`` turned False -- a run already restarted then stays
-        running, armed with no partial cycle.  Any refusal or a run that
-        ends before ready raises, naming the node.
+        Acquisition logic is.  Anything to re-arm is refused while a Task
+        runs.  Returns the node and the generation that reported ready;
+        None when Auto found nothing running or ``still_wanted`` turned
+        False -- before the owner turn, nothing is restarted; after it, the
+        restarted run stays running, armed with no partial cycle.  Any
+        refusal or a run that ends before ready raises, naming the node.
         """
 
-        from .pulse_editor import auto_acquisition
+        from .pulse_editor import resolve_acquisition
 
         def restart() -> object:
+            # The play may have been stopped or closed after this job was
+            # queued and before the waiting worker could withdraw it; still_wanted
+            # reads the editor's operation, which this same thread writes.
+            if not still_wanted():
+                return None
             if self._closing:
                 raise RuntimeError("Task Console is closing")
-            options = self._acquisition_options("")
-            if choice == "auto":
-                # Again here, on the turn that acts: the editor's own check
-                # ran before the board was touched and may be stale now.
-                node_id = auto_acquisition(self.acquisition_choices())
-                if node_id is None:
-                    return None
-            else:
-                node_id = choice
-            active = self._active_task()
-            if active is not None:
-                raise RuntimeError(
-                    f"{active.node_id}: stop the Task before On Pulse re-arms {node_id}, "
-                    "or choose None under Acquisition"
-                )
-            if node_id not in options:
+            # Again here, on the turn that acts: the editor's own check ran
+            # before the board was touched and may be stale now.
+            node_id = resolve_acquisition(choice, self.acquisition_choices())
+            if node_id is None:
+                return None
+            if node_id not in self._acquisition_options(""):
                 raise ValueError(f"{node_id!r} is not an available acquisition Measurement")
             binding = self.logic[node_id]
             was_running = self._acquiring(binding)
@@ -9686,13 +9686,13 @@ class ConsolePresenter:
                 raise RuntimeError(f"{node_id}: {binding.draft_error or 'could not start'}")
             host = binding.pending.host if binding.pending is not None else binding.host
             self._report(
-                f"{node_id} {'restarted' if was_running else 'started'} for On Pulse",
+                f"{node_id} {'restarted' if was_running else 'started'} for a Pulse Editor play",
                 severity="task",
             )
             return node_id, host
 
         try:
-            armed = self._ask_owner(restart, lambda: not still_wanted(), "On Pulse was stopped")
+            armed = self._ask_owner(restart, lambda: not still_wanted(), "the play was stopped")
         except InterruptedError:
             return None
         if armed is None:

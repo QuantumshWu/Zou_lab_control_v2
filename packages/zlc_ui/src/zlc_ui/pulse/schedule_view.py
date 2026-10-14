@@ -1731,7 +1731,6 @@ class PulseScheduleView(QtWidgets.QWidget):
         bar.addWidget(control_area, 1)
 
         connection_area = FluentGroupBox("Connection")
-        self.connection_card = connection_area
         connection_area.setFixedWidth(px(252, minimum=212))
         connection_layout = QtWidgets.QVBoxLayout(connection_area)
         connection_layout.setContentsMargins(*card_margins)
@@ -2190,9 +2189,8 @@ class PulseScheduleView(QtWidgets.QWidget):
     def set_acquisition(self, choices: tuple[tuple[str, str], ...], selected: str) -> None:
         """Project what On Pulse re-arms: (label, value) items and the chosen value.
 
-        The card is named for it too, so "under Acquisition" in a refusal
-        points at something on screen; the tooltip repeats the whole chosen
-        label, which a long node name can push past the collapsed box.
+        The tooltip repeats the whole chosen label, which a long node name
+        can push past the collapsed box.
         """
 
         with signals_blocked(self.acquisition_combo):
@@ -2210,9 +2208,8 @@ class PulseScheduleView(QtWidgets.QWidget):
             "On Pulse, Hold and Step stop the board, start or restart this Measurement "
             "with its current settings, wait until it is armed, then play. Auto restarts "
             "the one running Measurement and never starts an idle one. Stop Pulse leaves "
-            "it running. None plays without restarting."
+            "it running. A running Task refuses any restart. None plays without restarting."
         )
-        self.connection_card.setTitle("Connection · Acquisition")
         self.acquisition_combo.show()
 
     def _request_connection(self) -> None:

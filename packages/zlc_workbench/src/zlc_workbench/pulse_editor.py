@@ -108,7 +108,7 @@ _LOG = logging.getLogger(__name__)
 
 __all__ = [
     "PulseEditorPresenter",
-    "auto_acquisition",
+    "resolve_acquisition",
     "preview_candidate",
     "programmable_ports",
     "project_ports",
@@ -127,22 +127,41 @@ __all__ = [
 _TIME_UNITS = TIME_UNIT_CHOICES
 
 
-def auto_acquisition(options: Sequence[tuple[str, bool]]) -> str | None:
-    """The Measurement an Auto play re-arms: the one that runs, None when none does.
+def resolve_acquisition(
+    choice: str, answer: tuple[str, Sequence[tuple[str, bool]]],
+) -> str | None:
+    """The Measurement a play with ``choice`` re-arms; None when it re-arms none.
 
-    ``options`` are (node id, running) pairs.  Two or more running is
-    refused, naming them: which one the pulse triggers is the operator's
-    choice, never a guess.  The editor asks before it touches the board and
-    the console asks again on its owner turn, so both refuse in one wording.
+    ``answer`` is the Task Console's: the running Task ("" when none) and
+    (node id, running) per candidate.  "" (None) re-arms nothing.  "auto" is
+    the one candidate that runs, and nothing when none does; two or more
+    running are refused, naming them -- which one the pulse triggers is the
+    operator's choice, never a guess.  A node id is itself.  Whatever would
+    be re-armed is refused while a Task runs: a Task's acquisitions are its
+    own.  The editor asks before it touches the board and the console asks
+    again on its owner turn, so both refuse in one wording.
     """
 
+    if not choice:
+        return None
+    task, options = answer
     running = [node for node, live in options if live]
+    if choice == "auto" and not running:
+        return None
+    if task:
+        target = choice if choice != "auto" else ", ".join(running)
+        raise RuntimeError(
+            f"{task}: stop the Task before this play re-arms {target}, "
+            "or choose None under Acquisition"
+        )
+    if choice != "auto":
+        return choice
     if len(running) > 1:
         raise RuntimeError(
             f"{len(running)} Measurements are running ({', '.join(running)}); "
             "choose one under Acquisition, or None"
         )
-    return running[0] if running else None
+    return running[0]
 
 
 def _bracket_vms(
@@ -1256,11 +1275,12 @@ class PulseEditorPresenter:
         #: resolved from and the digest the board reported for it.
         self._held_program: tuple[int, str] | None = None
         #: The Task Console's two answers when the experiment opened this
-        #: editor: which Measurements can be re-armed (and which run), and
-        #: the Start/Restart-and-wait that every play gesture makes between
-        #: LOAD and FIRE.  None: a standalone editor, which re-arms nothing.
+        #: editor: the running Task and which Measurements can be re-armed
+        #: (and which run), and the Start/Restart-and-wait that every play
+        #: gesture makes between LOAD and FIRE.  None: a standalone editor,
+        #: which re-arms nothing.
         self._acquisition_link: tuple[
-            Callable[[], tuple[tuple[str, bool], ...]],
+            Callable[[], tuple[str, tuple[tuple[str, bool], ...]]],
             Callable[[str, Callable[[], bool]], tuple[str, str] | None],
         ] | None = None
         #: "auto", "" (None) or a node id; lives as long as the window.
@@ -1421,7 +1441,7 @@ class PulseEditorPresenter:
                 "save": "path: explicit Pulse JSON path; saves the current draft, not a compiled pulse",
                 "validate": "no arguments; compile on the command worker using loaded Config values, without loading or firing; inspect validation afterward",
                 "fire": "no arguments; submit the ordinary asynchronous On Pulse action; it re-arms the selected acquisition between load and fire (state.acquisition.armed names the generation); inspect pending/board/error afterward",
-                "acquisition": "logic: one value of state.acquisition.choices -- 'auto' restarts the one running ready-reporting Measurement and starts none (two or more running: fire is refused before the board is touched), '' (None) plays without restarting, a listed node_id is Started when idle and Restarted when running; applies to fire, Hold and Step",
+                "acquisition": "logic: one value of state.acquisition.choices -- 'auto' restarts the one running ready-reporting Measurement and starts none (two or more running: fire is refused before the board is touched); while a Task runs anything to re-arm is refused before the board is touched, '' (None) plays without restarting, a listed node_id is Started when idle and Restarted when running; applies to fire, Hold and Step",
                 "stop": "no arguments; submit the ordinary asynchronous Stop action",
                 "period_name": "period_id, name: display name; stable period_id does not change",
                 "duration": "period_id, value, unit: time rounded to the existing clock grid",
@@ -3752,14 +3772,15 @@ class PulseEditorPresenter:
 
     def link_acquisitions(
         self,
-        choices: Callable[[], tuple[tuple[str, bool], ...]],
+        choices: Callable[[], tuple[str, tuple[tuple[str, bool], ...]]],
         rearm: Callable[[str, Callable[[], bool]], tuple[str, str] | None],
     ) -> None:
         """Play into the Task Console's acquisitions (wired by the experiment flow).
 
-        ``choices`` answers on this thread which Measurements can be re-armed
-        and whether each runs; ``rearm(choice, still_wanted)`` Starts or
-        Restarts one and waits for its ready, on the command worker.
+        ``choices`` answers on this thread the running Task ("" when none)
+        and which Measurements can be re-armed and whether each runs;
+        ``rearm(choice, still_wanted)`` Starts or Restarts one and waits for
+        its ready, on the command worker.
         """
 
         if not callable(choices) or not callable(rearm):
@@ -3785,15 +3806,18 @@ class PulseEditorPresenter:
     def _acquisition_items(self) -> tuple[tuple[str, str], ...]:
         """(label, value) for every choice, each label saying what a play would do.
 
-        What a press does comes first, so a node name too long for the
-        collapsed box is what gets cut, never the action.
+        Auto's label is what ``resolve_acquisition`` would answer now,
+        refusals included; the whole label is the combo's tooltip, for a
+        node name the collapsed box cuts.
         """
 
         assert self._acquisition_link is not None
-        options = self._acquisition_link[0]()
+        task, options = self._acquisition_link[0]()
         running = [node for node, live in options if live]
         if not running:
             auto = "Auto · nothing running"
+        elif task:
+            auto = "Auto · Task running — choose None"
         elif len(running) == 1:
             auto = f"Auto · {running[0]}"
         else:
@@ -3801,7 +3825,10 @@ class PulseEditorPresenter:
         return (
             (auto, "auto"),
             ("None", ""),
-            *((f"{'Restart' if live else 'Start'} · {node}", node) for node, live in options),
+            *(
+                (f"{node} · running" if live else f"{node} · idle (On Pulse starts it)", node)
+                for node, live in options
+            ),
         )
 
     def _project_acquisition(self) -> None:
@@ -3825,23 +3852,32 @@ class PulseEditorPresenter:
         Returns the busy summary, the re-arm to make between LOAD and FIRE
         (None when nothing is linked or None is chosen) and the choice it is
         made with -- taken now, so a choice changed while the command runs
-        is the next play's.  An Auto that cannot pick (two or more running)
-        is refused here, warned and answered None: the label already said
-        so, and the board keeps playing what it played.  The console
-        resolves Auto again on its own turn, which catches a race.
+        is the next play's.  What the console would refuse now -- an Auto
+        that cannot pick (two or more running), or anything to re-arm while
+        a Task runs -- is refused here, warned and answered None: the label
+        already said so, and the board keeps playing what it played.  The
+        console resolves again on its own turn, which catches a race.
         """
 
         link, choice = self._acquisition_link, self._acquisition_choice
         if link is None or not choice:
             return f"{busy}...", None, choice
-        node: str | None = choice
-        if choice == "auto":
-            try:
-                node = auto_acquisition(link[0]())
-            except RuntimeError as error:
-                self._warn(f"{error}; the board was not touched", present=present)
-                return None
+        try:
+            node = resolve_acquisition(choice, link[0]())
+        except RuntimeError as error:
+            self._warn(f"{error}; the board was not touched", present=present)
+            return None
         return (f"{busy}..." if node is None else f"{busy} · re-arming {node}..."), link[1], choice
+
+    @staticmethod
+    def _armed_summary(done: str, armed: tuple[str, str] | None) -> str:
+        """What a play that succeeded says, naming what it re-armed.
+
+        The generation as the viewer prints it (its first eight characters);
+        the whole id stays in execution_snapshot.
+        """
+
+        return done if armed is None else f"{done} · {armed[0]} re-armed (generation {armed[1][:8]})"
 
     def request_fire(self, *, present: bool = True) -> bool:
         """Submit the same nonblocking On Pulse action as the editor button.
@@ -3928,12 +3964,7 @@ class PulseEditorPresenter:
                     self._digest = state.applied_digest
                     self._digest_revision = authored_revision
                 self.refresh()
-                # The generation as the viewer prints it (its first eight
-                # characters); the whole id stays in execution_snapshot.
-                self.view.set_summary(
-                    "Started" if armed is None
-                    else f"Started · {armed[0]} re-armed (generation {armed[1][:8]})"
-                )
+                self.view.set_summary(self._armed_summary("Started", armed))
             else:
                 if not state.firing:
                     self._release_drive()
@@ -5481,6 +5512,10 @@ class PulseEditorPresenter:
             self._held_point = held
             self._acquisition_armed = armed if error is None else None
             self._settle_hold(held, count, state, error, revision, present=present)
+            if error is None and armed is not None:
+                # Every Hold and Step opens a new generation of what it
+                # re-armed; say so, as On Pulse does.
+                self.view.set_summary(self._armed_summary("Held", armed))
             if error is not None and state.firing and previous_run is not None:
                 self._finite_run = previous_run
                 self._watch_completion()

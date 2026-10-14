@@ -4776,11 +4776,12 @@ def test_connect_hold_step_and_sync_run_on_the_device_worker(sequence) -> None:
             board.events.append("rearm")
             return "camera_measurement", "g7"
 
-        presenter.link_acquisitions(lambda: (("camera_measurement", True),), rearm)
+        camera_running = lambda: ("", (("camera_measurement", True),))
+        presenter.link_acquisitions(camera_running, rearm)
         assert view.acquisition == ((
             ("Auto · camera_measurement", "auto"),
             ("None", ""),
-            ("Restart · camera_measurement", "camera_measurement"),
+            ("camera_measurement · running", "camera_measurement"),
         ), "auto")
         # Only callables are kept: anything else would break every beat.
         with pytest.raises(TypeError):
@@ -4790,9 +4791,13 @@ def test_connect_hold_step_and_sync_run_on_the_device_worker(sequence) -> None:
         view.scan_hold_requested.emit()
         worker.deliver_until(lambda: not presenter._device_busy)
         assert board.events == ["safe", "load", "rearm", "fire forever"]
+        # Each Hold and Step opens a new generation, and says so.
+        assert view.summary == "Held · camera_measurement re-armed (generation g7)"
+        view.summary = ""
         assert presenter.invoke_public("step_scan_point", {"delta": 1}) is True
         worker.deliver_until(lambda: not presenter._device_busy)
         assert board.events[-4:] == ["safe", "load", "rearm", "fire forever"]
+        assert view.summary == "Held · camera_measurement re-armed (generation g7)"
         board.events.clear()
         view.fire_requested.emit()
         assert view.summary == "Starting · re-arming camera_measurement..."
@@ -4834,7 +4839,7 @@ def test_connect_hold_step_and_sync_run_on_the_device_worker(sequence) -> None:
                 time.sleep(0.01)
             return None
 
-        presenter.link_acquisitions(lambda: (("camera_measurement", True),), blocked)
+        presenter.link_acquisitions(camera_running, blocked)
         asked.clear()
         board.events.clear()
         view.fire_requested.emit()
@@ -4848,19 +4853,22 @@ def test_connect_hold_step_and_sync_run_on_the_device_worker(sequence) -> None:
 
         # Auto with two running is refused before the board is touched: the
         # pulse already playing keeps playing, for On Pulse, Hold and MCP.
-        presenter.link_acquisitions(lambda: (("camera_measurement", True),), rearm)
+        presenter.link_acquisitions(camera_running, rearm)
         view.fire_requested.emit()
         worker.deliver_until(lambda: not presenter._device_busy)
         assert presenter.running is True
         lease = presenter._drive_lease
         presenter.link_acquisitions(
-            lambda: (("camera_measurement", True), ("imu_monitor", True)), rearm,
+            lambda: ("", (("camera_measurement", True), ("imu_monitor", False))), rearm,
+        )
+        assert view.acquisition[0][2:] == (
+            ("camera_measurement · running", "camera_measurement"),
+            ("imu_monitor · idle (On Pulse starts it)", "imu_monitor"),
+        )
+        presenter.link_acquisitions(
+            lambda: ("", (("camera_measurement", True), ("imu_monitor", True))), rearm,
         )
         assert view.acquisition[0][0] == ("Auto · 2 running — choose", "auto")
-        assert view.acquisition[0][2:] == (
-            ("Restart · camera_measurement", "camera_measurement"),
-            ("Restart · imu_monitor", "imu_monitor"),
-        )
         board.events.clear()
         asked.clear()
         warned = len(view.warnings)
@@ -4882,6 +4890,32 @@ def test_connect_hold_step_and_sync_run_on_the_device_worker(sequence) -> None:
         worker.deliver_until(lambda: not presenter._device_busy)
         assert board.events[:3] == ["safe", "load", "rearm"] and asked == ["camera_measurement"]
         presenter.select_acquisition("auto")
+
+        # A running Task refuses whatever would be re-armed, also before the
+        # board is touched: the pulse keeps playing.  With nothing running
+        # Auto re-arms nothing, so a Task does not stand in the way.
+        lease = presenter._drive_lease
+        presenter.link_acquisitions(lambda: ("slm_feedback", (("camera_measurement", True),)), rearm)
+        assert view.acquisition[0][0] == ("Auto · Task running — choose None", "auto")
+        board.events.clear()
+        asked.clear()
+        warned = len(view.warnings)
+        view.fire_requested.emit()
+        presenter.control_action("acquisition", {"logic": "camera_measurement"})
+        view.scan_hold_requested.emit()
+        assert not presenter._device_busy and board.events == [] and asked == []
+        assert presenter.running is True and presenter._drive_lease is lease
+        assert view.warnings[warned:] == [
+            "slm_feedback: stop the Task before this play re-arms camera_measurement, "
+            "or choose None under Acquisition; the board was not touched",
+        ] * 2
+        presenter.link_acquisitions(lambda: ("slm_feedback", (("camera_measurement", False),)), rearm)
+        presenter.select_acquisition("auto")
+        view.fire_requested.emit()
+        worker.deliver_until(lambda: not presenter._device_busy)
+        # Not refused: the console resolves Auto again on its turn, to nothing.
+        assert board.events[:3] == ["safe", "load", "rearm"] and asked == ["auto"]
+        assert board.events[3].startswith("fire")
         view.stop_requested.emit()
         worker.deliver_until(lambda: not presenter._stop_busy)
 
@@ -4890,7 +4924,7 @@ def test_connect_hold_step_and_sync_run_on_the_device_worker(sequence) -> None:
             board.events.append("rearm")
             raise RuntimeError("camera_measurement: the camera did not arm")
 
-        presenter.link_acquisitions(lambda: (("camera_measurement", True),), refused)
+        presenter.link_acquisitions(camera_running, refused)
         board.events.clear()
         view.fire_requested.emit()
         worker.deliver_until(lambda: not presenter._device_busy)
