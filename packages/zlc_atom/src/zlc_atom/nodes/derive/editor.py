@@ -437,8 +437,9 @@ class _CodeCard(FluentFrame):
             self._fit_height()
         self.inserts.show_choices(context["inserts"], None)
         self.inserts.setVisible(bool(context["inserts"]))
+        # The example is for an empty box; written code speaks for itself.
         _set_text(self.example, context["example"])
-        self.example.setVisible(bool(context["example"]))
+        self.example.setVisible(bool(context["example"]) and not row["code"].strip())
         answer, failure = context["answer"], context["failure"]
         error = "" if not row["code"].strip() else (
             answer["error"].detail if answer["error"] is not None
@@ -499,6 +500,11 @@ class DeriveEditor(QtWidgets.QWidget):
         self.footer.setWordWrap(True)
         layout.addWidget(self.footer)
 
+    def set_mutation_enabled(self, enabled: bool) -> None:
+        self.add.setEnabled(enabled)
+        for card in self._cards:
+            card.setEnabled(enabled)
+
     # -- what the cards ask -------------------------------------------------
 
     def schema_of(self, card, name):
@@ -524,12 +530,17 @@ class DeriveEditor(QtWidgets.QWidget):
         self.empty.setVisible(not self._cards)
         self.card_edited()
 
+    def _card(self, kind):
+        card = _CodeCard(self) if kind == "code" else _OutputCard(self)
+        card.setEnabled(self.add.isEnabled())
+        return card
+
     def _add(self, kind) -> None:
         taken = {card.row["name"] for card in self._cards}
         ordinal = 1
         while f"output_{ordinal}" in taken:
             ordinal += 1
-        card = _CodeCard(self) if kind == "code" else _OutputCard(self)
+        card = self._card(kind)
         card.row = dict(ROW_DEFAULTS, name=f"output_{ordinal}")
         if kind != "code" and self._members:
             card.row["value"] = self._members[0]
@@ -609,10 +620,10 @@ class DeriveEditor(QtWidgets.QWidget):
                 if index < len(self._cards) and self._cards[index].kind != kind:
                     self._contexts.pop(id(self._cards[index]), None)
                     retire_widget(self._cards[index])
-                    self._cards[index] = _CodeCard(self) if kind == "code" else _OutputCard(self)
+                    self._cards[index] = self._card(kind)
                     self.cards.insertWidget(index, self._cards[index])
                 elif index == len(self._cards):
-                    self._cards.append(_CodeCard(self) if kind == "code" else _OutputCard(self))
+                    self._cards.append(self._card(kind))
                     self.cards.addWidget(self._cards[-1])
                 earlier = {earlier_row["name"]: answer["schema"]
                            for earlier_row, answer in zip(rows[:index], answers[:index])}

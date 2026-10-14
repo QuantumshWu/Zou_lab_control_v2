@@ -855,6 +855,12 @@ def typed_outputs(rows, inputs: Mapping[str, DatasetSchema] | None) -> tuple[dic
     """
     names = _row_names(rows)
     answers, typed = [], {}
+
+    def typeable(row):
+        reads = references(row) if not row["code"] else ()
+        return inputs is not None and not row["code"] and not any(
+            name in typed and typed[name] is None for _, name in reads)
+
     for index, raw in enumerate(rows):
         answer = {"schema": None, "error": None, "reducible": None}
         answers.append(answer)
@@ -866,9 +872,18 @@ def typed_outputs(rows, inputs: Mapping[str, DatasetSchema] | None) -> tuple[dic
             answer["error"] = error
             if names[index]:
                 typed.setdefault(names[index], None)
+            if error.stage == "statistic" and isinstance(raw, Mapping):
+                # What an unfinished statistic would reduce is known without it.
+                prefix = {**complete_row(raw), "statistic": "", "over": ""}
+                if typeable(prefix):
+                    trace = {}
+                    try:
+                        _structured(prefix, lambda name: _lookup(name, inputs, typed), trace)
+                    except DeriveError:
+                        pass
+                    answer["reducible"] = trace.get("reducible")
             continue
-        reads = references(row) if not row["code"] else ()
-        if inputs is None or row["code"] or any(name in typed and typed[name] is None for _, name in reads):
+        if not typeable(row):
             typed[row["name"]] = None
             continue
         trace = {}
