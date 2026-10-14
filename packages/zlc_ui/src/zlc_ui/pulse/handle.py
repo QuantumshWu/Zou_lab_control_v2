@@ -82,7 +82,6 @@ class PulseEditorHandle(QtCore.QObject):
 
     # -- the board -------------------------------------------------------
     connection_requested = QtCore.pyqtSignal(str, str)
-    acquisition_selected = QtCore.pyqtSignal(str)
     fire_requested = QtCore.pyqtSignal()
     stop_requested = QtCore.pyqtSignal()
     sync_requested = QtCore.pyqtSignal()
@@ -133,7 +132,7 @@ class PulseEditorHandle(QtCore.QObject):
             "bracket_add_requested",
             "run_repeats_committed",
             "visible_ports_committed", "fill_port_requested", "clear_port_requested",
-            "feedback_requested", "connection_requested", "acquisition_selected", "stop_requested",
+            "feedback_requested", "connection_requested", "stop_requested",
             "sync_requested", "save_requested", "load_requested",
         ):
             getattr(schedule, name).connect(getattr(self, name))
@@ -365,9 +364,6 @@ class PulseEditorHandle(QtCore.QObject):
 
     def set_connection(self, connection: ConnectionVM) -> None:
         self._view.schedule_view.set_connection(connection)
-
-    def set_acquisition(self, choices: tuple[tuple[str, str], ...], selected: str) -> None:
-        self._view.schedule_view.set_acquisition(choices, selected)
 
     # -------------------------------------------------------------- the scan
 
