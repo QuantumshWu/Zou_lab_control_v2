@@ -27,6 +27,7 @@ from zlc_ui.fluent import (
     add_row_switch,
     FluentTreeComboBox,
     FONT,
+    field_text_inset,
     fill_grouped_choice_combo,
     fluent_font_size,
     retire_widget,
@@ -665,6 +666,15 @@ class LogicEditorView(QtWidgets.QWidget):
             self._artifact_result_readouts.clear()
             for name, path, contract in results:
                 readout = FluentReadoutEdit(path)
+                # A value standing in the field column starts where the
+                # fields' text starts, not on the boxes' edge: a readout is
+                # flush with its own left edge, so it is indented by a
+                # field's text inset.
+                margins = readout.textMargins()
+                readout.setTextMargins(
+                    margins.left() + field_text_inset(), margins.top(),
+                    margins.right(), margins.bottom(),
+                )
                 self._artifact_result_readouts[name] = readout
                 row = FluentSettingRow(
                     _device_label(name), readout, label_width=self._label_width,
