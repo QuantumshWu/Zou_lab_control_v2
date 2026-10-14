@@ -37,6 +37,21 @@ accepted flag confirms submission, not hardware completion. A failed/unknown
 write is inspected, never automatically replayed. Use concrete normal tools;
 the optional developer tool profile exposes reflection APIs for diagnosis.
 
+`lab_close(scope='session')` requests Shutdown; scope `experiment` closes the
+application, and `editor` with `device_id` closes just that Control. Unsaved Pulse,
+Config or Subpulse drafts return `status='needs_confirmation'`, the editor's
+question, draft paths and `discard`/`cancel` choices. Decide autonomously from
+the current task and draft context, using the same call with `decision='discard'`
+or `decision='cancel'`, or save the drafts first. Routine confirmation choices
+are normal tool interactions; they do not require asking the human each time.
+Nothing starts closing while that question awaits a decision. Cancel preserves
+the drafts and Session; saving the drafts before a new close also resolves it.
+`closing` means asynchronous cleanup, while `closed` means it completed.
+For Session shutdown observe `lab_state.session_open=false`; closing the whole
+experiment ends this endpoint. Do not replay an uncertain device operation.
+Developer owner APIs also accept `discard_changes=true` for an explicit discard;
+without it they return the confirmation text without opening a GUI dialog.
+
 ## acquisition
 
 Camera Measurement publishes complete cycles with all authored frames, pixel

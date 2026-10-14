@@ -2051,9 +2051,26 @@ import httpx2
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 from zlc_ui import ensure_qt_app
+from zlc_ui.qt import QtCore, QtWidgets
 from zlc_workbench.apps.task_console import create_experiment_flow
 from zlc_workbench.apps.mcp import start_server
 app = ensure_qt_app([])
+dialogs = []
+watch_close_dialogs = Event()
+cleaning_up = False
+def dismiss_unexpected_dialog():
+    if not watch_close_dialogs.is_set():
+        return
+    dialog = app.activeModalWidget()
+    if isinstance(dialog, QtWidgets.QDialog):
+        dialogs.append([label.text() for label in dialog.findChildren(QtWidgets.QLabel)])
+        # Run in Qt's real nested modal loop: a regression must fail, not
+        # strand the subprocess waiting for a human to press Discard.
+        dialog.accept() if cleaning_up else dialog.reject()
+dialog_watchdog = QtCore.QTimer()
+dialog_watchdog.setInterval(10)
+dialog_watchdog.timeout.connect(dismiss_unexpected_dialog)
+dialog_watchdog.start()
 flow = create_experiment_flow(workspace=WORKSPACE, template="virtual")
 with socket.socket() as held:
     held.bind(("127.0.0.1", 0))
@@ -2448,12 +2465,71 @@ async def client():
                         remote_done = await waiting_remote
                         assert not remote_done.is_error and remote_done.structured_content["reached"]
                         assert int(count_path.read_text()) == connection_count
+                        # These are actual window closes reached through the
+                        # persistent STDIO connector, with a genuinely dirty
+                        # editor. No confirmation callback is replaced.
+                        await edit("period_name", {"period_id":"load", "name":"Unsaved MCP close"})
+                        watch_close_dialogs.set()
+                        for close_args in ({"scope":"session"}, {"scope":"experiment"},
+                                           {"scope":"editor", "device_id":"sequencer"}):
+                            question = await forwarded.call_tool("lab_close", close_args)
+                            assert not question.is_error, question.content
+                            confirmation = question.structured_content
+                            assert confirmation["status"] == "needs_confirmation" and not confirmation["accepted"]
+                            assert confirmation["choices"] == ["discard", "cancel"]
+                            assert confirmation["confirmations"][0]["device_id"] == "sequencer"
+                            assert "unsaved" in confirmation["confirmations"][0]["message"]
+                            assert "pulse" in {d["kind"] for d in confirmation["confirmations"][0]["drafts"]}
+                            cancelled = await forwarded.call_tool("lab_close", {**close_args, "decision":"cancel"})
+                            assert cancelled.structured_content["status"] == "cancelled"
+                            assert (await call("lab_state"))["session_open"]
+                            assert (await call("lab_editor_state", {"device_id":"sequencer"}))["dirty"]
+                            assert not dialogs, dialogs
+                        for handle, method in (("devices", "shutdown_active"),
+                                               ("devices", "close"),
+                                               ("devices", "toggle_lifecycle"),
+                                               ("experiment", "close")):
+                            refused = await forwarded.call_tool("lab_call", {
+                                "handle":handle, "method":method, "arguments":{}})
+                            assert not dialogs, (handle, method, dialogs)
+                            if handle == "experiment":
+                                assert refused.is_error and "unsaved" in str(refused.content).lower()
+                            else:
+                                assert not refused.is_error, refused.content
+                                assert refused.structured_content["result"] is False
+                            pulse = await call("lab_editor_state", {"device_id":"sequencer"})
+                            assert pulse["dirty"] and not pulse["closing"]
+                            assert "unsaved" in pulse["last_warning"].lower()
+                            assert (await call("lab_state"))["session_open"]
+                        await edit("save", {"path":"pulses/mcp_checked.json"})
+                        await edit("config.edit", {"rows":[["close_check", 2, "ms"]]})
+                        refused = await forwarded.call_tool("lab_call", {
+                            "handle":"devices", "method":"shutdown_active", "arguments":{}})
+                        assert not dialogs and not refused.is_error, (dialogs, refused.content)
+                        assert refused.structured_content["result"] is False
+                        pulse = await call("lab_editor_state", {"device_id":"sequencer"})
+                        assert pulse["config"]["draft_dirty"] and not pulse["closing"]
+                        assert "config" in pulse["last_warning"].lower()
+                        await edit("config.save", {"path":"pulses/close_config.json"})
+                        await edit("save", {"path":"pulses/mcp_checked.json"})
+                        await edit("subpulse.edit", {"edit":"duration", "period_id":local_period,
+                                                     "value":4, "unit":"ms"})
+                        refused = await forwarded.call_tool("lab_call", {
+                            "handle":"devices", "method":"shutdown_active", "arguments":{}})
+                        assert not dialogs and not refused.is_error, (dialogs, refused.content)
+                        assert refused.structured_content["result"] is False
+                        pulse = await call("lab_editor_state", {"device_id":"sequencer"})
+                        assert pulse["subpulse"]["dirty"] and not pulse["closing"]
+                        assert "subpulse" in pulse["last_warning"].lower()
+                        assert (await call("lab_state"))["session_open"]
                 operator_code = code.replace(", '--tools', 'developer'", "")
                 async with stdio_client(StdioServerParameters(command=sys.executable, args=["-c",operator_code], env=dict(os.environ))) as (sr, sw):
                     async with ClientSession(sr, sw) as operator:
                         await operator.initialize()
                         offered = {t.name for t in (await operator.list_tools()).tools}
-                        assert {"lab_guide", "lab_catalog", "lab_devices", "lab_results", "lab_recipes"} <= offered
+                        assert {"lab_guide", "lab_catalog", "lab_devices", "lab_results", "lab_recipes", "lab_close"} <= offered
+                        question = await operator.call_tool("lab_close", {})
+                        assert question.structured_content["status"] == "needs_confirmation"
                         assert not {"lab_handles", "lab_api", "lab_call", "lab_intent"} & offered
                         forbidden = await operator.call_tool("lab_call", {"handle":"devices", "method":"snapshot", "arguments":{}})
                         assert forbidden.is_error and "developer" in str(forbidden.content)
@@ -2470,7 +2546,7 @@ async def client():
                             await readonly.initialize()
                             tools = {item.name for item in (await readonly.list_tools()).tools}
                             assert {'lab_state','lab_guide','lab_catalog','lab_artifact','lab_results'} <= tools
-                            assert not {'lab_save','lab_review_points','lab_batch','lab_action','lab_initialize'} & tools
+                            assert not {'lab_save','lab_review_points','lab_batch','lab_action','lab_initialize','lab_close'} & tools
                             refused_write = await readonly.call_tool('lab_save',{'panel_id':panel_id,'path':'data/refused.png'})
                             assert refused_write.is_error and not (Path(WORKSPACE)/'data/refused.png').exists()
                 # A frozen owner must not execute an old queued write after
@@ -2482,6 +2558,20 @@ async def client():
                 await asyncio.sleep(.6)
                 rows = (await call("lab_state"))["console"]["logic"]
                 assert all(row["api_name"] != "derive" for row in rows)
+                # Explicit discard applies to all three unsaved drafts and
+                # still uses the ordinary asynchronous session shutdown.
+                await edit("period_name", {"period_id":"load", "name":"Discard this MCP draft"})
+                await edit("config.edit", {"rows":[["close_check", 3, "ms"]]})
+                question = await call("lab_close")
+                assert question["status"] == "needs_confirmation"
+                assert {d["kind"] for d in question["confirmations"][0]["drafts"]} == {"pulse", "config", "subpulse"}
+                closing = await call("lab_close", {"decision":"discard"})
+                assert closing["accepted"] and closing["status"] in {"closing", "closed"}, closing
+                retired = await call("lab_wait_for", {"tool_name":"lab_state", "arguments":{},
+                    "path":["session_open"], "equals":False, "timeout_seconds":10})
+                assert retired["matched"], retired
+                assert not (await call("lab_state"))["session_open"]
+                assert not dialogs, dialogs
 
 pool = ThreadPoolExecutor(max_workers=1)
 future = pool.submit(lambda: asyncio.run(client()))
@@ -2497,6 +2587,8 @@ try:
     future.result(timeout=1)
     print("MCP_ROUNDTRIP_PASS")
 finally:
+    cleaning_up = True
+    watch_close_dialogs.set()
     release_editor_gate()
     close_mcp()
     close_readonly()

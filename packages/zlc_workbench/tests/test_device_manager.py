@@ -707,7 +707,7 @@ def test_an_active_draft_change_reconciles_without_replacing_or_shutting_session
     reconciled: list[object] = []
     shut_down: list[object] = []
 
-    def prepare(active, candidate, close_keys):
+    def prepare(active, candidate, close_keys, *, present=True, discard_changes=False):
         prepared.append((active, candidate, close_keys))
         return lambda: active
 
@@ -754,7 +754,7 @@ def test_loaded_close_targets_one_key_and_missing_device_remains_applyable(
     prepared: list[tuple[InstallationConfig, tuple[str, ...]]] = []
     shut_down: list[object] = []
 
-    def prepare(active, candidate, close_keys):
+    def prepare(active, candidate, close_keys, *, present=True, discard_changes=False):
         assert active is session
         prepared.append((candidate, close_keys))
 
@@ -816,7 +816,7 @@ def test_reconcile_failure_keeps_the_active_session_and_apply_state(tmp_path, ca
     reconciled: list[object] = []
     shut_down: list[object] = []
 
-    def prepare(_active, _candidate, _close_keys):
+    def prepare(_active, _candidate, _close_keys, *, present=True, discard_changes=False):
         def fail():
             if _close_keys:
                 installation.close()
@@ -872,7 +872,7 @@ def test_partial_failure_adopts_effective_config_and_refreshes_views(tmp_path) -
     session = _session(installed, installation_config=initial)
     refreshed: list[object] = []
 
-    def prepare(active, _candidate, _close_keys):
+    def prepare(active, _candidate, _close_keys, *, present=True, discard_changes=False):
         def work():
             installed.pop("camera")
             active.installation_config = effective
@@ -905,7 +905,7 @@ def test_projection_refresh_failure_retries_without_running_hardware_again(tmp_p
     hardware_calls: list[bool] = []
     refresh_calls: list[bool] = []
 
-    def prepare(active, candidate, _close_keys):
+    def prepare(active, candidate, _close_keys, *, present=True, discard_changes=False):
         def work():
             hardware_calls.append(True)
             active.installation_config = candidate
@@ -1453,7 +1453,7 @@ def test_devices_from_the_fabric_or_another_machine_refuse_remote(
             ("full", "rig", "sequencer.hardware", {"host": "BENCH.lab.test", "port": 18865}),
         ),
         initialize_session=lambda _candidate: session,
-        prepare_reconcile=lambda active, _candidate, _keys: lambda: active,
+        prepare_reconcile=lambda active, _candidate, _keys, **_close_options: lambda: active,
     )
     assert manager.toggle_lifecycle() is True
     monkeypatch.setattr(endpoint, "local_ipv4_addresses", listed_on_a_press)
@@ -1603,7 +1603,7 @@ def _tunable_apparatus(value: int = 1) -> InstallationConfig:
     )
 
 
-def _app_reconcile(session, candidate, keys):
+def _app_reconcile(session, candidate, keys, *, present=True, discard_changes=False):
     """The embedding's reconcile contract: a maintenance barrier over the
     plan's affected keys before any device closes (ARCHITECTURE_DESIGN §6)."""
 

@@ -242,6 +242,7 @@ def _guard_window_close(
     stopping = False
     closing = False
     retired = False
+    present_close_errors = True
 
     def retire() -> None:
         window.presenter.close(present=False)
@@ -254,7 +255,7 @@ def _guard_window_close(
         window.presenter.cancel_preview_close()
         message = f"PulseGUI could not close: {error}"
         window.set_summary(message)
-        window.show_warning(message)
+        window.presenter._warn(message, present=present_close_errors)
         if refresh_timer is not None:
             refresh_timer.start()
 
@@ -267,12 +268,13 @@ def _guard_window_close(
         request_close()
 
     def guard() -> bool:
-        nonlocal closing, stopping
+        nonlocal closing, stopping, present_close_errors
         if retired:
             return all(close() for close in close_workers)
         if closing:
             return False
         if not stopping:
+            present_close_errors = window.presenter._present_messages
             # Asked before anything stops, so a Cancel leaves the window as
             # it was: its board-status beat running and its summary untouched.
             # Asked once: a close re-entered inside the question's modal

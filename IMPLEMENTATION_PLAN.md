@@ -459,6 +459,8 @@
 
 ### 2.5 Device Control与settings provenance
 
+- 2026-10-13 MCP关闭确认：`lab_close`把原Pulse owner的未保存Pulse/Config/Subpulse问题、路径与discard/cancel选项返回AI，AI按当前任务自主决策再提交选择，不要求每次人工审批。确认前不启动关闭；cancel保留草稿和Session，discard复用原窗口guard、worker与Shutdown。旧公开整体/单设备关闭也贯通非模态参数，异步关闭失败保留last_warning且不弹框。既有真实HTTP/Qt/STDIO用例先复现Shutdown弹出Unsaved pulse，再验证确认、取消、三稿丢弃与完成后状态可读；相关手动GUI关闭及Devices生命周期7项通过。正式exec_退出探针经正常工具发现后HTTP/STDIO均收到关闭成功并清理连接记录；未改传输生命周期。仅虚拟设备，测试进程已退出，未操作真实实验。
+
 - 2026-10-13 MCP原生实验工作流完成：客户端配置生成/连接诊断；必填插件用途与GUI同源说明、无Init能力目录；`lab_guide`；原生Layout寿命配方及有限配置/启动组合；Scan自己的只读时间预算；原生Fit表与Figure reader读回。批量支持前步JSON字段引用，拒绝、未就绪、过期generation和取消终态均阻止后续写；长等待不要求模型逐次维持且审核请求提前返回。科学点选沿原审核窗口确认/Stop，物理操作仍交人。保存最新结果必须等原Frozen更新成功，失败明确保留旧图并拒绝冒充新图保存；GUI与MCP共用snapshot_error。operator/developer分层覆盖直接及batch调用。
 - 完成证据：正式Qt应用+原生STDIO、无shell/源码/其它可执行工具的新代理迭代3轮寿命；最后一轮40次MCP、97.02s操作阶段（工具占用2.20s），采集中35site fit可读、最终自动追到revision168、Figure保存读回同generation/revision。独立Calibration44次、201.48s（工具19.03s含等待），单次50周期、98候选经原审核保留35、三readout均35usable及8份原生Figure读回；独立Pulse/SLM44次、95.28s（工具2.63s），Config编辑/编译/有限Fire/连续Fire/Stop及Context求解/Send/保存重载成功。临时另一SLM目标的求解不收敛被真实报告，未绕过质量约束。CLI各约2分钟模型网络回退另计，调用间隔含后台实验时间，不能都称为无效思考。直接协议回归31.87s覆盖失败Refresh、普通旧图Save、恢复、并发Stop、取消后不续写、身份/UTF8分页和只读边界；插件描述、Scan预算、Config预览、布局参数、原生Fit及审核窗口直接用例通过。3份guide/recipe资源已实际核对打包；所有证据在ignored research，全部测试窗口/服务/客户端关闭。以上是虚拟流程验证，不宣称真实寿命/SLM输运的物理验收。
 - 2026-10-13 实验交接SOP补入实际workspace说明必读入口，以及SLM Send确认、完整触发周期、同代采集和数据ref、固定Pattern位置比较。Pulse的running只是board.firing缓存，不能当有限播放生命周期完成；execution_snapshot直接公开既有`_finite_run`的`completion_pending`，没有新状态或额外通信，既有有限完成用例通过。旧calibration-10/11无raw，不能断言唯一硬件根因；未改相机/FPGA协议或加入重试。

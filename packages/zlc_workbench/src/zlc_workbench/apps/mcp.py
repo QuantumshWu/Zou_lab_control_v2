@@ -679,6 +679,7 @@ def start_server(flow, *, host="127.0.0.1", port: int, token: str, allow_control
             """Fallback: emit an existing public GUI Handle intent on the Qt owner, as the human UI does.
             Discover actual signals/signatures through lab_api. This can open ordinary dialogs; prefer lab_call
             with explicit path/value arguments. It is not arbitrary QWidget manipulation or Python execution.
+            Use lab_close for closing/Shutdown so confirmation questions and choices return to the AI.
             Dispatch is not successful completion: inspect owner state/errors or the actual UI afterward.
             """
             def emit():
@@ -767,6 +768,21 @@ def start_server(flow, *, host="127.0.0.1", port: int, token: str, allow_control
                 return dict(accepted=bool(result), result=_control_plain(result), state=state(),
                             error=None if result else "Devices rejected the file operation; inspect device_status")
             return await owner(command)
+
+        @tool()
+        async def lab_close(scope: Literal["session", "experiment", "editor"] = "session",
+                            device_id: str | None = None,
+                            decision: Literal["discard", "cancel"] | None = None) -> dict[str, object]:
+            """Close the Session, application, or one editor through its existing lifecycle.
+            First call without decision. Unsaved drafts return needs_confirmation with the actual
+            editor question, draft paths and discard/cancel choices; nothing starts closing yet.
+            Decide autonomously from the current task and draft context, then call the same scope/device
+            with decision, or save the drafts before closing. This is a tool interaction, not a requirement
+            to ask the human about routine task decisions. Cancel preserves the drafts and current Session.
+            closing means asynchronous cleanup was accepted, not hardware shutdown completed.
+            For Session shutdown observe lab_state.session_open=false; experiment close ends this endpoint.
+            """
+            return await owner(lambda: flow.control_close(scope, device_id=device_id, decision=decision))
 
         @tool()
         async def lab_run_recipe(name: str, parameters: dict[str, object],

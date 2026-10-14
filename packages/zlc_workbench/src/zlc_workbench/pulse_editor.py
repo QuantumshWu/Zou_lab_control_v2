@@ -5974,12 +5974,59 @@ class PulseEditorPresenter:
         if self._preview_close_requested and self._request_preview_close is not None:
             self._request_preview_close()
 
-    def may_close(self) -> bool:
-        """Whether unsaved pulse and Config edits may go; asked once per close."""
+    def close_confirmation(self) -> dict[str, object] | None:
+        """Describe the current unsaved drafts without starting a close."""
 
-        return self._preview_close_requested or (
+        if self._preview_close_requested:
+            return None
+        drafts = []
+        if self.dirty:
+            drafts.append({"kind": "pulse", "path": self.path})
+        if self._config_dirty():
+            drafts.append({"kind": "config", "path": self._config_path})
+        if self._subpulse_draft != self._subpulse_saved:
+            drafts.append({"kind": "subpulse", "path": self._subpulse_path})
+        if not drafts:
+            return None
+        names = ", ".join(draft["kind"] for draft in drafts)
+        return {
+            "message": f"Discard unsaved {names} edits and close?",
+            "drafts": drafts,
+            "choices": ["discard", "cancel"],
+        }
+
+    def may_close(self, *, present: bool = True, discard_changes: bool = False) -> bool:
+        """Ask once before closing, or return the question without a dialog."""
+
+        if self._preview_close_requested or discard_changes:
+            return True
+        if not present or not self._present_messages:
+            confirmation = self.close_confirmation()
+            if confirmation is not None:
+                self._warn(
+                    f"{confirmation['message']} Save the drafts first, explicitly pass "
+                    "discard_changes=true to discard and close, or cancel the close.",
+                    present=False,
+                )
+                return False
+            return True
+        return (
             self._discard_pulse_edits() and self._discard_config_edits() and self._discard_subpulse_edits()
         )
+
+    def request_close(self, *, present: bool = True, discard_changes: bool = False) -> bool:
+        """Request the ordinary guarded window close with an explicit draft choice."""
+
+        self.last_warning = ""
+        if not self.may_close(present=present, discard_changes=discard_changes):
+            return False
+        previous = self._present_messages
+        self._present_messages = previous and present
+        try:
+            self.prepare_preview_close()
+            return bool(self.view.close())
+        finally:
+            self._present_messages = previous
 
     def prepare_preview_close(self) -> bool:
         """Stop accepting work and report when every owned delivery is idle.

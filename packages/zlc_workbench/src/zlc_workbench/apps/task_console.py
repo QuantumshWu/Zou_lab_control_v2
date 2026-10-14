@@ -681,6 +681,62 @@ class ExperimentGuiFlow:
             **state,
         }
 
+    def control_close(self, scope: str = "session", *, device_id: str | None = None,
+                      decision: str | None = None) -> dict[str, object]:
+        """Return editor confirmation questions, then use the ordinary close lifecycle.
+
+        No close is queued while a decision is needed. Cancel leaves the drafts
+        and session alone; discard explicitly authorizes losing the listed drafts.
+        """
+        if scope not in {"session", "experiment", "editor"}:
+            raise ValueError("close scope must be session, experiment or editor")
+        if decision not in {None, "discard", "cancel"}:
+            raise ValueError("close decision must be discard or cancel")
+        if (scope == "editor") != (device_id is not None):
+            raise ValueError("supply device_id only when closing an editor")
+        controls = ([(device_id, self.device_controls[device_id])] if scope == "editor"
+                    else list(self.device_controls.items()))
+        confirmations = []
+        closing = self._closing_all or self._device_shutdown_pending
+        for key, control in controls:
+            presenter = getattr(control, "presenter", control)
+            describe = getattr(presenter, "close_confirmation", None)
+            question = describe() if callable(describe) else None
+            if question is not None:
+                confirmations.append({"device_id": key, **question})
+            if decision == "cancel":
+                snapshot = (getattr(presenter, "execution_snapshot", None)
+                            or getattr(presenter, "control_state", None))
+                if callable(snapshot):
+                    state = snapshot()
+                    closing = closing or bool(state.get("closing") or state.get("closed"))
+        if decision == "cancel":
+            # Cancellation answers a question; it cannot undo an accepted close.
+            if closing:
+                return dict(accepted=False, status="closing", completed=False,
+                            error="Closing has already started; it cannot be cancelled")
+            return dict(accepted=False, status="cancelled", completed=False)
+        if confirmations and decision is None:
+            return dict(accepted=False, status="needs_confirmation", completed=False,
+                        confirmations=confirmations, choices=["discard", "cancel"])
+        discard = decision == "discard"
+        if scope == "editor":
+            key, control = controls[0]
+            presenter = getattr(control, "presenter", control)
+            request = getattr(presenter, "request_close", None)
+            accepted = (request(present=False, discard_changes=discard) if callable(request)
+                        else control.close())
+            completed = key not in self.device_controls or not control.is_visible()
+            error = None if accepted else getattr(presenter, "last_warning", "Editor refused to close")
+        else:
+            manager = None if self.devices is None else self.devices.presenter
+            completed = (self.close(present=False, discard_changes=discard) if scope == "experiment"
+                         else manager is None or manager.shutdown_active(present=False, discard_changes=discard))
+            accepted = completed or self._closing_all or self._device_shutdown_pending
+            error = (None if accepted or manager is None else manager.snapshot()["status"]["text"])
+        return dict(accepted=bool(accepted), completed=bool(completed),
+                    status="closed" if completed else "closing" if accepted else "blocked", error=error)
+
     def _adopt_device_control(self, key: str, device: object, control: object) -> None:
         """This control is the one window for ``key`` until it closes."""
 
@@ -1556,6 +1612,7 @@ class ExperimentGuiFlow:
     def _retire_device_controls(
         self,
         device_keys: frozenset[str] | None = None,
+        *, present: bool = True, discard_changes: bool = False,
     ) -> tuple[tuple[str, ...], tuple[str, ...]]:
         """Ask each control to close: the keys still closing, and those kept.
 
@@ -1582,7 +1639,14 @@ class ExperimentGuiFlow:
         ):
             if kept:
                 break
-            under_way = control.close()
+            presenter = getattr(control, "presenter", None)
+            request_close = getattr(presenter, "request_close", None)
+            if (not present or discard_changes) and callable(request_close):
+                under_way = request_close(present=present, discard_changes=discard_changes)
+                if not under_way:
+                    raise ValueError(f"{key}: {presenter.last_warning}")
+            else:
+                under_way = control.close()
             if self.device_controls.get(key) is not control:
                 continue
             if not control.is_visible():
@@ -1591,7 +1655,8 @@ class ExperimentGuiFlow:
                 (closing if under_way else kept).append(key)
         return tuple(closing), tuple(kept)
 
-    def _device_controls_closed(self) -> bool:
+    def _device_controls_closed(self, *, present: bool = True,
+                                discard_changes: bool = False) -> bool:
         """Close every control before anything stops; whether all have.
 
         One still closing is waited for: its ``released`` resumes a pending
@@ -1601,7 +1666,12 @@ class ExperimentGuiFlow:
         and a closing composition asked its question again on every beat.
         """
 
-        closing, kept = self._retire_device_controls()
+        try:
+            closing, kept = self._retire_device_controls(present=present, discard_changes=discard_changes)
+        except ValueError:
+            self._device_shutdown_pending = False
+            self._closing_all = False
+            raise
         if kept:
             self._device_shutdown_pending = False
             self._closing_all = False
@@ -1617,6 +1687,7 @@ class ExperimentGuiFlow:
         session: object,
         config: object,
         close_keys: frozenset[str],
+        *, present: bool = True, discard_changes: bool = False,
     ):
         """Stop only users of affected leaves, then return the worker half."""
 
@@ -1644,7 +1715,8 @@ class ExperimentGuiFlow:
             )
         # Before anything stops: a running Logic stopped for a change that
         # then waits on an editor's close was stopped for nothing.
-        closing, kept = self._retire_device_controls(affected)
+        closing, kept = self._retire_device_controls(affected, present=present,
+                                                    discard_changes=discard_changes)
         if kept:
             raise RuntimeError(
                 f"the {', '.join(kept)} control stayed open; nothing changed"
@@ -1705,13 +1777,14 @@ class ExperimentGuiFlow:
         if self._device_shutdown_pending and self.devices is not None:
             self.devices.presenter.shutdown_active()
 
-    def _prepare_session_shutdown(self, session: object) -> bool:
+    def _prepare_session_shutdown(self, session: object, *, present: bool = True,
+                                  discard_changes: bool = False) -> bool:
         if not self._device_tune_idle():
             return False
         self._device_shutdown_pending = True
         # Controls first, while the console they draw in is still open; one
         # still closing resumes this shutdown when it has (``released``).
-        if not self._device_controls_closed():
+        if not self._device_controls_closed(present=present, discard_changes=discard_changes):
             return False
         presenter = self.console_presenter
         if presenter is not None and not presenter.close():
@@ -1797,19 +1870,23 @@ class ExperimentGuiFlow:
             self._closing_all = False
             return False
 
-    def close(self) -> bool:
+    def close(self, *, present: bool = True, discard_changes: bool = False) -> bool:
         """Advance composition shutdown without waiting on the Qt owner."""
 
         self._closing_all = True
         if not self._device_tune_idle():
             return False
+        if (not present or discard_changes) and not self._device_controls_closed(
+            present=present, discard_changes=discard_changes,
+        ):
+            return False
         if self.console is not None:
             self.console.close()
             return self.console is None
         elif self.devices is not None:
-            if not self.devices.presenter.shutdown_active():
+            if not self.devices.presenter.shutdown_active(present=present, discard_changes=discard_changes):
                 return False
-            if not self.devices.presenter.close():
+            if not self.devices.presenter.close(present=present, discard_changes=discard_changes):
                 return False
             if not self._close_device_worker():
                 return False

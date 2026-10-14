@@ -165,11 +165,9 @@ class DeviceManagerPresenter:
         initial_config: InstallationConfig | None = None,
         initialize_session: Callable[[InstallationConfig], object] | None = None,
         on_initialized: Callable[[object], None] | None = None,
-        prepare_reconcile: Callable[
-            [object, InstallationConfig, tuple[str, ...]], Callable[[], object]
-        ] | None = None,
+        prepare_reconcile: Callable[..., Callable[[], object]] | None = None,
         on_reconciled: Callable[[object], None] | None = None,
-        prepare_shutdown: Callable[[object], bool] | None = None,
+        prepare_shutdown: Callable[..., bool] | None = None,
         shutdown_session: Callable[[object], None] | None = None,
         on_shutdown: Callable[[object], None] | None = None,
         on_device_open: Callable[[str], None] | None = None,
@@ -1076,7 +1074,8 @@ class DeviceManagerPresenter:
         finally:
             lease.release()
 
-    def close_device(self, instance_id: str) -> bool:
+    def close_device(self, instance_id: str, *, present: bool = True,
+                     discard_changes: bool = False) -> bool:
         """Request retirement of exactly one currently loaded device."""
 
         key = str(instance_id)
@@ -1097,11 +1096,12 @@ class DeviceManagerPresenter:
         if candidate is None:
             self._report("active session has no installation config", severity="error")
             return False
-        return self._reconcile_active(candidate, close_keys=(key,))
+        return self._reconcile_active(candidate, close_keys=(key,), present=present,
+                                      discard_changes=discard_changes)
 
     # ------------------------------------------------------------ session life
 
-    def toggle_lifecycle(self) -> bool:
+    def toggle_lifecycle(self, *, present: bool = True, discard_changes: bool = False) -> bool:
         """Init, apply a changed draft, or shut down an unchanged session."""
 
         if self._active_session is None:
@@ -1116,14 +1116,16 @@ class DeviceManagerPresenter:
             self._report(f"this apparatus cannot be applied: {error}", severity="error")
             return False
         if self._active_differs(candidate):
-            return self._reconcile_active(candidate)
-        return self.shutdown_active()
+            return self._reconcile_active(candidate, present=present, discard_changes=discard_changes)
+        return self.shutdown_active(present=present, discard_changes=discard_changes)
 
     def _reconcile_active(
         self,
         candidate: InstallationConfig,
         *,
         close_keys: tuple[str, ...] = (),
+        present: bool = True,
+        discard_changes: bool = False,
     ) -> bool:
         """Prepare on the owner, reconcile off-thread, then project atomically."""
 
@@ -1183,7 +1185,8 @@ class DeviceManagerPresenter:
             )
 
         try:
-            work = self._prepare_reconcile(session, candidate, keys)
+            work = self._prepare_reconcile(session, candidate, keys, present=present,
+                                           discard_changes=discard_changes)
             if not callable(work):
                 raise TypeError("session reconciler preparation must return callable work")
         except BaseException as error:
@@ -1370,7 +1373,7 @@ class DeviceManagerPresenter:
         )
         return True
 
-    def shutdown_active(self) -> bool:
+    def shutdown_active(self, *, present: bool = True, discard_changes: bool = False) -> bool:
         """Shut down the retained session once; keep it reachable on failure."""
 
         session = self._active_session
@@ -1380,7 +1383,8 @@ class DeviceManagerPresenter:
             return False
         if self._prepare_shutdown is not None:
             try:
-                prepared = self._prepare_shutdown(session)
+                prepared = self._prepare_shutdown(session, present=present,
+                                                  discard_changes=discard_changes)
             except Exception as error:
                 _LOG.error("devices did not prepare to shut down", exc_info=error)
                 self._report(f"devices did not prepare to shut down: {_one_line(error)}", severity="error")
@@ -1731,7 +1735,7 @@ class DeviceManagerPresenter:
         self._last_status = {"text": str(text), "severity": str(severity)}
         self.view.show_status(str(text), str(severity))
 
-    def close(self) -> bool:
+    def close(self, *, present: bool = True, discard_changes: bool = False) -> bool:
         """Idempotently retire the retained shared session and this presenter."""
 
         if self._closed:
@@ -1753,7 +1757,7 @@ class DeviceManagerPresenter:
                 f"closing while the hardware scan of {scanning} is still answering",
                 severity="warning",
             )
-        if not self.shutdown_active():
+        if not self.shutdown_active(present=present, discard_changes=discard_changes):
             return False
         # Nothing is published any more; the fabric's connection threads
         # are joined at exit, so a peer still connected would keep this
