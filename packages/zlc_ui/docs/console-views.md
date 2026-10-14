@@ -111,8 +111,9 @@ host), so a board can present a same-shot group atomically through
 state_changed = pyqtSignal(object)  # one Setting-form patch: {key: value, ...}
 remove_requested = pyqtSignal()
 edit_requested = pyqtSignal()
-drag_started = pyqtSignal(tuple)  # (x: int, y: int), once per drag gesture
-dropped = pyqtSignal(tuple)  # (x: int, y: int), card-local drop point
+drag_started = pyqtSignal(tuple)  # global pointer (x, y), once per drag gesture
+drag_moved = pyqtSignal(tuple)  # global pointer (x, y), after every move the card follows
+dropped = pyqtSignal(tuple)  # global pointer (x, y) at the release that ends a drag
 geometry_changed = pyqtSignal()
 plot_error = pyqtSignal(str)  # relayed from the mounted surface's errorOccurred
 
@@ -142,11 +143,12 @@ reads two lines -- the caption (and data sizes) above, the axis names below
 -- and a card with no picture says why on that second line instead: `Pick a
 signal in Setting`, or `No data yet` once a signal is picked.  Its body is
 the blank frame its size preset plans, and `set_surface(None)` returns a
-card to that frame.  The strip is the card's one handle: a drag that starts
-on it carries the card, a press in the body never does, so the card's
-top-left -- what a drop snaps -- stays under the pointer whatever the card
-holds.  The header `×` is the quiet one-glyph remover (red only under the
-pointer); its first click arms it as the white-on-red confirm.
+card to that frame.  The strip is the card's one handle (`handle_rect()`):
+a drag that starts on it carries the card, a press in the body never does
+-- a drawn card's body is its plot's -- so both kinds of card are carried
+alike.  Setting is as tall as every other button and the header `×` is
+square at that height: the quiet one-glyph remover (red only under the
+pointer), whose first click arms it as the white-on-red confirm.
 
 `set_selectors_enabled(False)` suspends the mounted plot's whole pointer
 transport -- area, zoom, pan, hover and double-click focus -- and the
@@ -162,14 +164,22 @@ set_cards(cards: tuple[PanelCardView, ...]) -> None
 
 Construct the board with an injected `BoardMetrics(gap)` policy; each
 card's rectangle is the card's own.  After `set_cards`, the board owns the
-only live geometry calculation: it packs the cards, repacks them when its
-width changes, moves the dragged card freely without a placeholder/ghost,
-and commits the new `panel_id` order on release.  One `panel_id` is one
-card: a different object arriving under an id already on the board retires
-the one it replaces, and a card retired in the middle of a drag is ignored
-when it drops.  The presenter persists that order and each card's size; it
-never sends pixel rectangles back to the view.  `order_committed` is the
-only board-level reorder payload.
+only live geometry calculation.  A card a drop put somewhere keeps that
+place; every other card takes the first free slot in board order on every
+pack, so cards tile the width the board has now -- including cards added
+before the window was first laid out -- and everything then settles under
+north-west gravity.  A carried card follows the pointer; meanwhile the other
+cards stand where the drop will leave them and the slot under the pointer
+(chosen on the board without the carried card) is drawn as an accent-tint
+card with a dashed edge.  Near the viewport's top or bottom edge the board
+scrolls under the pointer.  On release the card takes that slot and the new
+`panel_id` order is committed.  `text_left()` is where a card's strip text
+starts, from the board's left edge, for a note on an empty board to start
+at.  One `panel_id` is one card: a different object arriving under an id
+already on the board retires the one it replaces, and a card retired in the
+middle of a drag is ignored when it drops.  The presenter persists that
+order and each card's size; it never sends pixel rectangles back to the
+view.  `order_committed` is the only board-level reorder payload.
 
 ## `LogicRowView` (internal)
 

@@ -3,7 +3,7 @@
 from .board_layout import (
     BoardMetrics,
     GeomProxy,
-    nearest_anchor,
+    slot_under,
     first_free_slot,
     min_board_width,
     pack,
@@ -19,7 +19,7 @@ __all__ = [
     "PLACEHOLDER_CELL_PX",
     "BoardMetrics",
     "GeomProxy",
-    "nearest_anchor",
+    "slot_under",
     "first_free_slot",
     "min_board_width",
     "pack",
