@@ -73,7 +73,7 @@ class PulseTargetView(QtWidgets.QWidget):
         self.status_label = FluentLabel("")
         self.status_label.setWordWrap(True)
         header_layout.addWidget(self.status_label, 1)
-        self.add_digital_button = FluentButton("Add Digital")
+        self.add_digital_button = FluentButton("Add digital")
         self.add_dac_button = FluentButton("Add DAC")
         self.apply_button = FluentButton("Apply target", role="primary")
         for button in (self.add_digital_button, self.add_dac_button, self.apply_button):

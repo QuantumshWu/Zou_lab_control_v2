@@ -124,12 +124,14 @@ class TaskConsoleView(QtWidgets.QWidget):
         # An on/off setting is a switch, even in a row of commands: a
         # checkable button there read as one more command.
         self.selectors_switch = FluentSwitch("Selectors")
-        self.save_screenshot_button = FluentButton("Save image")
+        # The file commands ask where before they act, so each carries the
+        # ellipsis; reading one is Open, as in every window of the suite.
+        self.save_screenshot_button = FluentButton("Save image…")
         self.save_screenshot_button.setToolTip("Save one screenshot of TaskConsole")
-        self.save_layout_button = FluentButton("Save")
+        self.save_layout_button = FluentButton("Save…")
         self.save_layout_button.setToolTip("Save the layout and signal wiring")
-        self.load_layout_button = FluentButton("Load")
-        self.load_layout_button.setToolTip("Load a saved layout and signal wiring")
+        self.load_layout_button = FluentButton("Open…")
+        self.load_layout_button.setToolTip("Open a saved layout and signal wiring")
         self.clear_board_button = FluentButton("Clear", role="destructive")
         self.clear_board_button.setToolTip("Remove every panel and logic node from the board")
 

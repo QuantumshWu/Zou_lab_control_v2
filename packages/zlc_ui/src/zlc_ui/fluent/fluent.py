@@ -1541,7 +1541,7 @@ class FluentGroupBox(QtWidgets.QGroupBox):
 #: ACCENT_STRONG fill, white ink) -- at most one per surface; ``standard``
 #: every other command (the light-blue tint); ``destructive`` a command that
 #: takes something away or stops or shuts something down -- Remove, Delete,
-#: Clear, Unload, a device's Close, Shutdown devices, every Stop (a labelled
+#: Clear, Unload, a device's Close, Shut down devices, every Stop (a labelled
 #: one sits on the RED_TINT face; a one-glyph remover repeated down rows is
 #: a ghost in quiet ink that turns red only under the pointer, since red at
 #: rest marks problems); and ``destructive_primary`` the confirm of a
@@ -3288,8 +3288,8 @@ def stamped_file_name(stem: str, extension: str, *, stamp: str | None = None) ->
 
     A name the operator recognises plus the moment it was written, because two
     saves of the same board are two files and the second must not silently be
-    the first.  ONE rule: the Edit tab's Save Fig and the console's own Save
-    Layout / Save Screenshot had begun to grow their own.
+    the first.  ONE rule: the Edit tab's Save figure and the console's own
+    Save… (layout) and Save image… had begun to grow their own.
     """
 
     from datetime import datetime  # noqa: PLC0415 -- only a save needs the clock

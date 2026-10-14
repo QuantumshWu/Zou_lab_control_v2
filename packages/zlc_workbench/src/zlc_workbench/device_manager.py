@@ -1678,7 +1678,7 @@ class DeviceManagerPresenter:
                 if self._refresh_pending
                 else "Apply device changes"
                 if reconcile
-                else "Shutdown devices"
+                else "Shut down devices"
                 if active
                 else "Init devices"
             ),

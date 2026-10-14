@@ -1121,7 +1121,7 @@ class FigureViewerView(QtWidgets.QWidget):
         self.add_panel_button = FluentButton("Add panel")
         self.add_panel_button.clicked.connect(self._add_selected_panel)
         self.add_panel_button.setEnabled(False)
-        self.save_image_button = FluentButton("Save image")
+        self.save_image_button = FluentButton("Save image…")
         self.save_image_button.clicked.connect(self.save_screenshot_requested)
         # A chooser and the command that reads it, spaced as the data row's.
         board_actions = QtWidgets.QHBoxLayout()

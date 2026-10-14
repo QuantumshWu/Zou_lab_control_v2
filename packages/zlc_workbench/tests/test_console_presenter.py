@@ -3870,7 +3870,7 @@ def test_loading_a_layout_over_running_logic_asks_and_stops_it(
     view.confirm_answer = False
     assert presenter.load_layout() is False
     ((_title, message, confirm_text),) = view.confirmations
-    assert confirm_text == "Stop and load" and logic_id in message
+    assert confirm_text == "Stop and open" and logic_id in message
     assert host.running and not host.cancelled
 
     view.confirm_answer = True

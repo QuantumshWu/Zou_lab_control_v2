@@ -180,7 +180,7 @@ of the Pulse's saved authoring content and survive remote Load/Sync.
   state/device snapshots.
 - Header **Save Screenshot** writes one ordinary image of the TaskConsole GUI,
   with no layout, data archive or provenance.
-- Panel Edit **Save Fig** writes only that panel's frozen typed data, exact Plot
+- Panel Edit **Save figure** writes only that panel's frozen typed data, exact Plot
   recipe, overlay, viewport and causal lineage. The `zlc.figure` NPZ is primary;
   its same-stem PNG is a preview. It does not include another panel or the whole
   monitor board. A dedicated composition-owned worker hands the save to the

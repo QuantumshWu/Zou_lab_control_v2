@@ -126,7 +126,7 @@ assert not {'Installation', 'Configured devices', 'Available', 'Loaded (session)
 assert view.new_button.text() == 'New…' and view.new_button.isEnabled()
 menu = view.templates_menu()
 assert tuple(action.text() for action in menu.actions()) == ('Virtual', 'Hardware')
-assert view.load_button.text() == 'Load…'
+assert view.load_button.text() == 'Open…'
 assert view.save_button.text() == 'Save'
 assert view.save_as_button.text() == 'Save as…'
 assert view.lifecycle_button.text() == 'Init devices'
@@ -182,7 +182,7 @@ assert title_row is not None and title_row.itemAt(0).widget().text() == 'Loaded 
 assert card.y() > title_row.geometry().bottom()
 assert card._rule and not manager._loaded_cards['slm']._rule
 assert manager.lifecycle_button.role() == 'primary'
-manager.set_lifecycle('Shutdown devices', enabled=True, active=True)
+manager.set_lifecycle('Shut down devices', enabled=True, active=True)
 assert manager.lifecycle_button.role() == 'destructive', 'taking the session down ends every device'
 manager.set_apparatus('bench', dirty=True, saved=False)
 assert manager.lifecycle_button.role() == 'destructive', 'an unsaved apparatus does not soften Shutdown'
@@ -200,7 +200,7 @@ assert card.control_button.role() == card.log_button.role() == 'standard'
 assert card.findChildren(FluentParameterForm) == []
 manager.set_lifecycle('Applying device changes', enabled=True, active=True, busy=True)
 assert not card.isEnabled()
-manager.set_lifecycle('Shutdown devices', enabled=True, active=True, busy=False)
+manager.set_lifecycle('Shut down devices', enabled=True, active=True, busy=False)
 assert card.isEnabled()
 QtTest.QTest.mouseClick(card.control_button, QtCore.Qt.LeftButton)
 assert opened == ['camera']

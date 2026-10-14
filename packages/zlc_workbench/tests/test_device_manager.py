@@ -667,7 +667,7 @@ def test_init_holds_the_exact_session_until_explicit_shutdown(tmp_path, caplog) 
         {"instance_id": "camera", "role": "camera", "type_id": "camera.virtual"}
     ]
     assert shut_down == [], "Init must retain the session for both experiment windows"
-    assert view.lifecycle[:3] == ("Shutdown devices", True, True)
+    assert view.lifecycle[:3] == ("Shut down devices", True, True)
 
     manager.set_role("camera", "camera_edited")
     assert view.lifecycle[:3] == ("Apply device changes", True, True)
@@ -678,7 +678,7 @@ def test_init_holds_the_exact_session_until_explicit_shutdown(tmp_path, caplog) 
     assert state["loaded"][0]["parameters"] == initial.devices[0].to_dict()["parameters"]
     assert state["lifecycle"]["text"] == view.lifecycle[0]
     manager.set_role("camera", "camera")
-    assert view.lifecycle[:3] == ("Shutdown devices", True, True)
+    assert view.lifecycle[:3] == ("Shut down devices", True, True)
 
     manager.toggle_lifecycle()
     assert manager._active_session is session
@@ -739,7 +739,7 @@ def test_an_active_draft_change_reconciles_without_replacing_or_shutting_session
     assert view.loaded_devices == (
         ("camera", "camera", "camera.virtual"),
     )
-    assert view.lifecycle[:3] == ("Shutdown devices", True, True)
+    assert view.lifecycle[:3] == ("Shut down devices", True, True)
 
 
 def test_loaded_close_targets_one_key_and_missing_device_remains_applyable(
@@ -794,7 +794,7 @@ def test_loaded_close_targets_one_key_and_missing_device_remains_applyable(
     assert manager.toggle_lifecycle() is True
     assert prepared[-1] == (initial, ())
     assert set(installed) == {"camera", "sequencer"}
-    assert view.lifecycle[:3] == ("Shutdown devices", True, True)
+    assert view.lifecycle[:3] == ("Shut down devices", True, True)
     assert manager._active_session is session
     assert shut_down == []
 
@@ -938,7 +938,7 @@ def test_projection_refresh_failure_retries_without_running_hardware_again(tmp_p
     assert manager.toggle_lifecycle() is True
     assert hardware_calls == [True]
     assert refresh_calls == [True, True]
-    assert view.lifecycle[0] == "Shutdown devices"
+    assert view.lifecycle[0] == "Shut down devices"
 
 
 def test_a_loaded_card_forwards_control_to_the_session_window_owner(tmp_path) -> None:
