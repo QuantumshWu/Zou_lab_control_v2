@@ -1830,9 +1830,10 @@ assert strip.text() == 'idle text'
 def test_task_console_construct_and_setters(run_qt) -> None:
     run_qt(
         """
+from PyQt5 import QtCore, QtGui
 from zlc_ui.qt import ensure_qt_app
 from zlc_ui.console import LogicRowView, PanelCardView, TaskConsoleView
-from zlc_ui.fluent import scaled_px
+from zlc_ui.fluent import ACCENT, row_gap, scaled_px
 app = ensure_qt_app(['test'])
 view = TaskConsoleView()
 card = PanelCardView('panel-1')
@@ -1871,6 +1872,28 @@ for widget in (
     view.clear_board_button,
 ):
     assert abs(widget.geometry().center().y() - center_y) <= 1
+# Cells and commands on the header stand one row gap apart.
+assert layout.spacing() == row_gap()
+
+# The strip and every page under it share one left edge and one top: the
+# first tab's underline, the Monitor board's first card and the Logic list's
+# first row -- switching pages moves nothing.
+def at(widget):
+    point = widget.mapTo(view.tabs, QtCore.QPoint())
+    return point.x(), point.y()
+view.tabs.setCurrentIndex(0); app.processEvents()
+bar = view.tabs.tabBar()
+image = view.tabs.grab().toImage()
+ratio = image.devicePixelRatio() or 1.0
+strip_left, strip_top = at(bar)
+y = int((strip_top + bar.height()) * ratio) - 1
+underline = next(x / ratio for x in range(int(strip_left * ratio), image.width())
+                 if image.pixelColor(x, y).name() == QtGui.QColor(ACCENT).name())
+monitor = at(card)
+view.tabs.setCurrentIndex(1); app.processEvents()
+logic = at(row)
+assert monitor == logic, (monitor, logic)
+assert underline == monitor[0], (underline, monitor)
 """
     )
 

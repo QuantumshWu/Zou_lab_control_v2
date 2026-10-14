@@ -2844,6 +2844,48 @@ class FluentSectionLabel(FluentLabel):
         self.setMinimumHeight(control_height())
 
 
+def card_title_row(
+    title: str,
+    *trailing: QtWidgets.QWidget,
+    summary: QtWidgets.QWidget | None = None,
+) -> tuple[QtWidgets.QHBoxLayout, QtWidgets.QLabel]:
+    """One card's title row: its name on the left, a muted ``summary`` and
+    its commands (if any) on the right, a control's height whether or not it
+    has any.
+
+    The Device Manager's and the Figure Viewer's cards lay their titles out
+    with this, so cards that stand side by side have their names on one
+    baseline -- a painted title strip beside a laid-out row put Camera four
+    pixels below Discovered hardware -- and a card's command sits on its
+    title line, never alone on a row of its own under it.  The title is a
+    :class:`FluentSectionLabel`, the one section title style."""
+
+    row = QtWidgets.QHBoxLayout()
+    row.setContentsMargins(0, 0, 0, 0)
+    row.setSpacing(row_gap())
+    heading = FluentSectionLabel(title)
+    row.addWidget(heading)
+    if summary is None:
+        row.addStretch(1)
+    else:
+        row.addWidget(summary, 1)
+    for widget in trailing:
+        row.addWidget(widget)
+    row.addItem(QtWidgets.QSpacerItem(
+        0, control_height(), QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed))
+    return row, heading
+
+
+def muted_summary_label(text: str = "") -> "ElidedLabel":
+    """A card's one-line summary for its title row: muted, right-aligned
+    against the commands after it, eliding (the whole text in its tooltip)
+    rather than widening the card."""
+
+    label = ElidedLabel(text, align=QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+    label.setStyleSheet(f'QLabel {{ {MUTED_LABEL_STYLE} font: {fluent_font_size()}pt "{FONT}"; }}')
+    return label
+
+
 def setting_label_width(labels, *, minimum: int = 72) -> int:
     """The ONE label-column width for a settings/edit/param form: wide enough that the LONGEST
     of ``labels`` shows in full, never below ``minimum`` (scaled).  Every form computes its
@@ -4946,12 +4988,38 @@ def _tab_margin_h() -> int:
     return scaled_px(3)
 
 
+def _tab_label_height() -> int:
+    """A pivot tab's label band: the tab's height above its underline,
+    where the style centres the label's line."""
+
+    return scaled_px(32, minimum=26)
+
+
+def _tab_underline() -> int:
+    """A pivot tab's underline: the bottom border of every tab, ACCENT
+    under the current one."""
+
+    return scaled_px(2, minimum=2)
+
+
 def _tab_font() -> QtGui.QFont:
     """The font the tab sheet names for a label."""
 
     font = QtGui.QFont(FONT)
     font.setPointSizeF(fluent_font_size())
     return font
+
+
+def _tab_cap_centre() -> float:
+    """Where a tab label's capitals are centred, down from the tab's top.
+
+    The style centres the label's LINE on the band above the underline
+    (on the line's fractional height, as a label's); the capitals' middle
+    lies the line's ascent down from its top, less half a capital."""
+
+    metrics = QtGui.QFontMetricsF(_tab_font())
+    line_top = (_tab_label_height() - metrics.ascent() - metrics.descent()) / 2.0
+    return line_top + metrics.ascent() - metrics.capHeight() / 2.0
 
 
 class _FluentTabCloseButton(QtWidgets.QToolButton):
@@ -4978,6 +5046,14 @@ class _FluentTabCloseButton(QtWidgets.QToolButton):
     laid the tab out (``_FluentTabBar.tabLayoutChange``), from where the
     style actually seated the button and where the glyph's ink actually
     ends -- not from a fitted constant.
+
+    Up and down, the x stands on its label's line: the disk is centred on
+    the middle of the label's capitals (:func:`_tab_cap_centre`).  The
+    button is as tall as the whole tab, underline included, so the style
+    seats it on the tab's top and every relayout -- a current tab changed,
+    a tab added -- puts it back there.  Centred by the style on the tab
+    with its underline, a disk-high button stood under the words, which
+    the style centres on the band above the underline.
     """
 
     def __init__(self, parent=None):
@@ -5014,8 +5090,17 @@ class _FluentTabCloseButton(QtWidgets.QToolButton):
         if trail == self._trail:
             return
         self._trail = trail
-        self.setFixedSize(self._size + trail, self._size)
+        self.setFixedSize(self._size + trail, _tab_label_height() + _tab_underline())
         self.update()
+
+    def disk_rect(self) -> QtCore.QRectF:
+        """The hover disk: an even number of device pixels across, on
+        whole device pixels, its middle on the label's capitals."""
+
+        ratio = float(self.devicePixelRatioF())
+        across = max(2, int(round(self._size * ratio)) & ~1) / ratio
+        top = device_snap(self, _tab_cap_centre() - across / 2.0, axis="y")
+        return QtCore.QRectF(device_snap(self, 0.0), top, across, across)
 
     def enterEvent(self, event) -> None:  # noqa: N802 - Qt naming
         self.update()
@@ -5027,9 +5112,7 @@ class _FluentTabCloseButton(QtWidgets.QToolButton):
 
     def paintEvent(self, event) -> None:  # noqa: N802 - Qt naming
         del event
-        ratio = float(self.devicePixelRatioF())
-        across = max(2, int(round(self._size * ratio)) & ~1) / ratio
-        disk = QtCore.QRectF(device_snap(self, 0.0), device_snap(self, 0.0, axis="y"), across, across)
+        disk = self.disk_rect()
         washed = self.isEnabled() and (self.isDown() or self.underMouse())
         painter = QtGui.QPainter(self)
         if washed:
@@ -5157,9 +5240,13 @@ class FluentTabWidget(QtWidgets.QTabWidget):
     :attr:`tab_close_requested` with the page widget so the host can tear it
     down -- the tab widget never removes a page behind its owner's back.
 
-    The first tab, and its underline, starts where the pages' content
-    starts (:meth:`set_page_inset`), so the strip and the page below it
-    share one left edge."""
+    THE rule for where the strip starts: the first tab's underline starts
+    on its pages' content edge -- the x, in from this widget's left edge,
+    where a page's cards and header start -- so the strip and the page
+    below it share one left edge in every window.  The host whose pages
+    they are says where that edge is (:meth:`set_page_inset`); a page that
+    keeps the one page inset, :func:`section_gap` from its edge to its
+    content, is the default."""
 
     tab_close_requested = QtCore.pyqtSignal(QtWidgets.QWidget)
 
@@ -5201,9 +5288,10 @@ class FluentTabWidget(QtWidgets.QTabWidget):
 
     def set_page_inset(self, inset: int) -> None:
         """Where the pages' content starts, in from this widget's left edge:
-        the first tab's underline starts there too.  A page's content starts
-        :func:`section_gap` in (the default); a host whose pages lay their
-        content elsewhere -- flush, or a card's padding in -- says where."""
+        the first tab's underline starts there too.  Every page of one tab
+        widget starts its content on this one x, so switching tabs moves
+        nothing.  :func:`section_gap` (a page's own inset) unless the host
+        lays its pages out on another edge -- a card's padding in, say."""
 
         inset = max(0, int(inset))
         if inset != self._page_inset:
@@ -5243,8 +5331,8 @@ class FluentTabWidget(QtWidgets.QTabWidget):
                 background: transparent;
                 color: {MUTED_INK};
                 border: none;
-                border-bottom: {scaled_px(2, minimum=2)}px solid transparent;
-                height: {scaled_px(32, minimum=26)}px;
+                border-bottom: {_tab_underline()}px solid transparent;
+                height: {_tab_label_height()}px;
                 padding: 0px {_tab_padding_h()}px;
                 margin: 0px {_tab_margin_h()}px;
                 font: {fluent_font_size()}pt "{FONT}";
@@ -5252,7 +5340,7 @@ class FluentTabWidget(QtWidgets.QTabWidget):
             QTabBar::tab:first {{ margin-left: {self._page_inset}px; }}
             QTabBar::tab:selected {{
                 color: {TEXT};
-                border-bottom: {scaled_px(2, minimum=2)}px solid {ACCENT};
+                border-bottom: {_tab_underline()}px solid {ACCENT};
             }}
             QTabBar::tab:!selected:hover {{
                 color: {TEXT};
@@ -5615,12 +5703,6 @@ class FluentSwitch(QtWidgets.QAbstractButton):
     offset = QtCore.pyqtProperty(float, fget=getOffset, fset=setOffset)
 
 
-def command_gap() -> int:
-    """The space between two commands in a row (Control, Log, Close)."""
-
-    return scaled_px(8, minimum=5)
-
-
 def add_row_switch(
     layout: QtWidgets.QBoxLayout,
     switch: FluentSwitch,
@@ -5639,7 +5721,7 @@ def add_row_switch(
 
     gap = layout.spacing()
     if gap < 0:
-        gap = command_gap()
+        gap = row_gap()
     if lead:
         layout.addSpacing(gap)
     layout.addWidget(switch, 0, QtCore.Qt.AlignVCenter)
@@ -7496,6 +7578,11 @@ class _TableHeader(QtWidgets.QHeaderView):
             super().paintSection(painter, rect, section)
             return
         orientation = self.orientation()
+        if orientation == QtCore.Qt.Horizontal and isinstance(table, FluentTableView):
+            cut = table.cut_column_left()
+            if cut is not None and rect.left() >= cut:
+                # Its values are withheld too (FluentTableView.set_value_columns).
+                return
         option = table.viewOptions()
         option.rect = rect
         option.text = str(model.headerData(section, orientation, QtCore.Qt.DisplayRole) or "")
@@ -7778,11 +7865,44 @@ class FluentTableView(QtWidgets.QTableView):
         paints them -- and widens, never narrows, while the same data is
         shown, so scrolling does not make the columns breathe.  The tooltip
         of a cell is its whole value, for a column narrower than a value.
+
+        A value is never shown in part.  The table scrolls sideways by whole
+        columns, so none is cut on the left, and the column the viewport's
+        right edge cuts shows neither its values nor its name until it is
+        scrolled in: cut there, a right-aligned value showed its leading
+        digits -- a different number -- under no column name at all.
         """
 
         self._fits_values = True
         self.setTextElideMode(QtCore.Qt.ElideNone)
+        self.setHorizontalScrollMode(QtWidgets.QAbstractItemView.ScrollPerItem)
         self._refit_value_columns()
+
+    def scrollContentsBy(self, dx: int, dy: int) -> None:  # noqa: N802 - Qt naming
+        super().scrollContentsBy(dx, dy)
+        if dx and self._fits_values:
+            # A sideways scroll moves pixels already painted; the column cut
+            # before it, painted blank, is whole now and has to be painted.
+            self.viewport().update()
+            self.horizontalHeader().viewport().update()
+
+    def cut_column_left(self) -> int | None:
+        """Where, in the viewport, the value column its right edge cuts
+        begins -- None when no column is cut there (or the table does not
+        show values, :meth:`set_value_columns`).  A column that starts at
+        the viewport's left edge is never withheld: it is all there is."""
+
+        if not self._fits_values:
+            return None
+        header = self.horizontalHeader()
+        width = self.viewport().width()
+        column = header.logicalIndexAt(width - 1)
+        if column < 0:
+            return None
+        left = header.sectionViewportPosition(column)
+        if left <= 0 or left + header.sectionSize(column) <= width:
+            return None
+        return left
 
     def _refit_value_columns(self, *_args) -> None:
         self._fitted_width = 0
@@ -8002,6 +8122,12 @@ class FluentTableView(QtWidgets.QTableView):
             wash.addRoundedRect(self._row_band(hover, hover, left, left + columns.length()), radius, radius)
             painter.fillPath(wash, QtGui.QColor(ACCENT_TINT))
         painter.end()
+        cut = self.cut_column_left()
+        if cut is not None:
+            # The cells of a column the right edge cuts are not painted
+            # (set_value_columns): the view paints the cells its region
+            # reaches, and the region stops where that column starts.
+            event = QtGui.QPaintEvent(event.region() & QtGui.QRegion(0, 0, cut, viewport.height()))
         super().paintEvent(event)
         inside = {row for top_row, bottom_row, _left, _right in runs for row in range(top_row, bottom_row)}
         width = float(viewport.width())
@@ -8530,8 +8656,7 @@ class _SelectionGridRowHeader(QtWidgets.QHeaderView):
 
     def two_line_height(self) -> int:
         label, note = self._fonts()
-        return (QtGui.QFontMetrics(label).height() + QtGui.QFontMetrics(note).height()
-                + scaled_px(6, minimum=4))
+        return QtGui.QFontMetrics(label).height() + QtGui.QFontMetrics(note).height() + row_gap()
 
     def _left(self) -> bool:
         return bool(self.defaultAlignment() & QtCore.Qt.AlignLeft)
@@ -8747,7 +8872,9 @@ class FluentSelectionGrid(QtWidgets.QTableView):
         horizontal = self.horizontalHeader()
         horizontal.setDefaultSectionSize(
             max(scaled_px(self._cell_width), widest + 2 * scaled_px(10, minimum=6)))
-        gap = scaled_px(14, minimum=8)
+        # Column groups, and the row's actions after its cells, stand a
+        # section apart.
+        gap = section_gap()
         for column in narrow_columns:
             horizontal.resizeSection(column, gap)
         trailing = self._grid_model.action_columns()
@@ -8780,14 +8907,6 @@ class FluentSelectionGrid(QtWidgets.QTableView):
             return QtCore.QRect(rect).adjusted(0, 0, 0, _grid_gutter())
         return QtCore.QRect(rect)
 
-    def label_width_hint(self) -> int:
-        """The form label column at which every row label still fits."""
-
-        header = self.verticalHeader()
-        widest = max((header.sectionSizeFromContents(section).width()
-                      for section in range(header.count())), default=0)
-        return max(0, widest - self._label_offset())
-
     def set_label_width(self, width: int) -> None:
         """End the row-label column where a form's ``width`` label column
         ends, so the first card starts on the form's field edge."""
@@ -8800,7 +8919,7 @@ class FluentSelectionGrid(QtWidgets.QTableView):
     def _label_offset() -> int:
         # A setting row's label-to-field spacing, less the inset that keeps
         # a card off its cell's edge.
-        return scaled_px(6, minimum=4) - _grid_gutter()
+        return row_gap() - _grid_gutter()
 
     def set_cell_states(self, states: "dict[tuple[int, int], str]",
                         tips: "dict[tuple[int, int], str] | None" = None) -> None:
@@ -9765,15 +9884,17 @@ class FluentStatusStrip(FluentFrame):
         self._severity = None
         self.show_message("", severity="idle")
 
-    def set_inset(self, inset: bool) -> None:
-        """Whether the strip keeps its content one CARD_PAD in from its
+    def set_inset(self, inset: bool, *, right: int = 0) -> None:
+        """Whether the strip keeps its content one card pad in from its
         sides -- a strip that is its own white card, whose dot then starts
         where a card's title and the tabs' first underline start -- or lies
         flush, in a page that is already white and padded, where the page's
-        own edge is the one its dot starts on."""
+        own edge is the one its dot starts on.  ``right`` keeps out of the
+        line whatever room the page reserves on its right (a scroll
+        gutter), so the line ends where the page's rows end."""
 
-        pad = scaled_px(CARD_PAD) if inset else 0
-        self.layout().setContentsMargins(pad, scaled_px(4), pad, scaled_px(4))
+        pad = card_pad() if inset else 0
+        self.layout().setContentsMargins(pad, scaled_px(4), pad + max(0, int(right)), scaled_px(4))
 
     @property
     def current_severity(self) -> str:

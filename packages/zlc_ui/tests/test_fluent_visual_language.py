@@ -528,6 +528,61 @@ def test_segments_are_rounded_fills_with_no_outline(app, host) -> None:
     assert segments.current() is None
 
 
+def test_a_tab_close_x_stands_on_its_label_line(app, host) -> None:
+    """A closable tab's x is centred on its label's capitals, at a scale
+    whose label band is even and at one whose band is odd, whichever tab
+    is current.  Seated by the style on the middle of the whole tab,
+    underline included, it stood 0.8 px under the words at a ratio of 3:
+    the button is now the tab's height, seated on its top, and its disk
+    is centred where the style puts the label's capitals."""
+
+    from PyQt5 import QtCore, QtWidgets
+    from zlc_ui.fluent import FluentTabWidget, set_fluent_scale
+    from zlc_ui.fluent import fluent as F
+
+    def ink_middle(image, rect, band, ratio):
+        rows = [y for y in range(int(rect.top() * ratio), int((rect.top() + band) * ratio))
+                if any(image.pixelColor(x, y).lightness() < 200
+                       for x in range(int(rect.left() * ratio), int((rect.right() + 1) * ratio)))]
+        return (rows[0] + rows[-1] + 1) / 2.0 / ratio
+
+    shown = F._FLUENT_SCALE
+    bands = set()
+    try:
+        for scale in sorted({shown, 0.82, 0.9}):
+            set_fluent_scale(scale)
+            tabs = FluentTabWidget(host)
+            tabs.add_permanent_tab(QtWidgets.QLabel(""), "Monitor")
+            tabs.add_closable_tab(QtWidgets.QLabel(""), "Edit", focus=False)
+            tabs.resize(400, 100)
+            _shown(app, host, tabs)
+            bar = tabs.tabBar()
+            close = bar.tabButton(1, QtWidgets.QTabBar.RightSide)
+            band = F._tab_label_height()
+            bands.add(band % 2)
+            image = host.grab().toImage()
+            ratio = image.devicePixelRatio() or 1.0
+            origin = bar.mapTo(host, QtCore.QPoint())
+            # "Monitor": capitals and no descender, above its underline.
+            label = ink_middle(image, bar.tabRect(0).translated(origin), band, ratio)
+            x = ink_middle(image, QtCore.QRect(close.mapTo(host, QtCore.QPoint()), close.size()), band, ratio)
+            assert abs(x - label) <= 0.5, (scale, x, label)
+            # Where the style puts the capitals is where the disk is centred.
+            assert abs(origin.y() + F._tab_cap_centre() - label) <= 0.5, (scale, label)
+            for current in (0, 1):
+                tabs.setCurrentIndex(current)
+                app.processEvents()
+                tab = bar.tabRect(1)
+                assert (close.y(), close.height()) == (tab.top(), tab.height()), (scale, current)
+                centre = close.y() + close.disk_rect().center().y()
+                assert abs(centre - (tab.top() + F._tab_cap_centre())) <= 0.5 / ratio, (scale, centre)
+            tabs.setParent(None)
+            tabs.deleteLater()
+            app.processEvents()
+    finally:
+        set_fluent_scale(shown)
+    assert bands == {0, 1}, "both parities of the label band were measured"
+
 def test_the_tri_switch_is_gone() -> None:
     import zlc_ui.fluent as fluent
     from zlc_ui.fluent import fluent as module
@@ -556,9 +611,11 @@ def test_parts_inside_a_field_are_centred_on_its_ink_and_frame(app, host) -> Non
     ratio = image.devicePixelRatio() or 1.0
     dark = [(x, y) for x in range(image.width()) for y in range(image.height())
             if image.pixelColor(x, y).lightness() < 150]
-    disk = close._size * ratio
+    disk = close.disk_rect()
+    left, top, across = disk.left() * ratio, disk.top() * ratio, disk.width() * ratio
     xs, ys = [p[0] for p in dark], [p[1] for p in dark]
-    assert abs(min(ys) - (disk - 1 - max(ys))) <= 1 and abs(min(xs) - (disk - 1 - max(xs))) <= 1
+    assert abs((min(ys) - top) - (top + across - 1 - max(ys))) <= 1
+    assert abs((min(xs) - left) - (left + across - 1 - max(xs))) <= 1
     tabs.hide()
 
     for height in (30, 29):

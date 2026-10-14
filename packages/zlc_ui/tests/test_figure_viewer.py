@@ -519,11 +519,11 @@ def test_the_right_surface_has_one_left_edge_one_right_edge_and_one_page_gap(run
 
     run_qt(
         """
-from PyQt5 import QtCore, QtWidgets
+from PyQt5 import QtCore, QtGui, QtWidgets
 from zlc_ui.figure_viewer import FigureViewerView
 from zlc_ui.fluent import (
-    FluentLabel, FluentSectionLabel, card_pad, control_height, fluent_scrollbar_thickness,
-    row_gap, section_gap,
+    ACCENT, FluentLabel, FluentSectionLabel, card_pad, control_height,
+    fluent_scrollbar_thickness, row_gap, section_gap,
 )
 from zlc_ui.qt import ensure_qt_app
 app = ensure_qt_app(['figure-surface-edges'])
@@ -535,6 +535,17 @@ def settle():
 def box(widget, top):
     origin = widget.mapTo(top, QtCore.QPoint())
     return origin.x(), origin.y(), origin.x() + widget.width(), origin.y() + widget.height()
+
+def underline_left(tabs, top):
+    # Where the current tab's ACCENT underline starts, on the strip's last row.
+    bar = tabs.tabBar()
+    image = top.grab().toImage()
+    ratio = image.devicePixelRatio() or 1.0
+    left, _y, right, bottom = box(bar, top)
+    y = int(bottom * ratio) - 1
+    accent = QtGui.QColor(ACCENT).name()
+    return next(x / ratio for x in range(int(left * ratio), int(right * ratio))
+                if image.pixelColor(x, y).name() == accent)
 
 class Matrix:
     def __init__(self, rows, columns): self.shape = (rows, columns)
@@ -589,6 +600,8 @@ settle()
 view.tabs.setCurrentIndex(0); settle()
 strip_bottom = box(bar, surface)[3]
 assert bar.isVisible()
+# The first tab's underline starts on that edge too (the strip's page inset).
+assert underline_left(view.tabs, surface) == edge
 assert box(view.kind_combo, surface)[0] == edge
 assert box(view.save_image_button, surface)[2] == end
 assert box(view.kind_combo, surface)[1] - strip_bottom == pad
@@ -606,6 +619,14 @@ pane = view.info_pane
 page = pane.info_tabs.currentWidget()
 filter_edit = page.findChildren(QtWidgets.QLineEdit)[0]
 assert (box(filter_edit, view)[1] - box(pane.info_tabs.tabBar(), view)[3]) == pad
+assert underline_left(pane.info_tabs, view) == box(filter_edit, view)[0]
+# The two panes' last lines read on one line: the pane's status on the
+# line of the editor's action bar.
+def centre(widget):
+    top = box(widget, view)
+    return (top[1] + top[3]) / 2.0
+assert box(pane.status, view)[3] == box(surface, view)[3]
+assert centre(pane.status.message) == centre(pane.status.dot) == centre(editor.discard_button)
 assert box(filter_edit, view)[1] == box(editor.dataset_group, view)[1]
 # File names its path as Data names its chooser: a row label, one gap from it.
 header = pane.path_edit.parentWidget().layout()
@@ -623,7 +644,20 @@ assert box(editor.axis_value_table, editor)[1] - box(heading, editor)[3] == row_
 
 # Each long table scrolls itself; with its card scrolled into view, the card
 # -- and so the table, its column names and its horizontal bar -- is whole.
+# The editor opens on the Axes card: it ends above the fold as the page opens.
 viewport = editor.editor_scroll.viewport()
+assert editor.editor_scroll.verticalScrollBar().value() == 0
+assert box(editor.axes_group, viewport)[3] <= viewport.height()
+# A value is never shown in part: the table scrolls by whole columns, and
+# the column the viewport's right edge cuts shows nothing.
+table = editor.value_table
+assert table.horizontalScrollMode() == QtWidgets.QAbstractItemView.ScrollPerItem
+cut = table.cut_column_left()
+if cut is not None:
+    image = table.viewport().grab().toImage()
+    ratio = image.devicePixelRatio() or 1.0
+    assert not any(image.pixelColor(x, y).lightness() < 150
+                   for x in range(int(cut * ratio), image.width()) for y in range(image.height()))
 for table, card in ((editor.axis_value_table, editor.axes_group),
                     (editor.value_table, editor.data_group)):
     assert table.verticalScrollBar().maximum() > 0

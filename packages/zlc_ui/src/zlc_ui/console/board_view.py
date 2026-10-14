@@ -60,10 +60,9 @@ class ConsoleBoardView(QtWidgets.QWidget):
         super().__init__(parent)
         self.setMinimumSize(0, 0)
         self.setStyleSheet("background: transparent;")
-        # One card pad between cards and from the board's edges: the first
-        # card stands where a white page's content starts -- one pad in from
-        # its side, under the first tab's underline, and one pad below its
-        # tab strip.
+        # One card pad between cards and from the board's edges.  The host
+        # mounts the board that pad short of its page's content edge, so the
+        # first card stands on that edge, under the first tab's underline.
         self._metrics = metrics or BoardMetrics(gap=card_pad())
         self._cards: dict[str, PanelCardView] = {}
         self._order: tuple[str, ...] = ()

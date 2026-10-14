@@ -23,10 +23,6 @@ from zlc_ui.console.panel_editor_view import (
     new_panel_editor,
     panel_editor_projection,
 )
-from zlc_ui.device_manager.view import (
-    card_title_row,
-    muted_summary_label,
-)
 from zlc_ui.form.qt_form import being_edited
 from zlc_ui.fluent import (
     retire_widget,
@@ -54,9 +50,11 @@ from zlc_ui.fluent import (
     FluentTabWidget,
     InfoPane,
     add_row_switch,
+    card_title_row,
     fluent_save_path,
     fluent_scrollbar_thickness,
     muted_note_label,
+    muted_summary_label,
     setting_label_width,
     signals_blocked,
     window_pad,
@@ -565,9 +563,10 @@ class _DataEditorView(QtWidgets.QWidget):
         actions.addWidget(self.save_button)
         outer.addLayout(actions)
 
-        #: Each value table, its card, and what closes the card under it:
-        #: the room a table may take is what the page's viewport leaves once
-        #: its card's rows above it and these below it are counted.
+        #: Each value table, its card, and what closes the card under it,
+        #: in page order: the room a table may take is what the page's
+        #: viewport leaves once what stands above it where it is read
+        #: (_fit_tables_to_page) and these below it are counted.
         self._page_tables = (
             (self.axis_value_table, axes_group, ()),
             (self.value_table, data_group, (self.message_label,)),
@@ -643,24 +642,33 @@ class _DataEditorView(QtWidgets.QWidget):
         self._table_fit.start()
 
     def _fit_tables_to_page(self) -> None:
-        """Let each value table be as tall as its card, scrolled into view,
+        """Let each value table be as tall as the page, where it is read,
         can show it whole.
 
         The page scrolls its cards and a long table scrolls its own rows.
         A table taller than the viewport leaves it would run under the
         page's fold, its last rows and its horizontal bar cut off by the
         page where its own bar cannot bring them.  Sized to the room the
-        viewport leaves under its card's rows, a table is whole when its
-        rows fit and otherwise a viewport of exactly that many rows, its
-        column names and horizontal bar on screen with it.
+        viewport leaves under it, a table is whole when its rows fit and
+        otherwise a viewport of exactly that many rows, its column names
+        and horizontal bar on screen with it.
+
+        Where a table is read: the editor opens on its first table's card,
+        so that table ends above the fold of the page as it opens -- sized
+        for its card scrolled to the top, it ran a hundred pixels under the
+        fold of the opening screen.  A later table's card is one the page
+        scrolls to, so that table ends above the fold with its card
+        scrolled to the top.
         """
 
         viewport = self.editor_scroll.viewport().height()
         if viewport <= 0:
             return
-        for table, card, closing in self._page_tables:
+        page = self.editor_scroll.widget()
+        page.layout().activate()
+        for position, (table, card, closing) in enumerate(self._page_tables):
             card.layout().activate()
-            above = table.mapTo(card, QtCore.QPoint()).y()
+            above = table.mapTo(page if position == 0 else card, QtCore.QPoint()).y()
             below = card.layout().contentsMargins().bottom() + sum(
                 row_gap() + (
                     widget.heightForWidth(table.width())
@@ -1036,15 +1044,20 @@ class FigureViewerView(QtWidgets.QWidget):
         # The right half is one white Fluent work surface.  Cards remain
         # visibly separate inside it instead of dissolving into the grey
         # top-level background.  Its tab strip runs from side to side, as
-        # the left pane's does, so the first tab's own inset puts its
-        # underline on the one card-pad edge every row of the surface starts
-        # on; each row keeps that inset itself.
+        # the left pane's does, and its first tab's underline starts on the
+        # one card-pad edge every row of the surface starts on (the strip's
+        # page inset); each row keeps that inset itself.
         holder = FluentFrame(parent=self, bordered=False)
         holder.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
         self._surface_layout = QtWidgets.QVBoxLayout(holder)
         side = card_pad()
         inset = _surface_right_inset()
         self._surface_layout.setContentsMargins(0, 0, 0, side)
+        # The two panes end on one line as well: the pane's status reads on
+        # the line of the data editor's action bar, a control high and one
+        # card pad above the surface's foot, so its band is that row with a
+        # card pad above and below it.
+        self.info_pane.status.setFixedHeight(control_height() + 2 * side)
         # The two panes are built alike: a header band, the gap, a tab strip.
         # The data band is as tall as the pane's path band and the gap is
         # the pane's own, so the two first rows share one centre line and
@@ -1087,6 +1100,8 @@ class FigureViewerView(QtWidgets.QWidget):
         self._surface_layout.addWidget(self._panel_bar)
 
         self.tabs = FluentTabWidget(holder)
+        # Every page of this surface starts its content one card pad in.
+        self.tabs.set_page_inset(side)
         self.tabs.tab_close_requested.connect(self._tab_close_clicked)
         monitor = QtWidgets.QWidget()
         monitor.setStyleSheet("background: white;")
