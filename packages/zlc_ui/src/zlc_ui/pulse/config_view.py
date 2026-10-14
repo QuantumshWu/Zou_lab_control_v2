@@ -66,7 +66,7 @@ class PulseConfigView(QtWidgets.QWidget):
         for name, text, role in (
             ("new", "New file", "standard"), ("load", "Open file", "standard"),
             ("refresh", "Refresh", "standard"), ("save", "Save", "standard"),
-            ("save_as", "Save as", "standard"), ("unload", "Unload", "destructive"),
+            ("save_as", "Save as…", "standard"), ("unload", "Unload", "destructive"),
         ):
             button = FluentButton(text, role=role)
             button.setFixedHeight(row_height())

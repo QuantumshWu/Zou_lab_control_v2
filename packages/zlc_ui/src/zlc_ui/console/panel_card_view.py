@@ -782,7 +782,7 @@ class PanelCardView(FluentGroupBox):
 
         if str(self._state_projection.get("signal") or ""):
             return "No data yet"
-        return "Pick a signal in Setting"
+        return "Choose a signal in Setting"
 
     def _refresh_title_band(self) -> None:
         """Repaint the strip for the current state, projection and width."""

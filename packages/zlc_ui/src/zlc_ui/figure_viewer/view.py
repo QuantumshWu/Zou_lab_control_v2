@@ -552,9 +552,9 @@ class _DataEditorView(QtWidgets.QWidget):
         # reach, ending where the cards end.  The same rule as every other
         # Save, in two steps: while the fields hold edits not yet applied,
         # Apply & Preview is the primary (with its star); once applied and
-        # not yet saved, Save As… is.
+        # not yet saved, Save as… is.
         self.apply_button = FluentButton("Apply && Preview")
-        self.save_button = FluentButton("Save As…")
+        self.save_button = FluentButton("Save as…")
         self.discard_button = FluentButton("Discard", role="destructive")
         actions = QtWidgets.QHBoxLayout()
         actions.setContentsMargins(0, 0, gutter, 0)

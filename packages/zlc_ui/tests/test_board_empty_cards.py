@@ -110,7 +110,7 @@ for button in ('settings_button', 'close_button'):
 for card in (drawn, empty):
     assert strip_line_count(card) == 2, card._title_label.text()
     assert card._title_label.height() >= card._title_label.sizeHint().height()
-assert 'Pick&nbsp;a&nbsp;signal&nbsp;in&nbsp;Setting' in empty._title_label.text()
+assert 'Choose&nbsp;a&nbsp;signal&nbsp;in&nbsp;Setting' in empty._title_label.text()
 # The body is the blank frame; nothing in it claims the room.
 assert not [child for child in empty.findChildren(QtWidgets.QLabel)
             if child.isVisible() and child is not empty._title_label]
