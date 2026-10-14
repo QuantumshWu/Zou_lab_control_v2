@@ -785,16 +785,22 @@ def _contribution_label_width(widget: QtWidgets.QWidget, spec: FormSpec) -> int:
     a grid's row names.  One that names none shows its managed fields as
     form rows (Calibration, SLM rearrangement), so their labels are its
     labels.  The editor measures every label by the one rule; no
-    contribution measures a column of its own.
+    contribution measures a column of its own.  One whose column holds
+    names that come and go (calibration files) declares the room they get
+    as ``label_width_floor()``, so the column -- and every field after it --
+    stays put as they are added and removed.
     """
 
     declared = getattr(widget, "row_labels", None)
     if callable(declared):
         declared = declared()
     if declared is not None:
-        return setting_label_width(tuple(str(label) for label in declared))
-    managed = set(getattr(widget, "managed_fields", ()) or ())
-    return _form_label_width(field for field in spec.fields if field.key in managed)
+        width = setting_label_width(tuple(str(label) for label in declared))
+    else:
+        managed = set(getattr(widget, "managed_fields", ()) or ())
+        width = _form_label_width(field for field in spec.fields if field.key in managed)
+    floor = getattr(widget, "label_width_floor", None)
+    return max(width, int(floor())) if callable(floor) else width
 
 
 def _opens_section(widget: QtWidgets.QWidget) -> bool:

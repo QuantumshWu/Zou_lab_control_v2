@@ -23,8 +23,9 @@ The section opens like every editor's section: its title, then at the right
 end its summary and "Add calibration…".  The file names stand in the
 editor's label column, shared with the form, so the first card, the model
 choice and the form's fields start on one edge.  The column is set by the
-labels that stay ("Readout model", the form's), never by a file name, so it
-does not move as files come and go.  A row names its file by its stem --
+labels that stay ("Readout model", the form's) and a fixed room for file
+names, never by a file name itself, so it does not move as files come and
+go.  A row names its file by its stem --
 every calibration is a .json, so the extension tells no row from another --
 elided in the middle when it is wider than the column; the tooltip reads
 the whole path.  The console resolves the
@@ -50,6 +51,7 @@ from zlc_ui.fluent import (
     fluent_open_path,
     muted_note_label,
     row_gap,
+    scaled_px,
     setting_label_width,
     show_note,
 )
@@ -61,6 +63,8 @@ from zlc_atom.nodes.calibration import DEFAULT_READOUT_MODEL_CHOICE, READOUT_MOD
 #: The artifact input this editor manages.
 CALIBRATIONS = "calibrations"
 _NAMED = ((FIRST, "First"), (LAST, "Last"), (REST, "Rest"))
+#: Design px of label column a calibration file name gets (see label_width_floor).
+_FILE_NAME_ROOM = 150
 _GAP = None
 _HINT = ("Click a cell to give that frame to a file · First and Last follow the cycle's ends, "
          "middle frames keep their number")
@@ -124,6 +128,14 @@ class CalibrationsEditor(QtWidgets.QWidget):
         self._label_width: int | None = None
         #: What the grid was last drawn from, to draw it again for a new column.
         self._drawn = None
+
+    def label_width_floor(self) -> int:
+        """The room a file name gets in the label column: a stem the way
+        calibrations are named (``background_5ms``, ``readout_50ms``) shows
+        whole; a longer one is elided in the middle.  Fixed, so the column
+        is the same with no file, one or ten."""
+
+        return scaled_px(_FILE_NAME_ROOM)
 
     def row_labels(self) -> tuple[str, ...]:
         """The labels that set the editor's label column: the model's label.
