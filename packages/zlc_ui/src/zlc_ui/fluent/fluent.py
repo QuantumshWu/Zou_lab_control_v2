@@ -6239,16 +6239,22 @@ class FluentTableView(QtWidgets.QTableView):
     _content_rows_limit = 0
     _content_viewport_rows = 8
     _fitting_content_height = False
+    _fits_values = False
+    _fitted_width = 0
+    _fitting_values = False
+    _fit_pending = False
+    #: Rows read per fit, from the top of the view: a fit is a sample of what
+    #: is on screen, coalesced to one per turn, never a scan of the model.
+    _FIT_SAMPLE_ROWS = 8
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setFrameShape(QtWidgets.QFrame.NoFrame)
-        self.setShowGrid(True)
-        self.setGridStyle(QtCore.Qt.SolidLine)
-        # No banding.  Every other Fluent surface here -- a card, a form, a
-        # plot -- is one white ground separated by hairlines, and a table
-        # striped grey/white belongs to a different toolkit.  The grid lines
-        # already say where a cell ends.
+        # Rows, not boxes: one hairline under each row, no vertical rules.
+        # No banding either -- every other Fluent surface is one white
+        # ground separated by hairlines, and a table striped grey/white
+        # belongs to a different toolkit.
+        self.setShowGrid(False)
         self.setAlternatingRowColors(False)
         self.setWordWrap(False)
         self.setSortingEnabled(False)
@@ -6276,6 +6282,7 @@ class FluentTableView(QtWidgets.QTableView):
         )
         self.horizontalHeader().setDefaultSectionSize(scaled_px(80, minimum=64))
         self.verticalHeader().setSectionsMovable(False)
+        self.verticalHeader().setDefaultAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
         self.verticalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Fixed)
         self.verticalHeader().setDefaultSectionSize(scaled_px(28, minimum=22))
         self.verticalHeader().setMinimumWidth(scaled_px(58, minimum=46))
@@ -6286,7 +6293,6 @@ class FluentTableView(QtWidgets.QTableView):
                 color: {TEXT};
                 border: 1px solid {DIVIDER};
                 border-radius: {_radius()}px;
-                gridline-color: {DIVIDER};
                 selection-background-color: {ACCENT_TINT};
                 selection-color: {TEXT};
                 font: {fluent_font_size()}pt "{FONT}";
@@ -6295,13 +6301,15 @@ class FluentTableView(QtWidgets.QTableView):
             QTableView::item {{
                 padding: {scaled_px(3, minimum=2)}px {scaled_px(6, minimum=4)}px;
                 border: none;
+                border-bottom: 1px solid {DIVIDER};
             }}
             QTableView::item:selected {{
                 background: {ACCENT_TINT};
                 color: {TEXT};
+                border: 1px solid {SELECTION_EDGE};
             }}
             QTableView::item:hover:!selected {{
-                background: {ACCENT_TINT};
+                background: {BG};
                 color: {TEXT};
             }}
             QTableView QLineEdit {{
@@ -6314,24 +6322,118 @@ class FluentTableView(QtWidgets.QTableView):
                 selection-background-color: {ACCENT_TINT};
                 selection-color: {TEXT};
             }}
+            QHeaderView {{ background: {SURFACE}; }}
             QHeaderView::section {{
-                background: {BG};
-                color: {GREY};
+                background: {SURFACE};
+                color: {GRAPHITE};
+                border: none;
+                padding: {scaled_px(4, minimum=3)}px {scaled_px(6, minimum=4)}px;
+                font: {fluent_font_size()}pt "{FONT}";
+            }}
+            QHeaderView::section:horizontal {{
+                font-weight: 600;
+                border-bottom: 1px solid {DIVIDER};
+            }}
+            QHeaderView::section:vertical {{
+                border-right: 1px solid {DIVIDER};
+                border-bottom: 1px solid {DIVIDER};
+            }}
+            QTableCornerButton::section {{
+                background: {SURFACE};
                 border: none;
                 border-right: 1px solid {DIVIDER};
                 border-bottom: 1px solid {DIVIDER};
-                padding: {scaled_px(4, minimum=3)}px {scaled_px(6, minimum=4)}px;
-                font: {fluent_font_size()}pt "{FONT}";
             }}
             """
         )
         apply_fluent_scrollbars(self)
+        for bar in (self.horizontalScrollBar(), self.verticalScrollBar()):
+            bar.valueChanged.connect(self._schedule_value_fit)
+
+    def setModel(self, model) -> None:  # noqa: N802 - Qt API name
+        super().setModel(model)
+        if model is None:
+            return
+        model.modelReset.connect(self._refit_value_columns)
+        for name in ("dataChanged", "layoutChanged", "rowsInserted", "columnsInserted", "headerDataChanged"):
+            getattr(model, name).connect(self._schedule_value_fit)
+        self._refit_value_columns()
+
+    def set_value_columns(self) -> None:
+        """Size the columns to the widest value in view, and never elide one.
+
+        A number cut to "2.6749…" hid the digits the operator opened the table
+        to read.  Every column takes the width of the widest cell in the rows
+        at the top of the view -- visible cells only, the way the table
+        paints them -- and widens, never narrows, while the same data is
+        shown, so scrolling does not make the columns breathe.  The tooltip
+        of a cell is its whole value, for a column narrower than a value.
+        """
+
+        self._fits_values = True
+        self.setTextElideMode(QtCore.Qt.ElideNone)
+        self._refit_value_columns()
+
+    def _refit_value_columns(self, *_args) -> None:
+        self._fitted_width = 0
+        self._schedule_value_fit()
+
+    def _schedule_value_fit(self, *_args) -> None:
+        if self._fits_values and not self._fit_pending:
+            self._fit_pending = True
+            QtCore.QTimer.singleShot(0, self._fit_value_columns)
+
+    def _fit_value_columns(self) -> None:
+        self._fit_pending = False
+        model = self.model()
+        if not self._fits_values or self._fitting_values or model is None:
+            return
+        rows, columns = model.rowCount(), model.columnCount()
+        if not rows and not columns:
+            return
+        header, side = self.horizontalHeader(), self.verticalHeader()
+        viewport = self.viewport()
+        first_row = max(0, side.visualIndexAt(0))
+        last_row = side.visualIndexAt(viewport.height() - 1)
+        last_row = rows - 1 if last_row < 0 else last_row
+        last_row = min(last_row, first_row + self._FIT_SAMPLE_ROWS - 1)
+        first_column = max(0, header.visualIndexAt(0))
+        last_column = header.visualIndexAt(viewport.width() - 1)
+        last_column = columns - 1 if last_column < 0 else last_column
+        metrics = self.fontMetrics()
+        bold = QtGui.QFont(self.font())
+        bold.setWeight(QtGui.QFont.DemiBold)
+        heading = QtGui.QFontMetrics(bold)
+        widest = 0
+        for column in range(first_column, last_column + 1):
+            label = model.headerData(column, QtCore.Qt.Horizontal, QtCore.Qt.DisplayRole)
+            widest = max(widest, heading.horizontalAdvance(str("" if label is None else label)))
+            for row in range(first_row, last_row + 1):
+                text = model.index(row, column).data(QtCore.Qt.DisplayRole)
+                widest = max(widest, metrics.horizontalAdvance(str("" if text is None else text)))
+        wanted = widest + 2 * scaled_px(6, minimum=4) + scaled_px(10, minimum=6)
+        if wanted <= max(self._fitted_width, header.minimumSectionSize()):
+            return
+        self._fitted_width = wanted
+        self._fitting_values = True
+        try:
+            header.setDefaultSectionSize(wanted)
+        finally:
+            self._fitting_values = False
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt API name
+        super().resizeEvent(event)
+        self._schedule_value_fit()
 
     def set_content_rows_limit(self, limit: int, *, viewport_rows: int = 8) -> None:
-        """Let an outer page scroll modest tables; retain virtualization above limit.
+        """Lay a table of at most ``limit`` rows out whole; scroll a longer one itself.
 
-        Only section geometry is read, never scientific cells. Large models
-        remain complete and use a bounded, internally scrollable viewport.
+        A longer table is a viewport at least ``viewport_rows`` tall that grows
+        into whatever room its page has, with its own scrollbar -- so its
+        column header stays in view.  Expanding every table of up to two
+        thousand rows into the page scrolled the header away with the first
+        screenful and gave the page and the table a scrollbar each.  Only
+        section geometry is read, never scientific cells.
         """
         if limit < 1 or viewport_rows < 1:
             raise ValueError("row limits must be positive")
@@ -6364,10 +6466,19 @@ class FluentTableView(QtWidgets.QTableView):
             if bar.maximum() > bar.minimum():
                 height += bar.sizeHint().height()
             height += 2 * self.frameWidth()
-            if self.minimumHeight() != height or self.maximumHeight() != height:
-                self.setFixedHeight(height)
+            ceiling = height if expanded else QtWidgets.QWIDGETSIZE_MAX
+            if self.minimumHeight() != height or self.maximumHeight() != ceiling:
+                self.setMinimumHeight(height)
+                self.setMaximumHeight(ceiling)
+                self.updateGeometry()
         finally:
             self._fitting_content_height = False
+
+    def sizeHint(self) -> QtCore.QSize:  # noqa: N802 - Qt API name
+        hint = super().sizeHint()
+        if self._content_rows_limit:
+            hint.setHeight(self.minimumHeight())
+        return hint
 
     def mousePressEvent(self, event) -> None:  # noqa: N802 - Qt naming
         """One click opens the cell it lands on.

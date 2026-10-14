@@ -277,8 +277,8 @@ projection = {
     ),
     'selected_axis': 'spatial-y',
     'axis_values': {
-        'shape': (1, 100_000), 'values': (range(100_000),),
-        'row_headers': ('Value',), 'column_headers': range(100_000),
+        'shape': (100_000, 1), 'values': range(100_000),
+        'row_headers': range(100_000), 'column_headers': ('Value',),
         'editable': True,
     },
     'table': {
@@ -324,9 +324,9 @@ for first, second in ((editor.name_edit, editor.axis_name_edit),
                       (editor.note_edit, editor.domain_combo)):
     assert first.mapTo(editor, QtCore.QPoint()).x() == second.mapTo(editor, QtCore.QPoint()).x()
     assert first.width() == second.width()
-assert editor.axis_value_model.rowCount() == 1
-assert editor.axis_value_model.columnCount() == 100_000
-assert editor.axis_value_table.horizontalScrollBar().maximum() > 0
+assert editor.axis_value_model.rowCount() == 100_000
+assert editor.axis_value_model.columnCount() == 1
+assert editor.axis_value_table.verticalScrollBar().maximum() > 0
 assert editor.axis_value_table.sizeAdjustPolicy() == QtWidgets.QAbstractScrollArea.AdjustIgnored
 roles = {
     label.text().split(' (')[0]: mode.currentText()
@@ -341,10 +341,10 @@ assert editor.value_table.horizontalScrollBar().maximum() > 0
 assert values.reads < 500, values.reads
 assert editor.value_table.verticalScrollBarPolicy() == QtCore.Qt.ScrollBarAsNeeded
 small = dict(projection)
-small_values = LazyMatrix(2000, 1)
-small['table'] = dict(projection['table'], shape=(2000, 1), values=small_values)
+small_values = LazyMatrix(12, 1)
+small['table'] = dict(projection['table'], shape=(12, 1), values=small_values)
 editor.update_projection(small); app.processEvents()
-assert editor.value_model.rowCount() == 2000
+assert editor.value_model.rowCount() == 12
 assert editor.value_table.verticalScrollBarPolicy() == QtCore.Qt.ScrollBarAlwaysOff
 assert editor.value_table.verticalScrollBar().maximum() == 0
 assert small_values.reads < 500, small_values.reads
@@ -398,12 +398,12 @@ assert intents[-1] == (
      'length': 3, 'unit': 'MHz', 'domain': 'point'},
 )
 editor.axis_value_model.setData(
-    editor.axis_value_model.index(0, 1), '0.5', QtCore.Qt.EditRole
+    editor.axis_value_model.index(1, 0), '0.5', QtCore.Qt.EditRole
 )
 assert intents[-1] == (
     'manual-1',
     {'op': 'set_axis_values', 'axis_id': 'spatial-y',
-     'cells': ((0, 1, '0.5'),)},
+     'cells': ((1, 0, '0.5'),)},
 )
 
 QtTest.QTest.mouseClick(editor.add_axis_button, QtCore.Qt.LeftButton)
@@ -446,8 +446,8 @@ assert editor.remove_axis_button.isEnabled()
 # A Dataset with no named axis left can still get its first one.
 scalar = dict(projection)
 scalar['axes'] = (); scalar['selected_axis'] = ''
-scalar['axis_values'] = {'shape': (1, 0), 'values': ((),), 'row_headers': ('Value',),
-                         'column_headers': (), 'editable': True}
+scalar['axis_values'] = {'shape': (0, 1), 'values': (), 'row_headers': (),
+                         'column_headers': ('Value',), 'editable': True}
 scalar['table'] = dict(projection['table'])
 scalar['table'].update({'shape': (1, 1), 'values': ((0,),), 'validity': ((True,),),
                         'row_headers': (0,), 'column_headers': (0,),

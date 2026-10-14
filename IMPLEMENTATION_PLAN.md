@@ -10,6 +10,8 @@
 
 ## 1. 当前实施范围
 
+- Fluent控件统一（2026-10-13，worktree `claude/fluent-polish`待人工验收）：按钮改为角色（primary唯一主操作ACCENT填充、standard白底细边、destructive红字、destructive_primary仅确认危险问题），禁用一律描边，dirty为橙色tint加星号，标签不省略；勾选按钮即toggle chip（Selectors/Plot等工具栏开关）；FluentSwitch为标准开关、标签在轨道旁。Combo去色块改chevron，弹出项悬停与选中分级；数字框安静步进器，Edit step进右键菜单，表单内数字框按双精度宽度封顶；方形复选框；Tab未选GRAPHITE、单页不显示Tab栏。分组标题为卡内半粗标题、无pill，设备行以细线分隔不再卡套卡；表单标签统一TEXT墨色与同一列宽（含Logic editor的source/device选择）；状态条task为ACCENT点+正文墨，路径用“”引号；Logic行Start/Stop合一、Restart/Remove进⋯菜单、kind列固定、输出为细边chip；Logic editor标题与状态分行；Panel title band垂直居中、panel id灰显；空Monitor给出提示；路径框中间省略并以tooltip给全路径，空白含义可由字段声明（相机“camera's current”/“full sensor”）；数据表格只留行间细线、表头白底半粗并按列对齐，numpy标量按自身dtype最短文本显示、列宽按可见值取宽不省略、tooltip给全值，超过12行保留有界viewport使表头始终可见，1-D axis值为纵向一列，Pulse Value Config名称列伸展、值/单位按内容。
+
 - 2026-10-09重排延迟整改：有限Camera接收容量以已知总帧数为额外上界，保留Monitor预算和完整周期要求；SLM优化以实际15帧/60Hz/原质量门为基准，区分GPU执行、主机同步、上传背压与播放，不能用不同GPU理论参数替代实验机延迟实测。
 
 - Frame Survival的发布配对由选择决定：全部/相邻/从首帧/到末帧按源帧数展开，Selected pairs为显式列表；保持一个survival输出和现有pair/site归属，结构、数值、validity及coverage共用同一配对规划，源缺帧继续等待。Edit为FluentSelectionGrid起始×结束网格（Qt原生选择：拖动矩形、Ctrl增删、表头整行整列）加FluentSegmentedButtons预设，源schema直接来自Runtime目录。zlc_ui新增这两个控件；FluentTableView的选中不再随窗口失焦消失。

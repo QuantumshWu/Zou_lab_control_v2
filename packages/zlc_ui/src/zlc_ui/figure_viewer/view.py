@@ -54,14 +54,14 @@ from zlc_ui.fluent import (
 
 
 def _plain_scalar(value: object) -> str:
-    """Format one already-projected table scalar without interpreting it."""
+    """Format one already-projected table scalar without interpreting it.
 
-    item = getattr(value, "item", None)
-    if callable(item):
-        try:
-            value = item()
-        except (TypeError, ValueError):
-            pass
+    A numpy scalar is written by its own type: ``str(np.float32(2.6749))`` is
+    ``2.6749``, the shortest text that reads back as that float32.  Widening
+    it first with ``.item()`` printed the double ``2.6749000549316406`` --
+    digits nobody stored -- and the column elided all of them.
+    """
+
     return "" if value is None else str(value)
 
 
@@ -178,12 +178,9 @@ class _VirtualTextTableModel(QtCore.QAbstractTableModel):
             return int(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
         if role == QtCore.Qt.BackgroundRole and (row, column) in self._pending:
             return QtGui.QBrush(QtGui.QColor(ORANGE_TINT))
-        if (
-            role == QtCore.Qt.ToolTipRole
-            and self._blank_hint
-            and self._projected_text(row, column) == ""
-        ):
-            return self._blank_hint
+        if role == QtCore.Qt.ToolTipRole:
+            # The whole stored value, for a column narrowed by hand.
+            return self._projected_text(row, column) or self._blank_hint or None
         return None
 
     def headerData(self, section, orientation, role=QtCore.Qt.DisplayRole):  # noqa: N802
@@ -416,13 +413,20 @@ class _DataEditorView(QtWidgets.QWidget):
             axis_form.addWidget(row, row_index, column_index)
         axes_layout.addLayout(axis_form)
         axes_layout.addWidget(FluentSectionLabel("Axis values"))
+        # One axis is one column of values, read down by index -- not a
+        # one-row strip read sideways past its scrollbar.
         self.axis_value_model = _VirtualTextTableModel(self)
         self.axis_value_table = FluentTableView(self)
         self.axis_value_table.setModel(self.axis_value_model)
         self.axis_value_table.setTabKeyNavigation(True)
-        self.axis_value_table.horizontalHeader().setStretchLastSection(False)
-        self.axis_value_table.set_content_rows_limit(2000)
-        axes_layout.addWidget(self.axis_value_table)
+        self.axis_value_table.horizontalHeader().setDefaultAlignment(
+            QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter
+        )
+        self.axis_value_table.horizontalHeader().setStretchLastSection(True)
+        self.axis_value_table.setMaximumWidth(window_pad(24))
+        self.axis_value_table.set_value_columns()
+        self.axis_value_table.set_content_rows_limit(12)
+        axes_layout.addWidget(self.axis_value_table, 0, QtCore.Qt.AlignLeft)
         axis_actions = QtWidgets.QHBoxLayout()
         self.axis_mode_label = muted_note_label("Edit selected axis")
         axis_actions.addWidget(self.axis_mode_label, 1)
@@ -475,8 +479,12 @@ class _DataEditorView(QtWidgets.QWidget):
         self.value_table = FluentTableView(self)
         self.value_table.setModel(self.value_model)
         self.value_table.setTabKeyNavigation(True)
+        self.value_table.horizontalHeader().setDefaultAlignment(
+            QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter
+        )
         self.value_table.horizontalHeader().setStretchLastSection(True)
-        self.value_table.set_content_rows_limit(2000)
+        self.value_table.set_value_columns()
+        self.value_table.set_content_rows_limit(12)
         data_layout.addWidget(self.value_table, 1)
         self.message_label = muted_note_label("")
         self.message_label.setWordWrap(True)
@@ -539,7 +547,7 @@ class _DataEditorView(QtWidgets.QWidget):
         self.axis_size_spin.setValue(1)
         self.axis_unit_edit.clear()
         self.axis_value_model.set_projection(
-            {"shape": (1, 0), "values": ((),), "row_headers": ("Value",)}
+            {"shape": (0, 1), "values": (), "column_headers": ("Value",)}
         )
         _fill_choice_combo(self.domain_combo, self._domain_choices, None)
         if self.domain_combo.count():

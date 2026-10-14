@@ -68,9 +68,23 @@ class PulseConfigView(QtWidgets.QWidget):
         self.values_model = QtGui.QStandardItemModel(0, 3, self)
         self.values_model.setHorizontalHeaderLabels(("Name", "Value", "Unit"))
         self.values_table.setModel(self.values_model)
-        self.values_table.set_content_rows_limit(2000)
+        self.values_table.set_content_rows_limit(12)
         self.values_table.verticalHeader().hide()
-        self.values_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Stretch)
+        # The name is what varies in length; a value and its unit are short
+        # and take what they need, the number set right like any number.
+        header = self.values_table.horizontalHeader()
+        header.setSectionResizeMode(0, QtWidgets.QHeaderView.Stretch)
+        header.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeToContents)
+        self.values_model.setHeaderData(
+            1, QtCore.Qt.Horizontal, int(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter),
+            QtCore.Qt.TextAlignmentRole,
+        )
+        for column in (0, 2):
+            self.values_model.setHeaderData(
+                column, QtCore.Qt.Horizontal, int(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter),
+                QtCore.Qt.TextAlignmentRole,
+            )
         self.values_model.itemChanged.connect(lambda _item: self._emit_entries())
         file_layout.addWidget(self.values_table)
         actions = QtWidgets.QHBoxLayout()
@@ -184,7 +198,9 @@ class PulseConfigView(QtWidgets.QWidget):
                     for offset, entry in enumerate(record.entries[new_start:new_stop]):
                         row = start + offset
                         if offset >= kept:
-                            self.values_model.insertRow(row, [QtGui.QStandardItem(value) for value in entry])
+                            items = [QtGui.QStandardItem(value) for value in entry]
+                            items[1].setTextAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+                            self.values_model.insertRow(row, items)
                         else:
                             for column, value in enumerate(entry):
                                 self.values_model.item(row, column).setText(value)

@@ -813,8 +813,8 @@ def _set_axis_values(
     values = list(_axis_coordinates(axis))
     replacements = []
     for row, column, text in tuple(cells):
-        index = int(column)
-        if int(row) != 0 or not 0 <= index < int(axis.size):
+        index = int(row)
+        if int(column) != 0 or not 0 <= index < int(axis.size):
             raise IndexError("axis value edit lies outside the selected axis")
         replacements.append((index, _parse_axis_value(text)))
     if not replacements:
@@ -1050,10 +1050,10 @@ def _data_projection(draft: dict[str, object]) -> dict[str, object]:
         "axes": axes,
         "selected_axis": selected,
         "axis_values": {
-            "shape": (1, len(coordinates)),
-            "values": (coordinates,),
-            "row_headers": ("Value",),
-            "column_headers": range(len(coordinates)),
+            "shape": (len(coordinates), 1),
+            "values": coordinates,
+            "row_headers": range(len(coordinates)),
+            "column_headers": ("Value",),
             "editable": True,
             "blank_hint": "Axis values cannot be blank",
         },

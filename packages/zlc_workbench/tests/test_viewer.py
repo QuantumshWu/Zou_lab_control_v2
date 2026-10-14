@@ -515,14 +515,14 @@ def test_manual_data_uses_runtime_panel_and_the_one_figure_writer(tmp_path) -> N
             "repeat",
             "point",
         )
-        assert projection["axis_values"]["shape"] == (1, 16)
+        assert projection["axis_values"]["shape"] == (16, 1)
 
         view.data_editor_intent.emit(
             editor_id,
             {
                 "op": "set_axis_values",
                 "axis_id": axis_id,
-                "cells": ((0, 8, "8.5"),),
+                "cells": ((8, 0, "8.5"),),
             },
         )
         view.data_editor_intent.emit(
@@ -552,7 +552,7 @@ def test_manual_data_uses_runtime_panel_and_the_one_figure_writer(tmp_path) -> N
             {
                 "op": "set_axis_values",
                 "axis_id": shot_id,
-                "cells": ((0, 0, "10"), (0, 1, "20")),
+                "cells": ((0, 0, "10"), (1, 0, "20")),
             },
         )
         view.data_editor_intent.emit(
@@ -906,7 +906,7 @@ def test_extending_a_numeric_axis_advances_by_its_step_or_refuses() -> None:
         draft, "manual.x", name="x", length=3, unit="", domain="point"
     )
     viewer_module._set_axis_values(
-        draft, "manual.x", ((0, 0, "1e20"), (0, 1, "0.5"), (0, 2, "5e19"))
+        draft, "manual.x", ((0, 0, "1e20"), (1, 0, "0.5"), (2, 0, "5e19"))
     )
     viewer_module._edit_axis(
         draft, "manual.x", name="x", length=4, unit="", domain="point"
@@ -919,7 +919,7 @@ def test_extending_a_numeric_axis_advances_by_its_step_or_refuses() -> None:
         draft, "manual.x", name="x", length=2, unit="", domain="point"
     )
     viewer_module._set_axis_values(
-        draft, "manual.x", ((0, 0, "1.9999999999999998"), (0, 1, "2"))
+        draft, "manual.x", ((0, 0, "1.9999999999999998"), (1, 0, "2"))
     )
     with pytest.raises(ValueError, match="cannot continue the axis"):
         viewer_module._edit_axis(
@@ -946,7 +946,7 @@ def test_manual_interaction_projection_does_not_rebuild_domains(monkeypatch) -> 
         ),
     )
     projection = viewer_module._data_projection(draft)
-    assert isinstance(projection["axis_values"]["values"][0], range)
+    assert isinstance(projection["axis_values"]["values"], range)
 
 def test_manual_value_edit_preserves_a_sparse_serpentine_domain() -> None:
     import zlc_workbench.viewer as viewer_module
