@@ -13,6 +13,10 @@ _EXPORTS = {
     # strip colours them, so it is named here rather than reached for inside
     # the view package -- which would cost every presenter a Qt import.
     "STATUS_SEVERITIES": ("zlc_ui.status", "STATUS_SEVERITIES"),
+    # The summary wording, for the same reason: presenters and plugin
+    # editors word their counts and part their lines one way, Qt-free.
+    "SUMMARY_SEPARATOR": ("zlc_ui.status", "SUMMARY_SEPARATOR"),
+    "counted": ("zlc_ui.status", "counted"),
     "FormChoice": ("zlc_ui.form", "FormChoice"),
     "FormFieldProps": ("zlc_ui.form", "FormFieldProps"),
     "FormSpec": ("zlc_ui.form", "FormSpec"),

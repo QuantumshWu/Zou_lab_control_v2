@@ -59,6 +59,7 @@ from zlc_ui.fluent import (
 )
 from zlc_ui.fluent.column_set import section_header
 from zlc_ui.form import FluentParameterForm, FormFieldProps, FormSpec, being_edited
+from zlc_ui.status import counted
 
 from zlc_data.units import DEFAULT_UNITS
 from zlc_pulse import api_parameter_columns_for, authored_api_entries
@@ -1086,7 +1087,7 @@ class ScanPlanEditor(QtWidgets.QWidget):
         swept = (self._scanned_parameters() | self._walked_parameters()) & set(self._authored)
         if swept:
             parts.append(f"swept by the plan: {', '.join(sorted(swept))}.")
-        self.values_note.setText("  ".join(parts))
+        self.values_note.setText(" ".join(parts))
 
     def set_mutation_enabled(self, enabled: bool) -> None:
         self.setEnabled(bool(enabled))
@@ -1241,7 +1242,7 @@ class ScanPlanEditor(QtWidgets.QWidget):
     def _refresh_summary(self) -> None:
         if not self._rows:
             self._say(summary=(
-                "No axes yet.  Each row is one axis, outermost first; "
+                "No axes yet. Each row is one axis, outermost first; "
                 "every point plays the pulse and captures one measurement."
             ))
             return
@@ -1266,8 +1267,8 @@ class ScanPlanEditor(QtWidgets.QWidget):
             ""
             if not manual
             else (
-                f"  {stops} of those points are reached by hand: the run "
-                "stops at each one and waits for you to set it."
+                f" {stops} of those points {'is' if stops == 1 else 'are'} reached by "
+                "hand: the run stops at each one and waits for you to set it."
             )
         )
         by_call = 1
@@ -1277,12 +1278,13 @@ class ScanPlanEditor(QtWidgets.QWidget):
             ""
             if not device
             else (
-                f"  {by_call} device settings are applied and read back "
-                "between fires."
+                f" {counted(by_call, 'device setting')} {'is' if by_call == 1 else 'are'} "
+                "applied and read back between fires."
             )
         )
         self._say(summary=(
-            f"{len(plan.axes)} axis(es), {shape} = {plan.point_count} points, "
+            f"{counted(len(plan.axes), 'axis', 'axes')}, {shape} = "
+            f"{counted(plan.point_count, 'point')}, "
             "outermost first; each point resolves the template, plays it, and "
             f"captures one measurement.{by_hand}{by_device}"
         ))

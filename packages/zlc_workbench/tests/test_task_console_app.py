@@ -851,7 +851,7 @@ def test_the_pulse_editor_opens_the_pulse_it_is_told_to(workspace) -> None:
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
     assert f"pulse ready: {PULSE_NAME!r}" in completed.stdout
-    assert "6 period(s)" in completed.stdout
+    assert "6 periods" in completed.stdout
 
 def test_the_pulse_editor_names_the_pulse_it_could_not_find(workspace) -> None:
     completed = _run_app(

@@ -8,6 +8,11 @@ so one mistyped word ("info") travelled from a panel edit into a Qt slot
 and took the whole console down with it.  Here it belongs to the package
 both sides already depend on, in a module that imports nothing, so
 referencing it costs no Qt; the strip builds its colour table from it.
+
+The words a summary or status line is built from live here for the same
+reason: a count and the mark between a line's parts are written by
+headless presenters and by plugin editors alike, and every window has to
+word them one way.
 """
 
 from __future__ import annotations
@@ -15,4 +20,22 @@ from __future__ import annotations
 #: Every severity a console status line may carry, worst last.
 STATUS_SEVERITIES: tuple[str, ...] = ("idle", "warning", "task", "error")
 
-__all__ = ["STATUS_SEVERITIES"]
+#: Between the parts of one summary line -- a file and its period count, a
+#: panel count and a node count, what is shown and what is hidden.  One
+#: mark for every window, so no two summaries part their words differently.
+SUMMARY_SEPARATOR = " · "
+
+
+def counted(count: int, noun: str, plural: str = "") -> str:
+    """``count`` of ``noun``, in the number it takes: "1 period", "3 periods".
+
+    ``plural`` names an irregular plural ("axis", "axes"); otherwise the
+    noun takes an "s".  Every count a window words goes through here, so
+    none reads "3 period(s)" beside another that says "3 periods".
+    """
+
+    count = int(count)
+    return f"{count} {noun if count == 1 else plural or noun + 's'}"
+
+
+__all__ = ["STATUS_SEVERITIES", "SUMMARY_SEPARATOR", "counted"]

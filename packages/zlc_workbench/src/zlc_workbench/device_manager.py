@@ -31,6 +31,7 @@ import time
 from typing import Any
 
 from zlc_atom.authoring import is_tunable
+from zlc_ui import counted
 from zlc_atom.install.configuration import (
     DeviceInstanceConfig,
     InstallationConfig,
@@ -386,7 +387,7 @@ class DeviceManagerPresenter:
         self._baseline_simulation = self.simulation
         self.saved = True
         self._show()
-        self._report(f"{len(self.devices)} device(s) from {self.path.name}")
+        self._report(f"{counted(len(self.devices), 'device')} from {self.path.name}")
         return True
 
     @property
@@ -550,7 +551,7 @@ class DeviceManagerPresenter:
             self.discovered = tuple(found)
             self.busy = False
             self._show()
-            message = f"discovered {len(found)} device(s)"
+            message = f"discovered {counted(len(found), 'device')}"
             if failures:
                 message += "; " + "; ".join(failures)
             self._report(message, severity="warning" if failures else "task")
@@ -1226,9 +1227,9 @@ class DeviceManagerPresenter:
             loaded = len(reconciled.installation.devices)
             self._report(
                 (
-                    f"{', '.join(keys)} closed · {loaded} device(s) loaded"
+                    f"{', '.join(keys)} closed · {counted(loaded, 'device')} loaded"
                     if keys
-                    else f"device changes applied · {loaded} device(s) loaded"
+                    else f"device changes applied · {counted(loaded, 'device')} loaded"
                 )
             )
 
@@ -1366,7 +1367,7 @@ class DeviceManagerPresenter:
             for key, error in sorted(failures.items())
         )
         self._report(
-            f"{len(loaded_keys)} device(s) initialized"
+            f"{counted(len(loaded_keys), 'device')} initialized"
             + (f": {roles}" if roles else "")
             + (f" · {len(failures)} failed -- {reasons}" if failures else ""),
             severity="warning" if failures else "task",
@@ -1486,7 +1487,7 @@ class DeviceManagerPresenter:
         self.saved = True
         # The dot and the [*] follow the file, so the projection runs again.
         self._show()
-        self._report(f"saved {len(self.devices)} device(s) to {written.name}", severity="task")
+        self._report(f"saved {counted(len(self.devices), 'device')} to {written.name}", severity="task")
         return str(written)
 
     def save_as(self, path: str | Path | None = None, *, present: bool = True) -> str:

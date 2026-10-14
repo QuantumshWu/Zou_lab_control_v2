@@ -95,6 +95,8 @@ from zlc_ui import (
     BracketVM,
     ScheduleVM,
     ComponentVM,
+    SUMMARY_SEPARATOR,
+    counted,
 )
 
 from .board import _guarded_slot
@@ -195,24 +197,6 @@ def _readable(nanoseconds: float) -> str:
 
     seconds = float(Fraction(str(float(nanoseconds))) / nanoseconds_per("s"))
     return format_quantity(seconds, "s")
-
-
-#: Between the parts of one summary line -- a file and its period count, a
-#: slot count and a point count, what is shown and what is hidden.  One
-#: mark for the whole editor, so no two of its summaries part their words
-#: differently.
-SUMMARY_SEPARATOR = " · "
-
-
-def counted(count: int, noun: str) -> str:
-    """``count`` of ``noun``, in the plural it takes: "1 period", "3 periods".
-
-    Every count the editor words goes through here, so none reads "3
-    period(s)" beside another that says "3 periods".
-    """
-
-    count = int(count)
-    return f"{count} {noun}{'' if count == 1 else 's'}"
 
 
 # ------------------------------------------------------------------ projection

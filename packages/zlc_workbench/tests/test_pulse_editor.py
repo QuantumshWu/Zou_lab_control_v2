@@ -26,10 +26,9 @@ import pytest
 from zlc_durable import readable_json_bytes
 from zlc_pulse.device import ConfigValueHolder
 
+from zlc_ui import SUMMARY_SEPARATOR, counted
 from zlc_workbench.pulse_editor import (
-    SUMMARY_SEPARATOR,
     PulseEditorPresenter as _PulseEditorPresenter,
-    counted,
     preview_candidate,
     project_schedule,
     replace_sequence,

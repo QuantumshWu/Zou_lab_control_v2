@@ -268,7 +268,7 @@ def test_starting_a_node_runs_it_and_the_row_says_so(presenter, session) -> None
     assert started["accepted"]
     assert started["state"]["logic"][0]["observation"]["running"]
     assert row.state[0] == "running"
-    assert "1/1 node(s) running" in presenter.view.summary
+    assert "1/1 node running" in presenter.view.summary
     declarations = presenter.logic[node_id].host.dataset_output_declarations
     assert tuple(value.name for value in declarations) == ("frames",)
     assert {value.contract_id for value in declarations} == {"camera.frames"}
@@ -281,7 +281,7 @@ def test_starting_a_node_runs_it_and_the_row_says_so(presenter, session) -> None
 
     assert not presenter.logic[node_id].host.running
     assert row.state[0] != "error", row.state
-    assert "0/1 node(s) running" in presenter.view.summary
+    assert "0/1 node running" in presenter.view.summary
     # The signal it declared is on the plane, ready for a panel.
     frames_signal = presenter.logic[node_id].host.signal_key("frames")
     value = session.signal_plane.freeze().value(frames_signal)

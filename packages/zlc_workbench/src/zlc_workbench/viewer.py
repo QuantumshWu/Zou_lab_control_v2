@@ -2668,7 +2668,7 @@ class FigureViewerPresenter:
             return False
         return bool(
             ask(
-                "%s has unsaved edits.  Close it and lose them?" % what
+                "%s has unsaved edits. Close it and lose them?" % what
             )
         )
 
