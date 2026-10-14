@@ -23,10 +23,6 @@ from zlc_ui.console.panel_editor_view import (
     new_panel_editor,
     panel_editor_projection,
 )
-from zlc_ui.device_manager.view import (
-    card_title_row,
-    muted_summary_label,
-)
 from zlc_ui.form.qt_form import being_edited
 from zlc_ui.fluent import (
     retire_widget,
@@ -54,9 +50,11 @@ from zlc_ui.fluent import (
     FluentTabWidget,
     InfoPane,
     add_row_switch,
+    card_title_row,
     fluent_save_path,
     fluent_scrollbar_thickness,
     muted_note_label,
+    muted_summary_label,
     setting_label_width,
     signals_blocked,
     window_pad,

@@ -16,11 +16,9 @@ from zlc_ui.fluent import (
     CARD_PAD,
     DISABLED_INK,
     FIELD_BORDER_PX,
-    FONT,
     GREEN,
     GREY,
     MUTED_INK,
-    MUTED_LABEL_STYLE,
     ORANGE,
     RADIUS,
     RED,
@@ -34,14 +32,12 @@ from zlc_ui.fluent import (
     FluentGroupBox,
     FluentLineEdit,
     FluentScrollArea,
-    FluentSectionLabel,
     FluentSettingRow,
     FluentStatusDot,
-    FluentStatusStrip,
     FluentSwitch,
     add_row_switch,
+    card_title_row,
     FluentTabWidget,
-    fluent_font_size,
     fluent_scrollbar_thickness,
     muted_note_label,
     paint_chevron,
@@ -65,10 +61,6 @@ from zlc_ui.form.qt_form import (
 from zlc_ui.console.status_strip import StatusStrip
 
 
-
-
-
-
 def _name_room() -> int:
     """The room an eliding label sized to its text keeps beyond the text:
     the scaled_px(2) ElidedLabel never writes into, and the pixel a
@@ -83,62 +75,6 @@ def _rule_gap() -> int:
     than a row gap, and the items read as groups of rows."""
 
     return window_pad(0.5)
-
-
-def card_title_row(
-    title: str,
-    *trailing: QtWidgets.QWidget,
-    summary: QtWidgets.QWidget | None = None,
-) -> tuple[QtWidgets.QHBoxLayout, QtWidgets.QLabel]:
-    """One card's title row: its name on the left, a muted ``summary`` and
-    its commands (if any) on the right, a control's height whether or not it
-    has any.
-
-    Every card of the Device Manager and the Figure Viewer lays its title out
-    with this, so cards that stand side by side have their names on one
-    baseline -- a painted title strip beside a laid-out row put Camera four
-    pixels below Discovered hardware -- and a card's command sits on its
-    title line, never alone on a row of its own under it.  The title wears
-    the one section-title style: a weight chosen here made a third look
-    beside the page title and the painted titles of other windows."""
-
-    row = QtWidgets.QHBoxLayout()
-    row.setContentsMargins(0, 0, 0, 0)
-    row.setSpacing(row_gap())
-    heading = FluentSectionLabel(title)
-    row.addWidget(heading)
-    if summary is None:
-        row.addStretch(1)
-    else:
-        row.addWidget(summary, 1)
-    for widget in trailing:
-        row.addWidget(widget)
-    row.addItem(QtWidgets.QSpacerItem(
-        0, control_height(), QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed))
-    return row, heading
-
-
-def muted_summary_label(text: str = "") -> ElidedLabel:
-    """A card's one-line summary for its title row: muted, right-aligned
-    against the commands after it, eliding (the whole text in its tooltip)
-    rather than widening the card."""
-
-    label = ElidedLabel(text, align=QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
-    label.setStyleSheet(f'QLabel {{ {MUTED_LABEL_STYLE} font: {fluent_font_size()}pt "{FONT}"; }}')
-    return label
-
-
-def seat_status_strip(strip: FluentStatusStrip, *, right: int = 0) -> None:
-    """Put a status strip's dot on the left edge of the padded page it sits on.
-
-    The strip pads itself for a strip that is a white card of its own; on a
-    page the window already pads, that inset moved the dot off the edge the
-    title, the cards and the action bar start on.  ``right`` keeps whatever
-    room the page reserves on its right (a scroll gutter) out of the line."""
-
-    layout = strip.layout()
-    margins = layout.contentsMargins()
-    layout.setContentsMargins(0, margins.top(), right, margins.bottom())
 
 
 def _rule_between(layout: QtWidgets.QLayout) -> None:
@@ -597,7 +533,7 @@ class DeviceControlView(QtWidgets.QWidget):
         outer.addWidget(self.form)
         outer.addStretch(1)
         self.status_strip = StatusStrip(self)
-        seat_status_strip(self.status_strip)
+        self.status_strip.set_inset(False)
         outer.addWidget(self.status_strip)
         self.refresh_button.clicked.connect(self.refresh_requested.emit)
         self.risk_switch.toggled.connect(self.risk_toggled.emit)
@@ -1007,7 +943,7 @@ class DeviceManagerView(QtWidgets.QWidget):
         # In the compact chrome, the left-hand title never changes; runtime state
         # and the edited document are a compact pair on the right.
         self.status_strip = StatusStrip()
-        seat_status_strip(self.status_strip, right=gutter)
+        self.status_strip.set_inset(False, right=gutter)
         self.status_dot = FluentStatusDot(size=12)
         self.status_dot.set_color(GREY)
         self.document_name = ElidedLabel(

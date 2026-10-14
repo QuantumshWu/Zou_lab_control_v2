@@ -2844,6 +2844,48 @@ class FluentSectionLabel(FluentLabel):
         self.setMinimumHeight(control_height())
 
 
+def card_title_row(
+    title: str,
+    *trailing: QtWidgets.QWidget,
+    summary: QtWidgets.QWidget | None = None,
+) -> tuple[QtWidgets.QHBoxLayout, QtWidgets.QLabel]:
+    """One card's title row: its name on the left, a muted ``summary`` and
+    its commands (if any) on the right, a control's height whether or not it
+    has any.
+
+    The Device Manager's and the Figure Viewer's cards lay their titles out
+    with this, so cards that stand side by side have their names on one
+    baseline -- a painted title strip beside a laid-out row put Camera four
+    pixels below Discovered hardware -- and a card's command sits on its
+    title line, never alone on a row of its own under it.  The title is a
+    :class:`FluentSectionLabel`, the one section title style."""
+
+    row = QtWidgets.QHBoxLayout()
+    row.setContentsMargins(0, 0, 0, 0)
+    row.setSpacing(row_gap())
+    heading = FluentSectionLabel(title)
+    row.addWidget(heading)
+    if summary is None:
+        row.addStretch(1)
+    else:
+        row.addWidget(summary, 1)
+    for widget in trailing:
+        row.addWidget(widget)
+    row.addItem(QtWidgets.QSpacerItem(
+        0, control_height(), QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed))
+    return row, heading
+
+
+def muted_summary_label(text: str = "") -> "ElidedLabel":
+    """A card's one-line summary for its title row: muted, right-aligned
+    against the commands after it, eliding (the whole text in its tooltip)
+    rather than widening the card."""
+
+    label = ElidedLabel(text, align=QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+    label.setStyleSheet(f'QLabel {{ {MUTED_LABEL_STYLE} font: {fluent_font_size()}pt "{FONT}"; }}')
+    return label
+
+
 def setting_label_width(labels, *, minimum: int = 72) -> int:
     """The ONE label-column width for a settings/edit/param form: wide enough that the LONGEST
     of ``labels`` shows in full, never below ``minimum`` (scaled).  Every form computes its
@@ -5615,12 +5657,6 @@ class FluentSwitch(QtWidgets.QAbstractButton):
     offset = QtCore.pyqtProperty(float, fget=getOffset, fset=setOffset)
 
 
-def command_gap() -> int:
-    """The space between two commands in a row (Control, Log, Close)."""
-
-    return scaled_px(8, minimum=5)
-
-
 def add_row_switch(
     layout: QtWidgets.QBoxLayout,
     switch: FluentSwitch,
@@ -5639,7 +5675,7 @@ def add_row_switch(
 
     gap = layout.spacing()
     if gap < 0:
-        gap = command_gap()
+        gap = row_gap()
     if lead:
         layout.addSpacing(gap)
     layout.addWidget(switch, 0, QtCore.Qt.AlignVCenter)
@@ -8530,8 +8566,7 @@ class _SelectionGridRowHeader(QtWidgets.QHeaderView):
 
     def two_line_height(self) -> int:
         label, note = self._fonts()
-        return (QtGui.QFontMetrics(label).height() + QtGui.QFontMetrics(note).height()
-                + scaled_px(6, minimum=4))
+        return QtGui.QFontMetrics(label).height() + QtGui.QFontMetrics(note).height() + row_gap()
 
     def _left(self) -> bool:
         return bool(self.defaultAlignment() & QtCore.Qt.AlignLeft)
@@ -8747,7 +8782,9 @@ class FluentSelectionGrid(QtWidgets.QTableView):
         horizontal = self.horizontalHeader()
         horizontal.setDefaultSectionSize(
             max(scaled_px(self._cell_width), widest + 2 * scaled_px(10, minimum=6)))
-        gap = scaled_px(14, minimum=8)
+        # Column groups, and the row's actions after its cells, stand a
+        # section apart.
+        gap = section_gap()
         for column in narrow_columns:
             horizontal.resizeSection(column, gap)
         trailing = self._grid_model.action_columns()
@@ -8780,14 +8817,6 @@ class FluentSelectionGrid(QtWidgets.QTableView):
             return QtCore.QRect(rect).adjusted(0, 0, 0, _grid_gutter())
         return QtCore.QRect(rect)
 
-    def label_width_hint(self) -> int:
-        """The form label column at which every row label still fits."""
-
-        header = self.verticalHeader()
-        widest = max((header.sectionSizeFromContents(section).width()
-                      for section in range(header.count())), default=0)
-        return max(0, widest - self._label_offset())
-
     def set_label_width(self, width: int) -> None:
         """End the row-label column where a form's ``width`` label column
         ends, so the first card starts on the form's field edge."""
@@ -8800,7 +8829,7 @@ class FluentSelectionGrid(QtWidgets.QTableView):
     def _label_offset() -> int:
         # A setting row's label-to-field spacing, less the inset that keeps
         # a card off its cell's edge.
-        return scaled_px(6, minimum=4) - _grid_gutter()
+        return row_gap() - _grid_gutter()
 
     def set_cell_states(self, states: "dict[tuple[int, int], str]",
                         tips: "dict[tuple[int, int], str] | None" = None) -> None:
@@ -9765,15 +9794,17 @@ class FluentStatusStrip(FluentFrame):
         self._severity = None
         self.show_message("", severity="idle")
 
-    def set_inset(self, inset: bool) -> None:
-        """Whether the strip keeps its content one CARD_PAD in from its
+    def set_inset(self, inset: bool, *, right: int = 0) -> None:
+        """Whether the strip keeps its content one card pad in from its
         sides -- a strip that is its own white card, whose dot then starts
         where a card's title and the tabs' first underline start -- or lies
         flush, in a page that is already white and padded, where the page's
-        own edge is the one its dot starts on."""
+        own edge is the one its dot starts on.  ``right`` keeps out of the
+        line whatever room the page reserves on its right (a scroll
+        gutter), so the line ends where the page's rows end."""
 
-        pad = scaled_px(CARD_PAD) if inset else 0
-        self.layout().setContentsMargins(pad, scaled_px(4), pad, scaled_px(4))
+        pad = card_pad() if inset else 0
+        self.layout().setContentsMargins(pad, scaled_px(4), pad + max(0, int(right)), scaled_px(4))
 
     @property
     def current_severity(self) -> str:

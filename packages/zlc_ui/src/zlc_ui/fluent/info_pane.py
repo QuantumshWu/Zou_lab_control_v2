@@ -28,6 +28,7 @@ from .fluent import (
     FluentTabWidget,
     _FluentRoundedMenu,
     apply_fluent_scrollbars,
+    card_pad,
     device_snap,
     fluent_font_size,
     frame_border_px,
@@ -39,7 +40,6 @@ from .fluent import (
 )
 from .style import (
     ACCENT,
-    CARD_PAD,
     ACCENT_TINT,
     DIVIDER,
     FONT,
@@ -596,7 +596,7 @@ class _RowsTab(QtWidgets.QWidget):
         # first tab's underline starts, as the header's words above do, and
         # one pad under the tab strip, where every tab page of the viewer
         # starts.
-        pad = scaled_px(CARD_PAD)
+        pad = card_pad()
         layout.setContentsMargins(pad, pad, pad, gap)
         layout.setSpacing(gap)
         self.filter_edit = FluentLineEdit()
@@ -724,10 +724,10 @@ class InfoPane(QtWidgets.QWidget):
         header_frame = FluentFrame(bordered=False)
         header_frame.setFixedHeight(scaled_px(48, minimum=38))
         header = QtWidgets.QHBoxLayout(header_frame)
-        # Every white strip of the pane keeps its content one CARD_PAD in --
+        # Every white strip of the pane keeps its content one card pad in --
         # the header's words, the tabs' first underline, the filter, the
         # tree and the status dot start on one x and end on one x.
-        pad = scaled_px(CARD_PAD)
+        pad = card_pad()
         header.setContentsMargins(pad, scaled_px(6), pad, scaled_px(6))
         # The path's name is a row label, read on its field's line at the
         # row's one gap from it -- a label like the one that names the
