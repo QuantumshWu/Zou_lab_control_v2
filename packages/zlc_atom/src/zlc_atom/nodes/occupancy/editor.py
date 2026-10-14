@@ -179,9 +179,8 @@ class CalibrationsEditor(QtWidgets.QWidget):
                 elif isinstance(token, int) and reach is not None:
                     readers = reach.readers[token]
                     mine = next((how for reader, how in readers if reader == row), None)
-                    end = next(
-                        ((reader, how) for reader, how in readers if how in (FIRST, LAST)), None)
-                    if mine is None and end is not None:
+                    end = None if mine is not None else _held_by(entries, row, token, count)
+                    if end is not None:
                         # Another file's First or Last: that column moves it,
                         # the number does not.
                         holder, how = end
@@ -254,10 +253,15 @@ class CalibrationsEditor(QtWidgets.QWidget):
         for row, column in sorted(after - before):
             token = self._columns[column]
             # A frame, First, Last or Rest belongs to one file: taking it here takes
-            # it from whichever file had it.
-            for other in frames:
-                if token in other:
-                    other.remove(token)
+            # it from whichever file had it.  First and 0 are one frame in every
+            # cycle, so taking either takes both.
+            same = (FIRST, 0) if token in (FIRST, 0) else (token,)
+            for index, other in enumerate(frames):
+                if index == row:
+                    continue
+                for taken in same:
+                    if taken in other:
+                        other.remove(taken)
             frames[row].append(token)
         self._write(tuple(
             {"path": entry["path"], "frames": tuple(claimed)}
@@ -311,6 +315,23 @@ class CalibrationsEditor(QtWidgets.QWidget):
 
     def set_mutation_enabled(self, enabled: bool) -> None:
         self.setEnabled(bool(enabled))
+
+
+def _held_by(entries, row: int, frame: int, count: int) -> tuple[int, str] | None:
+    """The other file reading ``frame`` as its First or Last, and which.
+
+    Read from the raw claims: a file that also names the frame by number
+    still holds it through First or Last, and only that column moves it.
+    """
+
+    for holder, entry in enumerate(entries):
+        if holder == row:
+            continue
+        if frame == 0 and FIRST in entry["frames"]:
+            return holder, FIRST
+        if frame == count - 1 and LAST in entry["frames"]:
+            return holder, LAST
+    return None
 
 
 def _name(entry) -> str:

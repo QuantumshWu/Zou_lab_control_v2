@@ -110,9 +110,16 @@ def test_claims_are_checked_among_themselves_before_any_count() -> None:
         check_claims(((0,), (0, "last")), ("A", "B"))
     with pytest.raises(ValueError, match="'first' is claimed by both A and B"):
         check_claims((("first",), ("first", "rest")), ("A", "B"))
-    # First and 0 are two spellings of one frame: that collision is a frame's,
-    # named with how each entry reaches it (above), not a claim's.
-    assert check_claims((("first",), (0, "last")), ("A", "B")) == (("first",), (0, "last"))
+    # First and 0 are one frame in every cycle: that collision needs no count,
+    # and is named as a frame's, with how each entry reaches it.
+    with pytest.raises(ValueError, match=r"frame 0 is read by both A \(first\) and B \(0\)"):
+        check_claims((("first",), (0, "last")), ("A", "B"))
+    with pytest.raises(ValueError, match=r"frame 0 is read by both A \(0\) and B \(first\)"):
+        check_claims(((0, "rest"), ("first",)), ("A", "B"))
+    # One entry naming frame 0 both ways is one reader; First against Last
+    # collides only in a one-frame cycle, so only a count refuses it.
+    assert check_claims(((0, "first"), ("rest",)), ("A", "B")) == ((0, "first"), ("rest",))
+    assert check_claims((("first",), ("last",)), ("A", "B")) == (("first",), ("last",))
     with pytest.raises(ValueError, match="B reads no frame"):
         check_claims((("rest",), ()), ("A", "B"))
 

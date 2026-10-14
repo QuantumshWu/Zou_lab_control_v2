@@ -89,8 +89,10 @@ def check_claims(
 ) -> tuple[tuple[FrameToken, ...], ...]:
     """What can be refused without knowing the frame count.
 
-    Every entry claims at least one frame, and every frame number, "first",
-    "last" and "rest" belongs to at most one entry.
+    Every entry claims at least one frame, every frame number, "first",
+    "last" and "rest" belongs to at most one entry, and "first" and frame 0 --
+    one frame in every cycle -- belong to the same entry.  "first" against
+    "last" collides only in a one-frame cycle: that is :func:`frame_problems`'.
     """
 
     if len(frames_by_entry) != len(names):
@@ -99,13 +101,18 @@ def check_claims(
     for name, frames in zip(names, claims):
         if not frames:
             raise ValueError(f"{name} reads no frame: choose its frames or remove it")
-    owners: dict[FrameToken, str] = {}
-    for name, frames in zip(names, claims):
+    owners: dict[FrameToken, int] = {}
+    for entry, frames in enumerate(claims):
         for token in frames:
             if token in owners:
                 what = f"frame {token}" if isinstance(token, int) else repr(token)
-                raise ValueError(f"{what} is claimed by both {owners[token]} and {name}")
-            owners[token] = name
+                raise ValueError(
+                    f"{what} is claimed by both {names[owners[token]]} and {names[entry]}")
+            owners[token] = entry
+    if FIRST in owners and 0 in owners and owners[FIRST] != owners[0]:
+        ways = sorted(((owners[FIRST], FIRST), (owners[0], "0")))
+        raise ValueError(
+            "frame 0 is read by both " + " and ".join(f"{names[entry]} ({how})" for entry, how in ways))
     return claims
 
 
