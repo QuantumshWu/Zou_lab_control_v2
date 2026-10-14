@@ -914,7 +914,8 @@ def start_server(flow, *, host="127.0.0.1", port: int, token: str, allow_control
                             path: str | None = None) -> dict[str, object]:
             """Use the bound Pulse Editor's existing asynchronous actions. Open takes a workspace Pulse JSON.
             Fire uses exactly its authored repeats/config; acceptance is not completion. Inspect pending/errors.
-            Never retry Fire on a timeout. No implicit camera arming or pulse editing is performed.
+            Never retry Fire on a timeout. Fire re-arms the editor's Acquisition (state.acquisition; choose it with
+            lab_editor_action action='acquisition', logic 'auto' | '' | node_id); no pulse editing is performed.
             """
             selected = None if path is None else str(workspace_path(path))
             return await owner(lambda: flow.control_pulse(action, device_id, path=selected))
