@@ -202,6 +202,22 @@ for _ in range(2):
     enter(first.duration_edit, "6")
 assert names == [("p1", "Changed")] * 2
 assert durations == [("p1", 6.0, "us")] * 2
+
+# A value-only signal may not edit Hold, Config or readonly Subpulse rows.
+for protected in (
+    periods[1],
+    replace(periods[1], analog=(("a0", "edge", replace(field, config_active=True)),)),
+    replace(periods[1], readonly=True),
+):
+    view.set_period(protected)
+    held = view._cards["p2"]
+    rejected = []
+    held.analog_committed.connect(lambda *args: rejected.append(args))
+    held.bus_value_edits["a0"].editingFinished.emit()
+    if not held.bus_mode_combos["a0"].isEnabled():
+        held.bus_mode_combos["a0"].setCurrentIndex(held.bus_mode_combos["a0"].findData("ramp"))
+    assert rejected == []
+    held.analog_committed.disconnect()
 '''
     )
 

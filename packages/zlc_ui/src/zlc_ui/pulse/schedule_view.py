@@ -408,28 +408,36 @@ class PeriodCard(FluentGroupBox):
         edit = self.bus_value_edits.get(port)
         if combo is None or edit is None:
             return
-        if not combo.isEnabled() or edit.isReadOnly():
-            return
-        if edit.property("numericError"):
-            self.feedback_requested.emit(str(edit.property("numericError")))
+        if not combo.isEnabled():
             return
         mode = combo.currentData()
         if not isinstance(mode, str) or not mode:
             raise ValueError("the selected analog mode has no domain value")
+        previous_mode, field = next(
+            (previous_mode, field) for key, previous_mode, field in self._period.analog if key == port
+        )
+        if edit.isReadOnly():
+            if mode == previous_mode:
+                return
+            # Hold's inherited level is read-only; its mode is not. Start
+            # the new step from the accepted held level, not widget edits.
+            text = field.text
+        else:
+            if edit.property("numericError"):
+                self.feedback_requested.emit(str(edit.property("numericError")))
+                return
+            text = edit.text()
         try:
-            value = int(float(edit.text()))
+            value = int(float(text))
         except ValueError:
             return
         # Only the accepted projection says what is unchanged. A previous
         # intent may have been refused, or superseded by Load/Sync/Clear.
-        for key, previous_mode, field in self._period.analog:
-            if key == port:
-                try:
-                    if (mode, value) == (previous_mode, int(float(field.text))):
-                        return
-                except ValueError:
-                    pass
-                break
+        try:
+            if (mode, value) == (previous_mode, int(float(field.text))):
+                return
+        except ValueError:
+            pass
         self.analog_committed.emit(self.period_id, port, mode, value)
 
     def set_port_label(self, port: str, label: str) -> None:

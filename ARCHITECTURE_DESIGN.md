@@ -446,6 +446,7 @@ Node new chunk
 - Pulse Editor每个channel保留同一组编辑/单位/全开/全关列；DAC不支持全开时保留按钮但disabled，不隐藏列。全关仍可用。
 - Pulse DAC模式Combo的宽度由公共FluentComboBox按实际字体、文字边距与箭头给出，不在Pulse复制估宽公式；模式与数值框之间保留行布局的显式逻辑像素间距，不能用过大的固定Combo宽度挤掉间距或数值输入空间。
 - Pulse Period字段的无变化判断只读取该卡片当前accepted PeriodVM（名字、duration/unit、DAC mode/value），不保存上次发送intent的数值。Load/Sync/Clear及拒绝后的回显共用原投影；未被owner接受的输入不能被视作已提交，控件复用不得吞掉再次输入。
+- DAC模式准入与数值准入分开：Hold的继承值只读不阻止可用Combo切换Edge/Ramp，切换初值取accepted FieldVM；模式未变的只读数值提交仍拒绝。Config有效覆盖、只读Subpulse及Spacer继续由同一Combo/owner准入限制，不能为了放行Hold切换而解除真正的只读保护。
 - Timeout显示真实错误但不冻结UI；未确认前不能显示Safe。
 - Form reconcile只在schema改变时重建dependency graph；同schema成功adopt只更新值。隐藏Setting延后构造/度量到实际打开，Manual Data单格修改只通知实际变化的格子。Pulse显示切换保留原timeline/滚动与bracket对象，不拆装未变控件。
 - 隐藏Setting在原Card保留待消费更新（包括runtime choice目录变化），显式重开或随父Tab重新Show时只消费一次；不得丢掉hidden force，也不得靠后续数据帧碰巧刷新。Pulse容器仍由原SetFixedSize layout定尺寸，真实LayoutRequest只同步已有gap指示线，不恢复多次scroll补偿。
