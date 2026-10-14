@@ -30,8 +30,6 @@ from .form import (
 )
 
 from ..fluent import (
-    ACCENT,
-    ORANGE,
     FluentButton,
     FluentComboBox,
     FluentCycleComboBox,
@@ -309,7 +307,7 @@ class _RowsEditor(QtWidgets.QWidget):
         self._rows_layout.setContentsMargins(0, 0, 0, 0)
         self._rows_layout.setSpacing(gap)
         layout.addLayout(self._rows_layout)
-        self.add_button = FluentButton("Add", color=ACCENT)
+        self.add_button = FluentButton("Add")
         self.add_button.setToolTip(field.description)
         self.add_button.clicked.connect(self._add_pressed)
         tail = QtWidgets.QHBoxLayout()
@@ -383,7 +381,7 @@ class _RowsEditor(QtWidgets.QWidget):
             )
             cells[column.key] = widget
             beside.addWidget(widget, 1)
-        remove = FluentButton("×", color=ORANGE)
+        remove = FluentButton("×", role="destructive")
         remove.setFixedWidth(scaled_px(30, minimum=24))
         remove.setToolTip("Remove this row")
         remove.clicked.connect(lambda _checked=False, row=row: self._remove(row))

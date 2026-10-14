@@ -5,7 +5,7 @@ from __future__ import annotations
 from PyQt5 import QtCore, QtWidgets
 
 from zlc_ui.fluent import (
-    ACCENT, GREY, YELLOW, ElidedLabel, FluentButton, FluentComboBox,
+    ElidedLabel, FluentButton, FluentComboBox,
     FluentFrame, FluentGroupBox, FluentLabel, FluentLineEdit, FluentScrollArea,
     read_editable_combo, retire_widget, signals_blocked,
 )
@@ -49,12 +49,11 @@ class PulseComponentView(QtWidgets.QWidget):
         self.name_edit.editingFinished.connect(self._name_committed)
         top.addWidget(self.name_edit, 1)
         self._buttons = {}
-        for action, text, color in (
-            ("new", "New", GREY), ("open", "Open", ACCENT),
-            ("save", "Save", YELLOW), ("save_as", "Save as", YELLOW),
-            ("insert", "Insert into Pulse", ACCENT),
+        for action, text in (
+            ("new", "New"), ("open", "Open"), ("save", "Save"),
+            ("save_as", "Save as"), ("insert", "Insert into Pulse"),
         ):
-            button = FluentButton(text, color=color)
+            button = FluentButton(text)
             button.clicked.connect(lambda _checked=False, a=action: self.action_requested.emit(a, self._context_id))
             self._buttons[action] = button
             top.addWidget(button)
@@ -69,7 +68,7 @@ class PulseComponentView(QtWidgets.QWidget):
         self.config_path_edit.setPlaceholderText("Choose a Subpulse file")
         self.config_path_edit.editingFinished.connect(self._commit_source)
         file_row.addWidget(self.config_path_edit, 1)
-        self.browse_source_button = FluentButton("Browse…", color=ACCENT)
+        self.browse_source_button = FluentButton("Browse…")
         self.browse_source_button.clicked.connect(
             lambda _checked=False: self.action_requested.emit("browse_source", self._selected_id)
         )

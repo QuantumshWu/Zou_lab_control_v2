@@ -7,7 +7,7 @@ from difflib import SequenceMatcher
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 from zlc_ui.fluent import (
-    ACCENT, GREY, ORANGE, YELLOW, FluentButton, FluentComboBox,
+    FluentButton, FluentComboBox,
     ElidedLabel, FluentGroupBox, FluentLabel, FluentLineEdit, FluentScrollArea,
     FluentTableView, read_editable_combo, retire_widget, signals_blocked,
 )
@@ -45,12 +45,12 @@ class PulseConfigView(QtWidgets.QWidget):
         file_layout.setContentsMargins(px(10), px(8), px(10), px(10))
         toolbar = QtWidgets.QHBoxLayout()
         self._file_buttons = []
-        for name, text, color in (
-            ("new", "New file", GREY), ("load", "Open file", ACCENT),
-            ("refresh", "Refresh", GREY), ("save", "Save", YELLOW),
-            ("save_as", "Save as", YELLOW), ("unload", "Unload", ORANGE),
+        for name, text, role in (
+            ("new", "New file", "standard"), ("load", "Open file", "standard"),
+            ("refresh", "Refresh", "standard"), ("save", "Save", "standard"),
+            ("save_as", "Save as", "standard"), ("unload", "Unload", "destructive"),
         ):
-            button = FluentButton(text, color=color)
+            button = FluentButton(text, role=role)
             button.setFixedHeight(row_height())
             button.clicked.connect(getattr(self, f"{name}_requested"))
             setattr(self, f"{name}_button", button)
@@ -74,8 +74,8 @@ class PulseConfigView(QtWidgets.QWidget):
         self.values_model.itemChanged.connect(lambda _item: self._emit_entries())
         file_layout.addWidget(self.values_table)
         actions = QtWidgets.QHBoxLayout()
-        self.add_button = FluentButton("Add parameter", color=ACCENT)
-        self.remove_button = FluentButton("Remove selected", color=ORANGE)
+        self.add_button = FluentButton("Add parameter")
+        self.remove_button = FluentButton("Remove selected", role="destructive")
         self.add_button.clicked.connect(self._add_entry)
         self.remove_button.clicked.connect(self._remove_entries)
         actions.addWidget(self.add_button)

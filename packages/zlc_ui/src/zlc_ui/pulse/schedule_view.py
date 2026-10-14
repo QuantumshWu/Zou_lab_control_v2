@@ -16,7 +16,7 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 from zlc_ui.form import FormChoice, being_edited
 from zlc_ui.fluent import (
     retire_widget,
-    ACCENT, BG, GREEN, GREY, ORANGE, RED, TEXT, YELLOW, CONFIG_GREEN, CONFIG_GREEN_DARK,
+    ACCENT, BG, GREY, TEXT, CONFIG_GREEN, CONFIG_GREEN_DARK,
     CONFIG_GREEN_TINT, FluentButton, FluentCheckBox, FluentSwitch,
     FluentComboBox, FluentFrame, FluentGroupBox, fluent_count_box,
     FluentLabel, FluentLineEdit, FluentScrollArea, LinkedScrollPanes,
@@ -598,7 +598,7 @@ class ChannelPanel(FluentGroupBox):
         mode_layout.setContentsMargins(0, 0, 0, 0)
         mode_layout.setSpacing(px(4))
         self.config_mode = FluentSwitch("Config")
-        self.config_refresh_button = FluentButton("Refresh", color=GREY)
+        self.config_refresh_button = FluentButton("Refresh")
         self.config_refresh_button.setEnabled(False)
         mode_layout.addWidget(self.config_mode)
         mode_layout.addWidget(self.config_refresh_button)
@@ -639,10 +639,10 @@ class ChannelPanel(FluentGroupBox):
                 edit.setFixedWidth(px(70, minimum=60))
                 combo = FluentComboBox()
                 combo.setFixedWidth(time_unit_width())
-                fill = FluentButton("●", color=ACCENT)
+                fill = FluentButton("●")
                 fill.setFixedWidth(hide_button_width())
                 fill.setToolTip("Turn this output on in every period")
-                clear = FluentButton("○", color=ORANGE)
+                clear = FluentButton("○")
                 clear.setFixedWidth(hide_button_width())
                 edit.binding_committed.connect(lambda scan, source, key=row.port_key: self.binding_committed.emit("delay", None, key, scan, source))
                 edit.config_key_committed.connect(
@@ -910,7 +910,7 @@ class ComponentCard(FluentGroupBox):
         self._component = component
         self.set_surface(edge=ACCENT)
         self.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Expanding)
-        self.expand_button = FluentButton("Expand" if mode == "closed" else "Collapse", color=ACCENT)
+        self.expand_button = FluentButton("Expand" if mode == "closed" else "Collapse")
         self.expand_button.clicked.connect(lambda: self.action_requested.emit("expand", self.component_id))
         width = (card_width if card_width is not None else period_card_width()) if mode == "closed" else max(
             spacer_card_width(), self.expand_button.sizeHint().width() + 2 * px(7),
@@ -971,10 +971,10 @@ class ComponentCard(FluentGroupBox):
         self.summary_label = FluentLabel("")
         self.summary_label.setAlignment(QtCore.Qt.AlignCenter)
         column.addWidget(self.summary_label)
-        self.edit_button = FluentButton("Edit", color=GREY)
+        self.edit_button = FluentButton("Edit")
         self.edit_button.setToolTip("Edit this Subpulse")
         self.edit_button.clicked.connect(lambda: self.action_requested.emit("edit", self.component_id))
-        self.ungroup_button = FluentButton("Ungroup", color=GREY)
+        self.ungroup_button = FluentButton("Ungroup")
         self.ungroup_button.setToolTip("Keep the default contents as ordinary Pulse items")
         self.ungroup_button.clicked.connect(lambda: self.action_requested.emit("ungroup", self.component_id))
         actions = QtWidgets.QVBoxLayout()
@@ -1626,7 +1626,7 @@ class PulseScheduleView(QtWidgets.QWidget):
         stub_label = FluentLabel("Name\nDelay")
         stub_label.setAlignment(QtCore.Qt.AlignCenter)
         stub_layout.addWidget(stub_label)
-        self.stub_show_button = FluentButton("Show", color=ACCENT)
+        self.stub_show_button = FluentButton("Show")
         self.stub_show_button.setFixedHeight(row_height())
         # As wide as the stub's column: a button narrower than its column
         # sat against the left edge under a centred label.
@@ -1698,17 +1698,17 @@ class PulseScheduleView(QtWidgets.QWidget):
         controls.setContentsMargins(0, 0, 0, 0)
         controls.setHorizontalSpacing(bar_gap)
         controls.setVerticalSpacing(bar_gap)
-        self.run_button = FluentButton("On Pulse*", color=GREEN)
-        self.stop_button = FluentButton("Stop Pulse", color=RED)
-        self.sync_button = FluentButton("Sync", color=ORANGE)
-        self.add_button = FluentButton("Add Period", color=ACCENT)
-        self.spacer_button = FluentButton("Add Spacer", color=ACCENT)
-        self.remove_button = FluentButton("Remove", color=ORANGE)
-        self.bracket_button = FluentButton("Add Bracket", color=ACCENT)
-        self.save_button = FluentButton("Save Pulse*", color=YELLOW)
-        self.load_button = FluentButton("Load", color=ORANGE)
-        self.collapse_button = FluentButton("Collapse", color=GREY)
-        self.group_button = FluentButton("Group Subpulse", color=ACCENT)
+        self.run_button = FluentButton("On Pulse*", role="primary")
+        self.stop_button = FluentButton("Stop Pulse")
+        self.sync_button = FluentButton("Sync")
+        self.add_button = FluentButton("Add Period")
+        self.spacer_button = FluentButton("Add Spacer")
+        self.remove_button = FluentButton("Remove", role="destructive")
+        self.bracket_button = FluentButton("Add Bracket")
+        self.save_button = FluentButton("Save Pulse*")
+        self.load_button = FluentButton("Load")
+        self.collapse_button = FluentButton("Collapse")
+        self.group_button = FluentButton("Group Subpulse")
         # Three compact rows: execute; edit the timeline; save and organize.
         control_buttons = (
             (self.run_button, 0, 0, 2), (self.stop_button, 0, 2, 1), (self.sync_button, 0, 3, 1),
@@ -1745,7 +1745,7 @@ class PulseScheduleView(QtWidgets.QWidget):
             "Connection choices are supplied by the host that opened this editor."
         )
         self.connection_endpoint.setFixedHeight(control_height)
-        self.connection_button = FluentButton("Connect", color=ACCENT)
+        self.connection_button = FluentButton("Connect")
         self.connection_button.setFixedHeight(control_height)
         self.connection_status = FluentLineEdit("")
         self.connection_status.setEnabled(False)
@@ -1768,9 +1768,9 @@ class PulseScheduleView(QtWidgets.QWidget):
         ports_layout.setSpacing(bar_gap)
         self.hidden_port_combo = FluentComboBox()
         self.hidden_port_combo.setFixedHeight(control_height)
-        self.add_port_button = FluentButton("Add", color=ACCENT)
-        self.hide_off_button = FluentButton("Hide Off", color=ORANGE)
-        self.show_all_button = FluentButton("Show All", color=ACCENT)
+        self.add_port_button = FluentButton("Add")
+        self.hide_off_button = FluentButton("Hide Off")
+        self.show_all_button = FluentButton("Show All")
         self.visible_label = FluentLineEdit("")
         self.visible_label.setEnabled(False)
         for button in (self.add_port_button, self.hide_off_button, self.show_all_button):

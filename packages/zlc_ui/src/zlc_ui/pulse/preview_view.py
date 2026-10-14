@@ -11,8 +11,8 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 
 from zlc_ui.fluent import (
     detach_widget,
-    ACCENT, FluentButton, FluentComboBox, FluentFrame, FluentLabel,
-    FluentLineEdit, FluentScrollArea, FluentSwitch, signals_blocked,
+    FluentButton, FluentComboBox, FluentFrame, FluentLabel,
+    FluentLineEdit, FluentScrollArea, signals_blocked,
 )
 
 from ._layout import px
@@ -41,18 +41,21 @@ class PulsePreviewView(QtWidgets.QWidget):
         row.setSpacing(px(10, minimum=6))
         control_h = px(32, minimum=28)
 
-        self.preview_include_off = FluentSwitch("Show off rows")
-        self.preview_include_off.setFixedSize(px(198, minimum=178), control_h)
+        # Toolbar toggles are chips, the same as the console's Selectors.
+        self.preview_include_off = FluentButton("Show off rows")
+        self.preview_include_off.setCheckable(True)
+        self.preview_include_off.setFixedHeight(control_h)
         self.preview_include_off.toggled.connect(self._include_off_changed)
-        self.preview_selectors_switch = FluentSwitch("Selectors")
-        self.preview_selectors_switch.setFixedSize(px(168, minimum=150), control_h)
+        self.preview_selectors_switch = FluentButton("Selectors")
+        self.preview_selectors_switch.setCheckable(True)
+        self.preview_selectors_switch.setFixedHeight(control_h)
         self.preview_selectors_switch.toggled.connect(self.selectors_toggled)
         self.preview_size_label = FluentLabel("Size")
         self.preview_size_combo = FluentComboBox()
         self.preview_size_combo.setFixedSize(px(80, minimum=66), control_h)
         self.preview_size_combo.activated[int].connect(self._size_picked)
-        self.preview_save_figure_button = FluentButton("Save Figure", color=ACCENT)
-        self.preview_save_figure_button.setFixedSize(px(124, minimum=108), control_h)
+        self.preview_save_figure_button = FluentButton("Save Figure")
+        self.preview_save_figure_button.setFixedHeight(control_h)
         self.preview_save_figure_button.clicked.connect(self.save_requested)
         self.preview_status = FluentLineEdit("")
         self.preview_status.setEnabled(False)

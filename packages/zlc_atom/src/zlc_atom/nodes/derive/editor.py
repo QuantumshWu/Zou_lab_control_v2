@@ -13,7 +13,7 @@ from PyQt5 import QtCore, QtWidgets
 
 from zlc_plot.semantics import schema_structure
 from zlc_ui.fluent import (
-    ACCENT, AXIS_GROUP_COLORS, GREY, FluentButton, FluentCodeEdit, FluentComboBox, FluentLineEdit, FluentLabel, FluentFrame,
+    AXIS_GROUP_COLORS, FluentButton, FluentCodeEdit, FluentComboBox, FluentLineEdit, FluentLabel, FluentFrame,
     FluentSpinBox, retire_widget, scaled_px, signals_blocked,
 )
 
@@ -61,7 +61,7 @@ class DeriveEditor(QtWidgets.QWidget):
         header = QtWidgets.QHBoxLayout()
         header.addWidget(FluentLabel("Outputs · Assign each answer to result"))
         header.addStretch(1)
-        self.add_button = FluentButton("Add output", color=ACCENT)
+        self.add_button = FluentButton("Add output")
         header.addWidget(self.add_button)
         layout.addLayout(header)
         self.rows_layout = QtWidgets.QVBoxLayout()
@@ -100,7 +100,7 @@ class DeriveEditor(QtWidgets.QWidget):
         name_edit = FluentLineEdit(name)
         name_edit.setPlaceholderText("Output name, e.g. contrast")
         header.addWidget(name_edit, 1)
-        remove = FluentButton("×", color=GREY)
+        remove = FluentButton("×", role="destructive")
         remove.setToolTip("Remove this output")
         header.addWidget(remove)
         column.addLayout(header)

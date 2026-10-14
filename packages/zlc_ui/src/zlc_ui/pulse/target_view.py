@@ -13,7 +13,7 @@ from PyQt5 import QtCore, QtWidgets
 
 from zlc_ui.form import being_edited
 from zlc_ui.fluent import (
-    ACCENT, GREY, FluentButton, FluentFrame, FluentGroupBox, FluentLabel,
+    FluentButton, FluentFrame, FluentGroupBox, FluentLabel,
     FluentLineEdit, FluentScrollArea, FluentSpinBox, signals_blocked,
 )
 
@@ -60,9 +60,9 @@ class PulseTargetView(QtWidgets.QWidget):
         self.status_label = FluentLabel("")
         self.status_label.setWordWrap(True)
         header_layout.addWidget(self.status_label, 1)
-        self.add_digital_button = FluentButton("Add Digital", color=ACCENT)
-        self.add_dac_button = FluentButton("Add DAC", color=ACCENT)
-        self.apply_button = FluentButton("Apply target", color=ACCENT)
+        self.add_digital_button = FluentButton("Add Digital")
+        self.add_dac_button = FluentButton("Add DAC")
+        self.apply_button = FluentButton("Apply target", role="primary")
         for button in (self.add_digital_button, self.add_dac_button, self.apply_button):
             header_layout.addWidget(button)
         layout.addWidget(header)
@@ -174,7 +174,7 @@ class PulseTargetView(QtWidgets.QWidget):
         width.setFixedSize(px(82, minimum=70), row_height())
         clock_endpoint = FluentLineEdit(record.clock_endpoint or "")
         clock_endpoint.setFixedHeight(row_height())
-        remove_button = FluentButton("Remove", color=GREY)
+        remove_button = FluentButton("Remove", role="destructive")
         remove_button.setFixedSize(px(86, minimum=74), row_height())
         remove_button.clicked.connect(lambda _checked=False, key=record.key: self._remove_key(key))
         if record.kind == "dac":

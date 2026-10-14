@@ -12,18 +12,15 @@ from PyQt5 import QtCore, QtWidgets
 from zlc_ui.fluent import (
     retire_widget,
     detach_widget,
-    ACCENT,
     ElidedLabel,
     GREEN,
     GREY,
-    ORANGE,
     FluentButton,
     FluentComboBox,
     FluentFrame,
     FluentLabel,
     FluentScrollArea,
     FluentStatusDot,
-    FluentSwitch,
     FluentTabWidget,
     fluent_widget_stylesheet,
     scaled_px,
@@ -97,22 +94,26 @@ class TaskConsoleView(QtWidgets.QWidget):
         # Keep the full kind label and its arrow in the
         # same fixed slot on every screen scale.
         self.kind_combo.setFixedWidth(scaled_px(170, minimum=130))
-        self.add_panel_button = FluentButton("Add Panel", color=ACCENT)
+        self.add_panel_button = FluentButton("Add Panel", role="primary")
         self.add_panel_button.setEnabled(False)
 
         # Rendered as a push button rather than a toggle, so the button carries
         # the command and the label carries the state.  It emits the state it
         # is asking FOR, which is what makes the command reversible.
-        self.pause_switch = FluentButton("Pause", color=ORANGE)
+        self.pause_switch = FluentButton("Pause")
         self._paused = False
-        self.selectors_switch = FluentSwitch("Selectors")
-        self.save_screenshot_button = FluentButton("Save image", color=ACCENT)
+        # A toolbar toggle is a chip: pressed in is on, the way a segmented
+        # choice marks its current item.  A sliding switch among buttons read
+        # as one more command.
+        self.selectors_switch = FluentButton("Selectors")
+        self.selectors_switch.setCheckable(True)
+        self.save_screenshot_button = FluentButton("Save image")
         self.save_screenshot_button.setToolTip("Save one screenshot of TaskConsole")
-        self.save_layout_button = FluentButton("Save", color=ACCENT)
+        self.save_layout_button = FluentButton("Save")
         self.save_layout_button.setToolTip("Save the layout and signal wiring")
-        self.load_layout_button = FluentButton("Load", color=ORANGE)
+        self.load_layout_button = FluentButton("Load")
         self.load_layout_button.setToolTip("Load a saved layout and signal wiring")
-        self.clear_board_button = FluentButton("Clear", color=ORANGE)
+        self.clear_board_button = FluentButton("Clear", role="destructive")
         self.clear_board_button.setToolTip("Remove every panel and logic node from the board")
 
         for widget in (

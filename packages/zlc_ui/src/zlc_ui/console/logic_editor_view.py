@@ -12,17 +12,13 @@ from collections.abc import Mapping
 from PyQt5 import QtCore, QtWidgets
 
 from zlc_ui.fluent import (
-    ACCENT,
-    GREEN,
     GREY,
-    ORANGE,
     FluentButton,
     FluentComboBox,
     FluentFrame,
     FluentLabel,
     FluentReadoutEdit,
     FluentScrollArea,
-    FluentSwitch,
     FluentTreeComboBox,
     fill_grouped_choice_combo,
     retire_widget,
@@ -127,18 +123,19 @@ class LogicEditorView(QtWidgets.QWidget):
 
         actions = QtWidgets.QHBoxLayout()
         actions.addStretch(1)
-        self.start_button = FluentButton("Start", color=GREEN)
+        self.start_button = FluentButton("Start", role="primary")
         # This is the Start an operator actually presses -- adding a node
         # opens its Edit and focuses it -- so the switch that says what Start
         # will do belongs here too.  Both views show the SAME preference: it
         # lives on the node's binding, and neither widget keeps a default.
-        self.preview_switch = FluentSwitch("Plot")
+        self.preview_switch = FluentButton("Plot")
+        self.preview_switch.setCheckable(True)
         self.preview_switch.setToolTip(
             "Open this node's plot panel when it starts"
         )
         self.preview_switch.toggled.connect(self.auto_preview_changed.emit)
-        self.stop_button = FluentButton("Stop", color=ORANGE)
-        self.remove_button = FluentButton("Remove", color=ACCENT)
+        self.stop_button = FluentButton("Stop")
+        self.remove_button = FluentButton("Remove", role="destructive")
         self.start_button.clicked.connect(self.start_requested.emit)
         self.stop_button.clicked.connect(self.stop_requested.emit)
         self.remove_button.clicked.connect(self.remove_requested.emit)

@@ -34,6 +34,7 @@ from .style import (
     ACCENT_TINT,
     SELECTION_EDGE,
     AUTO_SCALE_BASIS,
+    BUTTON_PADDING_H,
     AUTO_SCALE_MARGIN,
     BG,
     CARD_TITLE_PX,
@@ -46,15 +47,18 @@ from .style import (
     FONT,
     FONT_SIZE,
     GREEN,
+    GRAPHITE,
     GREY,
     HOVER,
     MUTED_LABEL_STYLE,
     ORANGE,
     ORANGE_DARK,
+    ORANGE_TINT,
     PADDING_V,
     PLACEHOLDER,
     RADIUS,
     RED,
+    RED_DARK,
     STEP_WIDTH,
     TEXT,
     TITLE_ICON_GAP,
@@ -1144,80 +1148,173 @@ class FluentGroupBox(QtWidgets.QGroupBox):
         super().paintEvent(event)
 
 
+#: What a button DOES, which is all its look may say.  A colour chosen per
+#: call gave one verb a different hue in every window -- Remove orange here,
+#: grey there, blue in the editor -- with white text at 1.65-2.55:1 on top.
+#: ``primary`` is a surface's one main action (the only accent fill),
+#: ``standard`` every other command, ``destructive`` a command that takes
+#: something away (standard, red ink), and ``destructive_primary`` the
+#: confirm of a destructive question -- the one other white-on-colour fill.
+BUTTON_ROLES = ("primary", "standard", "destructive", "destructive_primary")
+
+_BUTTON_STYLE_CACHE: tuple[float, str] | None = None
+
+
+def _button_stylesheet() -> str:
+    """The one sheet every FluentButton wears; role and state pick the rules.
+
+    Standard is the resting look of the segmented choice the operator
+    already reads as calm: a white face, a hairline edge, the accent only on
+    the edge under the pointer.  A checkable button checked is a toggle chip
+    and wears that control's "current" state.  Disabled is an OUTLINE: a
+    filled grey disabled button and an enabled grey one were the same
+    pixels, and nobody could tell whether Start could be pressed.
+    """
+
+    global _BUTTON_STYLE_CACHE
+    if _BUTTON_STYLE_CACHE is not None and _BUTTON_STYLE_CACHE[0] == _FLUENT_SCALE:
+        return _BUTTON_STYLE_CACHE[1]
+    accent_hover = QtGui.QColor(ACCENT).darker(110).name()
+    accent_pressed = QtGui.QColor(ACCENT).darker(122).name()
+    red_hover = QtGui.QColor(RED).darker(110).name()
+    red_pressed = QtGui.QColor(RED).darker(122).name()
+    style = f"""
+    QPushButton {{
+        background: {SURFACE};
+        color: {TEXT};
+        border: 1px solid {DIVIDER};
+        border-radius: {_radius()}px;
+        padding: 0px {scaled_px(BUTTON_PADDING_H, minimum=6)}px;
+        font: {fluent_font_size()}pt "{FONT}";
+        outline: none;
+    }}
+    QPushButton:hover {{ border-color: {ACCENT}; }}
+    QPushButton:pressed {{ background: {ACCENT_TINT}; }}
+    QPushButton:checked {{
+        background: {ACCENT_TINT};
+        border-color: {SELECTION_EDGE};
+        color: {HOVER};
+    }}
+    QPushButton:checked:hover {{ border-color: {ACCENT}; }}
+    QPushButton[role="destructive"] {{ color: {RED_DARK}; }}
+    QPushButton[role="destructive"]:hover {{ border-color: {RED}; }}
+    QPushButton[role="destructive"]:pressed {{ background: {BG}; }}
+    QPushButton[role="primary"] {{
+        background: {ACCENT}; border-color: {ACCENT}; color: white;
+    }}
+    QPushButton[role="primary"]:hover {{
+        background: {accent_hover}; border-color: {accent_hover};
+    }}
+    QPushButton[role="primary"]:pressed {{
+        background: {accent_pressed}; border-color: {accent_pressed};
+    }}
+    QPushButton[role="destructive_primary"] {{
+        background: {RED}; border-color: {RED}; color: white;
+    }}
+    QPushButton[role="destructive_primary"]:hover {{
+        background: {red_hover}; border-color: {red_hover};
+    }}
+    QPushButton[role="destructive_primary"]:pressed {{
+        background: {red_pressed}; border-color: {red_pressed};
+    }}
+    QPushButton[dirty="true"] {{
+        background: {ORANGE_TINT}; border-color: {ORANGE}; color: {ORANGE_DARK};
+    }}
+    QPushButton:disabled, QPushButton[role="primary"]:disabled,
+    QPushButton[role="destructive_primary"]:disabled, QPushButton[dirty="true"]:disabled,
+    QPushButton:checked:disabled {{
+        background: {BG}; border-color: {DIVIDER}; color: {PLACEHOLDER};
+    }}
+    """
+    _BUTTON_STYLE_CACHE = (_FLUENT_SCALE, style)
+    return style
+
+
 class FluentButton(QtWidgets.QPushButton):
-    def __init__(self, text: str = "", parent=None, *, color: str = ACCENT):
+    """A command, drawn by its ``role`` (see :data:`BUTTON_ROLES`).
+
+    Made checkable it is a toggle chip -- a state beside a command, drawn the
+    way a segmented choice marks its current item.  The label is never
+    elided: the button asks for its whole text plus padding, and a layout
+    too narrow for it is the layout's to fix.
+    """
+
+    def __init__(self, text: str = "", parent=None, *, role: str = "standard"):
         super().__init__(text, parent)
-        self._current_bg = None
-        # Shared dirty state (see set_dirty): the CLEAN base colour is
-        # remembered so a dirty colour never leaks into it, and toggling the
-        # trailing '*' is width-stable.
         self._dirty = False
-        self._dirty_color = None   # remembered so a dirty colour can always be reverted
-        self._base_color = QtGui.QColor(color).name(QtGui.QColor.HexRgb)
         self.setMinimumHeight(scaled_px(30, minimum=22))
-        # Default sizing is set ONCE here, not inside set_color -- callers that
-        # opt into Expanding (e.g. a button grid) would otherwise have their
-        # policy silently reset to Fixed the next time the colour changes, making
-        # the button collapse to its text width (the "Save button shrinks after
-        # load" bug).
+        # Default sizing is set ONCE here: a caller that opts into Expanding
+        # (a button grid) keeps it.
         self.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
-        self.set_color(color)
+        self.setProperty("dirty", False)
+        self.set_role(role)
+        self.setStyleSheet(_button_stylesheet())
 
-    def set_color(self, color: str) -> None:
-        bg = QtGui.QColor(color).name(QtGui.QColor.HexRgb)
-        # Remember the CLEAN base colour only while not dirty, so set_dirty's
-        # transient dirty colour can always be reverted.
-        if not self._dirty:
-            self._base_color = bg
-        if bg == self._current_bg:
-            return
-        self._current_bg = bg
-        hover = QtGui.QColor(bg).darker(184).name(QtGui.QColor.HexRgb)
-        self.setStyleSheet(
-            f"""
-            QPushButton {{
-                background: {bg};
-                color: white;
-                border: none;
-                border-radius: {_radius()}px;
-                padding: {scaled_px(PADDING_V)}px {scaled_px(EDIT_PADDING_H)}px;
-                font: {fluent_font_size()}pt "{FONT}";
-            }}
-            QPushButton:hover {{ background: {hover}; }}
-            QPushButton:disabled {{ background: {PLACEHOLDER}; color: {BG}; }}
-            """
-        )
+    def role(self) -> str:
+        return str(self.property("role"))
 
-    def set_dirty(self, dirty: bool = True, *, dirty_color: str | None = None) -> None:
-        """Dirty indicator, reusable on any FluentButton.
+    def set_role(self, role: str) -> None:
+        """What this command does; the sheet is repolished only on a change."""
 
-        A trailing ``*`` means "pressing this would apply / recompute something
-        new" (the same convention used by an editor title bar).  By default ONLY
-        the star toggles and the base colour is left unchanged.  Pass
-        ``dirty_color`` for the save-button rule (e.g. YELLOW while dirty, base
-        colour when clean).  Idempotent and width-stable -- the base label/colour
-        are remembered so repeated calls never accumulate stars or lose the colour."""
+        value = str(role)
+        if value not in BUTTON_ROLES:
+            raise ValueError(f"button role must be one of {BUTTON_ROLES}, not {value!r}")
+        if self.property("role") != value:
+            self.setProperty("role", value)
+            self._repolish()
+
+    def _repolish(self) -> None:
+        self.style().unpolish(self)
+        self.style().polish(self)
+        self.update()
+
+    def set_dirty(self, dirty: bool = True) -> None:
+        """Mark that pressing this would save or apply something new.
+
+        A trailing ``*`` and the orange attention tint, whatever the role:
+        the star alone was easy to miss, and the yellow fill it used to come
+        with carried white text at 1.65:1.  Idempotent and width-stable --
+        the label never accumulates stars.
+        """
+
         dirty = bool(dirty)
-        if dirty_color is not None:
-            self._dirty_color = dirty_color   # persist so clean can revert it
         base = self.text()
         if base.endswith("*"):
             base = base[:-1]
         self._dirty = dirty
         QtWidgets.QPushButton.setText(self, base + ("*" if dirty else ""))
-        if self._dirty_color is not None:
-            self.set_color(self._dirty_color if dirty else self._base_color)
+        if self.property("dirty") != dirty:
+            self.setProperty("dirty", dirty)
+            self._repolish()
 
     def is_dirty(self) -> bool:
         return self._dirty
 
-    def paintEvent(self, event) -> None:
-        option = QtWidgets.QStyleOptionButton()
-        self.initStyleOption(option)
-        contents = self.style().subElementRect(QtWidgets.QStyle.SE_PushButtonContents, option, self)
-        option.text = self.fontMetrics().elidedText(option.text, QtCore.Qt.ElideRight, contents.width())
-        painter = QtWidgets.QStylePainter(self)
-        painter.drawControl(QtWidgets.QStyle.CE_PushButton, option)
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        super().paintEvent(event)
+        _paint_keyboard_focus(self)
+
+
+def _paint_keyboard_focus(widget: QtWidgets.QWidget, rect: QtCore.QRectF | None = None) -> None:
+    """Ring ``widget`` while it holds focus the KEYBOARD gave it.
+
+    Only a Tab or a shortcut draws it: a ring left by every click would
+    outline whichever control was pressed last.  Qt records which kind of
+    focus change happened on the window -- the flag its own styles read
+    before they draw a focus frame.
+    """
+
+    if not widget.hasFocus() or not widget.window().testAttribute(QtCore.Qt.WA_KeyboardFocusChange):
+        return
+    painter = QtGui.QPainter(widget)
+    painter.setRenderHint(QtGui.QPainter.Antialiasing)
+    pen = QtGui.QPen(QtGui.QColor(HOVER))
+    pen.setWidthF(2.0)
+    painter.setPen(pen)
+    painter.setBrush(QtCore.Qt.NoBrush)
+    area = QtCore.QRectF(widget.rect()) if rect is None else QtCore.QRectF(rect)
+    painter.drawRoundedRect(area.adjusted(1.0, 1.0, -1.0, -1.0), _radius(), _radius())
+    painter.end()
 
 
 def _apply_fluent_context_menu(widget, event) -> None:
@@ -1944,15 +2041,9 @@ class FluentPathEdit(QtWidgets.QWidget):
         # pushes the Browse button off a narrow Edit tab.
         self.edit.setMinimumWidth(scaled_px(96, minimum=72))
         self.edit.textChanged.connect(lambda t: self.changed.emit(str(t)))
-        self.browse = FluentButton("Browse…", self, color=GREY)
-        # size the button to its OWN label (+ padding) at the live DPR so "Browse…"
-        # is never clipped (a fixed 80px clipped it to "owse" at some scales).
-        self.browse.setFixedWidth(
-            fluent_text_width(self.browse.fontMetrics(), "Browse…") + scaled_px(22, minimum=16))
+        self.browse = FluentButton("Browse…", self)
         self.browse.clicked.connect(self._browse)
-        self.refresh = FluentButton("Refresh", self, color=GREY)
-        self.refresh.setFixedWidth(
-            fluent_text_width(self.refresh.fontMetrics(), "Refresh") + scaled_px(22, minimum=16))
+        self.refresh = FluentButton("Refresh", self)
         self.refresh.setToolTip("Re-read this file from disk")
         self.refresh.clicked.connect(self.refresh_requested)
         self.refresh.setVisible(bool(refreshable))
@@ -2317,19 +2408,20 @@ class _FluentMessageDialog(FluentCardDialog):
         row = QtWidgets.QHBoxLayout()
         row.addStretch(1)
         if confirm:
-            cancel = FluentButton(str(cancel_text), color=GREY)
+            cancel = FluentButton(str(cancel_text))
             cancel.clicked.connect(self.reject)
             row.addWidget(cancel)
+            # A warning question confirms something that cannot be taken
+            # back, so its confirm is the one red fill this package draws.
             accept = FluentButton(
                 str(confirm_text),
-                color=(ORANGE if str(kind) == "warning" else ACCENT),
+                role="destructive_primary" if str(kind) == "warning" else "primary",
             )
             accept.clicked.connect(self.accept)
             row.addWidget(accept)
         else:
-            # A warning wears the ORANGE accent (the same destructive/attention hue Remove uses); a
-            # plain info uses the resting ACCENT -- the ONE palette, never a new colour.
-            ok = FluentButton("OK", color=(ORANGE if str(kind) == "warning" else ACCENT))
+            # Acknowledging a message destroys nothing, warning or not.
+            ok = FluentButton("OK", role="primary")
             ok.clicked.connect(self.accept)
             row.addWidget(ok)
         outer.addLayout(row)
@@ -4431,8 +4523,14 @@ class FluentTabWidget(QtWidgets.QTabWidget):
         return btn
 
 
+def _switch_track_size() -> tuple[int, int]:
+    """The track every switch draws: one size, whatever its label says."""
+
+    return scaled_px(40, minimum=32), scaled_px(20, minimum=16)
+
+
 def fluent_switch_width(text: str) -> int:
-    """The exact track width a :class:`FluentSwitch` paints for ``text``.
+    """The exact width a :class:`FluentSwitch` takes for ``text``.
 
     The ONE switch-width authority.  A layout that must reserve a column for a
     switch (a form's Auto label column) asks THIS instead of predicting the
@@ -4441,24 +4539,31 @@ def fluent_switch_width(text: str) -> int:
     underneath its neighbour.
     """
 
-    track_h = scaled_px(30, minimum=24)
+    track_w, _track_h = _switch_track_size()
     if not text:
-        return scaled_px(60, minimum=48)
+        return track_w + 2
     metrics = QtGui.QFontMetrics(QtGui.QFont(FONT, fluent_font_size()))
-    return max(
-        scaled_px(60, minimum=48),
-        track_h + scaled_px(8) + fluent_text_width(metrics, str(text)) + scaled_px(8),
-    )
+    return track_w + scaled_px(8) + fluent_text_width(metrics, str(text)) + 2
 
 
 class FluentSwitch(QtWidgets.QAbstractButton):
+    """An on/off setting: a small track with its label BESIDE it.
+
+    The label used to be painted across the track, under the thumb, which
+    covered a letter of every word it carried; and a blue thumb on a green
+    track put two hues on one bit.  Off is a white track ringed in grey with
+    a graphite thumb, on is the accent with a white thumb -- the standard
+    Fluent toggle.  The whole width, label included, takes the click.
+    """
+
     def __init__(self, text: str = "", parent=None):
         super().__init__(parent)
         self.setText(text)
         self.setCheckable(True)
         self.setCursor(QtCore.Qt.PointingHandCursor)
         self.setFont(QtGui.QFont(FONT, fluent_font_size()))
-        self._offset = float(scaled_px(3, minimum=2))
+        self.setAttribute(QtCore.Qt.WA_Hover, True)
+        self._offset = float(self._thumb_inset())
         self._animating = False
         self._anim = QtCore.QPropertyAnimation(self, b"offset", self)
         self._anim.setDuration(150)
@@ -4466,24 +4571,12 @@ class FluentSwitch(QtWidgets.QAbstractButton):
         self.toggled.connect(self._start_animation)
         self._apply_metrics()
 
-    def _content_width(self) -> int:
-        """Width of the single painted track, including its optional text.
-
-        Clamped to the widget's actual width: a switch never paints or accepts
-        clicks outside the cell a layout gave it, so a mis-sized cell degrades
-        to a clipped track instead of drawing over the neighbouring control.
-        """
-
-        wanted = fluent_switch_width(self.text())
-        return min(wanted, self.width()) if self.width() > 0 else wanted
+    @staticmethod
+    def _thumb_inset() -> int:
+        return scaled_px(4, minimum=3)
 
     def _apply_metrics(self) -> None:
-        # The REQUESTED width (never the clamped one): what this switch needs,
-        # for layouts that honour minimums.
-        self.setMinimumSize(
-            fluent_switch_width(self.text()),
-            scaled_px(30, minimum=24),
-        )
+        self.setMinimumSize(fluent_switch_width(self.text()), scaled_px(30, minimum=24))
 
     def setText(self, text: str) -> None:  # noqa: N802 - Qt API
         value = str(text)
@@ -4491,72 +4584,77 @@ class FluentSwitch(QtWidgets.QAbstractButton):
             return
         super().setText(value)
         self._apply_metrics()
+        self.update()
 
     def sizeHint(self) -> QtCore.QSize:
-        return QtCore.QSize(
-            max(self.minimumWidth(), self._content_width()), self.minimumHeight()
-        )
+        return QtCore.QSize(self.minimumWidth(), self.minimumHeight())
 
     def minimumSizeHint(self) -> QtCore.QSize:
         return self.sizeHint()
 
     def hitButton(self, pos) -> bool:
         return (
-            0 <= int(pos.x()) <= self._content_width()
+            0 <= int(pos.x()) <= min(self.width(), fluent_switch_width(self.text()))
             and 0 <= int(pos.y()) <= self.height()
         )
+
+    def _track_rect(self) -> QtCore.QRectF:
+        track_w, track_h = _switch_track_size()
+        top = (self.height() - track_h) / 2.0
+        return QtCore.QRectF(0.5, top + 0.5, track_w - 1.0, track_h - 1.0)
 
     def paintEvent(self, event) -> None:
         del event
         painter = QtGui.QPainter(self)
         painter.setRenderHint(QtGui.QPainter.Antialiasing)
-        track_w = self._content_width()
-        track_h = min(self.height(), scaled_px(30, minimum=24))
-        y = int((self.height() - track_h) / 2)
-        # The TRACK carries the state, and it says it in this window's own
-        # status colours: green is running, grey is not, which is what the
-        # board's status dots already mean.  Accent blue said only "accent".
-        track_color = GREEN if self.isChecked() and self.isEnabled() else (PLACEHOLDER if self.isEnabled() else BG)
-        painter.setBrush(QtGui.QBrush(QtGui.QColor(track_color)))
-        painter.setPen(QtCore.Qt.NoPen)
-        painter.drawRoundedRect(0, y, track_w, track_h, track_h / 2, track_h / 2)
+        track = self._track_rect()
+        radius = track.height() / 2.0
+        on, enabled = self.isChecked(), self.isEnabled()
+        hovered = enabled and self.underMouse()
+        if on:
+            fill = QtGui.QColor(ACCENT if enabled else PLACEHOLDER)
+            if hovered:
+                fill = fill.darker(110)
+            edge, thumb = fill, QtGui.QColor(SURFACE)
+        else:
+            fill = QtGui.QColor(SURFACE if enabled else BG)
+            edge = QtGui.QColor(GRAPHITE if hovered else PLACEHOLDER if enabled else DIVIDER)
+            thumb = QtGui.QColor(GRAPHITE if enabled else PLACEHOLDER)
+        painter.setPen(QtGui.QPen(edge, 1.0))
+        painter.setBrush(fill)
+        painter.drawRoundedRect(track, radius, radius)
 
-        margin = scaled_px(3, minimum=2)
-        thumb_d = max(1, track_h - margin * 2)
-        offset = self._offset if self._animating else self._checked_offset(track_w, thumb_d, margin)
-        # The THUMB is the control, so it wears the accent every other control
-        # in this window wears.  Disabled, it drops to the placeholder grey:
-        # the accent on an inert track reads as something still clickable.
-        painter.setBrush(
-            QtGui.QBrush(QtGui.QColor(ACCENT if self.isEnabled() else PLACEHOLDER))
-        )
-        painter.drawEllipse(int(offset), y + margin, thumb_d, thumb_d)
+        inset = self._thumb_inset()
+        diameter = max(1.0, track.height() + 1.0 - 2 * inset)
+        offset = self._offset if self._animating else self._checked_offset()
+        painter.setPen(QtCore.Qt.NoPen)
+        painter.setBrush(thumb)
+        painter.drawEllipse(QtCore.QRectF(offset, track.center().y() - diameter / 2.0, diameter, diameter))
 
         if self.text():
-            # The label is centered in the WHOLE track, drawn over the thumb:
-            # a true overlay, not a layout sibling the dot shoves aside -- so
-            # toggling never makes the text jump left and right.
-            painter.setPen(
-                QtGui.QColor("#FFFFFF" if self.isEnabled() else PLACEHOLDER)
-            )
+            track_w, _track_h = _switch_track_size()
+            painter.setPen(QtGui.QColor(TEXT if enabled else PLACEHOLDER))
+            painter.setFont(self.font())
+            left = track_w + scaled_px(8)
             painter.drawText(
-                QtCore.QRect(0, y, track_w, track_h),
-                QtCore.Qt.AlignCenter,
+                QtCore.QRect(left, 0, max(0, self.width() - left), self.height()),
+                QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter,
                 self.text(),
             )
         painter.end()
+        focus = self._track_rect().adjusted(-2.5, -2.5, 2.5, 2.5)
+        _paint_keyboard_focus(self, focus)
 
     def mouseReleaseEvent(self, event) -> None:
         # QAbstractButton already gates toggling on the left button + enabled state,
         # so the release is forwarded unconditionally.
         super().mouseReleaseEvent(event)
 
-    def _checked_offset(self, track_w: int | None = None, thumb_d: int | None = None, margin: int | None = None) -> float:
-        track_w = self._content_width() if track_w is None else int(track_w)
-        track_h = min(self.height() or scaled_px(30, minimum=24), scaled_px(30, minimum=24))
-        margin = scaled_px(3, minimum=2) if margin is None else int(margin)
-        thumb_d = max(1, track_h - margin * 2) if thumb_d is None else int(thumb_d)
-        return float(track_w - thumb_d - margin if self.isChecked() else margin)
+    def _checked_offset(self) -> float:
+        track_w, track_h = _switch_track_size()
+        inset = self._thumb_inset()
+        diameter = max(1.0, track_h - 2 * inset)
+        return float(track_w - diameter - inset if self.isChecked() else inset)
 
     def _start_animation(self, checked: bool) -> None:
         del checked
@@ -5045,12 +5143,13 @@ class FluentInputDialog(FluentCardDialog):
 
         btn_row = QtWidgets.QHBoxLayout()
         btn_row.addStretch()
-        ok = FluentButton("OK", self)
-        cancel = FluentButton("Cancel", self, color=GREY)
+        ok = FluentButton("OK", self, role="primary")
+        cancel = FluentButton("Cancel", self)
         ok.clicked.connect(self.accept)
         cancel.clicked.connect(self.reject)
-        btn_row.addWidget(ok)
+        # The confirm sits last, where the message card puts its own.
         btn_row.addWidget(cancel)
+        btn_row.addWidget(ok)
         layout.addLayout(btn_row)
 
     def text(self) -> str:
@@ -7451,7 +7550,7 @@ class FluentStatusStrip(FluentFrame):
         lay.addWidget(self.message, 1)
         self.action_button = None
         if action_text:
-            self.action_button = FluentButton(str(action_text), color=RED)
+            self.action_button = FluentButton(str(action_text), role="destructive")
             self.action_button.clicked.connect(self.action_clicked.emit)
             self.action_button.setVisible(False)
             lay.addWidget(self.action_button)

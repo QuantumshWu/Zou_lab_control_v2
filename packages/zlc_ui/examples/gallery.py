@@ -210,10 +210,14 @@ class _GalleryBody(QtWidgets.QWidget):
         card, inner = self._section("基础：buttons / text / choices / numeric controls")
 
         buttons = QtWidgets.QHBoxLayout()
-        for text, color in (("Primary", "#77AADD"), ("Green", "#7FC2AD"), ("Warning", "#D69A6E")):
-            button = FluentButton(text, color=color)
+        for text, role in (("Start", "primary"), ("Refresh", "standard"), ("Remove", "destructive")):
+            button = FluentButton(text, role=role)
             button.clicked.connect(lambda checked=False, value=text: self._log(value))
-            buttons.addWidget(self._named(f"FluentButton · {text}", button))
+            buttons.addWidget(self._named(f"FluentButton · {role}", button))
+        chip = FluentButton("Plot")
+        chip.setCheckable(True)
+        chip.setChecked(True)
+        buttons.addWidget(self._named("FluentButton · toggle chip", chip))
         check = FluentCheckBox("Fake option")
         check.setChecked(True)
         buttons.addWidget(self._named("FluentCheckBox", check))

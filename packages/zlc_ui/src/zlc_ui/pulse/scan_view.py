@@ -7,7 +7,7 @@ from html import escape
 from PyQt5 import QtCore, QtWidgets
 
 from zlc_ui.fluent import (
-    ACCENT, GREEN, GREY, ORANGE, RED, YELLOW, FluentButton, FluentCodeEdit,
+    FluentButton, FluentCodeEdit,
     FluentFrame, FluentGroupBox, FluentLabel, fluent_count_box,
     signals_blocked,
 )
@@ -62,12 +62,12 @@ class PulseScanView(QtWidgets.QWidget):
         self.scan_repeats_spin.editingFinished.connect(self._commit_repeats)
         run_row.addWidget(self.scan_repeats_spin)
 
-        self.scan_hold_button = FluentButton("Hold current point", color=RED)
+        self.scan_hold_button = FluentButton("Hold current point")
         self.scan_hold_button.setFixedHeight(row_height())
         self.scan_hold_button.clicked.connect(self.hold_requested)
         run_row.addWidget(self.scan_hold_button)
-        self.scan_step_back_button = FluentButton("◀ step", color=ORANGE)
-        self.scan_step_forward_button = FluentButton("step ▶", color=ORANGE)
+        self.scan_step_back_button = FluentButton("◀ step")
+        self.scan_step_forward_button = FluentButton("step ▶")
         for button, delta in ((self.scan_step_back_button, -1), (self.scan_step_forward_button, 1)):
             button.setFixedHeight(row_height())
             button.clicked.connect(lambda _checked=False, value=delta: self.step_requested.emit(value))
@@ -87,9 +87,9 @@ class PulseScanView(QtWidgets.QWidget):
 
         template_buttons = QtWidgets.QHBoxLayout()
         template_buttons.setSpacing(px(6, minimum=4))
-        self.scan_load_program_button = FluentButton("Load Program", color=ACCENT)
-        self.scan_column_template_button = FluentButton("Template: column_stack", color=GREY)
-        self.scan_grid_template_button = FluentButton("Template: grid", color=GREY)
+        self.scan_load_program_button = FluentButton("Load Program")
+        self.scan_column_template_button = FluentButton("Template: column_stack")
+        self.scan_grid_template_button = FluentButton("Template: grid")
         self.scan_load_program_button.clicked.connect(self.load_program_requested)
         self.scan_column_template_button.clicked.connect(lambda: self.template_requested.emit("column_stack"))
         self.scan_grid_template_button.clicked.connect(lambda: self.template_requested.emit("grid"))
@@ -102,10 +102,10 @@ class PulseScanView(QtWidgets.QWidget):
 
         code_buttons = QtWidgets.QHBoxLayout()
         code_buttons.setSpacing(px(6, minimum=4))
-        self.scan_run_button = FluentButton("Run", color=GREEN)
-        self.scan_save_array_button = FluentButton("Save Array", color=YELLOW)
-        self.scan_load_array_button = FluentButton("Load Array", color=ACCENT)
-        self.scan_clear_array_button = FluentButton("Clear Array", color=GREY)
+        self.scan_run_button = FluentButton("Run", role="primary")
+        self.scan_save_array_button = FluentButton("Save Array")
+        self.scan_load_array_button = FluentButton("Load Array")
+        self.scan_clear_array_button = FluentButton("Clear Array", role="destructive")
         self.scan_clear_array_button.setToolTip("Remove the current scan table; keep the Python draft")
         self.scan_load_array_button.clicked.connect(self.load_array_requested)
         self.scan_clear_array_button.clicked.connect(self.clear_array_requested)

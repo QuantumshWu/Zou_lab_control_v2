@@ -83,8 +83,8 @@ class SignalChooser(FluentCardDialog):
 
         buttons = QtWidgets.QHBoxLayout()
         buttons.addStretch(1)
-        self.cancel_button = FluentButton("Cancel", color=GREY)
-        self.accept_button = FluentButton("Add Panel", color=ACCENT)
+        self.cancel_button = FluentButton("Cancel")
+        self.accept_button = FluentButton("Add Panel", role="primary")
         self.accept_button.setEnabled(False)
         buttons.addWidget(self.cancel_button)
         buttons.addWidget(self.accept_button)

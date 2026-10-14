@@ -351,7 +351,7 @@ class InfoTree(QtWidgets.QTreeWidget):
     def _add_action(self, label: str, value: Mapping[str, str]) -> None:
         item = QtWidgets.QTreeWidgetItem([label, ""])
         self.addTopLevelItem(item)
-        button = FluentButton(str(value["text"]), color=ACCENT)
+        button = FluentButton(str(value["text"]))
         button.setMinimumWidth(0)
         button.clicked.connect(
             lambda _checked=False, action=str(value["action"]): (

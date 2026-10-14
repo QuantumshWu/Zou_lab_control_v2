@@ -7,7 +7,6 @@ from collections.abc import Mapping
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 from zlc_ui.fluent import (
-    ACCENT,
     GREEN,
     GREY,
     ORANGE,
@@ -51,13 +50,13 @@ class _DeviceCard(FluentFrame):
         outer.setContentsMargins(window_pad(0.6), window_pad(0.6), window_pad(0.6), window_pad(0.6))
         outer.setSpacing(window_pad(0.35))
         header = QtWidgets.QHBoxLayout()
-        self.collapse_button = FluentButton("−", color=GREY)
+        self.collapse_button = FluentButton("−")
         self.collapse_button.setFixedWidth(window_pad(2.0))
         self.name_label = muted_note_label("Role")
         self.role_edit = FluentLineEdit()
         self.role_edit.setPlaceholderText("role")
         self.type_combo = FluentComboBox()
-        self.remove_button = FluentButton("Remove", color=ORANGE)
+        self.remove_button = FluentButton("Remove", role="destructive")
         header.addWidget(self.collapse_button)
         header.addWidget(self.name_label)
         header.addWidget(self.role_edit, 1)
@@ -161,15 +160,18 @@ class _LiveDeviceCard(FluentFrame):
         outer.setSpacing(window_pad(0.3))
         self.role_label = ElidedLabel("")
         self.detail_label = muted_note_label("")
-        self.control_button = FluentButton("Control", color=ACCENT)
+        self.control_button = FluentButton("Control")
         #: One click beside Control publishes this device on the bench
         #: fabric, so the OTHER machine's "Scan hardware" finds it with no
         #: address typed anywhere.  A second click withdraws it.
-        self.remote_button = FluentButton("Remote", color=GREY)
+        self.remote_button = FluentButton("Remote")
+        # A chip: published is a STATE, and the chip shows the bench's
+        # answer, never the click -- see _remote_clicked.
+        self.remote_button.setCheckable(True)
         #: The device's own console: who is on its knobs -- local tunes,
         #: its in-process server, and remote clients once published.
-        self.log_button = FluentButton("Log", color=GREY)
-        self.close_button = FluentButton("Close", color=ORANGE)
+        self.log_button = FluentButton("Log")
+        self.close_button = FluentButton("Close")
         identity = QtWidgets.QVBoxLayout()
         identity.setContentsMargins(0, 0, 0, 0)
         identity.setSpacing(0)
@@ -183,9 +185,7 @@ class _LiveDeviceCard(FluentFrame):
         self.control_button.clicked.connect(
             lambda: self.device_open_requested.emit(self.instance_id)
         )
-        self.remote_button.clicked.connect(
-            lambda: self.device_remote_toggled.emit(self.instance_id)
-        )
+        self.remote_button.clicked.connect(self._remote_clicked)
         self.log_button.clicked.connect(
             lambda: self.device_log_requested.emit(self.instance_id)
         )
@@ -198,10 +198,16 @@ class _LiveDeviceCard(FluentFrame):
     ) -> None:
         self.role_label.setText(str(role))
         self.detail_label.setText(str(type_id))
-        # Colour alone says published; the caption stays put so the row's
-        # layout does not shuffle every time Remote is toggled.
-        self.remote_button.set_color(ACCENT if remote else GREY)
+        # The chip state alone says published; the caption stays put so the
+        # row's layout does not shuffle every time Remote is toggled.
+        self.remote_button.setChecked(bool(remote))
         self.setToolTip(f"Internal ID: {self.instance_id}")
+
+    def _remote_clicked(self, checked: bool) -> None:
+        # Qt flipped the chip on the click; put it back and ask.  Whether
+        # the device is published is the bench's to say, through set_record.
+        self.remote_button.setChecked(not checked)
+        self.device_remote_toggled.emit(self.instance_id)
 
 
 def _readable_value(value: object, unit: str, shown: str = "") -> str:
@@ -289,7 +295,7 @@ class DeviceControlView(QtWidgets.QWidget):
         owner_stack.addWidget(self.owner_label)
         owner_stack.addWidget(self.reason_label)
         header_layout.addLayout(owner_stack, 1)
-        self.refresh_button = FluentButton("Refresh", color=ACCENT)
+        self.refresh_button = FluentButton("Refresh")
         self.risk_switch = FluentSwitch("Accept risk")
         header_layout.addWidget(self.refresh_button)
         header_layout.addWidget(self.risk_switch)
@@ -381,7 +387,7 @@ class DeviceControlView(QtWidgets.QWidget):
             "The instrument's own range for this field; the editable window "
             "is the tighter of it and the bench policy"
         )
-        apply = FluentButton("Apply", color=ACCENT)
+        apply = FluentButton("Apply")
         dot = FluentStatusDot(size=12)
         status = ElidedLabel("")
         # Status has one shared width. Long messages elide behind their
@@ -781,7 +787,7 @@ class DeviceManagerView(QtWidgets.QWidget):
         self.discovered_layout = QtWidgets.QVBoxLayout(self.discovered_group)
         self.discovered_layout.setContentsMargins(pad, pad, pad, pad)
         self.discovered_layout.setSpacing(window_pad(0.4))
-        self.discover_button = FluentButton("Scan hardware", color=ACCENT)
+        self.discover_button = FluentButton("Scan hardware")
         self.discovered_layout.addWidget(self.discover_button)
         self.discovered_cards_layout = QtWidgets.QVBoxLayout()
         self.discovered_cards_layout.setSpacing(window_pad(0.4))
@@ -813,10 +819,10 @@ class DeviceManagerView(QtWidgets.QWidget):
         actions = QtWidgets.QHBoxLayout()
         self.new_combo = FluentComboBox()
         self.new_combo.addItem("New…", None)
-        self.load_button = FluentButton("Load…", color=ORANGE)
-        self.save_button = FluentButton("Save", color=ACCENT)
-        self.save_as_button = FluentButton("Save as…", color=ACCENT)
-        self.lifecycle_button = FluentButton("Init devices", color=GREEN)
+        self.load_button = FluentButton("Load…")
+        self.save_button = FluentButton("Save")
+        self.save_as_button = FluentButton("Save as…")
+        self.lifecycle_button = FluentButton("Init devices", role="primary")
         actions.addWidget(self.new_combo)
         actions.addWidget(self.load_button)
         actions.addWidget(self.save_button)
@@ -1011,9 +1017,7 @@ class DeviceManagerView(QtWidgets.QWidget):
 
         self._remoted = {str(instance_id) for instance_id in instance_ids}
         for instance_id, card in self._loaded_cards.items():
-            card.remote_button.set_color(
-                ACCENT if instance_id in self._remoted else GREY
-            )
+            card.remote_button.setChecked(instance_id in self._remoted)
 
     def set_discovery_enabled(
         self,
@@ -1051,7 +1055,7 @@ class DeviceManagerView(QtWidgets.QWidget):
                 )
                 title = ElidedLabel("")
                 detail = muted_note_label("")
-                button = FluentButton("Add", color=ACCENT)
+                button = FluentButton("Add")
                 row.addWidget(title)
                 row.addWidget(detail, 1)
                 row.addWidget(button)
@@ -1125,7 +1129,7 @@ class DeviceManagerView(QtWidgets.QWidget):
         cards.setContentsMargins(0, 0, 0, 0)
         cards.setSpacing(window_pad(0.4))
         group_layout.addLayout(cards)
-        button = FluentButton("Add device", color=ACCENT)
+        button = FluentButton("Add device")
         button.clicked.connect(
             lambda _checked=False, value=domain: self._add_domain_clicked(value)
         )

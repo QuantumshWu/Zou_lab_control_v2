@@ -29,8 +29,6 @@ import numpy as np
 from PyQt5 import QtCore, QtWidgets, sip
 from zlc_ui.fluent import (
     retire_widget,
-    ACCENT,
-    GREY,
     FluentButton,
     FluentDoubleSpinBox,
     FluentTreeComboBox,
@@ -138,7 +136,7 @@ class _AxisRow(QtWidgets.QWidget):
         self.input_stack = QtWidgets.QStackedWidget(self)
         self.input_stack.addWidget(self.range_inputs)
         self.input_stack.addWidget(self.values_edit)
-        self.mode_button = FluentButton("Range", color=GREY)
+        self.mode_button = FluentButton("Range")
         self.mode_button.setToolTip("Switch between independent Range and Values inputs")
         #: Which spelling of the port's unit both ends are read in.  ONE
         #: picker, not two: "from" and "to" are two ends of one sweep, and a
@@ -150,7 +148,7 @@ class _AxisRow(QtWidgets.QWidget):
         self._unit_layout.setSpacing(0)
         self.unit_label = FluentLabel("")
         self._unit_layout.addWidget(self.unit_label)
-        remove = FluentButton("×", color=GREY)
+        remove = FluentButton("×", role="destructive")
         remove.setFixedWidth(scaled_px(32))
         remove.setToolTip("Remove this axis")
         self.remove_button = remove
@@ -501,8 +499,8 @@ class ScanPlanEditor(QtWidgets.QWidget):
         header = QtWidgets.QHBoxLayout()
         title = FluentLabel("Scan plan")
         title.setStyleSheet("font-weight: 600;")
-        self.add_button = FluentButton("Add axis", color=ACCENT)
-        self.add_manual_button = FluentButton("Add manual axis", color=GREY)
+        self.add_button = FluentButton("Add axis")
+        self.add_manual_button = FluentButton("Add manual axis")
         header.addWidget(title)
         header.addStretch(1)
         header.addWidget(self.add_button)

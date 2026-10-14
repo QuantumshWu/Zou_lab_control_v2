@@ -16,7 +16,6 @@ from PyQt5 import QtCore, QtWidgets
 
 from zlc_ui.fluent import (
     detach_widget,
-    ACCENT,
     FluentButton,
     FluentComboBox,
     FluentFrame,
@@ -186,7 +185,7 @@ class PanelEditorView(QtWidgets.QWidget):
         self.snapshot_label.setWordWrap(True)
         snapshot_layout.addWidget(self.snapshot_label)
         snapshot_actions = QtWidgets.QHBoxLayout()
-        self.refresh_button = FluentButton("Refresh snapshot", color=ORANGE)
+        self.refresh_button = FluentButton("Refresh snapshot")
         self.refresh_button.clicked.connect(self.snapshot_refresh_requested.emit)
         snapshot_actions.addWidget(self.refresh_button)
         snapshot_actions.addStretch(1)
@@ -210,7 +209,7 @@ class PanelEditorView(QtWidgets.QWidget):
         self._producer_contributions: dict[object, QtWidgets.QWidget] = {}
         producer_actions = QtWidgets.QHBoxLayout()
         producer_actions.addStretch(1)
-        self.open_producer_button = FluentButton("Open Producer", color=ACCENT)
+        self.open_producer_button = FluentButton("Open Producer")
         self.open_producer_button.setToolTip(
             "Open this node's existing Logic Edit tab"
         )
@@ -259,7 +258,7 @@ class PanelEditorView(QtWidgets.QWidget):
         ))
         actions = QtWidgets.QHBoxLayout()
         actions.addStretch(1)
-        self.save_button = FluentButton("Save Fig", color=ACCENT)
+        self.save_button = FluentButton("Save Fig", role="primary")
         actions.addWidget(self.save_button)
         save_layout.addLayout(actions)
         body_layout.addWidget(save_group)

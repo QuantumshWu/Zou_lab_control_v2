@@ -27,8 +27,6 @@ from zlc_ui.form.qt_form import being_edited
 from zlc_ui.pulse.preview_view import PulsePreviewView
 from zlc_ui.fluent import (
     retire_widget,
-    ACCENT,
-    GREY,
     ElidedLabel,
     FluentPageBody,
     ORANGE_TINT,
@@ -49,7 +47,6 @@ from zlc_ui.fluent import (
     InfoPane,
     fluent_save_path,
     muted_note_label,
-    scaled_px,
     setting_label_width,
     signals_blocked,
     window_pad,
@@ -348,9 +345,9 @@ class _DataEditorView(QtWidgets.QWidget):
         action_row.setSpacing(window_pad(0.5))
         self.source_note = muted_note_label("")
         action_row.addWidget(self.source_note, 1)
-        self.apply_button = FluentButton("Apply && Preview", color=ACCENT)
-        self.save_button = FluentButton("Save As…", color=ACCENT)
-        self.discard_button = FluentButton("Discard", color=GREY)
+        self.apply_button = FluentButton("Apply && Preview", role="primary")
+        self.save_button = FluentButton("Save As…")
+        self.discard_button = FluentButton("Discard", role="destructive")
         action_row.addWidget(self.apply_button)
         action_row.addWidget(self.save_button)
         action_row.addWidget(self.discard_button)
@@ -376,7 +373,7 @@ class _DataEditorView(QtWidgets.QWidget):
         # form says what it is.
         add_axis_row = QtWidgets.QHBoxLayout()
         add_axis_row.setSpacing(window_pad(0.25))
-        self.add_axis_button = FluentButton("Add axis", color=ACCENT)
+        self.add_axis_button = FluentButton("Add axis")
         self.add_axis_button.setToolTip("Create a new axis")
         add_axis_row.addStretch(1)
         add_axis_row.addWidget(self.add_axis_button)
@@ -385,7 +382,7 @@ class _DataEditorView(QtWidgets.QWidget):
         axis_choice_row.setSpacing(window_pad(0.25))
         self.axis_combo = FluentComboBox()
         self.axis_combo.setMinimumContentsLength(13)
-        self.remove_axis_button = FluentButton("Delete", color=GREY)
+        self.remove_axis_button = FluentButton("Delete", role="destructive")
         self.remove_axis_button.setToolTip(
             "Delete selected axis and keep its current Scope slice"
         )
@@ -429,7 +426,7 @@ class _DataEditorView(QtWidgets.QWidget):
         axis_actions = QtWidgets.QHBoxLayout()
         self.axis_mode_label = muted_note_label("Edit selected axis")
         axis_actions.addWidget(self.axis_mode_label, 1)
-        self.apply_axis_button = FluentButton("Apply axis", color=ACCENT)
+        self.apply_axis_button = FluentButton("Apply axis")
         axis_actions.addWidget(self.apply_axis_button)
         axes_layout.addLayout(axis_actions)
         body_layout.addWidget(axes_group, 0)
@@ -876,22 +873,22 @@ class FigureViewerView(QtWidgets.QWidget):
         # read that way now -- Edit data / Add panel answer the box to their
         # left, New data and Save image do not -- so a creating action never
         # sits between a chooser and the thing that reads it.
-        self.edit_data_button = FluentButton("Edit data", color=ACCENT)
+        self.edit_data_button = FluentButton("Edit data")
         self.edit_data_button.setEnabled(False)
         self.edit_data_button.clicked.connect(self._edit_selected_data)
         bar_layout.addWidget(self.edit_data_button, 0, 2)
-        self.new_data_button = FluentButton("New data", color=ACCENT)
+        self.new_data_button = FluentButton("New data")
         self.new_data_button.clicked.connect(self.new_data_requested)
         bar_layout.addWidget(self.new_data_button, 0, 3)
         bar_layout.addWidget(FluentSectionLabel("Panels"), 1, 0)
         self.kind_combo = FluentComboBox()
         self.kind_combo.setMinimumContentsLength(12)
         bar_layout.addWidget(self.kind_combo, 1, 1)
-        self.add_panel_button = FluentButton("Add panel", color=ACCENT)
+        self.add_panel_button = FluentButton("Add panel")
         self.add_panel_button.clicked.connect(self._add_selected_panel)
         self.add_panel_button.setEnabled(False)
         bar_layout.addWidget(self.add_panel_button, 1, 2)
-        self.save_image_button = FluentButton("Save image", color=ACCENT)
+        self.save_image_button = FluentButton("Save image")
         self.save_image_button.clicked.connect(self.save_screenshot_requested)
         bar_layout.addWidget(self.save_image_button, 1, 3)
         for button in (self.edit_data_button, self.new_data_button,

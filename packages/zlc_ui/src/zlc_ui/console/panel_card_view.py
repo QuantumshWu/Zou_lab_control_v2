@@ -16,7 +16,6 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 from zlc_data.units import figure_padded
 from zlc_ui.fluent import (
     detach_widget,
-    ACCENT,
     AXIS_GROUP_COLORS,
     BG,
     CARD_PAD,
@@ -30,7 +29,6 @@ from zlc_ui.fluent import (
     FluentStatusDot,
     fluent_text_width,
     GREY,
-    ORANGE,
     popup_gap,
     RADIUS,
     RED,
@@ -361,15 +359,11 @@ class PanelCardView(FluentGroupBox):
         self._press_at: QtCore.QPoint | None = None
         self._drag_offset: QtCore.QPoint | None = None
         self._settings_drag_offset: QtCore.QPoint | None = None
-        self.settings_button = FluentButton("Setting", color=GREY)
+        self.settings_button = FluentButton("Setting")
         button_height = scaled_px(26, minimum=22)
-        self.settings_button.setFixedSize(
-            self.settings_button.fontMetrics().horizontalAdvance("Setting")
-            + scaled_px(18, minimum=14),
-            button_height,
-        )
+        self.settings_button.setFixedHeight(button_height)
         self.settings_button.clicked.connect(self._open_settings)
-        self.close_button = FluentButton("×", color=GREY)
+        self.close_button = FluentButton("×")
         self.close_button.setFixedSize(
             scaled_px(28, minimum=24),
             button_height,
@@ -1291,7 +1285,7 @@ class PanelCardView(FluentGroupBox):
             drag_handle.setCursor(QtCore.Qt.SizeAllCursor)
             drag_handle.installEventFilter(self)
             header_layout.addWidget(drag_handle, 1)
-            close_button = FluentButton("×", header, color=GREY)
+            close_button = FluentButton("×", header)
             close_button.setFixedSize(
                 scaled_px(24, minimum=20),
                 scaled_px(24, minimum=20),
@@ -1329,9 +1323,9 @@ class PanelCardView(FluentGroupBox):
             # per-panel decision already lives.  They existed as hidden widgets
             # nothing ever showed, so a panel opened in the real window could
             # not be removed at all and its Edit signal could not be raised.
-            self.edit_button = FluentButton("Edit", body, color=ACCENT)
+            self.edit_button = FluentButton("Edit", body)
             self.edit_button.clicked.connect(self._request_edit)
-            self.remove_button = FluentButton("Remove", body, color=ORANGE)
+            self.remove_button = FluentButton("Remove", body, role="destructive")
             self.remove_button.clicked.connect(self._request_remove)
             buttons.addWidget(self.edit_button)
             buttons.addStretch(1)
@@ -1408,7 +1402,7 @@ class PanelCardView(FluentGroupBox):
             self.remove_requested.emit()
             return
         self._remove_armed = True
-        self.close_button.set_color(RED)
+        self.close_button.set_role("destructive_primary")
         self.close_button.setToolTip("Click again to remove this panel")
         application = QtWidgets.QApplication.instance()
         interval = 400 if application is None else application.doubleClickInterval()
@@ -1416,7 +1410,7 @@ class PanelCardView(FluentGroupBox):
 
     def _disarm_header_remove(self) -> None:
         self._remove_armed = False
-        self.close_button.set_color(GREY)
+        self.close_button.set_role("standard")
         self.close_button.setToolTip(
             "Click once to arm; click again to remove this panel"
         )

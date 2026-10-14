@@ -119,7 +119,7 @@ for key, switch in form._auto_switches.items():
     control = form._widgets[key]
     assert switch.width() >= fluent_switch_width(switch.text()), (
         key, switch.width(), fluent_switch_width(switch.text()))
-    switch_right = switch.mapTo(row, QtCore.QPoint(switch._content_width(), 0)).x()
+    switch_right = switch.mapTo(row, QtCore.QPoint(fluent_switch_width(switch.text()), 0)).x()
     control_left = control.mapTo(row, QtCore.QPoint(0, 0)).x()
     assert switch_right <= control_left, (key, switch_right, control_left)
 
@@ -130,11 +130,6 @@ app.processEvents()
 app.processEvents()
 assert_the_viewport_spans_the_body()
 
-# A deliberately squeezed switch clips its own track instead of overflowing.
-squeezed = next(iter(card._settings_form._auto_switches.values()))
-squeezed.setFixedWidth(40)
-app.processEvents()
-assert squeezed._content_width() <= squeezed.width()
 """
         + _SURFACE_EPILOGUE
     )

@@ -68,7 +68,7 @@ class PulseEditorView(QtWidgets.QWidget):
         self.title_label.setAlignment(QtCore.Qt.AlignVCenter | QtCore.Qt.AlignLeft)
         self.summary_label = FluentLineEdit("")
         self.summary_label.setEnabled(False)
-        self.clear_button = FluentButton("Clear All", color=ORANGE)
+        self.clear_button = FluentButton("Clear All", role="destructive")
         self.clear_button.clicked.connect(self.clear_all_requested)
         header_layout.addWidget(self.status_dot)
         header_layout.addWidget(self.title_label)

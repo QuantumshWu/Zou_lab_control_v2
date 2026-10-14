@@ -5,17 +5,14 @@ from __future__ import annotations
 from PyQt5 import QtCore, QtWidgets
 
 from zlc_ui.fluent import (
-    ACCENT,
     GREEN,
     GREY,
-    ORANGE,
     RED,
     ElidedLabel,
     FluentButton,
     FluentFrame,
     FluentLabel,
     FluentStatusDot,
-    FluentSwitch,
     scaled_px,
 )
 from zlc_ui.fluent import PublishedItemsLegend
@@ -57,21 +54,20 @@ class LogicRowView(FluentFrame):
         self.status_label = ElidedLabel("idle")
         self.status_label.setMinimumWidth(0)
         self.status_label.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
-        self.start_button = FluentButton("Start", color=GREEN)
+        self.start_button = FluentButton("Start", role="primary")
         #: Beside Start because it says what Start will DO: with it on, the
         #: node's declared preview opens as an ordinary panel, already wired
-        #: to the signal.  A SWITCH, not a button: a command is a button in
-        #: this chrome and a boolean state is a switch, and a checkable
-        #: FluentButton draws no checked state at all -- on and off were the
-        #: same pixels, in the same accent as Edit beside it.
-        self.preview_switch = FluentSwitch("Plot")
+        #: to the signal.  A toggle CHIP, pressed in when on, so it reads as
+        #: a state among the commands and not as one more of them.
+        self.preview_switch = FluentButton("Plot")
+        self.preview_switch.setCheckable(True)
         self.preview_switch.setToolTip(
             "Open this node's plot panel when it starts"
         )
         self.preview_switch.toggled.connect(self.auto_preview_changed.emit)
-        self.stop_button = FluentButton("Stop", color=ORANGE)
-        self.edit_button = FluentButton("Edit", color=ACCENT)
-        self.remove_button = FluentButton("Remove", color=GREY)
+        self.stop_button = FluentButton("Stop")
+        self.edit_button = FluentButton("Edit")
+        self.remove_button = FluentButton("Remove", role="destructive")
         self.start_button.setEnabled(False)
         self.stop_button.setEnabled(False)
         self.start_button.clicked.connect(self.start_requested.emit)

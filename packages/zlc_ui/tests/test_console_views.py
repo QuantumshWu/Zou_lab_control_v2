@@ -155,14 +155,15 @@ events = []
 card.remove_requested.connect(lambda: events.append(('remove',)))
 card.edit_requested.connect(lambda: events.append(('edit',)))
 card.state_changed.connect(lambda patch: events.append(('state', patch)))
-# The header × is guarded against a stray click: first click turns red, the
-# second click inside the platform double-click interval removes the panel.
+# The header × is guarded against a stray click: first click turns it into a
+# red confirm, the second click inside the platform double-click interval
+# removes the panel.
 QtTest.QTest.mouseClick(card.close_button, QtCore.Qt.LeftButton)
 assert events == []
-assert RED.lower() in card.close_button.styleSheet().lower()
+assert card.close_button.role() == 'destructive_primary'
 QtTest.QTest.mouseClick(card.close_button, QtCore.Qt.LeftButton)
 assert events == [('remove',)]
-assert GREY.lower() in card.close_button.styleSheet().lower()
+assert card.close_button.role() == 'standard'
 # Edit and the explicit text Remove remain available in Setting as well.
 QtTest.QTest.mouseClick(card.settings_button, QtCore.Qt.LeftButton)
 app.processEvents()
@@ -1584,11 +1585,13 @@ switch_image = QtGui.QImage(
 switch_image.fill(QtCore.Qt.transparent)
 title_auto.resize(title_auto.sizeHint())
 title_auto.render(switch_image)
-middle_y = switch_image.height() // 2
-assert all(
-    QtGui.qAlpha(switch_image.pixel(x, middle_y)) > 0
-    for x in range(2, title_auto._content_width() - 2)
-), 'Auto/Manual text is painted outside rather than inside the switch track'
+from zlc_ui.fluent import fluent_switch_width
+track_right = fluent_switch_width('')
+assert any(
+    QtGui.qAlpha(switch_image.pixel(x, y)) > 0
+    for x in range(track_right + 1, switch_image.width())
+    for y in range(switch_image.height())
+), 'the Auto/Manual words are painted beside the track, inside the switch'
 title_row = editor.parameter_forms['display']._rows['title']
 assert title_row.layout().itemAt(0).widget() is title_auto
 assert title_row.layout().itemAt(1).widget() is title_edit
@@ -2199,17 +2202,18 @@ finally:
     )
 
 
-def test_the_auto_preview_control_is_a_switch_that_looks_different_when_on(run_qt) -> None:
-    """A checkable FluentButton drew NO checked state: on and off were the
-    same pixels, in the same accent as Edit beside it, so the control read as
-    a fourth command button and an operator could not find the toggle at all.
-    A boolean is a switch in this chrome; a command is a button.
+def test_the_auto_preview_control_is_a_chip_that_looks_different_when_on(run_qt) -> None:
+    """A checkable FluentButton once drew NO checked state: on and off were
+    the same pixels, in the same accent as Edit beside it, so the control read
+    as a fourth command button and an operator could not find the toggle at
+    all.  Checked, a button is now a toggle chip, pressed in the way a
+    segmented choice marks its current item.
     """
 
     run_qt(
         """
 from zlc_ui.qt import ensure_qt_app
-from zlc_ui.fluent import FluentSwitch
+from zlc_ui.fluent import FluentButton
 from zlc_ui.console import logic_row_view as tested_module
 
 app = ensure_qt_app(['test'])
@@ -2219,7 +2223,7 @@ row.show()
 app.processEvents()
 
 switch = row.preview_switch
-assert isinstance(switch, FluentSwitch), type(switch)
+assert isinstance(switch, FluentButton) and switch.isCheckable(), type(switch)
 
 seen = []
 switch.toggled.connect(seen.append)
@@ -2268,7 +2272,7 @@ def test_the_editor_shows_the_same_preview_switch_beside_its_own_start(run_qt) -
     run_qt(
         """
 from zlc_ui.qt import ensure_qt_app
-from zlc_ui.fluent import FluentSwitch
+from zlc_ui.fluent import FluentButton
 from zlc_ui.form import FormSpec
 from zlc_ui.console import logic_editor_view as tested_module
 
@@ -2292,7 +2296,7 @@ editor.resize(900, 420)
 editor.show()
 app.processEvents()
 switch = editor.preview_switch
-assert isinstance(switch, FluentSwitch), type(switch)
+assert isinstance(switch, FluentButton) and switch.isCheckable(), type(switch)
 assert switch.isChecked() is False, 'the editor shows the stored preference'
 
 # Beside Start, in pixels: same row, immediately to its right.  A switch that

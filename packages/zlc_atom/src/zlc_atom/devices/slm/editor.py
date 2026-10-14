@@ -269,7 +269,8 @@ class SlmEditorControl(QtCore.QObject):
         self._intensity.setDecimals(3)
         self._intensity.setValue(1.0)
         controls.addWidget(self._intensity)
-        self._selectors = FluentSwitch("Selectors", edit)
+        self._selectors = FluentButton("Selectors", edit)
+        self._selectors.setCheckable(True)
         self._selectors.setToolTip(
             "Enable plot selectors, wheel zoom, and pan; disable to paint the target"
         )
@@ -292,7 +293,7 @@ class SlmEditorControl(QtCore.QObject):
                 minimum_height=360,
             )
         )
-        clear = FluentButton("Clear", edit)
+        clear = FluentButton("Clear", edit, role="destructive")
         clear.clicked.connect(
             lambda: self.set_target(
                 np.zeros(self.shape, dtype=np.float32), objective_kind="spots"
@@ -382,7 +383,7 @@ class SlmEditorControl(QtCore.QObject):
             )
         )
         buttons.addWidget(self._adopt)
-        self._send = FluentButton("Send to SLM", files)
+        self._send = FluentButton("Send to SLM", files, role="primary")
         self._send.clicked.connect(
             self._guarded("send", lambda _checked=False: self.send())
         )
@@ -463,7 +464,7 @@ class SlmEditorControl(QtCore.QObject):
         self._preset_text.setPlaceholderText("Chinese and English text")
         form.addWidget(self._preset_text_title, text_row, 0)
         form.addWidget(self._preset_text, text_row, 1)
-        apply_button = FluentButton("Apply", body)
+        apply_button = FluentButton("Apply", body, role="primary")
         apply_button.clicked.connect(self._apply_preset_popup)
         form.addWidget(apply_button, text_row + 1, 0, 1, 2)
         self._preset_popup, self._preset_body = popup, body
@@ -569,7 +570,7 @@ class SlmEditorControl(QtCore.QObject):
             setattr(self, name, spin)
             form.addWidget(QtWidgets.QLabel(label, body), row, 0)
             form.addWidget(spin, row, 1)
-        apply_button = FluentButton("Apply pupil", body)
+        apply_button = FluentButton("Apply pupil", body, role="primary")
         apply_button.clicked.connect(self._apply_pupil)
         form.addWidget(apply_button, len(fields), 0, 1, 2)
         self._pupil_popup, self._pupil_body = popup, body

@@ -8,11 +8,6 @@ from PyQt5 import QtCore, QtWidgets
 
 from zlc_data.units import figure_padded
 from zlc_ui.fluent import (
-    ACCENT,
-    GREEN,
-    GREY,
-    ORANGE,
-    RED,
     FluentButton,
     FluentCheckBox,
     FluentDialogWindow,
@@ -157,21 +152,15 @@ class PointReviewView(FluentFrame):
 
         actions = QtWidgets.QHBoxLayout()
         actions.setSpacing(window_pad(0.5))
-        self.exclude_selected_button = FluentButton(
-            "Exclude selected", self, color=ORANGE
-        )
-        self.restore_selected_button = FluentButton(
-            "Restore selected", self, color=ACCENT
-        )
-        self.reset_button = FluentButton("Reset", self, color=GREY)
+        self.exclude_selected_button = FluentButton("Exclude selected", self)
+        self.restore_selected_button = FluentButton("Restore selected", self)
+        self.reset_button = FluentButton("Reset", self)
         actions.addWidget(self.exclude_selected_button)
         actions.addWidget(self.restore_selected_button)
         actions.addWidget(self.reset_button)
         actions.addStretch(1)
-        self.stop_button = FluentButton("Stop calibration", self, color=RED)
-        self.confirm_button = FluentButton(
-            str(confirm_label), self, color=GREEN
-        )
+        self.stop_button = FluentButton("Stop calibration", self, role="destructive")
+        self.confirm_button = FluentButton(str(confirm_label), self, role="primary")
         actions.addWidget(self.stop_button)
         actions.addWidget(self.confirm_button)
         outer.addLayout(actions)

@@ -24,6 +24,10 @@ PLACEHOLDER = "#A19F9D"
 DIVIDER = "#E1DFDD"
 GREEN = "#7FC2AD"
 RED = "#CD7380"
+#: Red at reading strength: the ink of a destructive command and of an error
+#: line.  RED itself is a dot and a fill colour; as text on white it was
+#: 3.3:1, too pale to read as the warning it is.
+RED_DARK = "#9E3B4A"
 ORANGE = "#D69A6E"
 ORANGE_TINT = "#F6E3D4"
 ORANGE_DARK = "#8A4B1F"
@@ -36,7 +40,6 @@ API_VIOLET_DARK = "#5A4A8A"
 CONFIG_GREEN = "#7FC2AD"
 CONFIG_GREEN_DARK = "#2F6B58"
 CONFIG_GREEN_TINT = "#D1E8E1"
-YELLOW = "#E5C85B"
 GREY = "#A2A2A2"
 GRAPHITE = "#808080"
 SURFACE = "#FFFFFF"
@@ -58,6 +61,9 @@ FONT = "Segoe UI"
 FONT_SIZE = 12
 PADDING_V = 1
 EDIT_PADDING_H = 4
+#: Air either side of a button's label.  An edit's 4 px left a word almost
+#: touching the edge of a button around it.
+BUTTON_PADDING_H = 10
 WINDOW_PAD = 14
 TITLE_LEFT_INSET = WINDOW_PAD
 #: The product mark in a window's own title bar, and the air after it.  The
@@ -93,6 +99,7 @@ __all__ = [
     "API_VIOLET",
     "API_VIOLET_DARK",
     "BG",
+    "BUTTON_PADDING_H",
     "AXIS_GROUP_COLORS",
     "CARD_PAD",
     "CARD_TITLE_PAD",
@@ -117,11 +124,11 @@ __all__ = [
     "PLACEHOLDER",
     "RADIUS",
     "RED",
+    "RED_DARK",
     "STEP_WIDTH",
     "SURFACE",
     "TEXT",
     "TITLE_LEFT_INSET",
     "WINDOW_PAD",
     "WINDOW_SCREEN_FRACTION",
-    "YELLOW",
 ]
