@@ -80,9 +80,11 @@ def _editor_factory(parent=None):
             layout = QtWidgets.QVBoxLayout(self)
             layout.setContentsMargins(0, 0, 0, 0)
             header = QtWidgets.QHBoxLayout()
-            self.presets = FluentSegmentedButtons(tuple((rule, short[rule]) for rule in PAIR_RULES), self)
+            # None clears every mark: an explicit, still-empty selection to mark pairs into.
+            self.presets = FluentSegmentedButtons(
+                (*((rule, short[rule]) for rule in PAIR_RULES), ("none", "None")), self)
             self.presets.activated.connect(lambda rule: self.draft_changed.emit(
-                {"values": {"selection": rule, "pairs": ()}}))
+                {"values": {"selection": "custom" if rule == "none" else rule, "pairs": ()}}))
             header.addWidget(self.presets)
             header.addStretch(1)
             self.summary = muted_note_label("")
@@ -129,7 +131,7 @@ def _editor_factory(parent=None):
             selection = values["selection"]
             explicit = tuple((row["start"], row["end"]) for row in values["pairs"]
                              if row["start"] is not None and row["end"] is not None)
-            self.presets.set_current(selection)
+            self.presets.set_current("none" if selection == "custom" and not explicit else selection)
             self.table.setEnabled(frames is not None)
             if frames is None:
                 self.summary.setText(labels[selection])
