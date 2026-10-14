@@ -35,6 +35,7 @@ from ..fluent import (
     FluentComboBox,
     FluentCycleComboBox,
     FluentDoubleSpinBox,
+    FluentLabel,
     FluentLineEdit,
     FluentPathEdit,
     FluentSegmentedButtons,
@@ -45,6 +46,7 @@ from ..fluent import (
     fluent_stepper_extent,
     fluent_unit_picker,
     fluent_switch_width,
+    unit_choice_tree,
     retire_widget,
     scaled_px,
     setting_label_width,
@@ -996,23 +998,37 @@ def _widget_family(field: FormFieldProps) -> str:
     raise ValueError(f"unsupported form field kind: {field.kind!r}")
 
 
-def _row_label_in(field: FormFieldProps, unit: str) -> str:
-    """The row's label, naming ``unit`` beside it -- or nothing, for "".
+#: The kinds whose control can be READ in another spelling of its unit
+#: (``setShownUnit``): the number boxes and the line edit.
+_UNIT_READ_KINDS = frozenset({"int", "float", "number", "text"})
+
+
+def _picks_unit(field: FormFieldProps) -> bool:
+    """Whether this field's row carries a unit picker: its control can be
+    read in another spelling and its unit has more than one.  A count and a
+    bare number have no ladder, and a picker beside them would offer a
+    choice that changes nothing."""
+
+    return field.kind in _UNIT_READ_KINDS and bool(unit_choice_tree(field.unit or ""))
+
+
+def _shown_label(field: FormFieldProps) -> str:
+    """The words this field's row shows in the label column.
 
     A row whose unit has other spellings carries a picker, and the picker
     says the unit; the label saying it too was the same fact in two places,
-    one of which went stale the moment the other was changed.  So such a row
-    is labelled with no unit at all, and a row with no picker keeps the
-    owner's unit in its label, because there is nothing else to say it.
+    one of which went stale the moment the other was changed -- "(s)" beside
+    a number read in ms.  So such a row is labelled with no unit at all, and
+    a row with no picker keeps the owner's unit in its label, because there
+    is nothing else to say it.  Every label of a form -- built, relabelled
+    for a column shared with other forms, or measured for one -- is these
+    words.
     """
 
+    if not _picks_unit(field):
+        return field.row_label
     label = field.label.strip()
-    symbol = str(unit).strip()
-    if symbol and symbol != "1":
-        label = f"{label} ({symbol})"
-    if field.required:
-        label = f"{label} *"
-    return label
+    return f"{label} *" if field.required else label
 
 
 def _shown_unit_of(widget: object, unit: str | None) -> str:
@@ -1059,13 +1075,16 @@ def _number_cap(widget: QtWidgets.QWidget) -> int:
 
 
 def _automatic_label(field: FormFieldProps, checked: bool) -> str:
-    return f"{'Auto' if checked else 'Manual'} {field.row_label}"
+    return f"{'Auto' if checked else 'Manual'} {_shown_label(field)}"
 
 
 def _form_label_width(fields) -> int:
     """The label column: wide enough for every text label AND every switch.
 
-    An automatic field's label IS a :class:`FluentSwitch`, so its column need
+    Measured from the words the rows SHOW (:func:`_shown_label`): measured
+    from the declared labels, a picker row's unit it does not show pushed
+    every control of the page right of a column nobody's words filled.  An
+    automatic field's label IS a :class:`FluentSwitch`, so its column need
     is the switch's own painted width -- asked from the one switch-width
     authority, never re-derived here with a padding constant.  Two independent
     formulas drifted apart and the switch's track painted underneath the
@@ -1073,7 +1092,7 @@ def _form_label_width(fields) -> int:
     """
 
     fields = tuple(fields)
-    width = setting_label_width(field.row_label for field in fields)
+    width = setting_label_width(_shown_label(field) for field in fields if not field.automatic)
     for field in fields:
         if field.automatic:
             width = max(
@@ -1253,6 +1272,9 @@ class FluentParameterForm(QtWidgets.QWidget):
         #: its editor column has one width budget; a plain form caps a
         #: number box to the width a number needs.
         self._caps_numbers = row_cells is None
+        #: The number edge an editor shares across its forms
+        #: (:meth:`set_number_edge`); 0 while no host has set one.
+        self._number_edge = 0
         self._fields = {field.key: field for field in spec.fields}
         self._widgets: dict[str, QtWidgets.QWidget] = {}
         self._handlers: dict[str, FormWidgetHandler] = {}
@@ -1409,21 +1431,16 @@ class FluentParameterForm(QtWidgets.QWidget):
             self._locked.add(key)
         self._project_enabled(key)
 
-    def _unit_picker(self, field, widget):
-        """The shared picker, for a row whose unit has more than one spelling.
+    def _unit_picker(self, field):
+        """The shared picker, for a row whose unit has more than one spelling
+        (:func:`_picks_unit`); None for any other row."""
 
-        Only for a widget that can be READ in another one: a count and a bare
-        number have no ladder, and a picker beside them would offer a choice
-        that changes nothing.
-        """
-
-        if not hasattr(widget, "setShownUnit"):
+        if not _picks_unit(field):
             return None
         picker = fluent_unit_picker(field.unit or "", self)
-        if picker is not None:
-            picker.unit_picked.connect(
-                lambda symbol, key=field.key: self._shown_unit_picked(key, symbol)
-            )
+        picker.unit_picked.connect(
+            lambda symbol, key=field.key: self._shown_unit_picked(key, symbol)
+        )
         return picker
 
     def _shown_unit_picked(self, key: str, symbol: str) -> None:
@@ -1453,12 +1470,18 @@ class FluentParameterForm(QtWidgets.QWidget):
         asked = getattr(self.widget_for(key), "shownUnit", None)
         return str(asked()).strip() if callable(asked) else ""
 
-    def _label_for(self, field: FormFieldProps, *, picked: bool | None = None) -> str:
-        """The row's label: with the owner's unit, unless a picker says it."""
+    def shown_labels(self) -> tuple[str, ...]:
+        """The words in this form's label column, row by row: what a host
+        sharing the column with other rows measures it by.  A picker row's
+        label has no unit (:func:`_shown_label`); an Auto row's is its
+        switch's words."""
 
-        if picked is None:
-            picked = field.key in self._unit_pickers
-        return _row_label_in(field, "") if picked else field.row_label
+        return tuple(
+            self._auto_switches[field.key].text()
+            if field.key in self._auto_switches
+            else _shown_label(field)
+            for field in self._spec.fields
+        )
 
     def cell_for(self, key: str) -> QtWidgets.QWidget:
         """What sits in this row's control column: editor, or editor + picker.
@@ -1482,7 +1505,7 @@ class FluentParameterForm(QtWidgets.QWidget):
         """
 
         automatic = None
-        picker = self._unit_picker(field, widget)
+        picker = self._unit_picker(field)
         capped = self._caps_numbers and field.kind in _CAPPED_KINDS
         if capped:
             # A number is a few digits; a box the width of the whole form
@@ -1505,7 +1528,7 @@ class FluentParameterForm(QtWidgets.QWidget):
             if capped:
                 beside.addStretch(1)
             cell = holder
-        label = self._label_for(field, picked=picker is not None)
+        label = _shown_label(field)
         if field.automatic:
             automatic = FluentSwitch("", self)
             with signals_blocked(automatic):
@@ -1519,8 +1542,11 @@ class FluentParameterForm(QtWidgets.QWidget):
             label = automatic
         elif isinstance(widget, _RowsEditor):
             # A field of rows is lines tall; its label belongs on the first
-            # line, beside Add, not halfway down a list it does not name.
-            label = QtWidgets.QLabel(label)
+            # line, beside Add, not halfway down a list it does not name --
+            # and on the line Add's own words stand on, as every row label
+            # stands on its field's: a FluentLabel paints its line where a
+            # control of its height puts its text.
+            label = FluentLabel(label)
         before, after = self._row_cells(field)
         row = FluentSettingRow(
             label,
@@ -1535,25 +1561,47 @@ class FluentParameterForm(QtWidgets.QWidget):
             row.layout().setAlignment(label, QtCore.Qt.AlignTop)
         return row, automatic, cell, picker
 
+    def _capped_numbers(self) -> list[QtWidgets.QWidget]:
+        """The number boxes this form caps to a number's width."""
+
+        if not self._caps_numbers:
+            return []
+        return [
+            widget for key, widget in self._widgets.items()
+            if key in self._fields and self._fields[key].kind in _CAPPED_KINDS
+        ]
+
+    def number_edge_hint(self) -> int:
+        """How wide this form's number boxes need to be: the widest box's
+        own need, or 0 when the form caps no number."""
+
+        return max((_number_cap(widget) for widget in self._capped_numbers()), default=0)
+
+    def set_number_edge(self, edge: int) -> None:
+        """End this form's number boxes on an editor's shared edge.
+
+        An editor of several forms -- a node's parameters above a scan's
+        API values -- ends every number box of the page on one x: the
+        widest :meth:`number_edge_hint` of its forms, given to each with
+        the label column.  A box never ends short of its own need."""
+
+        self._number_edge = int(edge)
+        self._align_number_column()
+
     def _align_number_column(self) -> None:
         """End every number box of the form on one edge.
 
         Each box needs its own width -- an integer box has no step chip, a
         blank-or-number edit no stepper -- and the column takes the widest
-        need, so a form of mixed numbers is one straight column.  A decimal
-        box's step chip has one reserved room whatever its step, so the
-        column does not move when a step changes, and forms side by side
-        end on the same edge."""
+        need, or the edge its editor shares across its forms when that is
+        wider, so a page of mixed numbers is one straight column.  A
+        decimal box's step chip has one reserved room whatever its step, so
+        the column does not move when a step changes."""
 
-        if not self._caps_numbers:
-            return
-        capped = [
-            widget for key, widget in self._widgets.items()
-            if key in self._fields and self._fields[key].kind in _CAPPED_KINDS
-        ]
+        capped = self._capped_numbers()
         if not capped:
             return
-        edge = max(_number_cap(widget) for widget in capped)
+        edge = max(self._number_edge, *(_number_cap(widget) for widget in capped))
         for widget in capped:
             if widget.maximumWidth() != edge:
                 widget.setMaximumWidth(edge)
@@ -1640,7 +1688,7 @@ class FluentParameterForm(QtWidgets.QWidget):
             row = self._rows[field.key]
             if isinstance(row, FluentSettingRow):
                 label = (_automatic_label(field, self._auto_switches[field.key].isChecked())
-                         if field.key in self._auto_switches else field.row_label)
+                         if field.key in self._auto_switches else _shown_label(field))
                 row.set_label(label, width=width)
         self.updateGeometry()
 
@@ -2073,13 +2121,13 @@ class FluentParameterForm(QtWidgets.QWidget):
                     label = (
                         _automatic_label(field, automatic.isChecked())
                         if automatic is not None
-                        else self._label_for(field)
+                        else _shown_label(field)
                     )
                     old_field = old_fields.get(field.key)
                     if (
                         old_label_width != label_width
                         or old_field is None
-                        or old_field.row_label != field.row_label
+                        or _shown_label(old_field) != _shown_label(field)
                     ):
                         row.set_label(label, width=label_width)
                 if order_changed or field.key not in in_layout:

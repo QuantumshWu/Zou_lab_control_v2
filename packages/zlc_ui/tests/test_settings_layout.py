@@ -1040,7 +1040,12 @@ def test_an_auto_quantity_returns_to_editable_with_its_picker() -> None:
 def test_replacing_a_row_keeps_the_picker_it_built() -> None:
     """A same-key row rebuilt in another family recorded its new cell and
     picker, then retired the old row -- by key, erasing both records: the
-    picker was on screen and ``unit_picker_for`` said None."""
+    picker was on screen and ``unit_picker_for`` said None.
+
+    The picker says the row's unit, so the label never does -- not when a
+    host shares its label column either, which relabelled every row with
+    its declared "(s)" beside a number the operator was reading in ms, and
+    sized the column for it."""
 
     from dataclasses import replace
 
@@ -1061,6 +1066,14 @@ def test_replacing_a_row_keeps_the_picker_it_built() -> None:
     assert form.cell_for("amount").isAncestorOf(picker)
     app.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
     assert form.unit_picker_for("amount") is picker
+
+    label = form._rows["amount"].layout().itemAt(0).widget()
+    assert label.text() == "Amount" and form.shown_labels() == ("Amount",)
+    form.set_label_width(label.width() + 20)
+    assert label.text() == "Amount", "a shared column does not bring the unit back"
+    from zlc_ui.form.qt_form import _form_label_width
+    from zlc_ui.fluent import setting_label_width
+    assert _form_label_width(form.spec.fields) == setting_label_width(("Amount",))
 
 
 def test_the_same_values_enable_a_dependent_the_same_way_through_every_entry() -> None:
@@ -1196,6 +1209,10 @@ from zlc_ui.fluent import row_gap
 top_of = lambda widget: widget.mapTo(form, QtCore.QPoint()).y()
 label = form._rows['expressions'].layout().itemAt(0).widget()
 assert (top_of(label), label.height()) == (top_of(editor.add_button), editor.add_button.height())
+# ... on the line Add's words stand on: the one label that paints its line
+# where a control of its height puts its text, as every row label does.
+from zlc_ui.fluent import FluentLabel
+assert isinstance(label, FluentLabel)
 lines = [editor.add_button, *(line for line, _cells, _remove in editor._rows)]
 assert [top_of(below) - top_of(above) - above.height() for above, below in zip(lines, lines[1:])] == [row_gap()] * 2
 _row, cells, remove = editor._rows[1]

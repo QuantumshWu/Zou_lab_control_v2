@@ -491,6 +491,15 @@ def test_api_values_are_reconciled_under_the_operators_wheel() -> None:
     drafts.clear()
     form.value_normalized.emit("duration:p0")
     assert drafts and drafts[-1].get("normalized") is True
+    # The picker says the duration's unit, so its label does not: the
+    # editor's column is measured from, and relabelled with, the words shown.
+    assert editor.row_labels() == ("MOT.duration *", form.shown_labels()[1])
+    editor.set_label_width(240)
+    assert form._rows["duration:p0"].layout().itemAt(0).widget().text() == "MOT.duration *"
+    # The editor's one number edge reaches the API values' boxes.
+    assert editor.number_edge_hint() == form.number_edge_hint() == hold.maximumWidth()
+    editor.set_number_edge(form.number_edge_hint() + 30)
+    assert hold.maximumWidth() == level.maximumWidth() == editor.number_edge_hint() + 30
     editor.close()
     editor.deleteLater()
 
