@@ -838,8 +838,16 @@ def test_an_api_axis_in_the_plan_locks_that_parameters_value_box() -> None:
     assert set(form.keys) == {"duration:p0", "dac:p0:dac"}
     assert not form.widget_for("dac:p0:dac").isEnabled(), "walked by the plan: locked"
     assert form.widget_for("duration:p0").isEnabled()
-    assert "swept by the plan: dac:p0:dac" in editor.values_note.text()
+    # The walked row is the plan's: counted among what it sweeps, not
+    # among the rows that run what the pulse carries.
+    assert editor.values_note.text() == "1 of 1 set for this run. Swept by the plan: dac:p0:dac."
     assert editor._overrides() == {"duration:p0": 250.0}
+    editor.update_projection(_projection(bound, plan=plan, api_values=""))
+    app.processEvents()
+    assert editor.values_note.text() == (
+        "0 of 1 set for this run; the rest run what the pulse carries. "
+        "Swept by the plan: dac:p0:dac."
+    )
 
     editor.update_projection(_projection(bound, plan="", api_values="duration:p0 = 250"))
     app.processEvents()
