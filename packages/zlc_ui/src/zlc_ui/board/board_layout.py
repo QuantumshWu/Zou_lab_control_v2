@@ -15,7 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Sequence
 
-__all__ = ["BoardMetrics", "GeomProxy", "nearest_anchor", "first_free_slot",
+__all__ = ["BoardMetrics", "GeomProxy", "slot_under", "first_free_slot",
            "min_board_width", "pack"]
 
 
@@ -163,21 +163,22 @@ def pack(
 ) -> bool:
     """Settle every card of ``order`` under north-west gravity, from where it is.
 
-    Each proxy arrives carrying the place its card was PUT -- seeded when the
-    panel was added, or authored by the operator's last drop -- and leaves
-    carrying where that place comes to rest on a board this wide.  Cards
-    settle north-west first, so whatever is above or to the left of a card has
-    already taken its place by the time that card falls past it.
+    Each proxy arrives carrying where its card starts from -- the place the
+    operator's drop PUT it, or for a card never dropped the first free slot
+    on this board -- and leaves carrying where that comes to rest on a board
+    this wide.  Cards settle north-west first, so whatever is above or to the
+    left of a card has already taken its place by the time that card falls
+    past it.
 
     ``dropped`` names the card the operator has just released.  It wins ties
     in that order, and nothing else: its intent decides who yields when two
     cards want the same place, and gravity then treats it like any other.
 
     ``board_w`` is the live viewport width, always clamped to fit one card.
-    A narrow board clamps positions but the caller keeps the
-    authored ones, so widening restores the arrangement rather than leaving
-    the operator with the single column the narrow board packed.  Returns
-    whether any proxy moved.
+    A narrow board clamps positions but the caller keeps the places drops
+    authored and seeds the rest at this width, so widening restores the
+    arrangement rather than leaving the operator with the single column the
+    narrow board packed.  Returns whether any proxy moved.
     """
     order = list(order)
     if dropped is not None and not any(cfg is dropped for cfg in order):
@@ -198,43 +199,39 @@ def pack(
     return moved
 
 
-def nearest_anchor(
+def slot_under(
+    point: tuple[int, int],
     cfg,
     others: Sequence,
     metrics: BoardMetrics,
     board_w: int,
 ) -> tuple[int, int]:
-    """Nearest two-dimensional gravity anchor to a dropped card's top-left.
+    """The anchor a card carried with the pointer at ``point`` is put at.
 
-    Anchors come from the settled board itself: its origin and every sibling's
-    left/right and top/bottom grid lines.  Occupied anchors remain candidates;
-    choosing one means that the dropped card displaces the card there.  The
-    chosen anchor is resolved *before* gravity, so vertical intent is never
-    flattened into a trial list order.  Equal distances prefer the northern,
-    then western anchor.
+    Anchors are the board's own grid lines: the margin and every other card's
+    left/right and top/bottom edges (a gap past each far edge).  The slot is
+    the one the POINTER is in -- on each axis the last anchor at or before it
+    -- so where the operator lets go decides, not where on the card they
+    happened to hold it: the anchor nearest the card's top-left would send a
+    card held far into its strip and let go just inside the second column
+    back to the first.  ``cfg`` only says how wide the carried card is, which
+    decides how far right it can start.  An occupied anchor stays a
+    candidate; choosing it puts the card there and the others make way.
     """
 
+    gap = metrics.gap
     board_w = max(board_w, min_board_width(list(others) + [cfg], metrics))
-    drop_x, drop_y = int(round(cfg.col)), int(round(cfg.row))
-    width = cfg.width
-    xs = {metrics.gap}
-    ys = {metrics.gap}
+    xs = {gap}
+    ys = {gap}
     for other in others:
         left, top, right, bottom = _aabb(other)
-        xs.update((left, right + metrics.gap))
-        ys.update((top, bottom + metrics.gap))
-    max_x = max(metrics.gap, board_w - metrics.gap - width)
-    candidates = (
-        (x, y)
-        for x in xs
-        for y in ys
-        if metrics.gap <= x <= max_x and y >= metrics.gap
-    )
-    return min(
-        candidates,
-        key=lambda point: (
-            (point[0] - drop_x) ** 2 + (point[1] - drop_y) ** 2,
-            point[1],
-            point[0],
-        ),
+        xs.update((left, right + gap))
+        ys.update((top, bottom + gap))
+    max_x = max(gap, board_w - gap - cfg.width)
+    xs = sorted(x for x in xs if gap <= x <= max_x)
+    ys = sorted(y for y in ys if y >= gap)
+    at_x, at_y = int(point[0]), int(point[1])
+    return (
+        max((x for x in xs if x <= at_x), default=xs[0]),
+        max((y for y in ys if y <= at_y), default=ys[0]),
     )

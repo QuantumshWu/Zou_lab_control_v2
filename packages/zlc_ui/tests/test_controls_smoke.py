@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from zlc_ui.board import BoardMetrics, first_free_slot, nearest_anchor, pack
+from zlc_ui.board import BoardMetrics, first_free_slot, pack, slot_under
 
 
 def test_point_review_is_one_fluent_view_and_dialog(run_qt) -> None:
@@ -385,23 +385,41 @@ def _board_card(width: int, height: int, col: int = 0, row: int = 0):
     return SimpleNamespace(width=width, height=height, col=col, row=row)
 
 
-def test_nearest_anchor_uses_probe_position_without_mutating_layout_record() -> None:
+def test_the_slot_is_the_one_under_the_pointer() -> None:
+    """Where the pointer is let go decides the slot -- not where on the card
+    it was held, and never the card's own (col, row).
+
+    The anchor nearest the card's top-left sent one release point to either
+    of two columns: a card held 400 px into its strip and let go just inside
+    the second column went back to the first.
+    """
+
     metrics = BoardMetrics(8)
-    others = [_board_card(500, 275) for _ in range(3)]
-    pack(others, metrics, board_w=1200)
-    probe = _board_card(500, 275, 600, 0)
-    assert nearest_anchor(probe, others, metrics, 1200) == (516, 8)
-    assert (probe.col, probe.row) == (600, 0)
+    others = [_board_card(508, 411) for _ in range(3)]
+    pack(others, metrics, board_w=1128)
+    assert [(card.col, card.row) for card in others] == [(8, 8), (524, 8), (8, 427)]
+    probe = _board_card(508, 411, 160, 0)
+    expected = {
+        (560, 30): (524, 8),     # just inside the second column
+        (515, 30): (8, 8),       # in the gap, still short of it
+        (1100, 30): (524, 8),    # past the last column a card can start in
+        (600, 500): (524, 427),  # the free slot beside the last card
+        (3, 3): (8, 8),          # the margin belongs to the first slot
+        (100, 900): (8, 846),    # below every card: the row after them
+    }
+    for pointer, slot in expected.items():
+        assert slot_under(pointer, probe, others, metrics, 1128) == slot, pointer
+    assert (probe.col, probe.row) == (160, 0)
 
 
-def test_drop_chooses_the_nearest_two_dimensional_gravity_anchor() -> None:
+def test_a_card_wider_than_a_column_only_starts_where_it_fits() -> None:
     metrics = BoardMetrics(10)
     others = [_board_card(100, 80) for _ in range(2)]
     pack(others, metrics, board_w=350)
-    probe = _board_card(100, 80, 12, 96)
-    assert nearest_anchor(probe, others, metrics, board_w=350) == (10, 100)
-    probe.col, probe.row = 12, 14
-    assert nearest_anchor(probe, others, metrics, board_w=350) == (10, 10)
+    wide = _board_card(210, 80)
+    assert slot_under((300, 50), wide, others, metrics, board_w=350) == (120, 10)
+    assert slot_under((300, 120), wide, others, metrics, board_w=350) == (120, 100)
+    assert slot_under((60, 120), wide, others, metrics, board_w=350) == (10, 100)
 
 
 def test_a_card_put_below_another_stays_below_it() -> None:

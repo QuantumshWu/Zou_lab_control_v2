@@ -264,3 +264,221 @@ assert face(closer, popup) == QtGui.QColor(SURFACE).name(), face(closer, popup)
 card.retire_settings_popup(); card.close(); app.processEvents()
 """
     )
+
+
+# A Monitor page without the plotting package: empty cards, sized as the
+# frame this package plans for them, on a board inside the Fluent scroll
+# area the console and the FigureViewer both mount it in.  Every gesture and
+# every resize goes through the window.
+_MONITOR = """
+import time
+
+from PyQt5 import QtCore, QtTest, QtWidgets
+from zlc_ui.qt import ensure_qt_app
+from zlc_ui.board import BoardMetrics
+from zlc_ui.fluent import ACCENT_TINT, FluentScrollArea
+from zlc_ui.console import ConsoleBoardView, PanelCardView
+
+app = ensure_qt_app(['monitor-board'])
+GAP = 10
+
+def wait_until(condition, timeout=10.0, message='condition did not settle'):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        app.processEvents()
+        if condition():
+            return
+        time.sleep(0.005)
+    raise AssertionError(message)
+
+def settle():
+    for _ in range(5):
+        app.processEvents()
+
+def empty_card(panel_id):
+    card = PanelCardView(panel_id, 'Plot')
+    card.set_size_choices(('2x2',), '2x2')
+    return card
+
+def monitor(count):
+    window = QtWidgets.QWidget()
+    layout = QtWidgets.QVBoxLayout(window)
+    layout.setContentsMargins(0, 0, 0, 0)
+    scroll = FluentScrollArea()
+    board = ConsoleBoardView(metrics=BoardMetrics(GAP))
+    scroll.setWidget(board)
+    layout.addWidget(scroll)
+    cards = tuple(empty_card(f'panel-{index}') for index in range(count))
+    return window, scroll, board, cards
+
+def places(cards):
+    return [(card.x(), card.y()) for card in cards]
+
+def grid(w, h, count, columns=2):
+    return [
+        (GAP + (index % columns) * (w + GAP), GAP + (index // columns) * (h + GAP))
+        for index in range(count)
+    ]
+
+def strip_point(card, x):
+    return QtCore.QPoint(x, card._title_band.geometry().center().y())
+
+def press_and_carry(window, card, held, end, steps=8):
+    handle = window.windowHandle()
+    start = card.mapTo(window, held)
+    QtTest.QTest.mouseMove(handle, start)
+    QtTest.QTest.mousePress(handle, QtCore.Qt.LeftButton, QtCore.Qt.NoModifier, start)
+    for step in range(1, steps + 1):
+        QtTest.QTest.mouseMove(handle, start + (end - start) * step / steps)
+        app.processEvents()
+
+def release(window, end):
+    QtTest.QTest.mouseRelease(window.windowHandle(), QtCore.Qt.LeftButton, QtCore.Qt.NoModifier, end)
+    settle()
+"""
+
+
+def test_panels_added_before_the_board_is_laid_out_tile_its_real_width(run_qt) -> None:
+    """Cards nobody has put anywhere follow the width the board has NOW.
+
+    A card's place was recorded when it arrived, at whatever width the board
+    had -- before the window's first layout that is Qt's default, one card
+    wide -- and gravity, which only moves cards up and left, kept that column
+    on a board two cards wide for good: three empty panels stacked down the
+    left with the rest of the Monitor empty.
+    """
+
+    run_qt(
+        _MONITOR
+        + """
+window, scroll, board, cards = monitor(3)
+w, h = cards[0].width(), cards[0].height()
+board.set_cards(cards)
+assert board.width() < 2 * w + 3 * GAP, 'the board was already wide enough before its layout'
+assert places(cards) == [(GAP, GAP), (GAP, 2 * GAP + h), (GAP, 3 * GAP + 2 * h)]
+wide = (2 * w + 3 * GAP + 40, 3 * h)
+narrow = (w + 2 * GAP + 40, 3 * h)
+window.resize(*wide)
+window.show()
+settle()
+assert places(cards) == grid(w, h, 3), places(cards)
+
+# A narrow window packs one column; widening restores the tiling.
+window.resize(*narrow); settle()
+assert {x for x, _y in places(cards)} == {GAP}, places(cards)
+window.resize(*wide); settle()
+assert places(cards) == grid(w, h, 3), places(cards)
+
+# A panel added while the window is narrow tiles once it widens.
+window.resize(*narrow); settle()
+more = cards + (empty_card('panel-3'),)
+board.set_cards(more); settle()
+assert {x for x, _y in places(more)} == {GAP}, places(more)
+window.resize(*wide); settle()
+assert places(more) == grid(w, h, 4), places(more)
+window.close(); settle()
+"""
+    )
+
+
+def test_a_carried_card_lands_in_the_slot_under_the_pointer_wherever_it_is_held(run_qt) -> None:
+    """Where the pointer lets go decides the slot, and the board shows it first.
+
+    The slot was the one nearest the card's TOP-LEFT, so the same release
+    just inside the second column sent a card held near the left of its
+    strip there and a card held near Setting back to the first column, and
+    nothing on screen said which until it landed.  Now, while it is carried,
+    the others stand where the drop will leave them and the slot is drawn
+    in the accent tint wherever the card does not cover it.
+    """
+
+    run_qt(
+        _MONITOR
+        + """
+outcomes = []
+for hold in ('left', 'right'):
+    window, scroll, board, cards = monitor(4)
+    w, h = cards[0].width(), cards[0].height()
+    window.resize(2 * w + 3 * GAP + 40, 3 * h)
+    window.show(); settle()
+    board.set_cards(cards); settle()
+    slots = grid(w, h, 4)
+    assert places(cards) == slots
+    mover = cards[0]
+    near_setting = mover.settings_button.mapTo(mover, QtCore.QPoint(0, 0)).x() - 12
+    held = strip_point(mover, 14 if hold == 'left' else near_setting)
+    # Just inside the last slot, whichever part of the strip is held.
+    end = board.mapTo(window, QtCore.QPoint(slots[3][0] + 12, slots[3][1] + 12))
+    press_and_carry(window, mover, held, end)
+    assert mover.mapTo(window, held) == end, (hold, mover.pos())
+    # The others closed up ahead of the slot under the pointer ...
+    assert places(cards[1:]) == slots[:3], (hold, places(cards[1:]))
+    # ... and the slot is drawn wherever the carried card leaves it showing.
+    target = QtCore.QRect(*slots[3], w, h)
+    picture = board.grab().toImage()
+    inside = [
+        point for point in (
+            QtCore.QPoint(target.right() - 8, target.bottom() - 4),
+            QtCore.QPoint(target.left() + 4, target.bottom() - 8),
+            QtCore.QPoint(target.right() - 4, target.center().y()),
+            QtCore.QPoint(target.left() + 4, target.center().y()),
+        )
+        if not mover.geometry().adjusted(-1, -1, 1, 1).contains(point)
+    ]
+    assert inside, (hold, mover.geometry())
+    for point in inside:
+        colour = picture.pixelColor(point).name().upper()
+        assert colour == ACCENT_TINT.upper(), (hold, point, colour)
+    events = []
+    board.order_committed.connect(events.append)
+    release(window, end)
+    assert events and events[-1] == ('panel-1', 'panel-2', 'panel-3', 'panel-0'), (hold, events)
+    assert places(cards) == [slots[3], slots[0], slots[1], slots[2]], (hold, places(cards))
+    # The presenter hands the cards back in the committed order: nothing moves.
+    by_id = {card.panel_id: card for card in cards}
+    before = places(cards)
+    board.set_cards(tuple(by_id[panel_id] for panel_id in events[-1])); settle()
+    assert places(cards) == before
+    outcomes.append(before)
+    window.close(); settle()
+assert outcomes[0] == outcomes[1], outcomes
+"""
+    )
+
+
+def test_a_card_carried_to_the_viewport_edge_scrolls_the_board_under_it(run_qt) -> None:
+    """A card can be carried to a row that is off screen.
+
+    Nothing scrolled the board while a card was carried, so the furthest a
+    card could go in one gesture was the bottom of the viewport.  Held at the
+    viewport's edge, the board scrolls under the pointer; the card stays in
+    the operator's hand and lands in the row the pointer reached.
+    """
+
+    run_qt(
+        _MONITOR
+        + """
+window, scroll, board, cards = monitor(6)
+w, h = cards[0].width(), cards[0].height()
+window.resize(2 * w + 3 * GAP + 40, h + h // 2)
+window.show(); settle()
+board.set_cards(cards); settle()
+viewport = scroll.viewport()
+seen = viewport.height()
+assert places(cards) == grid(w, h, 6)
+bar = scroll.verticalScrollBar()
+assert bar.value() == 0
+mover = cards[0]
+held = strip_point(mover, 14)
+edge = viewport.mapTo(window, QtCore.QPoint(mover.mapTo(viewport, held).x(), viewport.height() - 4))
+press_and_carry(window, mover, held, edge)
+wait_until(lambda: bar.value() >= h, message='the board did not scroll under the carried card')
+# Still in the operator's hand: the point it is held by is under the pointer.
+assert mover.mapTo(window, held) == edge, (mover.pos(), bar.value())
+release(window, edge)
+assert mover.y() > seen, (mover.pos(), seen)
+assert mover.y() in {y for _x, y in grid(w, h, 8)}, mover.pos()
+window.close(); settle()
+"""
+    )
+

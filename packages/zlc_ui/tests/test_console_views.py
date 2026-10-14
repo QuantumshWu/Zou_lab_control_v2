@@ -635,9 +635,9 @@ app.processEvents()
     )
 
 
-def test_board_qtest_drop_uses_the_nearest_anchor_and_keeps_every_place_a_drop_authored(run_qt) -> None:
-    """A drop lands at the nearest anchor, commits the new order, and moves
-    only the card that was dropped.
+def test_board_qtest_drop_uses_the_slot_under_the_pointer_and_keeps_every_place_a_drop_authored(run_qt) -> None:
+    """A drop lands in the slot under the pointer, commits the new order, and
+    keeps every place a drop authored.
 
     The board packed every card into the first free slot on the board and
     exempted exactly one -- whichever had been dropped last -- so it could
@@ -667,10 +667,11 @@ def new_board(rows):
 
 def drop_top_left_at(board, card, top_left):
     grab = QtCore.QPoint(18, 18)
-    target = card.mapFrom(board, QtCore.QPoint(top_left[0] + 18, top_left[1] + 18))
+    pointer = QtCore.QPoint(top_left[0] + 18, top_left[1] + 18)
     QtTest.QTest.mousePress(card, QtCore.Qt.LeftButton, pos=grab)
-    QtTest.QTest.mouseMove(card, target)
-    QtTest.QTest.mouseRelease(card, QtCore.Qt.LeftButton, pos=target)
+    QtTest.QTest.mouseMove(card, card.mapFrom(board, pointer))
+    # Released where the pointer is: the card has moved under it since.
+    QtTest.QTest.mouseRelease(card, QtCore.Qt.LeftButton, pos=card.mapFrom(board, pointer))
     app.processEvents()
 
 # The nearest anchor, before gravity; each drop commits the board's order.
@@ -713,7 +714,11 @@ assert cards[2].geometry().getRect()[:2] == (10, 30 + 2 * h), cards[2].geometry(
     )
 
 
-def test_board_qtest_drag_has_free_positions_without_ghost_or_live_reflow(run_qt) -> None:
+def test_board_qtest_drag_previews_the_drop_while_the_card_follows_the_pointer(run_qt) -> None:
+    """While a card is carried it follows the pointer, and the board already
+    stands as the drop will leave it: the other cards closed up ahead of the
+    slot under the pointer, and that slot drawn where the card will rest."""
+
     run_qt(
         """
 from PyQt5 import QtCore, QtTest
@@ -727,28 +732,38 @@ w, h = cards[0].size().width(), cards[0].size().height()
 board = ConsoleBoardView(metrics=metrics)
 board.resize(2 * w + 3 * 10, 2 * h + 3 * 10)
 board.set_cards(cards); board.show(); app.processEvents()
-before = tuple(card.geometry().getRect() for card in cards[1:])
+slots = ((10, 10), (20 + w, 10), (10, 20 + h), (20 + w, 20 + h))
 
 def drag_to(card, board_point):
-    start = card.geometry().center()
-    local_target = card.mapFrom(board, QtCore.QPoint(*board_point))
     QtTest.QTest.mousePress(card, QtCore.Qt.LeftButton, pos=QtCore.QPoint(18, 18))
-    QtTest.QTest.mouseMove(card, local_target)
+    QtTest.QTest.mouseMove(card, card.mapFrom(board, QtCore.QPoint(*board_point)))
     app.processEvents()
-    return local_target
 
-first_target = drag_to(cards[0], (w + 60, h + 60))
+def drop_at(card, board_point):
+    QtTest.QTest.mouseRelease(
+        card, QtCore.Qt.LeftButton, pos=card.mapFrom(board, QtCore.QPoint(*board_point))
+    )
+    app.processEvents()
+
+def places(ids):
+    by_id = {card.panel_id: card for card in cards}
+    return tuple(by_id[panel_id].geometry().getRect()[:2] for panel_id in ids)
+
+drag_to(cards[0], (w + 60, h + 60))
 assert cards[0].pos() == QtCore.QPoint(w + 42, h + 42)
-assert tuple(card.geometry().getRect() for card in cards[1:]) == before
-QtTest.QTest.mouseRelease(cards[0], QtCore.Qt.LeftButton, pos=first_target)
-app.processEvents()
-assert board._order != ('panel-0', 'panel-1', 'panel-2', 'panel-3')
-
-second_target = drag_to(cards[0], (35, 2 * h))
-assert cards[0].pos() == QtCore.QPoint(17, 2 * h - 18)
-QtTest.QTest.mouseRelease(cards[0], QtCore.Qt.LeftButton, pos=second_target)
-app.processEvents()
+assert places(('panel-1', 'panel-2', 'panel-3')) == slots[:3]
+assert board._drop_rect == QtCore.QRect(20 + w, 20 + h, w, h), board._drop_rect
+drop_at(cards[0], (w + 60, h + 60))
 assert board._order == ('panel-1', 'panel-2', 'panel-3', 'panel-0')
+assert places(board._order) == slots and board._drop_rect is None
+
+# Over the slot panel-3 stands in: panel-0 goes there and panel-3 after it.
+drag_to(cards[0], (35, 2 * h))
+assert places(('panel-1', 'panel-2', 'panel-3')) == (slots[0], slots[1], slots[3])
+assert board._drop_rect == QtCore.QRect(10, 20 + h, w, h), board._drop_rect
+drop_at(cards[0], (35, 2 * h))
+assert board._order == ('panel-1', 'panel-2', 'panel-0', 'panel-3')
+assert places(board._order) == slots
 """
     )
 

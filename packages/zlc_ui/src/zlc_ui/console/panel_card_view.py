@@ -292,11 +292,16 @@ class PanelCardView(FluentGroupBox):
     remove_requested = QtCore.pyqtSignal()
     edit_requested = QtCore.pyqtSignal()
     state_changed = QtCore.pyqtSignal(object)
-    dropped = QtCore.pyqtSignal(tuple)
-    #: The card crossed the drag threshold and is following the pointer.
-    #: Emitted ONCE per gesture; where it is while it moves is its own
-    #: geometry, and no board does anything with the pointer until release.
+    #: The three steps of carrying a card by its strip, each with the
+    #: pointer's GLOBAL position: the board decides where a card lands from
+    #: the pointer, and scrolls under a pointer that stands still, so a
+    #: card-local point would be stale by the time it is read.
+    #: ``drag_started`` once, when the press crosses the drag threshold;
+    #: ``drag_moved`` after every move the card follows; ``dropped`` on the
+    #: release that ends a drag (never on a click).
     drag_started = QtCore.pyqtSignal(tuple)
+    drag_moved = QtCore.pyqtSignal(tuple)
+    dropped = QtCore.pyqtSignal(tuple)
     geometry_changed = QtCore.pyqtSignal()
     #: A refusal the mounted plot surface reported (``errorOccurred``).  The
     #: card only relays it: unconnected, those refusals were fully silent.
@@ -486,6 +491,25 @@ class PanelCardView(FluentGroupBox):
         # a board can pack this card before anything is mounted in it.
         self._apply_card_size(str(self._state_projection["size"]))
         self._refresh_title_band()
+
+    def handle_rect(self) -> QtCore.QRect:
+        """The part of the card it is carried by -- its strip -- in card
+        coordinates.  A drawn card's body is its plot's."""
+
+        band = self._title_band.geometry()
+        return QtCore.QRect(0, 0, self.width(), band.bottom() + 1)
+
+    def follow_pointer(self, pointer: QtCore.QPoint) -> None:
+        """Keep the point this card is held by under ``pointer`` (global).
+
+        Asked on every move, and by a board that scrolled under a pointer
+        that stood still.  A card not being carried stays where it is.
+        """
+
+        parent = self.parentWidget()
+        if self._drag_offset is None or parent is None:
+            return
+        self.move(parent.mapFromGlobal(pointer) - self._drag_offset)
 
     def _band_height(self) -> int:
         """Two lines of text, or the command beside them, plus its padding.
@@ -1528,24 +1552,16 @@ class PanelCardView(FluentGroupBox):
             return self._overlay_groups
         return ()
 
-    def _on_strip(self, point: QtCore.QPoint) -> bool:
-        """Whether a card-local point is on the strip -- the card's handle."""
-
-        return point.y() <= self._title_band.geometry().bottom()
-
     def mousePressEvent(self, event) -> None:  # noqa: N802 - Qt API
         # The STRIP carries the card, whatever the card holds.  A drawn
         # card's body is its plot's (a gesture with Selectors on, nothing
-        # with them off), so the strip was always the only grip it had;
-        # an empty card's body is blank and its presses arrived here too, so
-        # an empty card was picked up mid-body.  A drop snaps the card's
-        # TOP-LEFT, not the pointer, so a card held half a card below its
-        # top had to be dragged half a card past the row it was meant for --
-        # below the viewport for the last row on screen -- and let go over
-        # its target it landed a row up, where the same aim with a drawn
-        # card worked.  One grip for every card puts its top-left under the
-        # pointer, wherever it is held.
-        if event.button() == QtCore.Qt.LeftButton and self._on_strip(event.pos()):
+        # with them off), so the strip is the only grip it has, and an empty
+        # card -- whose blank body would take the press -- is held the same
+        # way, so the two kinds of card cannot be carried differently.
+        if (
+            event.button() == QtCore.Qt.LeftButton
+            and self.handle_rect().contains(event.pos())
+        ):
             self._press_at = event.pos()
             self._drag_offset = None
             self.raise_()
@@ -1554,6 +1570,7 @@ class PanelCardView(FluentGroupBox):
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802 - Qt API
         if self._press_at is not None and event.buttons() & QtCore.Qt.LeftButton:
+            pointer = (int(event.globalPos().x()), int(event.globalPos().y()))
             if self._drag_offset is None:
                 # A PRESS IS NOT A DRAG.  A zero-motion click emitted a
                 # drop, and a drop records this card as the board's
@@ -1573,10 +1590,9 @@ class PanelCardView(FluentGroupBox):
                 # card actually starts following the pointer -- on the strip,
                 # which is what stays under the pointer while it does.
                 self._title_band.setCursor(QtCore.Qt.ClosedHandCursor)
-                self.drag_started.emit(
-                    (int(event.pos().x()), int(event.pos().y()))
-                )
-            self.move(self.mapToParent(event.pos() - self._drag_offset))
+                self.drag_started.emit(pointer)
+            self.follow_pointer(event.globalPos())
+            self.drag_moved.emit(pointer)
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802 - Qt API
@@ -1589,7 +1605,9 @@ class PanelCardView(FluentGroupBox):
             # A press that reaches release without ever crossing the
             # threshold IS a click, and a click drops nothing.
             if dragged:
-                self.dropped.emit((int(event.pos().x()), int(event.pos().y())))
+                self.dropped.emit(
+                    (int(event.globalPos().x()), int(event.globalPos().y()))
+                )
         super().mouseReleaseEvent(event)
 
 
