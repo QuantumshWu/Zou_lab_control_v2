@@ -146,8 +146,9 @@ the blank frame its size preset plans, and `set_surface(None)` returns a
 card to that frame.  The strip is the card's one handle (`handle_rect()`):
 a drag that starts on it carries the card, a press in the body never does
 -- a drawn card's body is its plot's -- so both kinds of card are carried
-alike.  The header `×` is the quiet one-glyph remover (red only under the
-pointer); its first click arms it as the white-on-red confirm.
+alike.  Setting is as tall as every other button and the header `×` is
+square at that height: the quiet one-glyph remover (red only under the
+pointer), whose first click arms it as the white-on-red confirm.
 
 `set_selectors_enabled(False)` suspends the mounted plot's whole pointer
 transport -- area, zoom, pan, hover and double-click focus -- and the
@@ -172,12 +173,13 @@ cards stand where the drop will leave them and the slot under the pointer
 (chosen on the board without the carried card) is drawn as an accent-tint
 card with a dashed edge.  Near the viewport's top or bottom edge the board
 scrolls under the pointer.  On release the card takes that slot and the new
-`panel_id` order is committed.  One `panel_id` is one card: a different
-object arriving under an id already on the board retires the one it
-replaces, and a card retired in the middle of a drag is ignored when it
-drops.  The presenter persists that order and each card's size; it
-never sends pixel rectangles back to the view.  `order_committed` is the
-only board-level reorder payload.
+`panel_id` order is committed.  `text_left()` is where a card's strip text
+starts, from the board's left edge, for a note on an empty board to start
+at.  One `panel_id` is one card: a different object arriving under an id
+already on the board retires the one it replaces, and a card retired in the
+middle of a drag is ignored when it drops.  The presenter persists that
+order and each card's size; it never sends pixel rectangles back to the
+view.  `order_committed` is the only board-level reorder payload.
 
 ## `LogicRowView` (internal)
 

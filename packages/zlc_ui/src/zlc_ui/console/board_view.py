@@ -90,6 +90,16 @@ class ConsoleBoardView(QtWidgets.QWidget):
         self._scroll_timer.setInterval(self._SCROLL_TICK_MS)
         self._scroll_timer.timeout.connect(self._scroll_step)
 
+    def text_left(self) -> int:
+        """Where the words on this board start, from its left edge.
+
+        A card's strip text sits one card pad in from a card that sits one
+        gap in from the board, so a note on an empty board set at this x
+        begins where the first card's title will.
+        """
+
+        return self._metrics.gap + PanelCardView.strip_text_inset()
+
     def set_cards(self, cards: tuple[PanelCardView, ...]) -> None:
         incoming = tuple(cards)
         for card in incoming:

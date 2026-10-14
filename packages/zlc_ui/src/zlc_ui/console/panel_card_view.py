@@ -371,17 +371,18 @@ class PanelCardView(FluentGroupBox):
         self._drag_offset: QtCore.QPoint | None = None
         self._settings_drag_offset: QtCore.QPoint | None = None
         self.settings_button = FluentButton("Setting")
-        button_height = scaled_px(26, minimum=22)
-        self.settings_button.setFixedHeight(button_height)
+        # The strip's two commands are the console's controls: as tall as
+        # every other button on the page (a FluentButton's own height), and
+        # the one-glyph remover square at that height.  The strip's two text
+        # lines are taller still, so the strip keeps its height.
+        control = self.settings_button.minimumHeight()
+        self.settings_button.setFixedHeight(control)
         self.settings_button.clicked.connect(self._open_settings)
         # A remover at rest is the quiet ghost every one-glyph × is -- red
         # only under the pointer -- and the armed second click is the one
         # white-on-red confirm.
         self.close_button = FluentButton("×", role="destructive")
-        self.close_button.setFixedSize(
-            scaled_px(28, minimum=24),
-            button_height,
-        )
+        self.close_button.setFixedSize(control, control)
         self.close_button.setToolTip(
             "Click once to arm; click again to remove this panel"
         )
@@ -418,7 +419,7 @@ class PanelCardView(FluentGroupBox):
         # over the top and side of it -- with an unscaled corner that left
         # a fragment of the arc showing at three device pixels a point.  It
         # starts one edge-width in, with the inner, concentric radius.
-        pad = scaled_px(CARD_PAD)
+        pad = self.strip_text_inset()
         title_pad = scaled_px(CARD_TITLE_PAD)
         inner_radius = max(0, scaled_px(RADIUS) - FIELD_BORDER_PX)
         self._title_band = QtWidgets.QWidget(self)
@@ -491,6 +492,16 @@ class PanelCardView(FluentGroupBox):
         # a board can pack this card before anything is mounted in it.
         self._apply_card_size(str(self._state_projection["size"]))
         self._refresh_title_band()
+
+    @staticmethod
+    def strip_text_inset() -> int:
+        """How far in from the card's left edge the strip's text starts.
+
+        One card pad, the same as the picture below it.  A board lines its
+        own words up with it (see ``ConsoleBoardView.text_left``).
+        """
+
+        return scaled_px(CARD_PAD)
 
     def handle_rect(self) -> QtCore.QRect:
         """The part of the card it is carried by -- its strip -- in card

@@ -276,7 +276,7 @@ import time
 from PyQt5 import QtCore, QtTest, QtWidgets
 from zlc_ui.qt import ensure_qt_app
 from zlc_ui.board import BoardMetrics
-from zlc_ui.fluent import ACCENT_TINT, FluentScrollArea
+from zlc_ui.fluent import ACCENT_TINT, FluentButton, FluentScrollArea
 from zlc_ui.console import ConsoleBoardView, PanelCardView
 
 app = ensure_qt_app(['monitor-board'])
@@ -482,3 +482,37 @@ window.close(); settle()
 """
     )
 
+
+def test_the_strip_commands_are_page_buttons_and_its_words_start_at_the_board_text_edge(run_qt) -> None:
+    """Setting is as tall as every other button and the remover is square at
+    that height, centred in the strip; and the board says where a card's
+    words start, so an empty board's note can start there too."""
+
+    run_qt(
+        _MONITOR
+        + """
+from zlc_ui.fluent import set_fluent_scale
+
+# At the full scale, where a button's own height and the old strip's
+# 26-px command are different numbers (the offscreen screen's automatic
+# scale floors both at 22).
+set_fluent_scale(1.0)
+window, scroll, board, cards = monitor(1)
+window.resize(800, 600)
+board.set_cards(cards)
+page_button = FluentButton('Add Panel')
+window.layout().addWidget(page_button)
+window.show(); settle()
+card = cards[0]
+setting, remover = card.settings_button, card.close_button
+assert setting.height() == page_button.height(), (setting.height(), page_button.height())
+assert remover.width() == remover.height() == setting.height(), remover.size()
+band = card._title_band
+for button in (setting, remover):
+    # Centred to the logical pixel: an odd remainder cannot split evenly.
+    top = button.mapTo(band, QtCore.QPoint(0, 0)).y()
+    assert abs(top - (band.height() - top - button.height())) <= 1, (button.text(), top, band.height())
+assert card._title_label.mapTo(board, QtCore.QPoint(0, 0)).x() == board.text_left()
+window.close(); settle()
+"""
+    )
