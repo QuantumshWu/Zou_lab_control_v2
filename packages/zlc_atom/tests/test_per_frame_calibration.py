@@ -280,15 +280,19 @@ def _claims_projection(entries, frames):
         "artifact_claims": {"calibrations": {
             "label": "Calibrations", "entries": tuple(entries), "base_dir": "C:/data",
             "file_filter": "Calibration artifacts (*.json)",
-            "files": tuple({"path": entry["path"], "summary": "20 ms · 1 sites · box"} for entry in entries),
+            "files": tuple({"path": entry["path"], "summary": "20 ms · 1 sites · default Box"} for entry in entries),
             "reads": reads, "problems": problems,
         }},
         "source_frames": frames,
+        "form_values": {"model_kind": "default"},
     }
 
 
-def test_the_calibrations_editor_gives_frames_to_files_by_clicking() -> None:
+def test_the_calibrations_editor_gives_frames_to_files_by_clicking(monkeypatch) -> None:
     from PyQt5 import QtCore, QtTest, QtWidgets
+
+    from zlc_atom.nodes.occupancy import editor as editor_module
+    from zlc_ui.fluent import scaled_px
 
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     editor = OCCUPANCY_NODE.ui_contributions[0]()
@@ -300,13 +304,15 @@ def test_the_calibrations_editor_gives_frames_to_files_by_clicking() -> None:
         editor.update_projection(_claims_projection(entries, frames))
         app.processEvents()
 
-    def click(row, column):
-        index = grid.model().index(row, column)
-        assert index.flags() & QtCore.Qt.ItemIsSelectable, (row, column)
+    def press(row, column):
         QtTest.QTest.mouseClick(grid.viewport(), QtCore.Qt.LeftButton, QtCore.Qt.NoModifier,
-                                grid.visualRect(index).center())
+                                grid.visualRect(grid.model().index(row, column)).center())
         app.processEvents()
         return drafts[-1]["artifact_inputs"]["calibrations"]
+
+    def click(row, column):
+        assert grid.model().index(row, column).flags() & QtCore.Qt.ItemIsSelectable, (row, column)
+        return press(row, column)
 
     load = {"path": "C:/data/load.json", "frames": (0,)}
     readout = {"path": "C:/data/readout.json", "frames": ("rest",)}
@@ -321,12 +327,19 @@ def test_the_calibrations_editor_gives_frames_to_files_by_clicking() -> None:
         assert grid.model().index(1, 4).data(QtCore.Qt.UserRole + 1) == "derived", "read as rest"
         assert drafts == [], "showing claims is not an edit"
         assert "3 frames · each read once" in editor.summary.text()
+        # The file names are the label column: with it, Add and the first
+        # card start on one edge, however long the names are.
+        editor.set_label_width(editor.label_width_hint())
+        app.processEvents()
+        card = grid.viewport().mapTo(editor, grid.visualRect(grid.model().index(0, 0)).topLeft())
+        assert abs(card.x() + scaled_px(2, minimum=1) - editor.add_button.x()) <= 1
         # Last moves to the readout file; frame 2 is then its, and not
         # offered to the load file at all.
         claims = click(1, 0)
         assert claims == (load, {"path": readout["path"], "frames": ("last", "rest")})
         project(claims)
         assert not grid.model().index(0, 5).flags() & QtCore.Qt.ItemIsSelectable
+        assert grid.model().index(0, 5).data(QtCore.Qt.UserRole + 1) == "held", "an outline, not a hole"
         # A frame taken here is taken from whichever file had it.
         claims = click(1, 3)
         assert claims == ({"path": load["path"], "frames": ()},
@@ -338,14 +351,31 @@ def test_the_calibrations_editor_gives_frames_to_files_by_clicking() -> None:
         assert "load.json names frame 2" in editor.note.text()
         claims = click(0, 5)
         assert claims[0] == {"path": load["path"], "frames": ()}
-        # Files come and go through their row label and the Add button.
-        editor.row_action(0, "remove")
-        assert drafts[-1]["artifact_inputs"]["calibrations"] == (readout,)
+        # Each row ends, after a gap, with its own remove cell: never a claim.
+        project((load, readout))
+        remove = grid.model().columnCount() - 1
+        assert grid.model().headerData(remove - 1, QtCore.Qt.Horizontal) is None
+        assert not grid.model().index(0, remove).flags() & QtCore.Qt.ItemIsSelectable
+        assert grid.model().index(0, remove).data(QtCore.Qt.ToolTipRole) == "Remove this calibration"
+        before = grid.selected_cells()
+        assert press(0, remove) == (readout,)
+        assert grid.selected_cells() == before, "removing is not marking"
+        # Clicking a file's name chooses another file for that row.
+        monkeypatch.setattr(editor_module, "fluent_open_path", lambda *args: "C:/data/other.json")
+        header = grid.verticalHeader()
+        QtTest.QTest.mouseClick(header.viewport(), QtCore.Qt.LeftButton, QtCore.Qt.NoModifier,
+                                QtCore.QPoint(10, header.sectionViewportPosition(1) + 10))
+        assert drafts[-1]["artifact_inputs"]["calibrations"] == (
+            load, {"path": "C:/data/other.json", "frames": ("rest",)})
+        # The readout model is chosen under the files it reads them with.
+        editor.model.button("box").click()
+        assert drafts[-1] == {"values": {"model_kind": "box"}}
         editor.add_file("C:/data/extra.json")
         assert drafts[-1]["artifact_inputs"]["calibrations"][-1] == {
             "path": "C:/data/extra.json", "frames": ()}, "Rest is taken; the new file starts with no frame"
         project(())
         assert not grid.isVisible() and editor.summary.text() == "No calibration yet"
+        assert not editor.model_row.isVisible() and editor.add_button.isVisible()
         editor.add_file("C:/data/only.json")
         assert drafts[-1]["artifact_inputs"]["calibrations"] == (
             {"path": "C:/data/only.json", "frames": ("rest",)},)

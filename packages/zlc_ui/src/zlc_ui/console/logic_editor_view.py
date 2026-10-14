@@ -195,6 +195,9 @@ class LogicEditorView(QtWidgets.QWidget):
         actions.addWidget(self.restart_button)
         actions.addWidget(self.run_button)
         actions.addWidget(self.preview_switch)
+        # The node's own commands stand apart from what it edits: a Remove
+        # right under a section read as that section's remove.
+        self._body_layout.addSpacing(scaled_px(14, minimum=8))
         self._body_layout.addLayout(actions)
         self._show_actions = bool(show_actions)
         for button in (self.remove_button, self.restart_button, self.run_button, self.preview_switch):
@@ -253,9 +256,16 @@ class LogicEditorView(QtWidgets.QWidget):
         }
         if structure != self._applied_structure:
             self._applied_structure = structure
+            for widget in self._contributions.values():
+                widget.update_projection(incoming)
+            # A contribution whose own rows are labelled (Occupancy's file
+            # names) says what column they need once it has drawn them; the
+            # form's labels and theirs then share the widest.
             label_width = max(
                 _form_label_width((*spec.fields, *artifact_spec.fields)),
                 setting_label_width(_row_labels(incoming)),
+                *(int(widget.label_width_hint()) for widget in self._contributions.values()
+                  if callable(getattr(widget, "label_width_hint", None))),
             )
             self._label_width = label_width
             self.artifact_form.set_label_width(label_width)
@@ -264,7 +274,6 @@ class LogicEditorView(QtWidgets.QWidget):
                 set_width = getattr(widget, "set_label_width", None)
                 if callable(set_width):
                     set_width(label_width)
-                widget.update_projection(incoming)
             self.artifact_form.reconcile(artifact_spec, dict(artifact_values))
             self.artifact_form.setVisible(bool(artifact_spec.keys))
             self.form.reconcile(
