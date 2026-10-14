@@ -126,9 +126,10 @@ __all__ = ["ConsolePresenter", "PanelBinding", "PanelState", "control_capabiliti
 _UNCHANGED = object()
 #: How frame claims are written, said once for every reader of the catalog.
 FRAME_CLAIMS_RULE = (
-    "frames are frame numbers from 0, 'last' and 'rest' (every frame no other entry "
-    "names); each frame is read by exactly one entry; at most one entry takes 'rest' "
-    "and one 'last'; one file per entry. One entry with ['rest'] reads every frame. "
+    "frames are frame numbers from 0, 'first' (frame 0), 'last' and 'rest' (every "
+    "frame no other entry names); each frame is read by exactly one entry; at most one "
+    "entry takes each of 'first', 'last' and 'rest'; one file per entry. One entry with "
+    "['rest'] reads every frame. "
     "Claims are kept as written when the frame count changes; one the new count "
     "cannot honour is reported, never dropped."
 )

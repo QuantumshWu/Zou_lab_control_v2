@@ -121,10 +121,11 @@ remain requires_human and cannot be answered by the scientific review tool.
 Occupancy reads Camera frames plus the chosen Calibrations and publishes counts,
 occupied and judgement validity. Its `calibrations` artifact input is a list of
 rows, each a Calibration file and the frames it reads: frame numbers from 0,
-`last`, and `rest` (every frame no other row names). One row with `["rest"]`
-reads every frame; frames taken at another exposure get their own row, e.g.
+`first` (frame 0), `last`, and `rest` (every frame no other row names). One row
+with `["rest"]` reads every frame; frames taken at another exposure get their
+own row, e.g.
 `lab_action('logic.update', {'node_id': OCC, 'artifact_inputs': {'calibrations':
-[{'path': LOAD, 'frames': [0]}, {'path': READOUT, 'frames': ['rest']}]}})`.
+[{'path': LOAD, 'frames': ['first']}, {'path': READOUT, 'frames': ['rest']}]}})`.
 Each frame is read by exactly one row; a collision, a frame nobody reads or a
 number the source does not carry is reported by name, never resolved silently,
 and the rows are never rewritten when the frame count changes.

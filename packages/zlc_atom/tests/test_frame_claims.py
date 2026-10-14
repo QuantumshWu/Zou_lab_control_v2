@@ -1,4 +1,4 @@
-"""Frame claims: numbers from 0, last and rest, each frame read exactly once."""
+"""Frame claims: numbers from 0, first, last and rest, each frame read exactly once."""
 
 from __future__ import annotations
 
@@ -17,13 +17,50 @@ from zlc_atom.nodes._framework.frames import (
 
 def test_claimed_frames_have_one_spelling_and_one_order() -> None:
     assert canonical_frames(["rest", 2, "0", "LAST"]) == (0, 2, "last", "rest")
+    assert canonical_frames(["rest", "last", 3, " First "]) == (3, "first", "last", "rest")
     assert describe_frames((0, 2, "last")) == "0, 2, last"
+    assert describe_frames((1, "first", "rest")) == "1, first, rest"
     assert describe_frames(()) == "no frame"
-    for bad in ([True], [-1], ["first"], [1.5], "rest"):
+    for bad in ([True], [-1], ["second"], [1.5], "rest"):
         with pytest.raises(ValueError):
             canonical_frames(bad)
     with pytest.raises(ValueError, match="frame 1 is listed twice"):
         canonical_frames([1, "1"])
+    with pytest.raises(ValueError, match="frame first is listed twice"):
+        canonical_frames(["first", "FIRST"])
+
+
+@pytest.mark.parametrize("count", [1, 2, 3, 4, 5])
+def test_first_is_frame_zero_in_every_cycle(count: int) -> None:
+    reach = reach_frames((("first",),), count)
+    assert reach.readers[0] == ((0, "first"),)
+    assert reach.frames_of(0) == (0,)
+    if count > 1:
+        assert assign_frames((("first",), ("rest",)), count, ("A", "B")) == (0, *(1,) * (count - 1))
+        assert assign_frames((("first",), ("last",), ("rest",)), count, ("A", "B", "C"))[0] == 0
+
+
+def test_first_and_frame_zero_are_one_frame() -> None:
+    # Two entries: refused by name, saying how each reaches it.
+    assert frame_problems((("first",), (0, "rest")), 3, ("A", "B")) == (
+        "frame 0 is read by both A (first) and B (0)",
+    )
+    assert frame_problems(((0,), ("first", "rest")), 3, ("A", "B")) == (
+        "frame 0 is read by both A (0) and B (first)",
+    )
+    # One entry naming it both ways is one reader.
+    assert assign_frames(((0, "first"), ("rest",)), 3, ("A", "B")) == (0, 1, 1)
+    assert reach_frames(((0, "first"), ("rest",)), 3).readers[0] == ((0, "0"),)
+
+
+def test_first_and_last_meet_in_a_one_frame_cycle() -> None:
+    assert assign_frames((("first", "last"),), 1, ("A",)) == (0,)
+    assert reach_frames((("first", "last"),), 1).readers == (((0, "first"),),)
+    assert frame_problems((("first",), ("last",)), 1, ("A", "B")) == (
+        "frame 0 is read by both A (first) and B (last)",
+    )
+    # The same claims are fine once the cycle has two ends again.
+    assert assign_frames((("first",), ("last",)), 2, ("A", "B")) == (0, 1)
 
 
 @pytest.mark.parametrize("count, expected", [
@@ -71,6 +108,11 @@ def test_claims_are_checked_among_themselves_before_any_count() -> None:
         check_claims((("rest",), ("rest",)), ("A", "B"))
     with pytest.raises(ValueError, match="frame 0 is claimed by both A and B"):
         check_claims(((0,), (0, "last")), ("A", "B"))
+    with pytest.raises(ValueError, match="'first' is claimed by both A and B"):
+        check_claims((("first",), ("first", "rest")), ("A", "B"))
+    # First and 0 are two spellings of one frame: that collision is a frame's,
+    # named with how each entry reaches it (above), not a claim's.
+    assert check_claims((("first",), (0, "last")), ("A", "B")) == (("first",), (0, "last"))
     with pytest.raises(ValueError, match="B reads no frame"):
         check_claims((("rest",), ()), ("A", "B"))
 

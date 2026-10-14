@@ -129,6 +129,34 @@ def test_last_and_rest_follow_the_frame_count_and_numbers_keep_their_place() -> 
         twice.process(_cycle(10.0, 10.0, 10.0, 10.0))
 
 
+def test_first_reads_frame_zero_whatever_the_count() -> None:
+    """First is frame 0 of every cycle, the mirror of Last; a second entry
+    reaching frame 0 -- by its number, or as the Last of a one-frame cycle --
+    refuses the run by name and by how each reaches it."""
+
+    shared, strict = _calibration(1.0), _calibration(1e6)
+    processor = OccupancyProcessor((
+        CalibrationReading(strict, ("first",), Path("load.json")),
+        CalibrationReading(shared, ("rest",), Path("readout.json")),
+    ))
+    assert processor.process(_cycle(10.0, 10.0)).occupied.tolist() == [[[False], [True]]]
+    assert processor.process(_cycle(10.0, 10.0, 10.0)).occupied.tolist() == [[[False], [True], [True]]]
+    assert processor.process(_cycle(10.0)).occupied.tolist() == [[[False]]]
+    ends = OccupancyProcessor((
+        CalibrationReading(strict, ("first",), Path("load.json")),
+        CalibrationReading(shared, ("last",), Path("readout.json")),
+    ))
+    assert ends.process(_cycle(10.0, 10.0)).occupied.tolist() == [[[False], [True]]]
+    with pytest.raises(ValueError, match=r"frame 0 is read by both load\.json \(first\) and readout\.json \(last\)"):
+        ends.process(_cycle(10.0))
+    numbered = OccupancyProcessor((
+        CalibrationReading(strict, ("first",), Path("load.json")),
+        CalibrationReading(shared, (0, "rest"), Path("readout.json")),
+    ))
+    with pytest.raises(ValueError, match=r"frame 0 is read by both load\.json \(first\) and readout\.json \(0\)"):
+        numbered.process(_cycle(10.0, 10.0))
+
+
 def test_calibrations_must_fit_together() -> None:
     with pytest.raises(ValueError, match="b.json names different sites"):
         OccupancyProcessor((
@@ -320,11 +348,11 @@ def test_the_calibrations_editor_gives_frames_to_files_by_clicking(monkeypatch) 
         editor.resize(900, 300)
         editor.show()
         project((load, readout))
-        # Columns: Last, Rest, a gap, then the source's frames 0..2.
-        assert [grid.model().headerData(c, QtCore.Qt.Horizontal) for c in range(6)] == [
-            "Last", "Rest", "", "0", "1", "2"]
-        assert grid.selected_cells() == ((0, 3), (1, 1))
-        assert grid.model().index(1, 4).data(QtCore.Qt.UserRole + 1) == "derived", "read as rest"
+        # Columns: First, Last, Rest, a gap, then the source's frames 0..2.
+        assert [grid.model().headerData(c, QtCore.Qt.Horizontal) for c in range(7)] == [
+            "First", "Last", "Rest", "", "0", "1", "2"]
+        assert grid.selected_cells() == ((0, 4), (1, 2))
+        assert grid.model().index(1, 5).data(QtCore.Qt.UserRole + 1) == "derived", "read as rest"
         assert drafts == [], "showing claims is not an edit"
         assert "3 frames · each read once" in editor.summary.text()
         # The file names are the label column: with it, Add and the first
@@ -335,21 +363,40 @@ def test_the_calibrations_editor_gives_frames_to_files_by_clicking(monkeypatch) 
         assert abs(card.x() + scaled_px(2, minimum=1) - editor.add_button.x()) <= 1
         # Last moves to the readout file; frame 2 is then its, and not
         # offered to the load file at all.
-        claims = click(1, 0)
+        claims = click(1, 1)
         assert claims == (load, {"path": readout["path"], "frames": ("last", "rest")})
         project(claims)
-        assert not grid.model().index(0, 5).flags() & QtCore.Qt.ItemIsSelectable
-        assert grid.model().index(0, 5).data(QtCore.Qt.UserRole + 1) == "held", "an outline, not a hole"
+        assert not grid.model().index(0, 6).flags() & QtCore.Qt.ItemIsSelectable
+        assert grid.model().index(0, 6).data(QtCore.Qt.UserRole + 1) == "held", "an outline, not a hole"
         # A frame taken here is taken from whichever file had it.
-        claims = click(1, 3)
+        claims = click(1, 4)
         assert claims == ({"path": load["path"], "frames": ()},
                           {"path": readout["path"], "frames": (0, "last", "rest")})
+        # First is Last's mirror: frame 0 read as First is a dashed card in its
+        # file's row and held in every other row; clicking First moves it.
+        first = {"path": load["path"], "frames": ("first",)}
+        project((first, readout))
+        assert grid.selected_cells() == ((0, 0), (1, 2))
+        assert grid.model().index(0, 4).data(QtCore.Qt.UserRole + 1) == "derived", "read as first"
+        assert not grid.model().index(1, 4).flags() & QtCore.Qt.ItemIsSelectable
+        assert grid.model().index(1, 4).data(QtCore.Qt.UserRole + 1) == "held"
+        assert grid.model().index(1, 4).data(QtCore.Qt.ToolTipRole) == (
+            "load.json reads frame 0 as First; click First in this row to read it here")
+        assert "3 frames · each read once" in editor.summary.text()
+        claims = click(1, 0)
+        assert claims == ({"path": load["path"], "frames": ()},
+                          {"path": readout["path"], "frames": ("first", "rest")})
+        project(({"path": load["path"], "frames": (1,)}, claims[1]))
+        assert not grid.model().index(0, 4).flags() & QtCore.Qt.ItemIsSelectable
+        assert grid.model().index(0, 4).data(QtCore.Qt.UserRole + 1) == "held"
+        assert grid.model().index(0, 4).data(QtCore.Qt.ToolTipRole) == (
+            "readout.json reads frame 0 as First; click First in this row to read it here")
         # A number the source no longer carries keeps a red column, one click from removal.
         project(({"path": load["path"], "frames": (2,)}, readout), frames=("0", "1"))
-        assert grid.model().headerData(5, QtCore.Qt.Horizontal) == "2"
-        assert grid.model().index(0, 5).data(QtCore.Qt.UserRole + 1) == "warning"
+        assert grid.model().headerData(6, QtCore.Qt.Horizontal) == "2"
+        assert grid.model().index(0, 6).data(QtCore.Qt.UserRole + 1) == "warning"
         assert "load.json names frame 2" in editor.note.text()
-        claims = click(0, 5)
+        claims = click(0, 6)
         assert claims[0] == {"path": load["path"], "frames": ()}
         # Each row ends, after a gap, with its own remove cell: never a claim.
         project((load, readout))

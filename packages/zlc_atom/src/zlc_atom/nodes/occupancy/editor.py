@@ -1,13 +1,14 @@
 """Occupancy's calibrations: one row per file, the frames it reads as columns.
 
 The operator says which file reads which frames the way they think it --
-this one the load frame, that one the rest -- by marking cells: "Last" and
-"Rest" follow the frame count, a frame number keeps its position.  A frame
-reached through Last or Rest shows as a dashed card in its file's row, and
-as an empty dashed outline in the other rows when it is a Last (Last
-moves it: a click there says so); a frame nobody reads is an empty red
-card in every row, and one two files reach, or a number the source does not
-carry, is a red-edged card with the reason below.  Nothing here changes a claim
+this one the first frame, that one the last, another the rest -- by marking
+cells: "First" is frame 0 whatever the count, "Last" and "Rest" follow the
+frame count, a frame number keeps its position.  A frame reached through
+First, Last or Rest shows as a dashed card in its file's row, and as an
+empty dashed outline in the other rows when it is a First or a Last (only
+that column moves it: a click there says so); a frame nobody reads is an
+empty red card in every row, and one two files reach, or a number the source
+does not carry, is a red-edged card with the reason below.  Nothing here changes a claim
 because the frame count changed: what was authored stays until the operator
 edits it.  A file is removed by the × that ends its row and replaced by
 clicking its name.  The readout model -- which model each file is read
@@ -39,12 +40,12 @@ from zlc_ui.fluent import (
     scaled_px,
 )
 
-from zlc_atom.nodes._framework.frames import LAST, REST, canonical_frames, reach_frames
+from zlc_atom.nodes._framework.frames import FIRST, LAST, REST, canonical_frames, reach_frames
 from zlc_atom.nodes.calibration import READOUT_MODEL_CHOICES
 
 #: The artifact input this editor manages.
 CALIBRATIONS = "calibrations"
-_NAMED = ((LAST, "Last"), (REST, "Rest"))
+_NAMED = ((FIRST, "First"), (LAST, "Last"), (REST, "Rest"))
 _GAP = None
 _HINT = "Click a cell to give that frame to a file · Last and Rest follow the frame count"
 _EMPTY = "Add a calibration file; the first one reads every frame"
@@ -178,13 +179,17 @@ class CalibrationsEditor(QtWidgets.QWidget):
                 elif isinstance(token, int) and reach is not None:
                     readers = reach.readers[token]
                     mine = next((how for reader, how in readers if reader == row), None)
-                    last = next((reader for reader, how in readers if how == LAST), None)
-                    if mine is None and last is not None:
-                        # Another file's Last: Last moves it, the number does not.
+                    end = next(
+                        ((reader, how) for reader, how in readers if how in (FIRST, LAST)), None)
+                    if mine is None and end is not None:
+                        # Another file's First or Last: that column moves it,
+                        # the number does not.
+                        holder, how = end
+                        word = how.capitalize()
                         states[(row, column)] = "held"
                         tips[(row, column)] = (
-                            f"{names[last]} reads frame {token} as Last; click Last in this "
-                            "row to read it here")
+                            f"{names[holder]} reads frame {token} as {word}; click {word} "
+                            "in this row to read it here")
                     elif len(readers) > 1 and mine is not None:
                         states[(row, column)] = "warning"
                         tips[(row, column)] = "read by " + " and ".join(
@@ -193,7 +198,7 @@ class CalibrationsEditor(QtWidgets.QWidget):
                         states[(row, column)] = "missing"
                         tips[(row, column)] = (
                             f"frame {token} has no calibration; click to give it to this file")
-                    elif mine in (LAST, REST):
+                    elif mine in (FIRST, LAST, REST):
                         states[(row, column)] = "derived"
                         tips[(row, column)] = f"read as {mine}"
                 cells[(row, column)] = label
@@ -248,7 +253,7 @@ class CalibrationsEditor(QtWidgets.QWidget):
                 frames[row].remove(token)
         for row, column in sorted(after - before):
             token = self._columns[column]
-            # A frame, Last or Rest belongs to one file: taking it here takes
+            # A frame, First, Last or Rest belongs to one file: taking it here takes
             # it from whichever file had it.
             for other in frames:
                 if token in other:

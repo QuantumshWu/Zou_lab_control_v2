@@ -304,11 +304,11 @@ replay and downstream processors all use the same choice.
 
 `OccupancyProcessor` consumes an explicit frames signal plus typed saved
 calibrations, each claiming the frames of a cycle it reads (frame numbers
-from 0, `last`, `rest`; one calibration alone reads every frame), and selects
-`default`, `box`, `psf`, or `uniform_psf` readout.  Which calibration reads
-which frame is resolved against the frames that arrive, so `last` and `rest`
-follow a cycle that gains or loses a frame and any collision is refused by
-name.
+from 0, `first`, `last`, `rest`; one calibration alone reads every frame),
+and selects `default`, `box`, `psf`, or `uniform_psf` readout.  Which
+calibration reads which frame is resolved against the frames that arrive, so
+`first`, `last` and `rest` follow a cycle that gains or loses a frame and any
+collision is refused by name.
 It publishes three same-publication Dataset siblings: per-site numeric
 `counts` in the source frame's effective unit; per-site boolean `occupied`,
 whose component validity is the sole truth for whether each site was readable;

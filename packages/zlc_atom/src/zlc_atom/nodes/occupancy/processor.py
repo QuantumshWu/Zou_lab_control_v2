@@ -90,8 +90,8 @@ class CalibrationReading:
     """One calibration and the frames of every cycle it reads.
 
     ``frames`` are claims (:mod:`zlc_atom.nodes._framework.frames`): frame
-    numbers from 0, ``"last"`` and ``"rest"``.  ``path`` is the file it was
-    read from, for the run record and for naming it in a refusal.
+    numbers from 0, ``"first"``, ``"last"`` and ``"rest"``.  ``path`` is the
+    file it was read from, for the run record and for naming it in a refusal.
     """
 
     calibration: TrapCalibration
@@ -111,9 +111,9 @@ class OccupancyProcessor:
     claims it: a load frame and a readout frame taken under different
     exposures are each read with the thresholds and kernels trained on frames
     like them.  Which calibration reads which frame is resolved against the
-    frames that actually arrive, so "last" and "rest" follow a cycle that
-    gains or loses a frame, and a claim the cycle cannot honour refuses the
-    run by name.  One calibration on its own reads every frame.
+    frames that actually arrive, so "first", "last" and "rest" follow a cycle
+    that gains or loses a frame, and a claim the cycle cannot honour refuses
+    the run by name.  One calibration on its own reads every frame.
     """
 
     def __init__(

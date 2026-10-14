@@ -1,25 +1,27 @@
 """Which frames of a cycle each entry of an assignment reads.
 
 An occupancy reads a load frame and a readout frame with calibrations trained
-on each.  The operator says it the way they think it -- THIS file reads frame
-0, THAT one the rest -- so an assignment is a list of entries, each claiming
-frames:
+on each.  The operator says it the way they think it -- THIS file reads the
+first frame, THAT one the last, ANOTHER the rest -- so an assignment is a list
+of entries, each claiming frames:
 
 * a frame number from 0, a position on the source's readout-event axis (the
   numbering the camera, Frame Survival and the Calibration task all use);
+* ``"first"``, the first frame of the cycle -- frame 0, in every cycle;
 * ``"last"``, whatever the last frame of the cycle is;
 * ``"rest"``, every frame no entry names.
 
-"last" and "rest" follow the frame count, so a cycle that gains or loses a
-frame keeps meaning what was authored; a frame number keeps its position.  A
-frame is read by exactly one entry.  Only "rest" ranks below anything else:
-every other collision -- two entries reaching one frame, a number the source
+"first" and "last" are the two ends of a cycle, said the same way: "last"
+follows the frame count, "first" is frame 0 whatever the count, and "rest"
+takes what is left, so a cycle that gains or loses a frame keeps meaning what
+was authored; a frame number keeps its position.  A frame is read by exactly
+one entry.  Only "rest" ranks below anything else: every other collision --
+two entries reaching one frame (frame 0 through one entry's 0 and another's
+"first", or "first" and "last" in a one-frame cycle), a number the source
 does not carry, a frame nobody reads -- is refused with the entries named,
-never settled silently.  Nothing here ever edits what was authored: the same
-claims are valid again once the frame count that suited them returns.
-
-There is no "first": frame 0 is the first frame of every cycle, so a second
-spelling of it would only be a second way to collide with itself.
+never settled silently.  One entry reaching a frame two ways is one reader.
+Nothing here ever edits what was authored: the same claims are valid again
+once the frame count that suited them returns.
 """
 
 from __future__ import annotations
@@ -27,9 +29,10 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+FIRST = "first"
 LAST = "last"
 REST = "rest"
-FRAME_NAMES = (LAST, REST)
+FRAME_NAMES = (FIRST, LAST, REST)
 
 FrameToken = int | str
 
@@ -46,7 +49,7 @@ class FrameClaim:
 
 
 def frame_token(raw: object) -> FrameToken:
-    """One claimed frame: a number from 0, ``"last"`` or ``"rest"``."""
+    """One claimed frame: a number from 0, ``"first"``, ``"last"`` or ``"rest"``."""
 
     if isinstance(raw, str):
         text = raw.strip().lower()
@@ -57,15 +60,15 @@ def frame_token(raw: object) -> FrameToken:
     elif isinstance(raw, int) and not isinstance(raw, bool) and raw >= 0:
         return int(raw)
     raise ValueError(
-        f"{raw!r} is not a frame: use a frame number from 0, 'last' or 'rest'"
+        f"{raw!r} is not a frame: use a frame number from 0, 'first', 'last' or 'rest'"
     )
 
 
 def canonical_frames(raw: object) -> tuple[FrameToken, ...]:
-    """Claimed frames in one order -- numbers ascending, then last, then rest."""
+    """Claimed frames in one order -- numbers ascending, then first, last, rest."""
 
     if isinstance(raw, (str, bytes)) or not isinstance(raw, Sequence):
-        raise ValueError("frames must be a list of frame numbers, 'last' or 'rest'")
+        raise ValueError("frames must be a list of frame numbers, 'first', 'last' or 'rest'")
     tokens = [frame_token(item) for item in raw]
     repeated = sorted({str(token) for token in tokens if tokens.count(token) > 1})
     if repeated:
@@ -86,8 +89,8 @@ def check_claims(
 ) -> tuple[tuple[FrameToken, ...], ...]:
     """What can be refused without knowing the frame count.
 
-    Every entry claims at least one frame, and every frame number, "last"
-    and "rest" belongs to at most one entry.
+    Every entry claims at least one frame, and every frame number, "first",
+    "last" and "rest" belongs to at most one entry.
     """
 
     if len(frames_by_entry) != len(names):
@@ -112,7 +115,7 @@ class FrameReach:
 
     count: int
     #: Per frame: every ``(entry, how)`` reaching it, ``how`` being the frame
-    #: number, ``"last"`` or ``"rest"``.
+    #: number, ``"first"``, ``"last"`` or ``"rest"``.
     readers: tuple[tuple[tuple[int, str], ...], ...]
     #: ``(entry, number)`` for every claimed number the cycle does not have.
     absent: tuple[tuple[int, int], ...]
@@ -146,7 +149,9 @@ def reach_frames(
     absent: list[tuple[int, int]] = []
     for entry, frames in enumerate(frames_by_entry):
         for token in frames:
-            if token == LAST:
+            if token == FIRST:
+                readers[0].append((entry, FIRST))
+            elif token == LAST:
                 readers[count - 1].append((entry, LAST))
             elif isinstance(token, int):
                 if token < count:
@@ -161,12 +166,12 @@ def reach_frames(
 
 
 def _one_per_entry(found: Sequence[tuple[int, str]]) -> tuple[tuple[int, str], ...]:
-    """One entry reaching a frame twice (0 and last, in a one-frame cycle) is one reader."""
+    """One entry reaching a frame twice (0 and first; first and last in a one-frame cycle) is one reader."""
 
-    first: dict[int, str] = {}
+    seen: dict[int, str] = {}
     for entry, how in found:
-        first.setdefault(entry, how)
-    return tuple(first.items())
+        seen.setdefault(entry, how)
+    return tuple(seen.items())
 
 
 def frame_problems(
@@ -219,6 +224,7 @@ def assign_frames(
 
 
 __all__ = [
+    "FIRST",
     "FRAME_NAMES",
     "FrameClaim",
     "FrameReach",

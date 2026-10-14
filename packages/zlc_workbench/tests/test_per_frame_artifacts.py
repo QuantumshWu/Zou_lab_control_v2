@@ -126,7 +126,7 @@ def test_a_saved_layout_keeps_the_claims_as_written() -> None:
         {"path": "load.json", "frames": (0,)}, {"path": "readout.json", "frames": ("last", "rest")},
     )}
     broken = LogicLayoutEntry(
-        "occupancy", "occupancy", {}, "", {}, {"calibrations": [{"path": "a.json", "frames": ["first"]}]},
+        "occupancy", "occupancy", {}, "", {}, {"calibrations": [{"path": "a.json", "frames": ["second"]}]},
     )
     with pytest.raises(LayoutError, match="not a frame"):
         resolve_layout(

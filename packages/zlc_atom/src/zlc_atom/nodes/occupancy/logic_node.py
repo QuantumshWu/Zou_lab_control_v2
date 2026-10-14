@@ -80,15 +80,15 @@ LOGIC_NODE = LogicNodeDescriptor(
         "Read camera image data using saved Calibrations and publish per-site counts, "
         "occupied verdicts and frame_judged diagnostics while preserving frame and scan "
         "axes. Each calibration claims the frames it reads: frame numbers from 0, "
-        "'last' and 'rest' (every frame no other calibration names); one calibration "
-        "with ['rest'] reads every frame. Use occupied for loading-rate plots, camera "
-        "overlays or Frame Survival; the processor follows the source and resumes when "
-        "compatible data returns."
+        "'first' (frame 0), 'last' and 'rest' (every frame no other calibration names); "
+        "one calibration with ['rest'] reads every frame. Use occupied for loading-rate "
+        "plots, camera overlays or Frame Survival; the processor follows the source and "
+        "resumes when compatible data returns."
     ),
     input_specs=(
         DatasetInputSpec("frames", None, "exact"),
         # Each calibration claims the frames it reads -- frame numbers from
-        # 0, last, rest -- so a load frame and a readout frame taken under
+        # 0, first, last, rest -- so a load frame and a readout frame taken under
         # different exposures are read with calibrations trained on each.
         ArtifactInputSpec(
             "calibrations",
