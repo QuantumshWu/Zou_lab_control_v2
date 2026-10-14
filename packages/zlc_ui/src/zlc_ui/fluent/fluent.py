@@ -5869,6 +5869,76 @@ class FluentCodeEdit(QtWidgets.QPlainTextEdit):
         _apply_fluent_context_menu(self, event)   # Fluent right-click (undo/cut/copy/paste), not the native menu
 
 
+class _StepChip(QtWidgets.QAbstractButton):
+    """The step a decimal box moves by, shown in the box: ``±0.1``.
+
+    A quiet ghost left of the stepper -- MUTED_INK, a size under the digits
+    -- that says what one notch does and is the way to change it: under
+    the pointer it becomes a light-blue pill in TEXT ink, and a click asks
+    for a new step.  On a box that cannot be edited it is DISABLED_INK and
+    takes no pointer.  Its geometry is the box's (see
+    ``FluentDoubleSpinBox._place_step_chip``).
+    """
+
+    def __init__(self, box: "FluentDoubleSpinBox"):
+        super().__init__(box)
+        self.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.setAttribute(QtCore.Qt.WA_Hover, True)
+        font = QtGui.QFont(FONT)
+        font.setPointSize(max(7, fluent_font_size() - 1))
+        self.setFont(font)
+        #: The digits' baseline in this chip's coordinates, so the smaller
+        #: step reads on the same line as the number beside it.
+        self._baseline: float | None = None
+        self.set_live(True)
+
+    def set_baseline(self, baseline: float | None) -> None:
+        if baseline != self._baseline:
+            self._baseline = baseline
+            self.update()
+
+    def set_live(self, live: bool) -> None:
+        """Whether the box can be edited: a read-only box shows its step
+        without offering to change it (a disabled box's chip is disabled
+        with it, whatever this says)."""
+
+        self.setEnabled(bool(live))
+        if live:
+            self.setCursor(QtCore.Qt.PointingHandCursor)
+        else:
+            self.unsetCursor()
+        self.update()
+
+    def enterEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        self.update()
+        super().leaveEvent(event)
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        del event
+        live = self.isEnabled()
+        hovered = live and (self.underMouse() or self.isDown())
+        painter = QtGui.QPainter(self)
+        if hovered:
+            painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
+            painter.setPen(QtCore.Qt.NoPen)
+            painter.setBrush(QtGui.QColor(ACCENT_TINT))
+            pill = QtCore.QRectF(self.rect())
+            painter.drawRoundedRect(pill, pill.height() / 2.0, pill.height() / 2.0)
+        painter.setPen(QtGui.QColor(TEXT if hovered else MUTED_INK if live else DISABLED_INK))
+        painter.setFont(self.font())
+        metrics = QtGui.QFontMetricsF(self.font())
+        if self._baseline is None:
+            painter.drawText(self.rect(), QtCore.Qt.AlignCenter, self.text())
+        else:
+            left = (self.width() - metrics.horizontalAdvance(self.text())) / 2.0
+            painter.drawText(QtCore.QPointF(left, self._baseline), self.text())
+        painter.end()
+
+
 class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
     """One bounded Decimal value, rounded to the digits the operator can see.
 
@@ -5884,8 +5954,12 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
     #: inside a Qt slot does not become a traceback, it ends the process.
     #: Declared here, there is no instant in which they are missing.
     valueNormalized = QtCore.pyqtSignal()
+    #: The step changed -- and with it the chip that shows it, so a host
+    #: that sized the box to its contents sizes it again.
+    singleStepChanged = QtCore.pyqtSignal()
 
     _normalization_pending = False
+    _step_chip = None
     _display_text = ""
     _text_width = 0
     _number_metrics = None
@@ -5925,7 +5999,7 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
 
     def sizeHint(self) -> QtCore.QSize:  # noqa: N802
         size = super().sizeHint()
-        size.setWidth(self.fontMetrics().horizontalAdvance("-123.456e-12") + _spin_field_chrome())
+        size.setWidth(self.fontMetrics().horizontalAdvance("-123.456e-12") + _spin_field_chrome() + self._step_chip_room())
         return size
 
     def minimumSizeHint(self) -> QtCore.QSize:  # noqa: N802
@@ -5952,6 +6026,8 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
         # tracks only for a widget that asks for hover events.
         self.setAttribute(QtCore.Qt.WA_Hover, True)
         self.editingFinished.connect(self._update_number_geometry)
+        self._step_chip = _StepChip(self)
+        self._step_chip.clicked.connect(self._on_edit_step)
 
         # No range of its own: a bound is the owner's, declared through
         # setRange, and until then the box holds whatever it is given.
@@ -5960,6 +6036,7 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
         # owner that declares a resolution says so with setDecimals.
         self.setDecimals(323)
         self.setSingleStep(1)
+        self._refresh_step_chip()
 
     # ------------------------------------------------------------ the value
 
@@ -6074,6 +6151,7 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
             return
         self._value = value
         super().setDecimals(places)
+        self._refresh_step_chip()
         self._commit(self._value, notify_normalized=True)
 
     def setSingleStep(self, step: float) -> None:  # noqa: N802 - Qt API name
@@ -6083,8 +6161,12 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
             return
         if magnitude == 0:
             return
+        changed = magnitude != self._step
         self._step = magnitude
         super().setSingleStep(float(magnitude))
+        if changed:
+            self._refresh_step_chip()
+            self.singleStepChanged.emit()
 
     def decimalValue(self) -> Decimal:  # noqa: N802 - Qt API style
         """The value as the box holds it -- exact, in the owner's unit."""
@@ -6327,10 +6409,12 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
+        self._place_step_chip()
         self._update_number_geometry()
 
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
+        self._place_step_chip()
         self._update_number_geometry()
 
     def changeEvent(self, event) -> None:  # noqa: N802
@@ -6341,6 +6425,9 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
             QtCore.QEvent.EnabledChange,
             QtCore.QEvent.ReadOnlyChange,
         ):
+            if self._step_chip is not None:
+                self._step_chip.set_live(not self.isReadOnly())
+                self._place_step_chip()
             if hasattr(self, "_display_text"):
                 self._display_text = ""
                 if self.isReadOnly() or not self.isEnabled():
@@ -6378,9 +6465,99 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
 
         return self.decimals() != 0
 
+    # ------------------------------------------------------------ the step chip
+    #
+    # A decimal box shows the step one notch moves it by, inside the field
+    # just left of the stepper: ``±0.1`` in a quiet ghost that turns into a
+    # light-blue pill under the pointer and asks for a new step when
+    # clicked.  The step used to be reachable only through a right-click
+    # menu -- or a six-pixel "." strip before that -- and an operator who
+    # cannot see the step cannot know what the arrows will do.  The digits
+    # end before the chip (a right text margin), so the chip never covers a
+    # number and every width rule of the box -- width_for, sizeHint, the
+    # form's number column -- counts it.
+
+    def _step_chip_text(self) -> str:
+        step = self._step
+        shown = _decimal_text(step) if -4 <= step.adjusted() <= 6 else f"{float(step):g}"
+        return f"±{shown}"
+
+    def _step_chip_metrics(self) -> tuple[int, int, int, int]:
+        """``(chip width, gap to the divider, vertical gap, gap to the
+        digits)`` in logical px for the step shown now."""
+
+        metrics = QtGui.QFontMetrics(self._step_chip.font())
+        pad = scaled_px(5, minimum=3)
+        width = fluent_text_width(metrics, self._step_chip_text()) + 2 * pad
+        return width, scaled_px(3, minimum=2), scaled_px(3, minimum=2), scaled_px(4, minimum=2)
+
+    def _shows_step_chip(self) -> bool:
+        return (
+            self._step_chip is not None
+            and self.offers_step_edit()
+            and self.buttonSymbols() != QtWidgets.QAbstractSpinBox.NoButtons
+        )
+
+    def _step_chip_room(self) -> int:
+        """How much the chip takes from the digits: the right text margin.
+
+        The edit field ends at the frame's padding before the divider; the
+        chip sits ``gap`` left of the divider, and the digits stop ``text
+        gap`` before the chip.  None of it depends on the box's width."""
+
+        if not self._shows_step_chip():
+            return 0
+        width, gap, _vertical, text_gap = self._step_chip_metrics()
+        before_divider = FIELD_BORDER_PX + scaled_px(EDIT_PADDING_H)
+        return max(0, width + gap + text_gap - before_divider)
+
+    def _place_step_chip(self) -> None:
+        chip = self._step_chip
+        if chip is None:
+            return
+        if not self._shows_step_chip():
+            chip.hide()
+            margins = self.lineEdit().textMargins()
+            if margins.right():
+                self.lineEdit().setTextMargins(margins.left(), margins.top(), 0, margins.bottom())
+            return
+        width, gap, vertical, _text_gap = self._step_chip_metrics()
+        divider, _up, _down = _spin_stepper_cells(self)
+        inner = frame_inner_rect(self)
+        top = int(math.ceil(inner.top())) + vertical
+        bottom = int(math.floor(inner.bottom())) - vertical
+        right = int(math.floor(divider)) - gap
+        chip.setText(self._step_chip_text())
+        chip.setGeometry(right - width, top, width, max(1, bottom - top))
+        # QLineEdit centres its line box with an integer split; the digits'
+        # baseline is that box's top plus the ascent.
+        edit = self.lineEdit()
+        line = edit.fontMetrics()
+        line_top = edit.y() + (edit.height() - line.height() + 1) // 2
+        chip.set_baseline(float(line_top + line.ascent() - top))
+        chip.setToolTip(f"Step {self._step_chip_text()[1:]} · click to change"
+                        if not self.isReadOnly() and self.isEnabled()
+                        else f"Step {self._step_chip_text()[1:]}")
+        room = self._step_chip_room()
+        margins = self.lineEdit().textMargins()
+        if margins.right() != room:
+            self.lineEdit().setTextMargins(margins.left(), margins.top(), room, margins.bottom())
+        chip.show()
+        chip.raise_()
+
+    def _refresh_step_chip(self) -> None:
+        """The step or the box's kind changed: show it, and re-fit the digits
+        to the room the chip leaves them."""
+
+        if self._step_chip is None:
+            return
+        self._place_step_chip()
+        self.updateGeometry()
+        self._update_number_geometry()
+
     def contextMenuEvent(self, event) -> None:  # noqa: N802 - Qt naming
-        # "Edit step…" lives here, with the box's other commands.  It was a
-        # six-pixel button beside the stepper that read as a stray dot.
+        # "Edit step…" stays here as well, with the box's other commands; the
+        # chip is the way that is seen.
         extra = (("Edit step…", self._on_edit_step),) if self.offers_step_edit() else ()
         _apply_fluent_context_menu(self.lineEdit(), event, extra=extra)
 

@@ -459,3 +459,39 @@ def test_a_spelling_that_fits_clears_an_earlier_narrow_refusal() -> None:
         assert edit.text() == "1000" and not edit.property("numericError")
     finally:
         window.close()
+
+
+def test_the_step_is_shown_in_the_box_and_a_click_changes_it(box, monkeypatch) -> None:
+    """The step one notch moves a decimal box by is in the box, beside the
+    stepper: ``±1``.  A click on it asks for a new one -- the same question
+    the context menu's Edit step… asks -- and the chip, its tooltip and the
+    room the digits keep follow the new step.  A whole-number box has no
+    step to choose and shows none; a read-only box shows its step but does
+    not offer to change it."""
+
+    from zlc_ui.fluent import fluent as F
+
+    box.setRange(0.0, 10.0)
+    box.resize(180, 30)
+    box.show()
+    chip = box._step_chip
+    assert chip.isVisible() and chip.text() == "±1"
+    assert chip.toolTip() == "Step 1 · click to change"
+    monkeypatch.setattr(F.FluentInputDialog, "getValue", lambda self: (0.25, True))
+    heard: list[float] = []
+    box.singleStepChanged.connect(lambda: heard.append(box.singleStep()))
+    room = box._step_chip_room()
+    chip.click()
+    assert box.singleStep() == 0.25 and heard == [0.25]
+    assert chip.text() == "±0.25" and chip.toolTip() == "Step 0.25 · click to change"
+    assert box._step_chip_room() > room, "a longer step takes more of the field"
+    edit = box.lineEdit()
+    assert edit.geometry().right() + 1 - edit.textMargins().right() <= chip.geometry().left()
+    assert chip.geometry().right() < F._spin_stepper_cells(box)[0], "clear of the divider"
+    box.setReadOnly(True)
+    assert chip.isVisible() and not chip.isEnabled()
+    assert chip.toolTip() == "Step 0.25"
+    box.setReadOnly(False)
+    assert chip.isEnabled()
+    box.setDecimals(0)
+    assert not chip.isVisible() and edit.textMargins().right() == 0

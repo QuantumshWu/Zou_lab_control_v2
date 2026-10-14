@@ -994,6 +994,16 @@ def _in_shown_unit(widget: object, number: float, unit: str | None) -> float:
 #: The widest number a capped box shows whole: a double's seventeen
 #: significant digits with sign and point, the most a field ever holds.
 _NUMBER_SAMPLE = "-1234567890.12345678"
+_CAPPED_KINDS = frozenset({"int", "float", "number"})
+
+
+def _number_cap(widget: QtWidgets.QWidget) -> int:
+    """The width at which a number box shows the widest number whole: its own
+    frame, padding and -- for a decimal box -- step chip, plus the stepper a
+    blank-or-number edit does not have and its neighbours do."""
+
+    stepper = 0 if isinstance(widget, FluentDoubleSpinBox) else fluent_stepper_extent()
+    return widget.width_for(_NUMBER_SAMPLE) + stepper
 
 
 def _automatic_label(field: FormFieldProps, checked: bool) -> str:
@@ -1241,6 +1251,7 @@ class FluentParameterForm(QtWidgets.QWidget):
                 ),
             )
             self._layout.addWidget(self._rows[field.key])
+        self._align_number_column()
         # THE SLACK GOES BELOW THE ROWS, not between them.  Without this a
         # form shorter than its host shares the surplus height across its
         # rows, so the PITCH depends on the row COUNT: adding one control
@@ -1420,14 +1431,15 @@ class FluentParameterForm(QtWidgets.QWidget):
 
         automatic = None
         picker = self._unit_picker(field, widget)
-        capped = self._caps_numbers and field.kind in {"int", "float", "number"}
+        capped = self._caps_numbers and field.kind in _CAPPED_KINDS
         if capped:
             # A number is a few digits; a box the width of the whole form
-            # put its stepper a screen away from them.  A blank-or-number
-            # edit has no stepper but keeps its room, so every number box
-            # of a form ends at the same edge.
-            stepper = 0 if isinstance(widget, FluentDoubleSpinBox) else fluent_stepper_extent()
-            widget.setMaximumWidth(widget.width_for(_NUMBER_SAMPLE) + stepper)
+            # put its stepper a screen away from them.  Every number box of
+            # a form ends at ONE edge (see _align_number_column); this is
+            # the box's own need until the row is installed.
+            widget.setMaximumWidth(_number_cap(widget))
+            if isinstance(widget, FluentDoubleSpinBox):
+                widget.singleStepChanged.connect(self._align_number_column)
         cell = widget
         if picker is not None:
             holder = QtWidgets.QWidget(self)
@@ -1465,6 +1477,27 @@ class FluentParameterForm(QtWidgets.QWidget):
             parent=self,
         )
         return row, automatic, cell, picker
+
+    def _align_number_column(self) -> None:
+        """End every number box of the form on one edge.
+
+        Each box needs its own width -- an integer box has no step chip, a
+        blank-or-number edit no stepper -- and the column takes the widest
+        need, so a form of mixed numbers is one straight column.  A decimal
+        box's need changes with its step, so a new step re-aligns it."""
+
+        if not self._caps_numbers:
+            return
+        capped = [
+            widget for key, widget in self._widgets.items()
+            if key in self._fields and self._fields[key].kind in _CAPPED_KINDS
+        ]
+        if not capped:
+            return
+        edge = max(_number_cap(widget) for widget in capped)
+        for widget in capped:
+            if widget.maximumWidth() != edge:
+                widget.setMaximumWidth(edge)
 
     def _install_row(self, field, widget, row, automatic, cell, picker) -> None:
         """Record every part of one built row, in the one place that does."""
@@ -2011,6 +2044,7 @@ class FluentParameterForm(QtWidgets.QWidget):
             self._dependents = new_dependents
             # A row that left takes its lock with it.
             self._locked.intersection_update(spec.keys)
+            self._align_number_column()
         finally:
             if structural:
                 self.setUpdatesEnabled(True)

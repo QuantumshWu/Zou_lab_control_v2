@@ -299,6 +299,38 @@ def spin_case(kind: str, state: str, offset: int) -> None:
     host.close()
 
 
+def chip_case() -> None:
+    """The step chip under the pointer: a pill clear of the frame and the
+    divider on every side."""
+
+    case = "dspin/chip_hover"
+    host = Host(220, 80)
+    box = make_spin("dspin")
+    box.setParent(host)
+    box.setGeometry(16, 16, 160, box.sizeHint().height())
+    show(host)
+    chip = box._step_chip
+    chip.setAttribute(QtCore.Qt.WA_UnderMouse, True)
+    chip.repaint()
+    pump(0.05)
+    image = grab(host)
+    geometry = chip.geometry().translated(box.pos())
+    row = dev(geometry.y() + geometry.height() / 2.0)
+    ground = image[row, dev(box.x()) + 3 * BD + 1]
+    pill = image[row, dev(geometry.x() + 2)]
+    divider = edge_px(box.x() + F._spin_stepper_cells(box)[0])
+    gap = [x for x in range(edge_px(geometry.x() + geometry.width()), divider) if eq(image[row, x], ground)]
+    middle = dev(geometry.x() + geometry.width() / 2.0)
+    above = image[edge_px(geometry.y()) - 1, middle]
+    below = image[edge_px(geometry.y() + geometry.height()), middle]
+    crop = (dev(geometry.x()) - 6, dev(box.y()) - 2, divider + 6, dev(box.y() + box.height()) + 2)
+    check(case, "T-B hovered chip is a pill clear of frame and divider",
+          not eq(pill, ground) and bool(gap) and eq(above, ground) and eq(below, ground),
+          f"pill {hexs(pill)} ground {hexs(ground)} gap cols {gap} above {hexs(above)} below {hexs(below)}",
+          image=image, box=crop)
+    host.close()
+
+
 # ------------------------------------------------------------------ chevrons
 def chevron_rows(oy: float, centre_y: float) -> tuple[int, int]:
     """Device rows that hold a chevron centred on ``centre_y`` and nothing
@@ -454,6 +486,7 @@ def main() -> None:
             spin_case(kind, state, 16)
         if not INTEGRAL:
             spin_case(kind, "rest", 17)
+    chip_case()
     chevron_case()
     column_case()
     form_case()
