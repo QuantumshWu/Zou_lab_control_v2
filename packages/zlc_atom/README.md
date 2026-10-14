@@ -303,8 +303,8 @@ photoelectron values are dimensionless, and live preview, saved samples,
 replay and downstream processors all use the same choice.
 
 `OccupancyProcessor` consumes an explicit frames signal plus typed saved
-calibrations, each claiming the frames of a cycle it reads (frame numbers
-from 0, `last`, `rest`; one calibration alone reads every frame), and selects
+calibrations, each claiming the frames of a cycle it reads (`0` for first,
+positive middle-frame indices, `last`, `rest`; one calibration alone reads every frame), and selects
 `default`, `box`, `psf`, or `uniform_psf` readout.  Which calibration reads
 which frame is resolved against the frames that arrive, so `last` and `rest`
 follow a cycle that gains or loses a frame and any collision is refused by
@@ -343,7 +343,12 @@ is All forward pairs, Consecutive (k→k+1), From the first frame (0→k), To th
 last frame (k→last) -- each resolved against the frames the source carries --
 or Selected pairs, marked on a start × end matrix with ordinary table selection
 (drag a rectangle, Ctrl to add or remove, a row or column header for every pair
-from or to that frame). The `slm_feedback` Task takes one ordinary camera/readout Calibration and one
+from or to that frame). Grid edits retain the rule with sparse pair overrides:
+excluding `0` to `last` from From first still selects newly added middle frames.
+Endpoint text `0`/`last` follows the first/last identity; middle indices never
+become a new endpoint when the count shrinks. The editor follows declared source
+draft frames immediately, while published data uses the actual acquired schema.
+The `slm_feedback` Task takes one ordinary camera/readout Calibration and one
 strict Science Context. Calibration has no SLM or Science Context input.
 Feedback registers the Context's frozen spots Target to the measured camera
 sites at its own composition boundary; the full roster, including predicted

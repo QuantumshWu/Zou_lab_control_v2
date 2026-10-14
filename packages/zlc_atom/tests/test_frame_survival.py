@@ -66,14 +66,14 @@ def _occupied_snapshot(
     )
 
 
-@pytest.mark.parametrize("pairs", ("all", ((1, 2), (0, 2))))
+@pytest.mark.parametrize("pairs", ("all", ((1, "last"), (0, "last"))))
 def test_pairing_identity_per_entry(pairs) -> None:
     rng = np.random.default_rng(3)
     occupied = rng.random((40, 3, 6)) < 0.5
     processor = FrameSurvivalProcessor(pairs=pairs)
     source = _occupied_snapshot(occupied)
     survival = processor._pair(source)
-    selected = _forward_pairs(3) if pairs == "all" else pairs
+    selected = _forward_pairs(3) if pairs == "all" else ((1, 2), (0, 2))
     values = np.asarray(survival.block.values)
     validity = np.asarray(survival.expanded_validity())
     assert values.shape == (40, len(selected), 6)  # (cycles, selected pairs, sites)
@@ -183,7 +183,7 @@ def test_single_frame_and_wrong_shapes_are_refused() -> None:
     selected = FrameSurvivalProcessor(pairs=((1, 3),))
     with pytest.raises(ValueError, match="need frame 3"):
         selected._pair(_occupied_snapshot(np.zeros((1, 3, 2), dtype=bool)))
-    restored = selected._pair(_occupied_snapshot(np.zeros((1, 4, 2), dtype=bool)))
+    restored = selected._pair(_occupied_snapshot(np.zeros((1, 5, 2), dtype=bool)))
     assert restored.block.schema.point_domain.axes[0].coordinate_labels == ("1-3",)
 
 
@@ -207,19 +207,40 @@ def test_a_named_selection_follows_the_frames_the_source_carries(rule, expected)
         FrameSurvivalProcessor(pairs="every")
 
 
-def test_selected_pairs_are_only_the_custom_choice() -> None:
+def test_pair_overrides_keep_the_rule_and_last_identity() -> None:
     from zlc_atom.nodes.frame_survival.logic_node import FRAME_SURVIVAL_SCHEMA, LOGIC_NODE
 
     assert FRAME_SURVIVAL_SCHEMA.draft_values() == {"selection": "all", "pairs": ()}
-    rows = ({"start": 0, "end": 2},)
+    rows = ({"start": "0", "end": "last", "selected": True},)
     FRAME_SURVIVAL_SCHEMA.project_values({"selection": "custom", "pairs": rows})
     with pytest.raises(ValueError, match="at least one pair"):
         FRAME_SURVIVAL_SCHEMA.project_values({"selection": "custom", "pairs": ()})
-    with pytest.raises(ValueError, match="only to the 'Selected pairs'"):
-        FRAME_SURVIVAL_SCHEMA.project_values({"selection": "consecutive", "pairs": rows})
+    FRAME_SURVIVAL_SCHEMA.project_values({"selection": "consecutive", "pairs": rows})
     built = LOGIC_NODE.build(source_signal="@logic/occupancy/occupied", selection="custom", pairs=rows)
-    assert built.pairs == ((0, 2),)
+    assert built.pairs == ((0, "last"),)
     assert LOGIC_NODE.build(source_signal="@logic/occupancy/occupied", selection="to_last", pairs=()).pairs == "to_last"
+    rows = ({"start": "0", "end": "last", "selected": False},)
+    built = LOGIC_NODE.build(source_signal="@logic/occupancy/occupied", selection="from_first", pairs=rows)
+    for count in (22, 25, 3, 22):
+        result = built._pair(_occupied_snapshot(np.zeros((1, count, 2), dtype=bool)))
+        assert result.block.schema.point_domain.axes[0].coordinate_labels == tuple(
+            f"0-{end}" for end in range(1, count - 1))
+    with pytest.raises(ValueError, match="at least two frames"):
+        built._pair(_occupied_snapshot(np.zeros((1, 1, 2), dtype=bool)))
+    assert built.pair_overrides == ((0, "last", False),)
+    # Excluding an absent middle pair stays dormant, then works again on restoration.
+    built = LOGIC_NODE.build(source_signal="@logic/occupancy/occupied", selection="from_first",
+                             pairs=({"start": "0", "end": "2", "selected": False},))
+    for count, expected in ((4, ("0-1", "0-3")), (3, ("0-1", "0-2")),
+                            (4, ("0-1", "0-3"))):
+        result = built._pair(_occupied_snapshot(np.zeros((1, count, 2), dtype=bool)))
+        assert result.block.schema.point_domain.axes[0].coordinate_labels == expected
+    # A middle index never becomes the last frame when the source shrinks.
+    middle = LOGIC_NODE.build(source_signal="@logic/occupancy/occupied", selection="custom",
+                             pairs=({"start": "0", "end": "2"},))
+    with pytest.raises(ValueError, match="need frame 2"):
+        middle._pair(_occupied_snapshot(np.zeros((1, 3, 2), dtype=bool)))
+    assert middle._pair(_occupied_snapshot(np.zeros((1, 4, 2), dtype=bool))).block.values.shape == (1, 1, 2)
 
 
 def test_pair_matrix_selects_like_a_table_and_writes_the_draft() -> None:
@@ -264,14 +285,17 @@ def test_pair_matrix_selects_like_a_table_and_writes_the_draft() -> None:
             QtCore.Qt.LeftButton, QtCore.Qt.NoModifier))
         QtTest.QTest.mouseRelease(view, QtCore.Qt.LeftButton, QtCore.Qt.NoModifier, last)
         app.processEvents()
-        assert drafts[-1] == {"values": {"selection": "custom", "pairs": (
-            {"start": 0, "end": 2}, {"start": 0, "end": 3}, {"start": 1, "end": 2}, {"start": 1, "end": 3})}}
+        assert drafts[-1]["values"]["selection"] == "consecutive"
+        assert {tuple(row.values()) for row in drafts[-1]["values"]["pairs"]} == {
+            ("0", "1", False), ("0", "2", True), ("0", "last", True),
+            ("1", "last", True), ("2", "last", False)}
         project(**drafts[-1]["values"])
         assert marked() == [(0, 2), (0, 3), (1, 2), (1, 3)]
         # Ctrl adds one more pair; a lower-triangle cell is never selectable.
         corner = form.table.visualRect(form.model.index(2, 2)).center()
         QtTest.QTest.mouseClick(view, QtCore.Qt.LeftButton, QtCore.Qt.ControlModifier, corner)
-        assert drafts[-1]["values"]["pairs"][-1] == {"start": 2, "end": 3}
+        assert not any(row["start"] == "2" and row["end"] == "last"
+                       for row in drafts[-1]["values"]["pairs"])
         assert not form.model.index(2, 0).flags() & QtCore.Qt.ItemIsSelectable
         # Delete and paste do not rename a pair.
         QtTest.QTest.keyClick(form.table, QtCore.Qt.Key_Delete)
@@ -286,8 +310,23 @@ def test_pair_matrix_selects_like_a_table_and_writes_the_draft() -> None:
         assert marked() == [] and form.presets.button("none").property("current")
         # Pairs the source no longer carries are named, not dropped silently.
         drafts.clear()
-        project(selection="custom", pairs=({"start": 0, "end": 1}, {"start": 2, "end": 5}))
+        project(selection="custom", pairs=({"start": "0", "end": "1"}, {"start": "2", "end": "5"}))
         assert marked() == [(0, 1)] and "2-5" in form.note.text() and drafts == []
+        # The reported 22-frame case: a real Ctrl click excludes only first→last.
+        frames = tuple(str(index) for index in range(22))
+        project(selection="from_first", pairs=())
+        index = form.model.index(0, 20)
+        form.table.scrollTo(index)
+        app.processEvents()
+        QtTest.QTest.mouseClick(form.table.viewport(), QtCore.Qt.LeftButton,
+                               QtCore.Qt.ControlModifier, form.table.visualRect(index).center())
+        assert drafts[-1] == {"values": {"selection": "from_first", "pairs": (
+            {"start": "0", "end": "last", "selected": False},)}}
+        project(**drafts[-1]["values"])
+        frames = tuple(str(index) for index in range(25))
+        project()
+        assert marked() == [(0, end) for end in range(1, 24)]
+        assert form.presets.button("from_first").property("current")
     finally:
         form.close()
         form.deleteLater()
@@ -340,7 +379,7 @@ def test_evaluate_translates_exact_coverage_by_whole_cycles() -> None:
 
 
 @pytest.mark.parametrize("frames,pairs", ((2, "all"), (3, "all"), (4, "all"),
-                                        (4, ((1, 3), (0, 2)))))
+                                        (4, ((1, "last"), (0, 2)))))
 def test_scan_pairing_preserves_coordinates_and_live_terminal_placement(frames, pairs) -> None:
     from types import SimpleNamespace
     from zlc_atom.nodes.scan import SCAN_OUTPUT, ScanDatasetWriter
@@ -365,7 +404,7 @@ def test_scan_pairing_preserves_coordinates_and_live_terminal_placement(frames, 
     result = SimpleNamespace(instance_id="survival", dataset_output_declarations=SURVIVAL_OUTPUTS,
                              signal_key=lambda name: f"@logic/survival/{name}")
     plane = SignalDataPlane()
-    selected = _forward_pairs(frames) if pairs == "all" else pairs
+    selected = _forward_pairs(frames) if pairs == "all" else ((1, 3), (0, 2))
     pair_count = len(selected)
     expected = np.zeros((2, 4, pair_count, 3), dtype=bool)
     eligible = np.zeros_like(expected)
@@ -456,7 +495,7 @@ def test_plot_mean_projection_gives_pooled_rate_and_binomial_band() -> None:
         )
 
 
-@pytest.mark.parametrize("pairs", ("all", ((0, 2),)))
+@pytest.mark.parametrize("pairs", ("all", ((0, "last"),)))
 def test_monitor_source_translates_coverage_to_own_geometry(pairs) -> None:
     """The real-bench failure: a camera-monitor chain hands MonitorCoverage
     counted in (cycles x frames); the published ledger must count THIS

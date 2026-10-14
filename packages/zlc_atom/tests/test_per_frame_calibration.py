@@ -116,14 +116,14 @@ def test_last_and_rest_follow_the_frame_count_and_numbers_keep_their_place() -> 
     ))
     with pytest.raises(ValueError, match=r"late\.json names frame 3, but the source carries 2 frames \(0-1\)"):
         beyond.process(_cycle(10.0, 10.0))
-    assert beyond.process(_cycle(10.0, 10.0, 10.0, 10.0)).occupied.tolist() == [
-        [[True], [True], [True], [False]]
+    assert beyond.process(_cycle(10.0, 10.0, 10.0, 10.0, 10.0)).occupied.tolist() == [
+        [[True], [True], [True], [False], [True]]
     ]
     twice = OccupancyProcessor((
         CalibrationReading(strict, ("last",), Path("readout.json")),
         CalibrationReading(shared, (0, 2), Path("load.json")),
     ))
-    with pytest.raises(ValueError, match=r"frame 2 is read by both readout\.json \(last\) and load\.json \(2\)"):
+    with pytest.raises(ValueError, match=r"load\.json names frame 2"):
         twice.process(_cycle(10.0, 10.0, 10.0))
     with pytest.raises(ValueError, match="frame 1 has no calibration"):
         twice.process(_cycle(10.0, 10.0, 10.0, 10.0))
@@ -314,30 +314,41 @@ def test_the_calibrations_editor_gives_frames_to_files_by_clicking() -> None:
         editor.resize(900, 300)
         editor.show()
         project((load, readout))
-        # Columns: Last, Rest, a gap, then the source's frames 0..2.
-        assert [grid.model().headerData(c, QtCore.Qt.Horizontal) for c in range(6)] == [
-            "Last", "Rest", "", "0", "1", "2"]
-        assert grid.selected_cells() == ((0, 3), (1, 1))
-        assert grid.model().index(1, 4).data(QtCore.Qt.UserRole + 1) == "derived", "read as rest"
+        # One displayed column for the last frame, not Last plus numeric 2.
+        assert [grid.model().headerData(c, QtCore.Qt.Horizontal) for c in range(5)] == [
+            "Rest", "", "0", "1", "2 · Last"]
+        assert grid.selected_cells() == ((0, 2), (1, 0))
+        assert grid.model().index(1, 3).data(QtCore.Qt.UserRole + 1) == "derived", "read as rest"
         assert drafts == [], "showing claims is not an edit"
         assert "3 frames · each read once" in editor.summary.text()
-        # Last moves to the readout file; frame 2 is then its, and not
-        # offered to the load file at all.
-        claims = click(1, 0)
+        # Clicking the displayed last frame authors Last, not integer 2.
+        claims = click(1, 4)
         assert claims == (load, {"path": readout["path"], "frames": ("last", "rest")})
         project(claims)
-        assert not grid.model().index(0, 5).flags() & QtCore.Qt.ItemIsSelectable
+        assert grid.model().index(0, 4).flags() & QtCore.Qt.ItemIsSelectable
         # A frame taken here is taken from whichever file had it.
-        claims = click(1, 3)
+        claims = click(1, 2)
         assert claims == ({"path": load["path"], "frames": ()},
                           {"path": readout["path"], "frames": (0, "last", "rest")})
         # A number the source no longer carries keeps a red column, one click from removal.
         project(({"path": load["path"], "frames": (2,)}, readout), frames=("0", "1"))
-        assert grid.model().headerData(5, QtCore.Qt.Horizontal) == "2"
-        assert grid.model().index(0, 5).data(QtCore.Qt.UserRole + 1) == "warning"
+        assert grid.model().headerData(4, QtCore.Qt.Horizontal) == "2"
+        assert grid.model().index(0, 4).data(QtCore.Qt.UserRole + 1) == "warning"
         assert "load.json names frame 2" in editor.note.text()
-        claims = click(0, 5)
+        claims = click(0, 4)
         assert claims[0] == {"path": load["path"], "frames": ()}
+        # Last follows 22→25; the former last is now an ordinary Rest frame.
+        project((load, readout), tuple(str(index) for index in range(22)))
+        index = grid.model().index(0, 23)
+        grid.scrollTo(index)
+        app.processEvents()
+        claims = click(0, 23)
+        assert claims[0]["frames"] == (0, "last")
+        project(claims, tuple(str(index) for index in range(25)))
+        assert editor._columns[-1] == "last"
+        assert grid.selected_cells() == ((0, 2), (0, 26), (1, 0))
+        assert grid.model().index(1, 23).data(QtCore.Qt.UserRole + 1) == "derived"
+        project(({"path": load["path"], "frames": (2,)}, readout), frames=("0", "1"))
         # Files come and go through their row label and the Add button.
         editor.row_action(0, "remove")
         assert drafts[-1]["artifact_inputs"]["calibrations"] == (readout,)

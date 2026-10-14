@@ -57,11 +57,11 @@
     },
     "start_frame": {
       "path": ["logic", 2, "values", "pairs", 0, "start"],
-      "description": "Zero-based earlier imaging frame conditioning on occupied sites."
+      "description": "Earlier frame identity as text: '0' is first; positive numbers name middle frames. Conditions on occupied sites."
     },
     "end_frame": {
       "path": ["logic", 2, "values", "pairs", 0, "end"],
-      "description": "Zero-based later imaging frame; must follow start_frame within the cycle."
+      "description": "Later frame identity as text: 'last' follows the cycle's last frame; positive numbers name middle frames. Must follow start_frame."
     },
     "fit_fixed": {
       "path": ["panels", 0, "fit", "fixed"],

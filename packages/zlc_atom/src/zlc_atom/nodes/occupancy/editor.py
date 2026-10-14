@@ -27,11 +27,12 @@ from zlc_ui.fluent import (
     muted_note_label,
 )
 
-from zlc_atom.nodes._framework.frames import LAST, REST, canonical_frames, reach_frames
+from zlc_atom.nodes._framework.frames import (
+    LAST, REST, canonical_frames, frame_identity, reach_frames, resolve_frame,
+)
 
 #: The artifact input this editor manages.
 CALIBRATIONS = "calibrations"
-_NAMED = ((LAST, "Last"), (REST, "Rest"))
 _GAP = None
 
 
@@ -65,8 +66,8 @@ class CalibrationsEditor(QtWidgets.QWidget):
         self.note.setWordWrap(True)
         layout.addWidget(self.note)
         self.hint = muted_note_label(
-            "Click a cell to give that frame to the file. Last and Rest follow the "
-            "frame count; Rest is every frame no other file names. Click a file "
+            "Click a cell to give that frame to the file. The last frame follows "
+            "the cycle; middle frames keep their index. Rest reads unnamed frames. Click a file "
             "name to replace or remove it."
         )
         self.hint.setWordWrap(True)
@@ -96,14 +97,19 @@ class CalibrationsEditor(QtWidgets.QWidget):
         claimed = sorted({
             token for entry in entries for token in entry["frames"] if isinstance(token, int)
         })
-        present = () if count is None else tuple(range(count))
+        present = () if count is None else tuple(frame_identity(index, count) for index in range(count))
         # A number the source does not carry keeps a column of its own, so
         # the claim stays visible -- and one click away from being removed.
-        ghosts = tuple(number for number in claimed if count is None or number >= count)
-        self._columns = (*(token for token, _label in _NAMED), _GAP, *present, *ghosts)
+        ghosts = tuple(number for number in claimed if number not in present)
+        # Unknown/single-frame sources must still expose an authored Last claim.
+        extra_last = (LAST,) if LAST not in present and (
+            count is None or any(LAST in entry["frames"] for entry in entries)) else ()
+        self._columns = (REST, _GAP, *present, *extra_last, *ghosts)
         labels = (
-            *(label for _token, label in _NAMED), "",
-            *(frames[number] for number in present), *(str(number) for number in ghosts),
+            "Rest", "",
+            *(f"{frames[index]} · Last" if token == LAST else frames[index]
+              for index, token in enumerate(present)),
+            *("Last" for _ in extra_last), *(str(number) for number in ghosts),
         )
         reach = None if count is None or not entries else reach_frames(
             tuple(entry["frames"] for entry in entries), count)
@@ -117,7 +123,8 @@ class CalibrationsEditor(QtWidgets.QWidget):
                 if token is _GAP:
                     continue
                 label = labels[column]
-                if isinstance(token, int) and token not in present:
+                frame = None if count is None or token == REST else resolve_frame(token, count)
+                if isinstance(token, int) and frame is None:
                     if token not in entry["frames"]:
                         continue
                     states[(row, column)] = "warning"
@@ -125,12 +132,8 @@ class CalibrationsEditor(QtWidgets.QWidget):
                         f"frame {token} is not in this source; click to drop the claim"
                         if count is not None else f"frame {token}"
                     )
-                elif isinstance(token, int) and reach is not None:
-                    readers = reach.readers[token]
-                    # A frame another file reads as its Last is that file's:
-                    # no cell to take it from here.
-                    if any(reader != row and how == LAST for reader, how in readers):
-                        continue
+                elif frame is not None and reach is not None:
+                    readers = reach.readers[frame]
                     mine = next((how for reader, how in readers if reader == row), None)
                     if len(readers) > 1 and mine is not None:
                         states[(row, column)] = "warning"
@@ -138,8 +141,8 @@ class CalibrationsEditor(QtWidgets.QWidget):
                             f"{names[reader]} ({how})" for reader, how in readers)
                     elif not readers:
                         states[(row, column)] = "warning"
-                        tips[(row, column)] = f"frame {token} has no calibration"
-                    elif mine in (LAST, REST):
+                        tips[(row, column)] = f"frame {frame} has no calibration"
+                    elif mine in (LAST, REST) and token not in entry["frames"]:
                         states[(row, column)] = "derived"
                         tips[(row, column)] = f"read as {mine}"
                 cells[(row, column)] = label

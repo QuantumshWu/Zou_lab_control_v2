@@ -753,15 +753,15 @@ def test_the_bracket_posts_are_built_to_frame_the_cards_they_span(run_qt) -> Non
     run_qt(
         """
 from dataclasses import replace
-from PyQt5 import QtCore, QtWidgets
+from PyQt5 import QtCore, QtTest, QtWidgets
 from zlc_ui.qt import ensure_qt_app
 from zlc_ui.pulse import BracketPost, BracketVM, PulseScheduleView
 from zlc_ui.pulse._layout import panel_top_height
 """ + _schedule_source() + r'''
 app = ensure_qt_app(["repeat-art"])
 
-start = BracketPost("b", "start", minimum=2)
-end = BracketPost("b", "end", count=4, minimum=2)
+start = BracketPost("b", "start")
+end = BracketPost("b", "end", count=4)
 for post in (start, end):
     assert post.title() == "Bracket 1", "named in the pill, like the cards it frames"
     assert post.sizePolicy().verticalPolicy() == QtWidgets.QSizePolicy.Expanding
@@ -777,7 +777,33 @@ assert start.width() == end.width(), "the two posts match"
 start.show(); end.show(); app.processEvents()
 assert not start.count_edit.isVisible()
 assert end.count_edit.isVisible() and end.count_edit.text() == "4"
-assert end.count_edit._numeric_bounds == (2, (1 << 32) - 1, "int")
+assert isinstance(end.count_spin, QtWidgets.QDoubleSpinBox)
+assert end.count_spin.minimum() == 1 and end.count_spin.maximum() == (1 << 32) - 1
+assert end.count_spin.decimals() == 0 and end.count_spin.singleStep() == 1
+assert end.count_edit._numeric_bounds == (1, (1 << 32) - 1, "int")
+counts = []
+def accept_count(value):
+    counts.append(value)
+    end.set_count_field(replace(end._count_field, text=str(value)))
+end.count_committed.connect(accept_count)
+QtTest.QTest.mouseClick(end.count_spin, QtCore.Qt.LeftButton, pos=QtCore.QPoint(end.count_spin.width()-5, end.count_spin.height()//4))
+app.processEvents()
+assert end.count_spin.value() == 5 and counts == [5], counts
+QtTest.QTest.keyClick(end.count_spin, QtCore.Qt.Key_Down)
+assert end.count_spin.value() == 4 and counts[-1] == 4
+end.set_count_field(replace(end._count_field, text="1"))
+QtTest.QTest.keyClick(end.count_spin, QtCore.Qt.Key_Down)
+assert end.count_spin.value() == 1, 'Bracket has no zero/infinite count'
+end.set_count_field(replace(end._count_field, text=str((1 << 32)-1)))
+QtTest.QTest.keyClick(end.count_spin, QtCore.Qt.Key_Up)
+assert end.count_spin.value() == (1 << 32)-1, 'uint32 maximum must not wrap'
+end.set_count_field(replace(end._count_field, text="4", source="config", config_active=True))
+before = list(counts)
+QtTest.QTest.keyClick(end.count_spin, QtCore.Qt.Key_Up)
+assert end.count_spin.isReadOnly() and end.count_edit.isReadOnly()
+assert end.count_spin.value() == 4 and counts == before
+assert end.count_edit.binding_button.isEnabled(), 'Config source remains editable'
+end.set_count_field(replace(end._count_field, source="default", config_active=False))
 bindings = []
 end.binding_committed.connect(lambda scan, source: bindings.append((scan, source)))
 end.count_edit.binding_button.click(); app.processEvents()
@@ -881,7 +907,7 @@ def test_bracket_posts_drop_on_period_gaps_and_run_repeats_uses_uint32(run_qt) -
     run_qt(
         """
 from dataclasses import replace
-from PyQt5 import QtCore, QtGui, QtWidgets
+from PyQt5 import QtCore, QtGui, QtTest, QtWidgets
 from zlc_ui.qt import ensure_qt_app
 from zlc_ui.pulse import BracketPost, BracketVM, PulseScheduleView
 import zlc_ui.pulse.schedule_view as schedule_module
@@ -972,11 +998,13 @@ orders.clear()
 assert not drop(("bracket", "b:start"), strip.items()[-1].geometry().right() + 40)
 assert orders == [] and bracket_requests == []
 end_post = next(post for post in strip._posts if post.kind == 'end')
-end_post.count_edit.setText("7")
-end_post.count_edit.editingFinished.emit()
+end_post.count_edit.setFocus(); end_post.count_edit.selectAll()
+QtTest.QTest.keyClicks(end_post.count_edit, "7")
+QtTest.QTest.keyClick(end_post.count_edit, QtCore.Qt.Key_Return)
 assert bracket_requests == [('b', 'p2', 'p2', 7)], 'retained post used stale bracket anchors'
-end_post.count_edit.setText(str((1 << 32) - 1))
-end_post.count_edit.editingFinished.emit()
+end_post.count_edit.selectAll()
+QtTest.QTest.keyClicks(end_post.count_edit, str((1 << 32) - 1))
+QtTest.QTest.keyClick(end_post.count_edit, QtCore.Qt.Key_Return)
 assert bracket_requests[-1] == ('b', 'p2', 'p2', (1 << 32) - 1), 'Qt must not wrap uint32 counts to signed int'
 empty = replace(right_only, revision=5, brackets=(BracketVM('b', 'p2', 'p1', 7),))
 assert view.set_schedule(empty)
@@ -984,6 +1012,14 @@ app.processEvents()
 assert end_post in strip._posts and start_post in strip._posts
 keys = tuple(strip._item_key(item) for item in strip.items())
 assert keys.index(('bracket', 'b:end')) == keys.index(('bracket', 'b:start')) + 1
+locked = replace(empty, revision=6, brackets=(replace(empty.brackets[0], readonly=True),))
+assert view.set_schedule(locked)
+before = list(bracket_requests)
+QtTest.QTest.keyClick(end_post.count_spin, QtCore.Qt.Key_Up)
+assert end_post.count_spin.isReadOnly() and not end_post.count_edit.binding_button.isEnabled()
+assert bracket_requests == before, 'file-backed Subpulse counts must remain read-only'
+assert view.set_schedule(replace(empty, revision=7))
+assert not end_post.count_spin.isReadOnly() and end_post.count_edit.binding_button.isEnabled()
 
 view.close(); view.deleteLater()
 app.sendPostedEvents(None, QtCore.QEvent.DeferredDelete); app.processEvents()
@@ -1839,7 +1875,7 @@ from zlc_ui.pulse._layout import px
 app = ensure_qt_app(["post-width"])
 post = BracketPost("b", "end", count=10000)
 post.show(); app.processEvents()
-assert post.width() == post.count_edit.width() + 2 * px(7)
+assert post.width() == post.count_spin.width() + 2 * px(7)
 assert post.count_edit.contentsRect().width() - post.count_edit.textMargins().right() >= post.count_edit.fontMetrics().horizontalAdvance("10000")
 assert post.count_edit.text() == "10000" and not post.count_edit.property("numericError")
 post.close(); post.deleteLater()

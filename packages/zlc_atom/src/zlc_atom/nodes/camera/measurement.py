@@ -53,6 +53,17 @@ _CAMERA_FRAME_CONTRACT = "camera.frames"
 #: is READOUT_EVENT.
 CAMERA_FRAMES_OUTPUT = DatasetOutputDeclaration("frames", _CAMERA_FRAME_CONTRACT)
 
+
+def describe_camera_frames(values, output_name, source_frames=None):
+    """The camera draft's cycle labels, before any image has been acquired."""
+    if output_name != CAMERA_FRAMES_OUTPUT.name:
+        return None
+    try:
+        count = int(values.get("frames_per_cycle") or 0)
+    except (TypeError, ValueError):
+        return None
+    return tuple(str(frame) for frame in range(count)) if count > 0 else None
+
 #: How often a capture comes back to see whether it has been asked to stop.
 #:
 #: Cancellation is only ever seen BETWEEN reads, so the read length IS the
@@ -1232,6 +1243,7 @@ class CameraMeasurementNode:
 
 __all__ = [
     "CAMERA_FRAMES_OUTPUT",
+    "describe_camera_frames",
     "frames_snapshot",
     "CameraMeasurementNode",
     "CameraMeasurementRequest",

@@ -72,6 +72,11 @@ def _editor_factory(parent=None):
     return CalibrationsEditor(parent)
 
 
+def _describe_output_frames(values, output_name, source_frames):
+    """Every Occupancy output preserves its camera's readout-event axis."""
+    return source_frames if any(item.name == output_name for item in OCCUPANCY_OUTPUTS) else None
+
+
 LOGIC_NODE = LogicNodeDescriptor(
     "occupancy",
     NodeKind.PROCESSOR,
@@ -79,7 +84,7 @@ LOGIC_NODE = LogicNodeDescriptor(
     description=(
         "Read camera image data using saved Calibrations and publish per-site counts, "
         "occupied verdicts and frame_judged diagnostics while preserving frame and scan "
-        "axes. Each calibration claims the frames it reads: frame numbers from 0, "
+        "axes. Each calibration claims the frames it reads: 0 for first, positive middle-frame indices, "
         "'last' and 'rest' (every frame no other calibration names); one calibration "
         "with ['rest'] reads every frame. Use occupied for loading-rate plots, camera "
         "overlays or Frame Survival; the processor follows the source and resumes when "
@@ -99,6 +104,7 @@ LOGIC_NODE = LogicNodeDescriptor(
     ),
     ui_contributions=(_editor_factory,),
     outputs=OCCUPANCY_OUTPUTS,
+    describe_output_frames=_describe_output_frames,
     build=_build,
 )
 

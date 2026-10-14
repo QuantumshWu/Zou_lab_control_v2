@@ -399,6 +399,13 @@ class LogicNodeDescriptor:
         ]
         | None
     ) = None
+    #: Pure authoring projection for one output's readout-event labels.
+    #: None means unknown, not permission to invent or publish data. The
+    #: optional source labels come from the same upstream draft contract.
+    describe_output_frames: (
+        Callable[[Mapping[str, object], str, tuple[str, ...] | None], tuple[str, ...] | None]
+        | None
+    ) = None
     device_requirements: tuple[DeviceRequirement, ...] = ()
     build: Callable[..., object] | None = None
     node_previews: tuple[NodePreviewSpec, ...] | None = None
@@ -549,6 +556,8 @@ class LogicNodeDescriptor:
             raise TypeError("resolve_defaults must be callable or None")
         if self.estimate_run is not None and not callable(self.estimate_run):
             raise TypeError("estimate_run must be callable or None")
+        if self.describe_output_frames is not None and not callable(self.describe_output_frames):
+            raise TypeError("describe_output_frames must be callable or None")
         if any(not isinstance(value, ArtifactOutputSpec) for value in artifact_outputs):
             raise TypeError("artifact_outputs must contain ArtifactOutputSpec values")
         if any(not isinstance(value, DeviceRequirement) for value in requirements):

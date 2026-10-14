@@ -464,6 +464,8 @@
 
 ### 2.5 Device Control与settings provenance
 
+- 2026-10-14 三项交互修复：Bracket Repeats复用公共count spinbox，最小1/步长1/uint32上限，原Slot与Config/Subpulse只读语义保留；3项直接Qt与正式窗口点击4→5/保存截图通过并关闭。节点describe_output_frames纯元数据与Console多跳刷新使Camera草稿立即到Occupancy/Survival，无采集或假发布；统一0首/last尾/中间index，Survival保留规则＋稀疏例外，22→25时From first排除首尾而自动含新增中间帧。相关33项通过，Console草稿更新及Layout保存重开直接用例通过，所有测试窗关闭。Viewer Open载入实际played Pulse到普通未连接Editor，删除旧专属预览；真实Qt编辑/另存且不改原NPZ、Viewer与Editor独立关闭及错误入口3项通过。MCP说明与寿命配方按当前端点/规则语义更新；不猜旧custom列表曾来自哪个preset。
+
 - 2026-10-14 Pulse Hold→Edge/Ramp数值不可编辑回归修复：UI提交错误地把旧Hold数值框的readonly作为模式切换禁令，造成Combo变了而Pulse未变。原Period card改为分别判断模式与数值准入，Hold切换用accepted继承值，不读取被动widget改值；Config/Subpulse/Spacer保护不变。扩展既有正式Editor Qt点击用例先红后绿，连同只读/控件复用直接用例共2 passed（3.94s），窗口正常关闭，未连接真实硬件或改编译/通信。
 
 - 2026-10-13 处理实验机寿命反馈（资料包标记2026-10-14、基线6c4599c0）：真实Qt/HTTP复现首次多点正常，单点试采后改同一Scan为多点仍保留scan=reduce并报缺X。现有recipe原生字段绑定增加必填panel_semantic，显式保留实际Scan X；没有新增解析/执行框架或改变通用Plot默认。原同一用例两路径均通过actual fate、原生fit success与当前generation/revision核对。panel.update目录与原校验共享允许字段，guide补全2x2平均、4x4逐site、2x2 tau误差三图调用、Fit输出Site域、非停止显示/保存和科学解释边界；配方示例关闭坐标网格但保留facet。临时真实Qt/HTTP三图验收确认Site转Point域、三张PNG与三份原生NPZ的plot/dataset读回、Frozen ref及Layout preset/display一致，未调用Stop；测试进程及临时workspace已清理。未改solver、实验机扫描点/次数、系数约束或原始数据；验收仅虚拟设备。

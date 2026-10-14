@@ -126,11 +126,11 @@ __all__ = ["ConsolePresenter", "PanelBinding", "PanelState", "control_capabiliti
 _UNCHANGED = object()
 #: How frame claims are written, said once for every reader of the catalog.
 FRAME_CLAIMS_RULE = (
-    "frames are frame numbers from 0, 'last' and 'rest' (every frame no other entry "
+    "frames are 0 (first), positive middle-frame indices, 'last' and 'rest' (every frame no other entry "
     "names); each frame is read by exactly one entry; at most one entry takes 'rest' "
     "and one 'last'; one file per entry. One entry with ['rest'] reads every frame. "
     "Claims are kept as written when the frame count changes; one the new count "
-    "cannot honour is reported, never dropped."
+    "cannot honour is reported, never dropped. A middle index cannot become the new last frame."
 )
 _PANEL_UPDATE_FIELDS = (
     "signal", "kind", "cell_kind", "size", "interval_ms", "title",
@@ -4585,12 +4585,18 @@ class ConsolePresenter:
         occupancy editor only when something else happened to re-project it.
         """
 
+        consumers = {}
         for other in tuple(self.logic.values()):
-            if (
-                other.node_id != node_id
-                and self._direct_producer_node_id(other.draft.source_signal) == node_id
-            ):
-                self.refresh_logic_editor(other.node_id)
+            producer = self._direct_producer_node_id(other.draft.source_signal)
+            consumers.setdefault(producer, []).append(other)
+        pending = [node_id]
+        seen = {node_id}
+        for producer in pending:
+            for other in consumers.get(producer, ()):
+                if other.node_id not in seen:
+                    seen.add(other.node_id)
+                    pending.append(other.node_id)
+                    self.refresh_logic_editor(other.node_id)
 
     def refresh_panel_editor(self, panel_id: str) -> bool:
         binding = self.panels.get(str(panel_id))
@@ -9702,12 +9708,12 @@ class ConsolePresenter:
             self._artifact_completion_order += 1
             binding.artifact_completion_order = self._artifact_completion_order
 
-    def _source_frames_for(self, binding: LogicBinding) -> tuple[str, ...] | None:
+    def _source_frames_for(self, binding: LogicBinding, *, _visited=frozenset()) -> tuple[str, ...] | None:
         """The labels of the frames one cycle of this node's source carries.
 
-        Asked of the source's PRODUCER first: its draft says how many before
-        it has published anything, so frames can be given their calibrations
-        while the camera is still being set up.  Otherwise the plane says --
+        Asked of the source's PRODUCER first: its explicit pure metadata
+        callback can preserve or describe upstream draft frames, without
+        constructing a node or inventing a data schema. Otherwise the plane says --
         the declared signal, then its latest publication -- through the Point
         axis with the readout-event role.  A source without one carries one
         frame; None while there is no source or nothing says yet.
@@ -9715,20 +9721,17 @@ class ConsolePresenter:
 
         from zlc_data import READOUT_EVENT
 
+        if binding.node_id in _visited:
+            return None
+        visited = _visited | {binding.node_id}
         source = str(binding.draft.source_signal).strip()
         if not source:
             return None
         parts = split_signal_key(source)
         producer = None if parts is None else self.logic.get(parts[0])
-        if (
-            producer is not None
-            and "frames_per_cycle" in producer.descriptor.authoring_schema.field_names
-        ):
-            try:
-                count = int(producer.draft.values.get("frames_per_cycle") or 0)
-            except (TypeError, ValueError):
-                return None
-            return tuple(str(frame) for frame in range(count)) if count > 0 else None
+        if producer is not None and producer.descriptor.describe_output_frames is not None:
+            upstream = self._source_frames_for(producer, _visited=visited)
+            return producer.descriptor.describe_output_frames(producer.draft.values, parts[1], upstream)
         description = self._signal_projection()[1].get(source)
         schema = None if description is None else description.schema
         if schema is None:

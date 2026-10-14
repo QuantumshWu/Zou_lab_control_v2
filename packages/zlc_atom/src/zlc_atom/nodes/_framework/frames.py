@@ -5,13 +5,14 @@ on each.  The operator says it the way they think it -- THIS file reads frame
 0, THAT one the rest -- so an assignment is a list of entries, each claiming
 frames:
 
-* a frame number from 0, a position on the source's readout-event axis (the
-  numbering the camera, Frame Survival and the Calibration task all use);
+* frame 0, the first frame, or a positive middle-frame index (the numbering
+  the camera, Frame Survival and the Calibration task all use);
 * ``"last"``, whatever the last frame of the cycle is;
 * ``"rest"``, every frame no entry names.
 
 "last" and "rest" follow the frame count, so a cycle that gains or loses a
-frame keeps meaning what was authored; a frame number keeps its position.  A
+frame keeps meaning what was authored; a middle-frame index keeps its position
+and becomes absent rather than taking over the last frame of a shorter cycle. A
 frame is read by exactly one entry.  Only "rest" ranks below anything else:
 every other collision -- two entries reaching one frame, a number the source
 does not carry, a frame nobody reads -- is refused with the entries named,
@@ -59,6 +60,22 @@ def frame_token(raw: object) -> FrameToken:
     raise ValueError(
         f"{raw!r} is not a frame: use a frame number from 0, 'last' or 'rest'"
     )
+
+
+def frame_identity(index: int, count: int) -> FrameToken:
+    """Author a displayed endpoint by identity, and a middle frame by index."""
+
+    return LAST if index > 0 and index == count - 1 else index
+
+
+def resolve_frame(token: FrameToken, count: int) -> int | None:
+    """Resolve one frame, retaining an absent numbered claim in the draft."""
+
+    if token == LAST:
+        return count - 1 if count else None
+    if isinstance(token, int):
+        return token if token == 0 and count > 0 or 0 < token < count - 1 else None
+    raise ValueError("one frame must be a number from 0 or 'last'")
 
 
 def canonical_frames(raw: object) -> tuple[FrameToken, ...]:
@@ -146,13 +163,12 @@ def reach_frames(
     absent: list[tuple[int, int]] = []
     for entry, frames in enumerate(frames_by_entry):
         for token in frames:
-            if token == LAST:
-                readers[count - 1].append((entry, LAST))
-            elif isinstance(token, int):
-                if token < count:
-                    readers[token].append((entry, str(token)))
-                else:
+            if token != REST:
+                frame = resolve_frame(token, count)
+                if frame is None:
                     absent.append((entry, token))
+                else:
+                    readers[frame].append((entry, str(token)))
     rest = [entry for entry, frames in enumerate(frames_by_entry) if REST in frames]
     for frame in range(count):
         if not readers[frame]:
@@ -182,7 +198,8 @@ def frame_problems(
     span = "only frame 0" if count == 1 else f"0-{count - 1}"
     problems = [
         f"{names[entry]} names frame {number}, but the source carries "
-        f"{count} frame{'s' if count != 1 else ''} ({span})"
+        f"{count} frame{'s' if count != 1 else ''} ({span}); "
+        "numbered middle frames cannot stand for the last frame"
         for entry, number in reach.absent
     ]
     for frame, readers in enumerate(reach.readers):
@@ -231,5 +248,7 @@ __all__ = [
     "describe_frames",
     "frame_problems",
     "frame_token",
+    "frame_identity",
+    "resolve_frame",
     "reach_frames",
 ]

@@ -11,7 +11,7 @@ from zlc_atom.nodes._framework.descriptor import (
     ArtifactCodec, ArtifactInputSpec, DeviceRequirement, LogicNodeDescriptor, NodeKind, NodePreviewSpec,
 )
 from zlc_atom.nodes.calibration import CALIBRATION_ARTIFACT_CODEC
-from zlc_atom.nodes.camera.measurement import CameraMeasurementRequest, CAMERA_FRAMES_OUTPUT
+from zlc_atom.nodes.camera.measurement import CameraMeasurementRequest, CAMERA_FRAMES_OUTPUT, describe_camera_frames
 
 from .measurement import RearrangementMeasurement
 
@@ -61,6 +61,7 @@ LOGIC_NODE = LogicNodeDescriptor("rearrangement_measurement", NodeKind.MEASUREME
         "Pulse triggers; this measurement does not Fire."
     ),
     outputs=(CAMERA_FRAMES_OUTPUT,), node_previews=(NodePreviewSpec(CAMERA_FRAMES_OUTPUT, "facet_grid"),),
+    describe_output_frames=describe_camera_frames,
     input_specs=(
         ArtifactInputSpec("calibration_path", "Calibration", CALIBRATION_ARTIFACT_CODEC, argument_name="calibration"),
         ArtifactInputSpec("science_context_path", "SLM Science Context",
