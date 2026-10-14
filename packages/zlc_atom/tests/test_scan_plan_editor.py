@@ -296,7 +296,7 @@ def test_a_devices_knobs_hang_under_that_device_not_in_one_flat_list() -> None:
     and what it is called cannot drift apart.
     """
 
-    from zlc_atom.nodes.scan.editor import _AxisRow
+    from zlc_atom.nodes.scan.editor import _AxisRow, _row_columns
     from zlc_atom.nodes.scan.plan import ScanAxis, port_label
 
     ensure_qt_app()
@@ -313,6 +313,7 @@ def test_a_devices_knobs_hang_under_that_device_not_in_one_flat_list() -> None:
     row = _AxisRow(
         ports,
         plan_input_rows(ScanPlan((ScanAxis("device:rf_source:power", (0.0, 1.0, 2.0)),)))[0],
+        _row_columns(),
         device_labels={"rf_source": "Cooling RF", "slm": "Tweezers"},
     )
     try:
