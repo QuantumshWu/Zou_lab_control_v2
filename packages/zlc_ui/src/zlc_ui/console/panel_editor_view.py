@@ -30,6 +30,7 @@ from zlc_ui.fluent import (
     FluentSwitch,
     MUTED_INK,
     ORANGE_DARK,
+    row_gap,
     scaled_px,
     setting_label_width,
     stamped_file_name,
@@ -222,7 +223,7 @@ class PanelEditorView(QtWidgets.QWidget):
         self.save_group = save_group
         save_layout = QtWidgets.QVBoxLayout(save_group)
         save_layout.setContentsMargins(margin, margin, margin, margin)
-        save_layout.setSpacing(scaled_px(8, minimum=5))
+        save_layout.setSpacing(row_gap())
         label_width = setting_label_width(("Directory", "Name", "Format", "File"))
         self.save_directory = FluentPathEdit(
             "",
@@ -236,7 +237,7 @@ class PanelEditorView(QtWidgets.QWidget):
         name_controls = QtWidgets.QWidget(save_group)
         name_layout = QtWidgets.QHBoxLayout(name_controls)
         name_layout.setContentsMargins(0, 0, 0, 0)
-        name_layout.setSpacing(scaled_px(8, minimum=5))
+        name_layout.setSpacing(row_gap())
         self.save_auto_name = FluentSwitch("Auto-name", name_controls)
         self.save_auto_name.setChecked(True)
         self.save_name = FluentLineEdit()

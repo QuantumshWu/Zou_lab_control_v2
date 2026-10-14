@@ -162,8 +162,10 @@ order_committed = pyqtSignal(tuple)  # tuple[str, ...], panel_id order
 set_cards(cards: tuple[PanelCardView, ...]) -> None
 ```
 
-Construct the board with an injected `BoardMetrics(gap)` policy; each
-card's rectangle is the card's own.  After `set_cards`, the board owns the
+The board's gap -- between cards and from its edges -- is one card pad
+(`card_pad()`) unless a `BoardMetrics(gap)` policy is injected, so its first
+card starts where a white page's content starts; each card's rectangle is
+the card's own.  After `set_cards`, the board owns the
 only live geometry calculation.  A card a drop put somewhere keeps that
 place; every other card takes the first free slot in board order on every
 pack, so cards tile the width the board has now -- including cards added
