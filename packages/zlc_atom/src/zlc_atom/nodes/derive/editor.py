@@ -88,12 +88,30 @@ def _text_word(text: str) -> QtWidgets.QLabel:
     return word
 
 
-def _card_column(card: QtWidgets.QWidget) -> QtWidgets.QVBoxLayout:
-    column = QtWidgets.QVBoxLayout(card)
+def _note_gap() -> int:
+    """How far a note stands under the line it belongs to: a line's error,
+    the result under a card's last line, a code box's status.  Half a row
+    gap, so a note reads as its line's and not as the next line."""
+
+    return row_gap() // 2
+
+
+def _card_column(card: QtWidgets.QWidget) -> tuple[QtWidgets.QVBoxLayout, QtWidgets.QVBoxLayout]:
+    """``(lines, notes)``: the layout a card's lines go in, a row gap apart,
+    and the card's column that holds them and, under the last line, its
+    notes.  A note under the last line stands a note gap under it, as a
+    line's own error does under its line, so the result and the error that
+    replaces it stand at one y and the card keeps its height."""
+
+    notes = QtWidgets.QVBoxLayout(card)
     pad = card_pad()
-    column.setContentsMargins(pad, pad, pad, pad)
-    column.setSpacing(row_gap())
-    return column
+    notes.setContentsMargins(pad, pad, pad, pad)
+    notes.setSpacing(_note_gap())
+    lines = QtWidgets.QVBoxLayout()
+    lines.setContentsMargins(0, 0, 0, 0)
+    lines.setSpacing(row_gap())
+    notes.addLayout(lines)
+    return lines, notes
 
 
 def _under_lines(columns: FluentColumnSet, label: QtWidgets.QLabel) -> QtWidgets.QLabel:
@@ -114,7 +132,10 @@ class _OutputCard(FluentFrame):
         self.row = dict(ROW_DEFAULTS)
         #: Stages the operator opened and has not filled yet.
         self._opened: set[str] = set()
-        column = _card_column(self)
+        #: The draft problem this card states under one of its lines, in
+        #: the draft's words; "" when it states none.
+        self.problem = ""
+        column, notes = _card_column(self)
 
         line, block = self._line(column)
         self.name = FluentLineEdit("")
@@ -191,7 +212,7 @@ class _OutputCard(FluentFrame):
 
         self.preview = _under_lines(editor.columns, muted_note_label(""))
         self.preview.setWordWrap(True)
-        column.addWidget(self.preview)
+        notes.addWidget(self.preview)
 
     # -- construction -------------------------------------------------------
 
@@ -201,7 +222,7 @@ class _OutputCard(FluentFrame):
         block = QtWidgets.QWidget(self)
         rows = QtWidgets.QVBoxLayout(block)
         rows.setContentsMargins(0, 0, 0, 0)
-        rows.setSpacing(row_gap() // 2)
+        rows.setSpacing(_note_gap())
         line = FluentColumnLine(self._editor.columns, block)
         rows.addWidget(line)
         column.addWidget(block)
@@ -347,8 +368,9 @@ class _OutputCard(FluentFrame):
 
         # A run's failure names a row the schemas could not type; a row they
         # did type answers for itself.
-        if answer["error"] is not None:
-            stage, detail = answer["error"].stage, answer["error"].detail
+        error = answer["error"]
+        if error is not None:
+            stage, detail = error.stage, error.detail
         elif context["failure"] is not None and answer["schema"] is None:
             _output, stage, detail = context["failure"]
         else:
@@ -356,6 +378,9 @@ class _OutputCard(FluentFrame):
         show_note(self.value_error, detail if stage in ("name", "value") else "")
         for name, label in self.errors.items():
             show_note(label, detail if stage == name else "")
+        # The draft's own problem, when it stands under a line shown here.
+        stated = stage in ("name", "value") or (stage in self.lines and not self.lines[stage].isHidden())
+        self.problem = str(error) if error is not None and stated else ""
         self.preview.setVisible(stage is None)
         if stage is None:
             self.preview.setText(self._preview(row, answer, context))
@@ -392,7 +417,9 @@ class _CodeCard(FluentFrame):
         super().__init__(editor)
         self._editor = editor
         self.row = dict(ROW_DEFAULTS)
-        column = _card_column(self)
+        #: The draft problem this card states under its code; "" when none.
+        self.problem = ""
+        column, notes = _card_column(self)
         line = FluentColumnLine(editor.columns, self)
         self.name = FluentLineEdit("")
         self.name.setPlaceholderText("name")
@@ -423,12 +450,12 @@ class _CodeCard(FluentFrame):
         self.example = _under_lines(editor.columns, muted_note_label(""))
         self.example.setWordWrap(True)
         self.example.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
-        column.addWidget(self.example)
+        notes.addWidget(self.example)
         self.status = _under_lines(editor.columns, muted_note_label(""))
         self.status.setWordWrap(True)
-        column.addWidget(self.status)
+        notes.addWidget(self.status)
         self.error = _under_lines(editor.columns, error_note_label())
-        column.addWidget(self.error)
+        notes.addWidget(self.error)
         self._fit_height()
 
     def _edit(self, **changes) -> None:
@@ -490,6 +517,7 @@ class _CodeCard(FluentFrame):
             answer["error"].detail if answer["error"] is not None
             else failure[2] if failure is not None else "")
         show_note(self.error, error)
+        self.problem = str(answer["error"]) if row["code"].strip() and answer["error"] is not None else ""
         published = context["published"]
         self.status.setText(
             "Write Python; assign the Dataset answer to result." if not row["code"].strip()
@@ -539,7 +567,7 @@ class DeriveEditor(QtWidgets.QWidget):
         self.add_output.clicked.connect(lambda: self._add("structured"))
         self.add_code = FluentButton("Add code output", self)
         self.add_code.clicked.connect(lambda: self._add("code"))
-        _title, header = section_header("Outputs", actions=(self.add_output, self.add_code))
+        self.outputs_title, header = section_header("Outputs", actions=(self.add_output, self.add_code))
         # A new section under the Inputs row: the section gap above its title.
         layout.addSpacing(section_gap() - row_gap())
         layout.addLayout(header)
@@ -563,6 +591,14 @@ class DeriveEditor(QtWidgets.QWidget):
         """The editor's label column, shared with the bundle row above."""
 
         self.inputs_title.setFixedWidth(int(width))
+
+    def shown_problems(self) -> dict[str, str]:
+        """The draft's problems this editor states in red under the lines
+        they are about, each with its section: the page header counts them
+        rather than saying the first one again above."""
+
+        section = self.outputs_title.text()
+        return {card.problem: section for card in self._cards if card.problem}
 
     def set_mutation_enabled(self, enabled: bool) -> None:
         self.add_output.setEnabled(enabled)

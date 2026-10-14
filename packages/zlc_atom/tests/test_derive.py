@@ -450,3 +450,56 @@ def test_the_editor_lists_what_the_data_offers_and_commands_are_buttons() -> Non
         editor.close()
         editor.deleteLater()
         app.processEvents()
+
+
+def test_a_typing_error_is_said_once_under_its_line_where_the_result_stood() -> None:
+    """A row the schemas cannot type says why in red under the line it is
+    about, and names that problem -- in the draft's words -- to the page,
+    whose header counts it instead of saying it again.  The error stands
+    where the row's result stood: the same gap under the card's last line,
+    so the card keeps its height and nothing below it moves."""
+    from PyQt5 import QtCore, QtWidgets
+
+    from zlc_ui.qt import ensure_qt_app
+
+    app = ensure_qt_app(["zlc-derive-editor-test"])
+    # Hosted as the Edit page hosts it: at its own height, the slack below.
+    host = QtWidgets.QWidget()
+    column = QtWidgets.QVBoxLayout(host)
+    editor = LOGIC_NODE.ui_contributions[0]()
+    column.addWidget(editor)
+    column.addStretch(1)
+    schemas = {"counts": _schema(2, 3, 4, np.dtype(float), "count"),
+               "occupied": _schema(2, 3, 4, np.dtype(bool), "1")}
+    bundle = tuple((name, schema, None) for name, schema in schemas.items())
+    typed = {"name": "bright", "value": "counts", "at": "frame 1", "where": "occupied", "where_at": "frame 1"}
+    unpinned = dict(typed, where_at="")
+
+    def project(row):
+        editor.update_projection({"form_values": {"outputs": (row,)}, "input_bundle": bundle})
+        (card,) = editor._cards
+        for _ in range(3):
+            app.processEvents()
+        return card
+
+    def top(widget, card):
+        return widget.mapTo(card, QtCore.QPoint()).y()
+
+    host.resize(1400, 900)
+    host.show()
+    try:
+        card = project(typed)
+        assert editor.shown_problems() == {}
+        assert card.preview.isVisible()
+        result_y, height = top(card.preview, card), card.height()
+        card = project(unpinned)
+        (answer,) = typed_outputs((unpinned,), schemas)
+        assert answer["error"] is not None and answer["error"].stage == "where"
+        assert editor.shown_problems() == {str(answer["error"]): "Outputs"}
+        error = card.errors["where"]
+        assert error.isVisible() and not card.preview.isVisible()
+        assert (top(error, card), card.height()) == (result_y, height)
+    finally:
+        host.close()
+        host.deleteLater()
+        app.processEvents()
