@@ -1982,7 +1982,7 @@ app = ensure_qt_app(["pulse-components"])
 view = PulseEditorView()
 handle = PulseEditorHandle(None, view)
 third = replace(periods[0], period_id="p3", name="Three")
-component = ComponentVM("mot", "MOT", ("p1", "p2"), "16 us", 1, ("b",))
+component = ComponentVM("mot", "MOT", ("p1", "p2"), "16 us", "2 periods · 1 bracket", ("b",))
 plain = replace(vm, periods=(*periods, third))
 handle.set_schedule(plain)
 view.resize(1280, 820); view.show(); app.processEvents()
@@ -2023,6 +2023,8 @@ assert main.drag_container.flat_order() == vm.item_order
 card = main._component_cards[("component", "mot")]
 assert card.width() == main._cards["p3"].width()
 assert not hasattr(card, "_actions_popup") and card._source_popup is None
+assert card.summary_label.text() == component.summary_text, "the projection words what the block holds"
+assert card.name_edit.isVisible() and not card.name_label.isVisible()
 card.expand_button.click(); app.processEvents()
 assert set(main._cards) == {"p1", "p2", "p3"}
 assert main.drag_container.flat_order() == vm.item_order
@@ -2044,13 +2046,16 @@ QtTest.QTest.mouseClick(start_cap, QtCore.Qt.LeftButton,
 assert strip.selection_payload() == (("component", "mot"),)
 main.bracket_button.click()
 assert outer_brackets == [("p1", "p2", vm.default_bracket_count)], outer_brackets
-QtTest.QTest.mouseClick(start_cap.name_edit, QtCore.Qt.LeftButton)
-start_cap.name_edit.selectAll()
-QtTest.QTest.keyClicks(start_cap.name_edit, "MOT revised")
-QtTest.QTest.keyClick(start_cap.name_edit, QtCore.Qt.Key_Return)
-assert actions[-1] == ("rename", ("mot", "MOT revised")), actions
+# The two ends of the expanded block show its name alike: read, at a
+# field's text inset, not a field on Start and bare text on End.
+end_cap = main._component_cards[("component-end", "mot")]
+for cap in (start_cap, end_cap):
+    assert not cap.name_edit.isVisible() and cap.name_label.isVisible()
+    assert cap.name_label.text() == "MOT" and not cap.summary_label.text()
+assert start_cap.name_label.mapTo(start_cap, QtCore.QPoint()).x() ==     end_cap.name_label.mapTo(end_cap, QtCore.QPoint()).x()
 vm = replace(vm, revision=4, components=(replace(component, name="MOT revised"),))
 handle.set_schedule(vm)
+assert start_cap.name_label.text() == end_cap.name_label.text() == "MOT revised"
 actions.clear()
 edits = []
 handle.duration_committed.connect(lambda *args: edits.append(args))
@@ -2065,6 +2070,13 @@ assert set(main._cards) == {"p3"}
 data.setData(main.drag_container.ITEM_MIME, QtCore.QByteArray(json.dumps(("component", "mot")).encode()))
 assert main.drag_container._proposal_at(data, 2) == (("period", "p3"), *vm.item_order[:-1])
 card = main._component_cards[("component", "mot")]
+# Closed, the block is renamed in its name field.
+QtTest.QTest.mouseClick(card.name_edit, QtCore.Qt.LeftButton)
+card.name_edit.selectAll()
+QtTest.QTest.keyClicks(card.name_edit, "MOT again")
+QtTest.QTest.keyClick(card.name_edit, QtCore.Qt.Key_Return)
+assert actions[-1] == ("rename", ("mot", "MOT again")), actions
+actions.clear()
 buttons = (card.expand_button, card.edit_button, card.ungroup_button)
 assert tuple(button.text() for button in buttons) == ("Expand", "Edit", "Ungroup")
 assert len({button.width() for button in buttons}) == 1
@@ -2186,4 +2198,209 @@ data.setData(strip.ITEM_MIME, QtCore.QByteArray(json.dumps(("component-start", "
 assert strip._proposal_at(data, len(strip.items())) is not None
 view.finish_close(); view.deleteLater()
 app.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
+''')
+
+
+def test_an_empty_scan_table_says_why_it_is_empty(run_qt) -> None:
+    """With no table the box says what to do, in ink on the screen.
+
+    Read off a grab, not the record: the record carries the sentence
+    whether or not anything paints it, and the read-only editor's own
+    placeholder does not.
+    """
+
+    run_qt(r'''
+from PyQt5 import QtGui
+from zlc_ui.qt import ensure_qt_app
+from zlc_ui.pulse import PulseScanView, ScanPageRecord
+app = ensure_qt_app(["pulse-scan-note"])
+scan = PulseScanView()
+scan.resize(900, 600); scan.show(); app.processEvents()
+table = scan.scan_table_view
+
+def ink_inside():
+    image = table.grab().toImage()
+    ratio = image.devicePixelRatio()
+    box = table.viewport().geometry()
+    return sum(
+        1
+        for y in range(int(box.top() * ratio), int((box.bottom() + 1) * ratio))
+        for x in range(int(box.left() * ratio), int((box.right() + 1) * ratio))
+        if QtGui.QColor(image.pixel(x, y)).lightness() < 200
+    )
+
+assert ink_inside() == 0
+scan.set_page(ScanPageRecord(table_note="No scan table yet: write a program and press Run."))
+app.processEvents()
+assert scan.table_note_label.isVisible()
+assert ink_inside() > 0, "the empty table box must show its note"
+# Where the table's first line would start, so the note reads in its place.
+assert scan.table_note_label.geometry() == table.viewport().rect()
+scan.set_page(ScanPageRecord(table_text="1 2 3"))
+app.processEvents()
+assert not scan.table_note_label.isVisible() and table.toPlainText() == "1 2 3"
+scan.close()
+''')
+
+
+def test_the_scan_pages_bound_fields_list_has_one_pitch(run_qt) -> None:
+    """Every line of the list -- a group's title or a field -- is one row
+    tall, so the lines of one group stand as far apart as the groups."""
+
+    run_qt(r'''
+from zlc_ui.qt import ensure_qt_app
+from zlc_ui.pulse import BindingRecord, PulseScanView, ScanPageRecord
+from zlc_ui.pulse._layout import row_height
+app = ensure_qt_app(["pulse-scan-pitch"])
+scan = PulseScanView()
+scan.resize(900, 600); scan.show()
+scan.set_page(ScanPageRecord(bindings=(
+    BindingRecord("hold", "Hold.duration", scan=True),
+    BindingRecord("load", "Trap load.duration", source="api", group_id="loading", group_label="Loading"),
+    BindingRecord("pgc", "PGC.da_dipole", scan=True, source="config", group_id="loading", group_label="Loading"),
+)))
+app.processEvents()
+listed = scan._bindings_layout
+lines = [listed.itemAt(index).widget() for index in range(listed.count())]
+assert [line.text() for line in lines] == [
+    "Pulse", "Hold.duration · Scan", "Loading", "Trap load.duration · API",
+    "PGC.da_dipole · Scan + Config",
+]
+tops = [line.y() for line in lines]
+assert {line.height() for line in lines} == {row_height()}
+assert {after - before for before, after in zip(tops, tops[1:])} == {row_height()}
+scan.close()
+''')
+
+
+def test_the_header_dot_is_the_status_strips_dot(run_qt) -> None:
+    run_qt(r'''
+from zlc_ui.qt import ensure_qt_app
+from zlc_ui.fluent import FluentStatusDot, status_dot_gap
+from zlc_ui.pulse import PulseEditorView
+app = ensure_qt_app(["pulse-header-dot"])
+view = PulseEditorView()
+view.resize(1100, 640); view.show(); app.processEvents()
+dot = view.status_dot
+assert dot.size() == FluentStatusDot().size()
+assert view.title_label.x() - (dot.x() + dot.width()) == status_dot_gap()
+view.finish_close()
+''')
+
+
+def test_the_subpulse_page_scrolls_with_one_bar_under_pinned_commands(run_qt) -> None:
+    """Embedded, the schedule is as tall as its rows and the page is the
+    one vertical scroller -- never two bars side by side; the Subpulse
+    choice and the schedule's commands stay put above it."""
+
+    run_qt(r'''
+from PyQt5 import QtCore, QtWidgets
+from zlc_ui.qt import ensure_qt_app
+from zlc_ui.fluent import row_gap
+from zlc_ui.pulse import FieldVM, PeriodVM, PortRowVM, PulseEditorHandle, PulseEditorView, ScheduleVM
+app = ensure_qt_app(["pulse-subpulse-scroll"])
+field = FieldVM("4")
+ports = tuple(PortRowVM(f"d{n}", "digital", f"Out {n}", f"d{n}") for n in range(24))
+periods = tuple(
+    PeriodVM(f"p{n}", f"P{n}", field, "us", ("us",), digital=tuple((p.key, n % 2 == 0) for p in ports))
+    for n in range(3)
+)
+vm = ScheduleVM(1, 1, "Loading", "50 MHz", "12 us", "", 3, "24/24 ports", "", ports, periods)
+view = PulseEditorView()
+handle = PulseEditorHandle(None, view)
+view.resize(1100, 640); view.show()
+view.tabs.setCurrentWidget(view.component_view); app.processEvents()
+handle.set_component_document(vm, contexts=(("load", "Loading"),), context_id="load",
+                              bindings=(("p0:duration", "P0.duration", "t"),), config_names=("t",))
+# The new height travels up one nested layout per turn of the loop.
+for _ in range(30):
+    app.processEvents()
+page = view.component_view
+schedule = page.schedule_view
+rows = max(schedule.left_body.sizeHint().height(), schedule.drag_container.sizeHint().height())
+assert schedule.dataset_panes.height() >= rows, "the panes are as tall as their rows"
+assert not schedule.dataset_panes.scrollbar.isVisible(), "the schedule does not scroll inside the page"
+bars = [bar for bar in page.findChildren(QtWidgets.QScrollBar)
+        if bar.isVisible() and bar.orientation() == QtCore.Qt.Vertical]
+assert len(bars) == 1 and bars[0].maximum() > 0, [(bar.parent(), bar.maximum()) for bar in bars]
+toolbar = schedule.toolbar
+assert toolbar.isVisible() and not schedule.isAncestorOf(toolbar)
+top = toolbar.mapTo(page, QtCore.QPoint()).y()
+panes_top = schedule.dataset_panes.mapTo(page, QtCore.QPoint()).y()
+assert panes_top - (top + toolbar.height()) == row_gap()
+bars[0].setValue(bars[0].maximum()); app.processEvents()
+assert toolbar.mapTo(page, QtCore.QPoint()).y() == top, "the commands stay while the page scrolls"
+assert page.bindings_box.isVisible()
+box = page.bindings_box.mapTo(page, QtCore.QPoint()).y() + page.bindings_box.height()
+assert box <= page.height(), "the references under the schedule are reached by the one bar"
+view.finish_close()
+''')
+
+
+def test_the_subpulse_source_is_said_once_on_the_hint_line(run_qt) -> None:
+    run_qt(r'''
+from zlc_ui.qt import ensure_qt_app
+from zlc_ui.pulse import FieldVM, PeriodVM, PulseComponentView, ScheduleVM
+app = ensure_qt_app(["pulse-subpulse-source"])
+period = PeriodVM("p0", "P0", FieldVM("4"), "us", ("us",))
+vm = ScheduleVM(1, 1, "Loading", "50 MHz", "4 us", "", 1, "0/0 ports", "", (), (period,))
+page = PulseComponentView()
+page.resize(1000, 600); page.show()
+page.set_sources((("load", "Loading", "default", "", "Default"),), enabled=True)
+page.set_document(vm, contexts=(("load", "Loading"),), context_id="load")
+app.processEvents()
+assert page.scope_label.text().startswith("Default in Pulse")
+assert not page.source_status.isVisible(), "the scope already says Default"
+page.set_sources((("load", "Loading", "config", "a.subpulse.json", "Applied"),), enabled=True)
+app.processEvents()
+assert page.source_status.isVisible() and page.source_status.text() == "Applied"
+page.set_document(vm, contexts=(("load", "Loading"),), context_id="", selected_id="load")
+page.set_sources((("load", "Loading", "default", "", "Default"),), enabled=True)
+app.processEvents()
+assert page.scope_label.text().startswith("Config file")
+assert page.source_status.isVisible(), "beside the file's scope, Default says the file is not in use"
+page.close()
+''')
+
+
+def test_scrolled_cards_clip_one_card_gap_from_the_side_panels(run_qt) -> None:
+    """The gap after the side panels is the strip's own leading margin and
+    scrolls with the cards.  Scrolled, the viewport is masked by that gap,
+    so no card fragment stands against the panel; unscrolled, the gap is
+    the strip's again, where gap 0 is picked."""
+
+    run_qt(_schedule_source() + r'''
+from dataclasses import replace
+from PyQt5 import QtCore, QtGui
+from zlc_ui.qt import ensure_qt_app
+from zlc_ui.pulse import PulseScheduleView
+app = ensure_qt_app(["pulse-scrolled-gap"])
+many = tuple(replace(periods[0], period_id=f"q{n}", name=f"Q{n}") for n in range(12))
+view = PulseScheduleView()
+view.resize(1000, 560); view.show()
+view.set_schedule(replace(vm, periods=many))
+app.processEvents()
+viewport = view.timeline_scroll.viewport()
+strip = view.drag_container
+gap = strip.layout_main.contentsMargins().left()
+assert gap > 0 and viewport.mask().isEmpty()
+first = strip.items()[0]
+assert first.geometry().left() == gap, "unscrolled, the first card stands one gap in"
+bar = view.timeline_scroll.horizontalScrollBar()
+assert bar.maximum() > 40
+bar.setValue(40); app.processEvents()
+mask = viewport.mask()
+assert not mask.contains(QtCore.QPoint(gap - 1, 20)) and mask.contains(QtCore.QPoint(gap, 20))
+image = view.grab().toImage()
+ratio = image.devicePixelRatio()
+left = viewport.mapTo(view, QtCore.QPoint()).x()
+top = first.mapTo(view, QtCore.QPoint()).y()
+gutter = [
+    QtGui.QColor(image.pixel(int(x * ratio), int(y * ratio))).lightness()
+    for x in range(left, left + gap) for y in range(top + 10, top + first.height() - 10)
+]
+assert min(gutter) >= 245, "nothing of a scrolled card in the gap after the panels"
+bar.setValue(0); app.processEvents()
+assert viewport.mask().isEmpty(), "unscrolled, the gap is the strip's again"
+view.close()
 ''')

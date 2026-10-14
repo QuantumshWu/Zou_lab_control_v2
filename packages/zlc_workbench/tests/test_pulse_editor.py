@@ -27,7 +27,9 @@ from zlc_durable import readable_json_bytes
 from zlc_pulse.device import ConfigValueHolder
 
 from zlc_workbench.pulse_editor import (
+    SUMMARY_SEPARATOR,
     PulseEditorPresenter as _PulseEditorPresenter,
+    counted,
     preview_candidate,
     project_schedule,
     replace_sequence,
@@ -678,7 +680,7 @@ def test_inserting_a_spacer_names_it_and_counts_it_apart(presenter) -> None:
     assert all(mode == "hold" for _key, mode, _field in vm.analog)
     schedule = presenter.view.schedule_view.schedule
     assert schedule.period_count == len(before)
-    assert schedule.total_tooltip.endswith(f"{len(before)} period(s) and 1 spacer(s)")
+    assert schedule.total_tooltip.endswith(f"{counted(len(before), 'period')} and {counted(1, 'spacer')}")
 
     marks = {mark.name: mark for mark in timeline_of(presenter.sequence).periods}
     assert marks["spacer1"].spacer and not marks[before[0].period_id].spacer
@@ -1350,6 +1352,9 @@ def test_component_instances_and_subpulse_files_share_edits_not_ownership(sequen
         period_only, = presenter.sequence.components
         assert period_only.bracket_ids == ()
         assert view.schedule_view.schedule.components[0].bracket_ids == ()
+        # The closed card's line is worded by the projection, with the one
+        # plural every count takes; no "0 brackets".
+        assert view.schedule_view.schedule.components[0].summary_text == counted(2, "period")
         assert presenter.sequence.brackets == parent.brackets
         original_order = view.schedule_view.schedule.item_order
         view.reorder_items_requested.emit(tuple(item for item in original_order if item not in selected_periods)
@@ -3586,7 +3591,7 @@ def test_the_strips_total_is_what_the_board_plays(sequence) -> None:
         assert after.total_text == _readable(3 * one_pass)
         assert "as the board plays it" in after.total_tooltip
         assert "in one pass through" in after.total_tooltip
-        assert after.total_tooltip.endswith(f"{before.period_count} period(s)")
+        assert after.total_tooltip.endswith(counted(before.period_count, "period"))
         candidate = preview_candidate(presenter.sequence, False, None)
         assert candidate[-1] == 3 * one_pass
     finally:
@@ -4134,14 +4139,14 @@ def test_the_edit_page_says_how_many_points_will_be_played(presenter, sequence) 
     assert view.schedule_view.schedule.scan_summary_text == "no scan slots"
 
     view.binding_committed.emit('duration', sequence.periods[3].period_id, None, True, 'default')
-    assert view.schedule_view.schedule.scan_summary_text == "1 slot - 0 pts"
+    assert view.schedule_view.schedule.scan_summary_text == "1 slot · 0 points"
 
     _run_scan(
         view,
         "import numpy as np\n"
         "scan_table = (np.arange(21) + 1).reshape(-1, 1) * 0.001\n"
     )
-    assert view.schedule_view.schedule.scan_summary_text == "1 slot - 21 pts"
+    assert view.schedule_view.schedule.scan_summary_text == "1 slot · 21 points"
 
 
 
@@ -4749,7 +4754,7 @@ def test_connect_hold_step_and_sync_run_on_the_device_worker(sequence) -> None:
         assert "held at scan point 2" in presenter._scan_progress  # row 1, as the running line counts it
         # The busy sentence comes down with the outcome, though a hold
         # refreshes nothing that would have rewritten it.
-        assert view.summary.endswith("period(s)"), view.summary
+        assert view.summary.endswith(f"{SUMMARY_SEPARATOR}{counted(len(presenter.sequence.periods), 'period')}"), view.summary
 
         assert presenter.invoke_public("step_scan_point", {"delta": 1}) is True
         assert presenter._device_busy is True
@@ -4779,7 +4784,7 @@ def test_connect_hold_step_and_sync_run_on_the_device_worker(sequence) -> None:
         view.sync_requested.emit()
         worker.deliver_until(lambda: not presenter._device_busy)
         assert len(presenter.sequence.periods) == periods + 1
-        assert view.summary.endswith(f"{periods + 1} period(s)"), view.summary
+        assert view.summary.endswith(f"{SUMMARY_SEPARATOR}{counted(periods + 1, 'period')}"), view.summary
     finally:
         presenter.close()
 

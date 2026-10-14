@@ -5,14 +5,14 @@ from __future__ import annotations
 from PyQt5 import QtCore, QtWidgets
 
 from zlc_ui.fluent import (
-    CARD_TITLE_PX, ElidedLabel, FluentButton, FluentComboBox,
+    ElidedLabel, FluentButton, FluentComboBox,
     FluentFrame, FluentGroupBox, FluentLabel, FluentLineEdit, FluentScrollArea,
-    fluent_scrollbar_thickness, read_editable_combo, retire_widget, scaled_px,
+    fluent_scrollbar_thickness, read_editable_combo, retire_widget,
     setting_label_width, signals_blocked,
 )
 
 from ._layout import (
-    bound_field_width, config_name_width, panel_top_height, px, quiet, row_height, row_spacing,
+    bound_field_width, config_name_width, px, quiet, row_height,
 )
 from zlc_ui.fluent import card_pad, row_gap, section_gap
 from .models import ScheduleVM
@@ -35,20 +35,29 @@ class PulseComponentView(QtWidgets.QWidget):
         self._sources: tuple[tuple[str, str, str, str, str], ...] = ()
         self._contexts: tuple[tuple[str, str], ...] = ()
         self.schedule_view: PulseScheduleView | None = None
-        # The page scrolls as one: the schedule keeps room for its header
-        # block and some port rows, and the references under it are reached
-        # by scrolling, instead of a nested list squeezing the schedule until
-        # no port row showed.  The cards end on every tab's right edge: the
-        # bar's gutter, kept at all times, stands inside the right inset.
+        # The choice of Subpulse and the schedule's commands stand still at
+        # the top; under them the page scrolls as one, with one vertical
+        # bar: the schedule as tall as its rows, then the references.  A
+        # schedule scrolling inside the scrolling page would stand two bars
+        # side by side, the wheel moving whichever the pointer is over.
+        # The gap under the commands is above the scrolling body, so
+        # scrolled content clips one gap below them.  The cards end on every
+        # tab's right edge: the bar's gutter, kept at all times, stands
+        # inside the right inset.
         outer = QtWidgets.QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+        page = section_gap()
+        self._pinned = QtWidgets.QVBoxLayout()
+        self._pinned.setContentsMargins(page, page, page, page)
+        self._pinned.setSpacing(section_gap())
+        outer.addLayout(self._pinned)
         scroll = FluentScrollArea()
         page_body = QtWidgets.QWidget()
         scroll.set_width_bounded_widget(page_body)
-        outer.addWidget(scroll)
+        outer.addWidget(scroll, 1)
         self._page = QtWidgets.QVBoxLayout(page_body)
-        page = section_gap()
-        self._page.setContentsMargins(page, page, max(0, page - fluent_scrollbar_thickness()), page)
+        self._page.setContentsMargins(page, 0, max(0, page - fluent_scrollbar_thickness()), page)
         self._page.setSpacing(section_gap())
         pad = card_pad()
         header = FluentFrame()
@@ -117,7 +126,7 @@ class PulseComponentView(QtWidgets.QWidget):
         hint.addWidget(self.source_status)
         self.source_status.hide()
         head.addLayout(hint)
-        self._page.addWidget(header)
+        self._pinned.addWidget(header)
         self.placeholder = FluentLabel("Choose a Subpulse above, or create or open a Subpulse file.")
         self.placeholder.setWordWrap(True)
         self.placeholder.setAlignment(QtCore.Qt.AlignCenter)
@@ -134,6 +143,9 @@ class PulseComponentView(QtWidgets.QWidget):
         self._binding_layout.setAlignment(QtCore.Qt.AlignTop)
         self._page.addWidget(self.bindings_box)
         self.bindings_box.hide()
+        # The slack under a short schedule, so it and the references stay
+        # at the top; the placeholder's stretch takes it while it shows.
+        self._page.addStretch(0)
 
     def set_sources(
         self, rows: tuple[tuple[str, str, str, str, str], ...], *,
@@ -160,7 +172,13 @@ class PulseComponentView(QtWidgets.QWidget):
     def _project_source(self, *, busy: bool = False) -> None:
         record = next((row for row in self._sources if row[0] == self._selected_id), None)
         self.config_file_row.setVisible(record is not None)
-        self.source_status.setVisible(record is not None and bool(record[4]))
+        # The source is said once on the line: editing a Default Subpulse in
+        # the Pulse, the scope already names it, and the status would only
+        # say "Default" again at the far end.
+        self.source_status.setVisible(
+            record is not None and bool(record[4])
+            and not (self._context_id and record[2] != "config")
+        )
         if record is None:
             return
         key, _name, source, path, status = record
@@ -217,13 +235,8 @@ class PulseComponentView(QtWidgets.QWidget):
         ):
             getattr(schedule, signal).connect(lambda *args, a=action: self.edit_requested.emit(a, args))
         schedule.feedback_requested.connect(self.feedback_requested)
-        # Room for the schedule's own header strip, a card's title band, its
-        # header block and four port rows; past that the page scrolls.
-        schedule.setMinimumHeight(
-            row_height() + row_gap() + scaled_px(CARD_TITLE_PX) + 2 * card_pad()
-            + panel_top_height() + 4 * (row_spacing() + row_height())
-        )
-        self._page.insertWidget(1, schedule, 1)
+        self._pinned.addWidget(schedule.toolbar)
+        self._page.insertWidget(1, schedule)
         return schedule
 
     def set_document(
@@ -271,8 +284,16 @@ class PulseComponentView(QtWidgets.QWidget):
             self.schedule_view.set_schedule(schedule)
             self.schedule_view.setEnabled(not busy)
             self.schedule_view.show()
+            self.schedule_view.toolbar.setEnabled(not busy)
+            self.schedule_view.toolbar.show()
         elif self.schedule_view is not None:
             self.schedule_view.hide()
+            self.schedule_view.toolbar.hide()
+        # Under the commands, the schedule's own row gap; under the header
+        # alone, the gap between two sections.
+        margins = self._pinned.contentsMargins()
+        self._pinned.setContentsMargins(margins.left(), margins.top(), margins.right(),
+                                        row_gap() if schedule is not None else section_gap())
         wanted = {field_id for field_id, _label, _key in bindings}
         for field_id in tuple(self._binding_rows):
             if field_id not in wanted:

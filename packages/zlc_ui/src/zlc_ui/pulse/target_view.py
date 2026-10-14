@@ -14,12 +14,12 @@ from PyQt5 import QtCore, QtWidgets
 from zlc_ui.form import being_edited
 from zlc_ui.fluent import (
     FluentButton, FluentFrame, FluentGroupBox, FluentLabel,
-    FluentLineEdit, FluentScrollArea, FluentSpinBox, field_text_inset,
+    FluentLineEdit, FluentScrollArea, FluentSpinBox, column_header_label, field_text_inset,
     fluent_scrollbar_thickness, signals_blocked,
 )
 
 from ._layout import (
-    column_header, px, row_height,
+    px, row_height,
 )
 from zlc_ui.fluent import card_pad, row_gap, section_gap
 from .models import TargetPortRecord, TargetWidthRule
@@ -124,7 +124,7 @@ class PulseTargetView(QtWidgets.QWidget):
     def _header_label(text: str) -> FluentLabel:
         """A column header over a column of fields: starts over their text."""
 
-        label = column_header(text)
+        label = column_header_label(text)
         label.setIndent(field_text_inset())
         label.setFixedHeight(row_height())
         return label

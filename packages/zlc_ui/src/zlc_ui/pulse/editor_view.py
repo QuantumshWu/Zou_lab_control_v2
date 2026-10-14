@@ -25,7 +25,7 @@ from zlc_ui.fluent import (
     window_pad,
 )
 
-from zlc_ui.fluent import section_gap
+from zlc_ui.fluent import row_gap, section_gap, status_dot_gap
 from .preview_view import PulsePreviewView
 from .scan_view import PulseScanView
 from .config_view import PulseConfigView
@@ -65,9 +65,11 @@ class PulseEditorView(QtWidgets.QWidget):
         # All ends on their right one: the header and every tab below it
         # are inset by the same section gap.
         header_layout.setContentsMargins(section_gap(), scaled_px(6), section_gap(), scaled_px(6))
-        header_layout.setSpacing(scaled_px(8, minimum=5))
-        self.status_dot = FluentStatusDot(size=16)
-        self.title_label = FluentLabel("PulseGUI - Untitled*")
+        header_layout.setSpacing(row_gap())
+        # The status strip's dot and the strip's air after it: the header's
+        # words start where a strip's do.
+        self.status_dot = FluentStatusDot()
+        self.title_label = FluentLabel("PulseGUI · Untitled*")
         self.title_label.setMinimumWidth(scaled_px(260, minimum=180))
         self.title_label.setAlignment(QtCore.Qt.AlignVCenter | QtCore.Qt.AlignLeft)
         # What the editor holds -- its file, its period count, a config
@@ -76,8 +78,12 @@ class PulseEditorView(QtWidgets.QWidget):
         self.summary_label = FluentReadoutEdit("", flush=True)
         self.clear_button = FluentButton("Clear All", role="destructive")
         self.clear_button.clicked.connect(self.clear_all_requested)
-        header_layout.addWidget(self.status_dot)
-        header_layout.addWidget(self.title_label)
+        named = QtWidgets.QHBoxLayout()
+        named.setContentsMargins(0, 0, 0, 0)
+        named.setSpacing(status_dot_gap())
+        named.addWidget(self.status_dot)
+        named.addWidget(self.title_label)
+        header_layout.addLayout(named)
         header_layout.addWidget(self.summary_label, 1)
         header_layout.addWidget(self.clear_button)
         outer.addWidget(header)
