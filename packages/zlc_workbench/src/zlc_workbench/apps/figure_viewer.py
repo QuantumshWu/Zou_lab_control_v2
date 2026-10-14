@@ -215,13 +215,15 @@ def main(argv: list[str] | None = None) -> int:
             # What the window reads when it opens, every Dataset and its
             # recipe included -- a check of less passed archives that then
             # did not open.
+            from zlc_ui import counted
+
             from ..viewer import read_figure_archive
 
             _resolved, description, *_rest = read_figure_archive(arguments.path)
             print(
                 f"figure ready: {description.name!r}, "
-                f"{len(description.datasets)} dataset(s), "
-                f"{sum(len(rows) for _title, rows in description.tabs)} record row(s)"
+                f"{counted(len(description.datasets), 'dataset')}, "
+                f"{counted(sum(len(rows) for _title, rows in description.tabs), 'record row')}"
             )
             return 0
         except Exception as error:

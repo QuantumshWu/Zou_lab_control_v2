@@ -19,6 +19,7 @@ from ._layout import (
 )
 from zlc_ui.fluent import card_pad, row_gap, section_gap
 from .models import ConfigPageRecord
+from zlc_ui.status import SUMMARY_SEPARATOR
 
 #: The binding grid's columns, left to right: what it binds, the Config name
 #: chosen for it, its default and the Config value (columns 2 and 3), and the
@@ -65,7 +66,7 @@ class PulseConfigView(QtWidgets.QWidget):
         for name, text, role in (
             ("new", "New file", "standard"), ("load", "Open file", "standard"),
             ("refresh", "Refresh", "standard"), ("save", "Save", "standard"),
-            ("save_as", "Save as", "standard"), ("unload", "Unload", "destructive"),
+            ("save_as", "Save as…", "standard"), ("unload", "Unload", "destructive"),
         ):
             button = FluentButton(text, role=role)
             button.setFixedHeight(row_height())
@@ -198,9 +199,9 @@ class PulseConfigView(QtWidgets.QWidget):
         self.bindings_placeholder.setVisible(not record.bindings)
         self.path_text.setText(record.file_path)
         self.path_text.setToolTip(record.file_path)
-        status = f"Loaded file: {Path(record.active_path).name}" if record.active_path else "No value file selected."
+        status = f"Loaded file: {Path(record.active_path).name}" if record.active_path else "No value file selected"
         if record.dirty:
-            status += "  Unsaved edits do not participate in Fire."
+            status += f"{SUMMARY_SEPARATOR}unsaved edits do not participate in Fire"
         self.file_status.setText(status)
         self.file_status.setToolTip(record.active_path)
         # Primary with its star only while there is something to save.

@@ -328,6 +328,7 @@ def test_pair_matrix_selects_like_a_table_and_writes_the_draft() -> None:
         assert drafts[-1] == {"values": {"selection": "custom", "pairs": ()}}
         project(**drafts[-1]["values"])
         assert marked() == [] and form.presets.button("none").property("current")
+        assert form.summary.text() == "None · 0 of 6 pairs", "the summary names the strip's segment"
         # Pairs the source no longer carries are named, not dropped silently.
         drafts.clear()
         project(selection="custom", pairs=({"start": "0", "end": "1"}, {"start": "2", "end": "5"}))

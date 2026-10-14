@@ -590,6 +590,20 @@ def finalize_logic_draft(
     )
 
 
+def claim_names(entries: Sequence[Mapping[str, Any]]) -> tuple[str, ...]:
+    """What each frame-claims row is called in a problem sentence.
+
+    The file's stem, as the editor's rows show it, or "row N" for a row with
+    no file yet.  The draft issues and the claims projection both name rows
+    through here: the console matches one against the other by equality.
+    """
+
+    return tuple(
+        Path(entry["path"]).stem or f"row {index + 1}"
+        for index, entry in enumerate(entries)
+    )
+
+
 def _resolve_frame_claims(
     descriptor: Any,
     spec: Any,
@@ -615,12 +629,9 @@ def _resolve_frame_claims(
         return None
     if not entries:
         if spec.required:
-            issues.append(f"{descriptor.api_name} needs {spec.label.lower()}: add one")
+            issues.append(f"{spec.label} must have at least one file")
         return None
-    names = tuple(
-        Path(entry["path"]).name or f"row {index + 1}"
-        for index, entry in enumerate(entries)
-    )
+    names = claim_names(entries)
     resolved_rows = []
     for name, entry in zip(names, entries):
         if entry["path"]:
@@ -629,7 +640,7 @@ def _resolve_frame_claims(
             issues.append(f"{spec.label} {name} has no file yet")
             resolved_rows.append(None)
     paths = [Path(row.path) for row in resolved_rows if row is not None]
-    repeated = sorted({path.name for path in paths if paths.count(path) > 1})
+    repeated = sorted({path.stem for path in paths if paths.count(path) > 1})
     if repeated:
         issues.append(f"{repeated[0]} is listed twice: give it every frame it reads in one row")
     frames = tuple(entry["frames"] for entry in entries)

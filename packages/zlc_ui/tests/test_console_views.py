@@ -117,7 +117,7 @@ QtWidgets.QApplication.sendEvent(surface, wheel)
 assert bar.value() > 0, 'a wheel the surface ignores must still reach the board scroll'
 card.set_surface(None)
 # An emptied card says why on its strip's second line; the body is its frame.
-assert card._title_label.text().endswith('Pick&nbsp;a&nbsp;signal&nbsp;in&nbsp;Setting</span>'), card._title_label.text()
+assert card._title_label.text().endswith('Choose&nbsp;a&nbsp;signal&nbsp;in&nbsp;Setting</span>'), card._title_label.text()
 card.set_panel_projection(dict(state, size='1x4'), surface_projection)
 assert card.panel_size == '1x4'
 try:

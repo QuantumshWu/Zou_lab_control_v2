@@ -487,7 +487,7 @@ def create_bound_window(
 def main(argv: list[str] | None = None) -> int:
     arguments = _parser().parse_args(argv)
 
-    from zlc_ui import ensure_qt_app, open_pulse_editor
+    from zlc_ui import counted, ensure_qt_app, open_pulse_editor
 
     application = ensure_qt_app([])
     try:
@@ -538,8 +538,8 @@ def main(argv: list[str] | None = None) -> int:
                 sequence = state.sequence
                 print(
                     f"pulse ready: {sequence.name!r}, "
-                    f"{len(sequence.periods)} period(s), "
-                    f"{len(sequence.target.ports)} port(s)"
+                    f"{counted(len(sequence.periods), 'period')}, "
+                    f"{counted(len(sequence.target.ports), 'port')}"
                 )
             return 0
         finally:

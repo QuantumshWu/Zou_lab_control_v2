@@ -697,7 +697,7 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
             for field in descriptors["calibration"].authoring_schema.fields
             if field.name == "pulse_template"
         )
-        with pytest.raises(ValueError, match=f"Enter {template.label}"):
+        with pytest.raises(ValueError, match=f"{template.label} must be filled in"):
             descriptors["calibration"].authoring_schema.project_values({})
         named = {"pulse_template": IMAGING_PULSE_RESOURCE.path.name,
                  "reference_before_field": "duration:long_before",

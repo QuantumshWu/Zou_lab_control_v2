@@ -114,10 +114,10 @@ def test_last_and_rest_follow_the_frame_count_and_numbers_keep_their_place() -> 
         CalibrationReading(shared, ("rest",), Path("load.json")),
         CalibrationReading(strict, (3,), Path("late.json")),
     ))
-    with pytest.raises(ValueError, match=r"late\.json names middle frame 3, but the source carries 2 frames \(0-1\)"):
+    with pytest.raises(ValueError, match=r"late names middle frame 3, but the source carries 2 frames \(0-1\)"):
         beyond.process(_cycle(10.0, 10.0))
     # In four frames 3 is the last frame, not a middle one: still absent.
-    with pytest.raises(ValueError, match=r"late\.json names middle frame 3"):
+    with pytest.raises(ValueError, match=r"late names middle frame 3"):
         beyond.process(_cycle(10.0, 10.0, 10.0, 10.0))
     assert beyond.process(_cycle(10.0, 10.0, 10.0, 10.0, 10.0)).occupied.tolist() == [
         [[True], [True], [True], [False], [True]]
@@ -127,7 +127,7 @@ def test_last_and_rest_follow_the_frame_count_and_numbers_keep_their_place() -> 
         CalibrationReading(shared, (0, 2), Path("load.json")),
     ))
     # In three frames 2 is the last: load's middle 2 is absent, not a second reader.
-    with pytest.raises(ValueError, match=r"load\.json names middle frame 2"):
+    with pytest.raises(ValueError, match=r"load names middle frame 2"):
         twice.process(_cycle(10.0, 10.0, 10.0))
     with pytest.raises(ValueError, match="frame 1 has no calibration"):
         twice.process(_cycle(10.0, 10.0, 10.0, 10.0))
@@ -151,10 +151,10 @@ def test_first_reads_frame_zero_whatever_the_count() -> None:
         CalibrationReading(shared, ("last",), Path("readout.json")),
     ))
     assert ends.process(_cycle(10.0, 10.0)).occupied.tolist() == [[[False], [True]]]
-    with pytest.raises(ValueError, match=r"frame 0 is read by both load\.json \(first\) and readout\.json \(last\)"):
+    with pytest.raises(ValueError, match=r"frame 0 is read by both load \(first\) and readout \(last\)"):
         ends.process(_cycle(10.0))
     # 0 IS First: one claim, refused before any cycle arrives.
-    with pytest.raises(ValueError, match="'first' is claimed by both load.json and readout.json"):
+    with pytest.raises(ValueError, match="'first' is claimed by both load and readout"):
         OccupancyProcessor((
             CalibrationReading(strict, ("first",), Path("load.json")),
             CalibrationReading(shared, (0, "rest"), Path("readout.json")),
@@ -162,22 +162,22 @@ def test_first_reads_frame_zero_whatever_the_count() -> None:
 
 
 def test_calibrations_must_fit_together() -> None:
-    with pytest.raises(ValueError, match="b.json names different sites"):
+    with pytest.raises(ValueError, match="b names different sites"):
         OccupancyProcessor((
             CalibrationReading(_calibration(1.0), ("rest",), Path("a.json")),
             CalibrationReading(_calibration(1.0, sites=("site-1", "site-2")), (0,), Path("b.json")),
         ))
-    with pytest.raises(ValueError, match="'rest' is claimed by both a.json and b.json"):
+    with pytest.raises(ValueError, match="'rest' is claimed by both a and b"):
         OccupancyProcessor((
             CalibrationReading(_calibration(1.0), ("rest",), Path("a.json")),
             CalibrationReading(_calibration(1.0), ("rest",), Path("b.json")),
         ))
-    with pytest.raises(ValueError, match="b.json reads no frame"):
+    with pytest.raises(ValueError, match="b reads no frame"):
         OccupancyProcessor((
             CalibrationReading(_calibration(1.0), ("rest",), Path("a.json")),
             CalibrationReading(_calibration(1.0), (), Path("b.json")),
         ))
-    with pytest.raises(ValueError, match="a.json is listed twice"):
+    with pytest.raises(ValueError, match="a is listed twice"):
         OccupancyProcessor((
             CalibrationReading(_calibration(1.0), ("rest",), Path("a.json")),
             CalibrationReading(_calibration(1.0), (0,), Path("a.json")),
@@ -188,7 +188,7 @@ def test_calibrations_must_fit_together() -> None:
         CalibrationReading(_calibration(1.0), ("rest",), Path("a.json")),
         CalibrationReading(_calibration(2.0), (0,), Path("b.json")),
     )).model_kind is ReadoutModelKind.BOX
-    with pytest.raises(ValueError, match="a.json has no uniform_psf readout model"):
+    with pytest.raises(ValueError, match="a has no uniform_psf readout model"):
         OccupancyProcessor(
             (
                 CalibrationReading(_calibration(1.0), ("rest",), Path("a.json")),
@@ -200,7 +200,7 @@ def test_calibrations_must_fit_together() -> None:
     # photoelectrons do not judge frames read in counts.
     trained = replace(_calibration(1e6), report={"run_record": {"request": {"photoelectrons": True}}})
     counted = SignalValue("camera/frames", _cycle(10.0, 10.0), None)
-    with pytest.raises(ValueError, match="trained.json was trained in photoelectrons"):
+    with pytest.raises(ValueError, match="trained was trained in photoelectrons"):
         OccupancyProcessor((
             CalibrationReading(_calibration(1.0), ("rest",), Path("plain.json")),
             CalibrationReading(trained, (1,), Path("trained.json")),
@@ -300,7 +300,7 @@ def _claims_projection(entries, frames):
 
     from zlc_atom.nodes import check_claims, frame_problems, reach_frames
 
-    names = tuple(Path(entry["path"]).name for entry in entries)
+    names = tuple(Path(entry["path"]).stem for entry in entries)
     claimed = tuple(entry["frames"] for entry in entries)
     problems, reads = (), None
     try:
@@ -406,7 +406,7 @@ def test_the_calibrations_editor_gives_frames_to_files_by_clicking(monkeypatch) 
         assert grid.selected_cells() == ((0, 0), (0, 5), (1, 2))
         project((middle, readout))
         assert header(5) == "2" and state(0, 5) == "warning"
-        assert "load.json names middle frame 2" in editor.note.text()
+        assert "load names middle frame 2" in editor.note.text()
         assert state(1, 1) == "derived", "the new last frame is read as rest, not as middle 2"
         assert click(0, 5)[0] == {"path": load["path"], "frames": ("first",)}
         # Each row ends, after a gap, with its own remove cell: never a claim.

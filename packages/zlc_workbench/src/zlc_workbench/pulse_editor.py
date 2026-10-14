@@ -61,6 +61,7 @@ from zlc_pulse import (
 )
 from zlc_pulse import (
     TIME_UNIT_CHOICES,
+    convert_time,
     nanoseconds_per,
     align_to_grid,
     apply_config_values,
@@ -95,6 +96,8 @@ from zlc_ui import (
     BracketVM,
     ScheduleVM,
     ComponentVM,
+    SUMMARY_SEPARATOR,
+    counted,
 )
 
 from .board import _guarded_slot
@@ -154,7 +157,7 @@ def _bracket_vms(
                     config_enabled=sequence.config_enabled,
                     default_text=str(next((old.count for old in (authored_sequence or sequence).brackets
                                           if old.bracket_id == b.bracket_id), b.count)),
-                    actual_text=f"{b.count} count",
+                    actual_text=str(b.count),
                 ),
             ),
             readonly=bool(sequence.config_enabled and any(
@@ -184,6 +187,25 @@ def _nanoseconds(value: float, unit: str) -> float:
     return float(Fraction(str(float(value))) * nanoseconds_per(unit))
 
 
+def _bound_text(number: float, unit: str, binding_unit: str) -> str:
+    """A value a binding feeds, written the way the field it feeds shows it.
+
+    A DAC code and a bracket count are bare numbers, as their boxes show
+    them: 'value' and 'count' are the model's tokens, not units.  A time is
+    said in the binding's unit, so a Config file's 'us' reads 'µs' beside
+    the default.  A Config value whose unit cannot feed the binding is shown
+    as written; its row says Config error.
+    """
+
+    if unit == binding_unit and unit in ("value", "count"):
+        return format_quantity(number, "1")
+    try:
+        number = convert_time(number, unit, binding_unit)
+    except ValueError:
+        return f"{format_quantity(number, '1')} {unit}"
+    return f"{format_quantity(number, '1')} {binding_unit}"
+
+
 def _readable(nanoseconds: float) -> str:
     """One duration, in the scale a person would have written it in.
 
@@ -195,24 +217,6 @@ def _readable(nanoseconds: float) -> str:
 
     seconds = float(Fraction(str(float(nanoseconds))) / nanoseconds_per("s"))
     return format_quantity(seconds, "s")
-
-
-#: Between the parts of one summary line -- a file and its period count, a
-#: slot count and a point count, what is shown and what is hidden.  One
-#: mark for the whole editor, so no two of its summaries part their words
-#: differently.
-SUMMARY_SEPARATOR = " · "
-
-
-def counted(count: int, noun: str) -> str:
-    """``count`` of ``noun``, in the plural it takes: "1 period", "3 periods".
-
-    Every count the editor words goes through here, so none reads "3
-    period(s)" beside another that says "3 periods".
-    """
-
-    count = int(count)
-    return f"{count} {noun}{'' if count == 1 else 's'}"
 
 
 # ------------------------------------------------------------------ projection
@@ -783,7 +787,7 @@ def _binding_field_state(
             )
         else:
             active = True
-            effective = actual_text or f"{format_quantity(value[0], '1')} {value[1]}"
+            effective = actual_text
             status = "The saved Config supplies this value. Edit it on the Value Config page."
     elif binding.source == "api":
         status = "An API caller may override it; otherwise the Pulse default is used."
@@ -907,6 +911,7 @@ def _delay_row(
     """
 
     value, unit = (0.0, "ns") if sequence is None else _delay_of(sequence, port_key)
+    default, default_unit = (value, unit) if sequence is None else _delay_of(authored_sequence or sequence, port_key)
     binding = _binding_for(bindings, "delay", None, port_key)
     return DelayRowVM(
         port_key=port_key,
@@ -917,7 +922,7 @@ def _delay_row(
             can_scan=False,
             **_binding_field_state(binding, config_values,
                                   config_enabled=bool(sequence is not None and sequence.config_enabled),
-                                  default_text="" if sequence is None else " ".join(map(str, _delay_of(authored_sequence or sequence, port_key))),
+                                  default_text="" if sequence is None else f"{format_quantity(default, '1')} {default_unit}",
                                   actual_text=f"{format_quantity(float(value), '1')} {unit}"),
             editable=sequence is not None,
             allow_any=False,
@@ -2389,8 +2394,8 @@ class PulseEditorPresenter:
                 component = self.sequence.component_for_field(b.field_ref)
                 bindings.append((
                     b.field_id, _grouped_label(self.sequence, b.field_ref, component), b.config_key,
-                    f"{format_quantity(default, '1')} {b.unit}",
-                    "" if effective is None else f"{format_quantity(effective[0], '1')} {effective[1]}",
+                    _bound_text(default, b.unit, b.unit),
+                    "" if effective is None else _bound_text(*effective, b.unit),
                     "Config off" if not self.sequence.config_enabled else
                     "Not applied — Config error" if self._config_error else
                     "Scan table" if b.scan and scan_active else

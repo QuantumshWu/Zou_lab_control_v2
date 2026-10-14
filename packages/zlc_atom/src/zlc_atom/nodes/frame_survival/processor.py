@@ -232,7 +232,7 @@ class FrameSurvivalProcessor:
             # its verdicts.  Say which signal is the right one.
             raise ValueError(
                 "frame survival consumes the per-site verdicts -- select the "
-                "occupancy processor's 'occupied' signal.  This source has "
+                "occupancy processor's 'occupied' signal. This source has "
                 f"{len(cell_axes)} cell axes and looks like camera frames "
                 "(occupancy's 'frame_judged' is the judged evidence, not the "
                 "judgement)"

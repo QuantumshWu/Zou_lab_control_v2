@@ -81,19 +81,19 @@ def test_claims_are_refused_by_name_and_against_a_known_frame_count(workspace) -
     load, readout = _saved(workspace, "load.json"), _saved(workspace, "readout.json")
     plane = SignalDataPlane()
     try:
-        assert "occupancy needs calibrations: add one" in _finalize(workspace, plane, ()).issues
+        assert "Calibrations must have at least one file" in _finalize(workspace, plane, ()).issues
         twice = _finalize(workspace, plane, (
             {"path": str(load), "frames": ["rest"]}, {"path": str(load), "frames": [0]},
         ))
-        assert "load.json is listed twice: give it every frame it reads in one row" in twice.issues
+        assert "load is listed twice: give it every frame it reads in one row" in twice.issues
         both = _finalize(workspace, plane, (
             {"path": str(load), "frames": ["rest"]}, {"path": str(readout), "frames": ["rest"]},
         ))
-        assert "'rest' is claimed by both load.json and readout.json" in both.issues
+        assert "'rest' is claimed by both load and readout" in both.issues
         claims = ({"path": str(load), "frames": [2]}, {"path": str(readout), "frames": ["rest"]})
         assert _finalize(workspace, plane, claims).can_start, "no count known: nothing to check yet"
         assert _finalize(workspace, plane, claims, source_frames=2).issues == (
-            "load.json names middle frame 2, but the source carries 2 frames (0-1); "
+            "load names middle frame 2, but the source carries 2 frames (0-1); "
             "a numbered middle frame never stands for the first or the last",
         )
         assert _finalize(workspace, plane, claims, source_frames=4).can_start

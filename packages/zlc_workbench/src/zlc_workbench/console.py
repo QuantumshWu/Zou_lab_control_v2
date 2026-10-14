@@ -41,7 +41,7 @@ from zlc_plot import (
     image_point_overlay_geometry_matches,
 )
 from zlc_plot.primitives import ImageFrame, ImagePointOverlay, PointStatus
-from zlc_ui import STATUS_SEVERITIES
+from zlc_ui import STATUS_SEVERITIES, SUMMARY_SEPARATOR, counted
 from zlc_plot.semantics import FATE_REDUCE, ROLE_FATES
 from zlc_plot.specs import semantic_spec, validate_authored_display
 from zlc_plot.ui import parameter_controls_for_kind
@@ -74,6 +74,7 @@ from .logic import (
     LogicDraftFinalization,
     artifact_input_specs,
     build_arguments,
+    claim_names,
     dataset_inputs,
     device_key_options,
     draft_devices,
@@ -271,9 +272,7 @@ def _claims_projection(
         return {"label": spec.label, "entries": (), "base_dir": base_dir,
                 "file_filter": str(spec.codec.file_filter), "files": (),
                 "reads": None, "problems": (str(error),)}
-    names = tuple(
-        Path(entry["path"]).name or f"row {index + 1}" for index, entry in enumerate(entries)
-    )
+    names = claim_names(entries)
     frames = tuple(entry["frames"] for entry in entries)
     claims = finalization.artifacts.get(spec.name)
     reads = None
@@ -9869,14 +9868,16 @@ class ConsolePresenter:
         for binding in tuple(self.logic.values()):
             self._show_logic(binding, descriptions)
         self._project_task_takeover()
-        state = "paused" if self._paused else "running"
-        running = sum(
-            1
-            for item in self.logic.values()
-            if item.host is not None and item.host.running
-        )
-        nodes = f", {running}/{len(self.logic)} node(s) running" if self.logic else ""
-        summary = f"{len(self.panels)} panel(s), {state}{nodes}"
+        # The board is live or paused; "running" is said once, of the nodes.
+        parts = [counted(len(self.panels), "panel"), "paused" if self._paused else "live"]
+        if self.logic:
+            running = sum(
+                1
+                for item in self.logic.values()
+                if item.host is not None and item.host.running
+            )
+            parts.append(f"{running}/{counted(len(self.logic), 'node')} running")
+        summary = SUMMARY_SEPARATOR.join(parts)
         if summary == self._shown_console_summary:
             return
         self._shown_console_summary = summary
@@ -9950,12 +9951,12 @@ class ConsolePresenter:
             waiting = [binding.node_id for binding in self.logic.values()]
             if self.board.pending_projection_count:
                 waiting.append(
-                    f"{self.board.pending_projection_count} panel projection(s)"
+                    counted(self.board.pending_projection_count, "panel projection")
                 )
             if self._retired_plot_hosts:
-                waiting.append(f"{len(self._retired_plot_hosts)} plot worker(s)")
+                waiting.append(counted(len(self._retired_plot_hosts), "plot worker"))
             if self._saving_panels:
-                waiting.append(f"{len(self._saving_panels)} panel save(s)")
+                waiting.append(counted(len(self._saving_panels), "panel save"))
             elif owners_ready and not render_processes_closed:
                 waiting.append("render processes")
             self._report(

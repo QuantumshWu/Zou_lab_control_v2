@@ -24,6 +24,7 @@ import time
 from typing import TYPE_CHECKING, Any
 
 from zlc_durable import day_folder, day_folder_path
+from zlc_ui import counted
 from zlc_durable.paths import resolve_under
 
 from .device_use import DeviceClaim, DeviceUseCoordinator
@@ -900,7 +901,7 @@ class ExperimentSession:
             report = self.sequencer.wait_done(float(timeout) * count)
             if report is None:
                 raise TimeoutError(
-                    f"{count} Pulse run(s) did not report done within "
+                    f"{counted(count, 'Pulse run')} did not report done within "
                     f"{float(timeout) * count:g}s"
                 )
             if report.fault:

@@ -454,7 +454,11 @@ class AuthoringSchema:
             )
             if vacant and field.required:
                 if require_complete:
-                    raise ValueError(f"Enter {field.label}")
+                    raise ValueError(
+                        f"{field.label} must have at least one row"
+                        if str(field.value_type) == "rows"
+                        else f"{field.label} must be filled in"
+                    )
                 complete = False
             if field.choices and value is not None and not any(
                 _typed_equal(value, choice.value) for choice in field.choices

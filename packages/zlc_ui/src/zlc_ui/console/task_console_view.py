@@ -110,7 +110,7 @@ class TaskConsoleView(QtWidgets.QWidget):
         # Keep the full kind label and its arrow in the
         # same fixed slot on every screen scale.
         self.kind_combo.setFixedWidth(scaled_px(170, minimum=130))
-        self.add_panel_button = FluentButton("Add Panel")
+        self.add_panel_button = FluentButton("Add panel")
         self.add_panel_button.setEnabled(False)
 
         # Rendered as a push button rather than a toggle, so the button carries
@@ -169,7 +169,7 @@ class TaskConsoleView(QtWidgets.QWidget):
         self.board.order_committed.connect(self.panel_order_committed.emit)
         # An empty Monitor said nothing at all; it says how a panel arrives.
         self.monitor_hint = muted_note_label(
-            "No panels yet. Choose a Plot in the header and Add Panel, or turn on "
+            "No panels yet. Choose a Plot in the header and click Add panel, or turn on "
             "Plot on a Logic row before starting it."
         )
         self.monitor_hint.setWordWrap(True)

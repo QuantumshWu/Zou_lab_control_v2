@@ -2033,7 +2033,7 @@ def main(argv: list[str] | None = None) -> int:
     if arguments.no_mcp and (arguments.mcp_port is not None or arguments.mcp_read_only):
         parser.error("--no-mcp cannot be combined with other MCP options")
 
-    from zlc_ui import ensure_qt_app
+    from zlc_ui import counted, ensure_qt_app
 
     application = ensure_qt_app([])
 
@@ -2058,8 +2058,8 @@ def main(argv: list[str] | None = None) -> int:
             for _beat in range(3):
                 presenter.beat()
             print(
-                f"console ready: {len(presenter.panels)} panel(s), "
-                f"{len(presenter.offered_signals())} more signal(s) offerable"
+                f"console ready: {counted(len(presenter.panels), 'panel')}, "
+                f"{counted(len(presenter.offered_signals()), 'more signal')} offerable"
             )
             return 0
         finally:

@@ -86,7 +86,7 @@ class PulseComponentView(QtWidgets.QWidget):
         self._buttons = {}
         for action, text in (
             ("new", "New"), ("open", "Open"), ("save", "Save"),
-            ("save_as", "Save as"), ("insert", "Insert into Pulse"),
+            ("save_as", "Save as…"), ("insert", "Insert into Pulse"),
         ):
             button = FluentButton(text)
             button.clicked.connect(lambda _checked=False, a=action: self.action_requested.emit(a, self._context_id))
@@ -262,7 +262,7 @@ class PulseComponentView(QtWidgets.QWidget):
         self.name_edit.setEnabled(schedule is not None and not busy)
         instance = bool(self._context_id)
         self._buttons["save"].setText("Save Pulse" if instance else "Save")
-        self._buttons["save_as"].setText("Export file" if instance else "Save as")
+        self._buttons["save_as"].setText("Export file…" if instance else "Save as…")
         self._buttons["insert"].setText("Duplicate in Pulse" if instance else "Insert into Pulse")
         for action, button in self._buttons.items():
             button.setEnabled(not busy and (schedule is not None or action in ("new", "open")))

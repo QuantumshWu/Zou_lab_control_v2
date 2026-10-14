@@ -969,7 +969,7 @@ def test_a_loaded_card_forwards_control_to_the_session_window_owner(tmp_path) ->
     # A count is not a reason: the line must name WHICH device and WHY, or
     # an operator is left to guess at a bench that only says how many.
     severity, line = view.status[-1][0], view.status[-1][1]
-    assert "1 device(s) initialized: camera · 1 failed" in line
+    assert "1 device initialized: camera · 1 failed" in line
     assert "sequencer" in line and "not connected" in line and "RuntimeError" in line
     assert severity == "warning", "a device that did not start is not routine"
 
@@ -1042,7 +1042,7 @@ def test_a_scan_names_what_a_family_could_not_ask_beside_what_it_found(
     """A fabric announcer that could not be listed is named on the scan's line.
 
     It used to go only to a log no view shows, while the scan reported a
-    clean "discovered N device(s)" and that machine's devices were simply
+    clean "discovered N devices" and that machine's devices were simply
     missing from it.
     """
 
@@ -1067,7 +1067,7 @@ def test_a_scan_names_what_a_family_could_not_ask_beside_what_it_found(
         assert manager.discover() is True
         assert manager.discovered == (board,)
         assert view.status[-1] == (
-            "warning", f"discovered 1 device(s); remote.tunable: {skipped}"
+            "warning", f"discovered 1 device; remote.tunable: {skipped}"
         )
     finally:
         manager.close()

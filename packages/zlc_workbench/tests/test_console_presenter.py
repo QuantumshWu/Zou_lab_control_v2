@@ -958,7 +958,7 @@ def test_pausing_freezes_the_picture_and_keeps_the_bench_running(
 
         presenter.view.pause_toggled.emit(False)
         assert presenter.view.paused is False
-        assert "running" in presenter.view.summary
+        assert "live" in presenter.view.summary
         ticks.clear()
         presenter.beat()
         assert ticks == [True]

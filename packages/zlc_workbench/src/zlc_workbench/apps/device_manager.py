@@ -173,15 +173,15 @@ def main(argv: list[str] | None = None) -> int:
     print(f"apparatus: {path}", flush=True)
 
     if arguments.check:
-        from zlc_ui import open_device_manager
+        from zlc_ui import counted, open_device_manager
 
         # The same composition, through the same entry: a smoke test.
         window = open_device_manager(window_ratio=0.4)
         presenter = build(window, path)
         try:
             print(
-                f"device manager ready: {len(presenter.devices)} device(s), "
-                f"{len(presenter.types)} type(s) offerable"
+                f"device manager ready: {counted(len(presenter.devices), 'device')}, "
+                f"{counted(len(presenter.types), 'type')} offerable"
             )
             return 0
         finally:
