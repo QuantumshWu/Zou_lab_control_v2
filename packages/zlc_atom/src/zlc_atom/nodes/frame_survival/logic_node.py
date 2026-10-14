@@ -160,8 +160,11 @@ LOGIC_NODE = LogicNodeDescriptor(
         "Turn Occupancy occupied data into survival for the selected earlier/later "
         "frame pairs, retaining site and scan axes. Each value is the later verdict; "
         "validity requires the earlier frame occupied and both frames judgeable, so "
-        "Mean over repeats gives conditional survival. Feed survival to Seamless Scan "
-        "and use a site Facet with native Exponential fitting for per-site lifetimes."
+        "Mean over repeats gives conditional survival. Choose the pairs with selection: "
+        "all, consecutive (k->k+1), from_first (0->k) and to_last (k->last) follow the "
+        "frames the source carries; custom publishes exactly the listed pairs rows. "
+        "Feed survival to Seamless Scan and use a site Facet with native Exponential "
+        "fitting for per-site lifetimes."
     ),
     input_specs=(DatasetInputSpec("occupied", None, "exact"),),
     outputs=SURVIVAL_OUTPUTS,

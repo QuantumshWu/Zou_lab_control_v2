@@ -107,8 +107,12 @@ Occupancy reads Camera frames plus the chosen Calibration and publishes counts,
 occupied and judgement validity. Frame Survival consumes occupied, not counts.
 It publishes the later occupancy verdict with validity equal to earlier occupied
 AND both frames judgeable. Mean over trials is therefore conditional survival;
-the site axis remains available for per-site analysis. Configure the desired
-forward frame pair using the node's ordinary pairs fields.
+the site axis remains available for per-site analysis. Its `selection` field
+chooses the published forward pairs: `all`, `consecutive` (k→k+1), `from_first`
+(0→k) and `to_last` (k→last) are resolved against the frames the source carries,
+so they survive a Pulse that adds or removes a photograph; `custom` publishes
+exactly the `pairs` rows, e.g. `{"selection":"custom","pairs":[{"start":0,"end":1}]}`.
+Pairs rows given with any other selection are refused, not ignored.
 
 Derive is the existing route for expressions and named-axis reductions not
 already provided by a node. Its output names are authored, not a fixed empty
