@@ -12,7 +12,7 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 from zlc_ui.fluent import (
     detach_widget,
     FluentButton, FluentComboBox, FluentFrame, FluentLabel,
-    FluentReadoutEdit, FluentScrollArea, signals_blocked,
+    FluentReadoutEdit, FluentScrollArea, FluentSwitch, signals_blocked,
 )
 
 from ._layout import px
@@ -41,14 +41,10 @@ class PulsePreviewView(QtWidgets.QWidget):
         row.setSpacing(px(10, minimum=6))
         control_h = px(32, minimum=28)
 
-        # Toolbar toggles are chips, the same as the console's Selectors.
-        self.preview_include_off = FluentButton("Show off rows")
-        self.preview_include_off.setCheckable(True)
-        self.preview_include_off.setFixedHeight(control_h)
+        # On/off settings are switches, the same as the console's Selectors.
+        self.preview_include_off = FluentSwitch("Show off rows")
         self.preview_include_off.toggled.connect(self._include_off_changed)
-        self.preview_selectors_switch = FluentButton("Selectors")
-        self.preview_selectors_switch.setCheckable(True)
-        self.preview_selectors_switch.setFixedHeight(control_h)
+        self.preview_selectors_switch = FluentSwitch("Selectors")
         self.preview_selectors_switch.toggled.connect(self.selectors_toggled)
         self.preview_size_label = FluentLabel("Size")
         self.preview_size_combo = FluentComboBox()

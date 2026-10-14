@@ -1059,6 +1059,7 @@ def _data_projection(draft: dict[str, object]) -> dict[str, object]:
         },
         "table": _table_projection(draft),
         "dirty": bool(draft["modified"] or draft["unsaved"]),
+        "modified": bool(draft["modified"]),
         "can_apply": can_apply,
         "can_save": bool(draft["save_ready"] and not draft["modified"]),
         "save_suggested": str((Path(source_path).parent / suggested) if source_path is not None else suggested),

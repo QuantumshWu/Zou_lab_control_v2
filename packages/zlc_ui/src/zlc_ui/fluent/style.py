@@ -7,13 +7,15 @@ custom host surfaces.
 from __future__ import annotations
 
 #: The accent, and what every "this is the one chosen" state wears -- a
-#: toggle chip that is on, the current segmented choice, a chosen grid card,
-#: the picked row of a popup list, an active cycle combo: the fill alone, no
-#: edge, with TEXT ink (5.3:1).  It is told from a command by FILL -- 1.9:1
-#: against BUTTON_TINT -- and from the main command by ACCENT_STRONG (2.1:1).
+#: switch that is on (its track), the current segmented choice, a chosen grid
+#: card, the picked row of a popup list or a data table, an active cycle
+#: combo: the fill alone, no edge, with TEXT ink (5.3:1).  It is told from a
+#: command by FILL -- 1.9:1 against BUTTON_TINT -- and from the main command
+#: by ACCENT_STRONG (2.1:1).
 ACCENT = "#77AADD"
 #: The selection's hover and pressed faces: ACCENT stepped toward HOVER,
-#: TEXT ink still 4.8:1 and 4.6:1 on them.
+#: TEXT ink still 4.8:1 and 4.6:1 on them.  ACCENT_HOVER is also the track of
+#: an on switch under the pointer.
 ACCENT_HOVER = "#6DA2D5"
 ACCENT_PRESSED = "#699ED1"
 #: The accent at reading strength: a wash a dark number stays legible
@@ -25,36 +27,45 @@ ACCENT_TINT = "#E4EFF9"
 #: closes the shape.  A full-strength 2 px accent border read as an outline
 #: drawn around a card, not as the card being picked.
 SELECTION_EDGE = "#ACC4DD"
-#: The face of a standard command: the accent a step past ACCENT_TINT.
-#: ACCENT_TINT is the hover wash and sat 1.17:1 on a white card --
-#: a button there read as a selected cell, not a thing to press.  Dark-blue
-#: (HOVER) ink on it reads 7.8:1.
-BUTTON_TINT = "#D6E6F5"
+#: The face of a standard command: the accent a step past ACCENT_TINT, far
+#: enough from a white field (CIEDE2000 10.3) that a button beside an edit
+#: is a different object, not a second field.  ACCENT_TINT is the hover wash
+#: and sat 1.17:1 on a white card -- a button there read as a selected cell,
+#: not a thing to press.  Dark-blue (HOVER) ink on it reads 7.7:1; its hover
+#: and pressed faces step a quarter and nearly half way to ACCENT
+#: (#BDD6EF 6.6:1, #AACAEA 5.8:1).
+BUTTON_TINT = "#D4E5F5"
 #: The face of a surface's ONE run or commit command (Start, Init devices,
 #: Save Pulse): the accent's own hue, deep enough to carry white ink at 5.2:1.
 ACCENT_STRONG = "#2F6FB0"
 #: A grid card reached by a rule rather than chosen: the ACCENT_TINT wash, a
-#: dashed edge in DERIVED_EDGE (3.4:1 on white, dashes as long as their
-#: gaps) and its name in DERIVED_INK (5.0:1 on the wash).
+#: dashed edge in DERIVED_EDGE (3.4:1 on white, flat-capped dashes as long as
+#: their gaps) and its name in DERIVED_INK (5.0:1 on the wash).  The LABEL
+#: and the blue dashed EDGE are what tell it from an empty cell -- the wash
+#: is only 1.17:1 from white and is never asked to carry that alone.  On an
+#: on switch's white thumb DERIVED_EDGE at half strength is the hairline rim
+#: that keeps the thumb crisp on the ACCENT track.
 DERIVED_EDGE = "#5A8FC7"
 DERIVED_INK = "#40688F"
-#: Dark accent: the ink of a standard command (7.8:1 on BUTTON_TINT) and the
-#: keyboard-focus ring.
+#: Dark accent: the ink of a standard command (7.7:1 on BUTTON_TINT), of a
+#: command on a tinted card (9.9:1 on its white face) and the keyboard-focus
+#: ring.
 HOVER = "#004578"
 BG = "#F3F3F3"
 TEXT = "#323130"
 #: The edge of a field, and of an empty grid cell one can fill: 2.6:1 on
 #: white.  As text it is a prompt only -- see MUTED_INK.
 PLACEHOLDER = "#A19F9D"
-#: The label of a command that cannot be pressed now: still readable
-#: (3.2:1 on the BG face) where PLACEHOLDER read 2.4:1.
+#: The label of a command, and the text of a field, that cannot be used
+#: now: still readable (3.2:1 on the BG face) where PLACEHOLDER read 2.4:1.
 DISABLED_INK = "#8A8886"
 #: Quiet text that still CARRIES information -- a status line, a kind
 #: "(processor)", a summary, a hint, a table or grid header, a grid row's
-#: sub-line, an unselected tab, a placeholder that says what a blank does:
-#: 5.2:1 on white, 4.7:1 on the BG page, still lighter than TEXT.  GREY and
-#: GRAPHITE are strokes and dots, never words.
-MUTED_INK = "#6E6C6A"
+#: sub-line, an unselected tab, every field placeholder that is not a pure
+#: prompt: 5.6:1 on white, 5.0:1 on the BG page, 4.8:1 on ACCENT_TINT (a
+#: hovered row), still lighter than TEXT.  GREY and GRAPHITE are strokes and
+#: dots, never words.
+MUTED_INK = "#6A6866"
 DIVIDER = "#E1DFDD"
 GREEN = "#7FC2AD"
 RED = "#CD7380"
@@ -62,9 +73,14 @@ RED = "#CD7380"
 #: white) and of an error line.  RED itself is a dot and a fill colour; as
 #: text on white it was 3.3:1, too pale to read as the warning it is.
 RED_DARK = "#9E3B4A"
-#: RED as a wash: what a destructive command -- a ghost, no face at rest --
-#: wears under the pointer, RED_DARK ink still 5.4:1 on it.
+#: RED as a wash: what a destructive GLYPH (a row's ×, a ghost with no face
+#: at rest) wears under the pointer, RED_DARK ink still 5.4:1 on it.
 RED_TINT = "#F7E3E6"
+#: The face of every LABELLED destructive command -- Remove, Delete, Clear,
+#: Unload, Remove selected, Clear All: a seat of red so faint it sits among
+#: the light-blue commands without shouting, no edge, RED_DARK ink 5.9:1.
+#: Under the pointer it steps toward RED (#EFCED2, 4.5:1), pressed further.
+RED_SEAT = "#FBF0F1"
 ORANGE = "#D69A6E"
 ORANGE_TINT = "#F6E3D4"
 ORANGE_DARK = "#8A4B1F"
@@ -75,6 +91,9 @@ API_VIOLET_DARK = "#5A4A8A"
 #: Green, because it reads as "already settled" beside the orange a table
 #: sweeps and the violet a caller writes.
 CONFIG_GREEN = "#7FC2AD"
+#: The config green at reading strength: a config title, a config-bound
+#: value's ink, and the face of the "C" badge under its white letter (6.2:1;
+#: white on CONFIG_GREEN itself was 2.0:1).
 CONFIG_GREEN_DARK = "#2F6B58"
 CONFIG_GREEN_TINT = "#D1E8E1"
 GREY = "#A2A2A2"
@@ -170,6 +189,8 @@ __all__ = [
     "RADIUS",
     "RED",
     "RED_DARK",
+    "RED_SEAT",
+    "RED_TINT",
     "SURFACE",
     "TEXT",
     "TITLE_LEFT_INSET",

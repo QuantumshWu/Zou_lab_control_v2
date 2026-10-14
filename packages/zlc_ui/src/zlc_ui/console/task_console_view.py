@@ -21,6 +21,7 @@ from zlc_ui.fluent import (
     FluentLabel,
     FluentScrollArea,
     FluentStatusDot,
+    FluentSwitch,
     FluentTabWidget,
     fluent_widget_stylesheet,
     muted_note_label,
@@ -103,18 +104,16 @@ class TaskConsoleView(QtWidgets.QWidget):
         # is asking FOR, which is what makes the command reversible.
         self.pause_switch = FluentButton("Pause")
         self._paused = False
-        # A toolbar toggle is a chip: pressed in is on, the way a segmented
-        # choice marks its current item.  A sliding switch among buttons read
-        # as one more command.
-        self.selectors_switch = FluentButton("Selectors")
-        self.selectors_switch.setCheckable(True)
+        # An on/off setting is a switch, even in a row of commands: a
+        # checkable button there read as one more command.
+        self.selectors_switch = FluentSwitch("Selectors")
         self.save_screenshot_button = FluentButton("Save image")
         self.save_screenshot_button.setToolTip("Save one screenshot of TaskConsole")
         self.save_layout_button = FluentButton("Save")
         self.save_layout_button.setToolTip("Save the layout and signal wiring")
         self.load_layout_button = FluentButton("Load")
         self.load_layout_button.setToolTip("Load a saved layout and signal wiring")
-        self.clear_board_button = FluentButton("Clear", role="destructive", seated=True)
+        self.clear_board_button = FluentButton("Clear", role="destructive")
         self.clear_board_button.setToolTip("Remove every panel and logic node from the board")
 
         for widget in (

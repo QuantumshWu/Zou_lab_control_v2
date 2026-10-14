@@ -105,7 +105,7 @@ class PulseScanView(QtWidgets.QWidget):
         self.scan_run_button = FluentButton("Run", role="primary")
         self.scan_save_array_button = FluentButton("Save Array")
         self.scan_load_array_button = FluentButton("Load Array")
-        self.scan_clear_array_button = FluentButton("Clear Array", role="destructive", seated=True)
+        self.scan_clear_array_button = FluentButton("Clear Array", role="destructive")
         self.scan_clear_array_button.setToolTip("Remove the current scan table; keep the Python draft")
         self.scan_load_array_button.clicked.connect(self.load_array_requested)
         self.scan_clear_array_button.clicked.connect(self.clear_array_requested)

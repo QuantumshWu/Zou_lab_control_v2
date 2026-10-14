@@ -224,7 +224,6 @@ def _blank_or_number_edit(field: FormFieldProps) -> FluentLineEdit:
     widget = FluentLineEdit()
     widget.setMinimumWidth(scaled_px(120, minimum=96))
     widget.setPlaceholderText(_blank_placeholder(field))
-    widget.set_placeholder_is_information(True)
     _install_validator(field, widget)
     return widget
 
@@ -1078,10 +1077,8 @@ def _reconfigure_widget(
     if isinstance(widget, FluentLineEdit):
         if field.kind == "text":
             widget.setPlaceholderText(field.description[:48])
-            widget.set_placeholder_is_information(False)
         else:
             widget.setPlaceholderText(_blank_placeholder(field))
-            widget.set_placeholder_is_information(True)
             _install_validator(field, widget)
     elif isinstance(widget, FluentDoubleSpinBox):
         handler = _IntHandler if field.kind == "int" else _FloatHandler

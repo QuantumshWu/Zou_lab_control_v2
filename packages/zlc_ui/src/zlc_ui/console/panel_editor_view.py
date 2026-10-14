@@ -241,6 +241,7 @@ class PanelEditorView(QtWidgets.QWidget):
         self.save_auto_name.setChecked(True)
         self.save_name = FluentLineEdit()
         self.save_name.setPlaceholderText("File name")
+        self.save_name.set_placeholder_prompt()
         name_layout.addWidget(self.save_auto_name)
         name_layout.addWidget(self.save_name, 1)
         save_layout.addWidget(FluentSettingRow(

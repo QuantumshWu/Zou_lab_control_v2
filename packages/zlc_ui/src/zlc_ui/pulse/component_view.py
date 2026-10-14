@@ -46,6 +46,7 @@ class PulseComponentView(QtWidgets.QWidget):
         top.addWidget(FluentLabel("Name"))
         self.name_edit = FluentLineEdit("")
         self.name_edit.setPlaceholderText("Subpulse name")
+        self.name_edit.set_placeholder_prompt()
         self.name_edit.editingFinished.connect(self._name_committed)
         top.addWidget(self.name_edit, 1)
         self._buttons = {}

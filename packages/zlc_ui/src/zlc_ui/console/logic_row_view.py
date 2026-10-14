@@ -15,6 +15,7 @@ from zlc_ui.fluent import (
     FluentFrame,
     FluentLabel,
     FluentStatusDot,
+    FluentSwitch,
     popup_gap,
     retire_widget,
     scaled_px,
@@ -74,10 +75,8 @@ class LogicRowView(FluentFrame):
         self.status_label.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
         #: Beside Start because it says what Start will DO: with it on, the
         #: node's declared preview opens as an ordinary panel, already wired
-        #: to the signal.  A toggle CHIP, pressed in when on, so it reads as
-        #: a state among the commands and not as one more of them.
-        self.preview_switch = FluentButton("Plot")
-        self.preview_switch.setCheckable(True)
+        #: to the signal.  A SWITCH, a setting and not one more command.
+        self.preview_switch = FluentSwitch("Plot")
         self.preview_switch.setToolTip(
             "Open this node's plot panel when it starts"
         )

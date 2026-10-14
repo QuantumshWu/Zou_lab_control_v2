@@ -156,6 +156,7 @@ class PeriodCard(FluentGroupBox):
         top_layout.addWidget(self.unit_combo)
         self.name_edit = FluentLineEdit("")
         self.name_edit.setPlaceholderText("name")
+        self.name_edit.set_placeholder_prompt()
         self.name_edit.setFixedWidth(control_width)
         # A spacer is named by the editor, not the operator: the name is
         # shown where every card shows its name and cannot be typed into.
@@ -460,6 +461,7 @@ class ChannelNamesPanel(FluentGroupBox):
         self.name_edit = FluentLineEdit("")
         self.document_name_edit = self.name_edit
         self.name_edit.setPlaceholderText("pulse name")
+        self.name_edit.set_placeholder_prompt()
         self.name_edit.editingFinished.connect(lambda: self.document_name_committed.emit(self.name_edit.text()))
         # What the pulse adds up to is read, not typed: readouts, not
         # switched-off fields.
@@ -949,6 +951,7 @@ class ComponentCard(FluentGroupBox):
         self.name_edit.setFixedWidth(control_width)
         self.name_edit.setAlignment(QtCore.Qt.AlignCenter)
         self.name_edit.setPlaceholderText("Name")
+        self.name_edit.set_placeholder_prompt()
         self.name_edit.editingFinished.connect(self._commit_name)
         self.end_label = ElidedLabel(component.name, align=QtCore.Qt.AlignCenter)
         self.end_label.setFixedSize(control_width, row_height())
@@ -1031,6 +1034,10 @@ class ComponentCard(FluentGroupBox):
         self.set_surface(fill=CONFIG_GREEN_TINT if component.config_active else None,
                          edge=CONFIG_GREEN if component.config_active else ACCENT)
         self.set_title_color(CONFIG_GREEN_DARK if component.config_active else ACCENT)
+        # On the green card a light-blue face would lay a second hue on it
+        # and lose its edge: the commands go white with the field edge.
+        for button in (self.expand_button, self.edit_button, self.ungroup_button):
+            button.set_on_tint(component.config_active)
         self.source_button.source = component.source
         self.source_button.setToolTip(component.error or f"Subpulse source: {component.source.title()}")
         self.source_button.update()
@@ -1701,11 +1708,11 @@ class PulseScheduleView(QtWidgets.QWidget):
         self.sync_button = FluentButton("Sync")
         self.add_button = FluentButton("Add Period")
         self.spacer_button = FluentButton("Add Spacer")
-        self.remove_button = FluentButton("Remove", role="destructive", seated=True)
+        self.remove_button = FluentButton("Remove", role="destructive")
         self.bracket_button = FluentButton("Add Bracket")
-        # Saving the document being edited is this page's one commit: primary
-        # with its star while the file is behind the editor, a standard
-        # command while there is nothing to save.
+        # One primary at a time: On Pulse while it can run and the document
+        # is saved; Save Pulse, with its star, while the file is behind the
+        # editor -- On Pulse is then a standard command.
         self.save_button = FluentButton("Save Pulse")
         self.load_button = FluentButton("Load")
         self.collapse_button = FluentButton("Collapse")
@@ -2230,6 +2237,9 @@ class PulseScheduleView(QtWidgets.QWidget):
         self.run_button.setEnabled(bool(can_run))
         self.run_button.setText(
             "On Pulse" if bool(running) and bool(synchronized) else "On Pulse*"
+        )
+        self.run_button.set_role(
+            "primary" if bool(can_run) and not bool(file_dirty) else "standard"
         )
         self.stop_button.setEnabled(bool(can_stop))
         self.sync_button.setEnabled(bool(can_run) and self._capabilities["can_sync"])

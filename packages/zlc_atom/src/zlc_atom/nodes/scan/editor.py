@@ -448,6 +448,7 @@ class _ManualAxisRow(_AxisRow):
         QtWidgets.QWidget.__init__(self, parent)
         self.name_edit = FluentLineEdit()
         self.name_edit.setPlaceholderText("manual axis name")
+        self.name_edit.set_placeholder_prompt()
         identity = QtWidgets.QWidget(self)
         identity_layout = QtWidgets.QHBoxLayout(identity)
         identity_layout.setContentsMargins(0, 0, 0, 0)

@@ -27,6 +27,7 @@ from zlc_ui.fluent import (
     FluentScrollArea,
     FluentSettingRow,
     FluentStatusDot,
+    FluentSwitch,
     FluentTreeComboBox,
     FONT,
     fill_grouped_choice_combo,
@@ -188,8 +189,7 @@ class LogicEditorView(QtWidgets.QWidget):
         # opens its Edit and focuses it -- so the switch that says what Start
         # will do belongs here too.  Both views show the SAME preference: it
         # lives on the node's binding, and neither widget keeps a default.
-        self.preview_switch = FluentButton("Plot")
-        self.preview_switch.setCheckable(True)
+        self.preview_switch = FluentSwitch("Plot")
         self.preview_switch.setToolTip(
             "Open this node's plot panel when it starts"
         )

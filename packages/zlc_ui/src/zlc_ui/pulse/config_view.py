@@ -50,7 +50,7 @@ class PulseConfigView(QtWidgets.QWidget):
             ("refresh", "Refresh", "standard"), ("save", "Save", "standard"),
             ("save_as", "Save as", "standard"), ("unload", "Unload", "destructive"),
         ):
-            button = FluentButton(text, role=role, seated=True)
+            button = FluentButton(text, role=role)
             button.setFixedHeight(row_height())
             button.clicked.connect(getattr(self, f"{name}_requested"))
             setattr(self, f"{name}_button", button)
@@ -61,7 +61,6 @@ class PulseConfigView(QtWidgets.QWidget):
         # The chosen file is read, not typed: Load and Save as choose it.
         self.path_text = FluentReadoutEdit("")
         self.path_text.setPlaceholderText("No value file selected")
-        self.path_text.set_placeholder_is_information(True)
         file_layout.addWidget(self.path_text)
         self.file_status = ElidedLabel("Save the Config file before using its values.")
         file_layout.addWidget(self.file_status)
@@ -92,7 +91,7 @@ class PulseConfigView(QtWidgets.QWidget):
         file_layout.addWidget(self.values_table)
         actions = QtWidgets.QHBoxLayout()
         self.add_button = FluentButton("Add parameter")
-        self.remove_button = FluentButton("Remove selected", role="destructive", seated=True)
+        self.remove_button = FluentButton("Remove selected", role="destructive")
         self.add_button.clicked.connect(self._add_entry)
         self.remove_button.clicked.connect(self._remove_entries)
         actions.addWidget(self.add_button)

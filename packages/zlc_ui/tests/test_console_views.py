@@ -2204,18 +2204,16 @@ finally:
     )
 
 
-def test_the_auto_preview_control_is_a_chip_that_looks_different_when_on(run_qt) -> None:
-    """A checkable FluentButton once drew NO checked state: on and off were
-    the same pixels, in the same accent as Edit beside it, so the control read
-    as a fourth command button and an operator could not find the toggle at
-    all.  Checked, a button is now a toggle chip, pressed in the way a
-    segmented choice marks its current item.
+def test_the_auto_preview_control_is_a_switch_that_looks_different_when_on(run_qt) -> None:
+    """A checkable FluentButton once drew NO checked state, and a later toggle
+    chip still read as one more command among Start and Edit.  The setting
+    is a FluentSwitch: a track that is visibly on or off, its label beside it.
     """
 
     run_qt(
         """
 from zlc_ui.qt import ensure_qt_app
-from zlc_ui.fluent import FluentButton
+from zlc_ui.fluent import FluentSwitch
 from zlc_ui.console import logic_row_view as tested_module
 
 app = ensure_qt_app(['test'])
@@ -2225,7 +2223,7 @@ row.show()
 app.processEvents()
 
 switch = row.preview_switch
-assert isinstance(switch, FluentButton) and switch.isCheckable(), type(switch)
+assert isinstance(switch, FluentSwitch), type(switch)
 
 seen = []
 switch.toggled.connect(seen.append)
@@ -2273,7 +2271,7 @@ def test_the_editor_shows_the_same_preview_switch_beside_its_own_start(run_qt) -
     run_qt(
         """
 from zlc_ui.qt import ensure_qt_app
-from zlc_ui.fluent import FluentButton
+from zlc_ui.fluent import FluentSwitch
 from zlc_ui.form import FormSpec
 from zlc_ui.console import logic_editor_view as tested_module
 
@@ -2297,7 +2295,7 @@ editor.resize(900, 420)
 editor.show()
 app.processEvents()
 switch = editor.preview_switch
-assert isinstance(switch, FluentButton) and switch.isCheckable(), type(switch)
+assert isinstance(switch, FluentSwitch), type(switch)
 assert switch.isChecked() is False, 'the editor shows the stored preference'
 
 # Beside Start, in pixels: same row, immediately to its left.  Start keeps

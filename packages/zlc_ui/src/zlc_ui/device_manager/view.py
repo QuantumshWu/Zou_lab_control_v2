@@ -75,6 +75,7 @@ class _DeviceCard(FluentFrame):
         self.name_label = muted_note_label("Role")
         self.role_edit = FluentLineEdit()
         self.role_edit.setPlaceholderText("role")
+        self.role_edit.set_placeholder_prompt()
         self.type_combo = FluentComboBox()
         self.remove_button = FluentButton("Remove", role="destructive")
         header.addWidget(self.collapse_button)
@@ -186,10 +187,9 @@ class _LiveDeviceCard(FluentFrame):
         #: One click beside Control publishes this device on the bench
         #: fabric, so the OTHER machine's "Scan hardware" finds it with no
         #: address typed anywhere.  A second click withdraws it.
-        self.remote_button = FluentButton("Remote")
-        # A chip: published is a STATE, and the chip shows the bench's
+        # A switch: published is a STATE, and the switch shows the bench's
         # answer, never the click -- see _remote_clicked.
-        self.remote_button.setCheckable(True)
+        self.remote_button = FluentSwitch("Remote")
         #: The device's own console: who is on its knobs -- local tunes,
         #: its in-process server, and remote clients once published.
         self.log_button = FluentButton("Log")
@@ -220,13 +220,13 @@ class _LiveDeviceCard(FluentFrame):
     ) -> None:
         self.role_label.setText(str(role))
         self.detail_label.setText(str(type_id))
-        # The chip state alone says published; the caption stays put so the
+        # The switch alone says published; the caption stays put so the
         # row's layout does not shuffle every time Remote is toggled.
         self.remote_button.setChecked(bool(remote))
         self.setToolTip(f"Internal ID: {self.instance_id}")
 
     def _remote_clicked(self, checked: bool) -> None:
-        # Qt flipped the chip on the click; put it back and ask.  Whether
+        # Qt flipped the switch on the click; put it back and ask.  Whether
         # the device is published is the bench's to say, through set_record.
         self.remote_button.setChecked(not checked)
         self.device_remote_toggled.emit(self.instance_id)
@@ -872,6 +872,10 @@ class DeviceManagerView(QtWidgets.QWidget):
 
         shown = f"{name}{'*' if dirty else ''}"
         self.document_name.setText(shown)
+        # One primary at a time: Save, with its star, while the apparatus
+        # has unsaved edits; Init devices again once it is saved.
+        self.save_button.set_dirty(bool(dirty))
+        self.lifecycle_button.set_role("standard" if dirty else "primary")
         self.document_name.setToolTip(
             f"{name} ({'saved' if saved and not dirty else 'unsaved draft'})"
         )

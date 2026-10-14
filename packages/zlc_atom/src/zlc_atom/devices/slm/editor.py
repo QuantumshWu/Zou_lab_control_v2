@@ -269,8 +269,7 @@ class SlmEditorControl(QtCore.QObject):
         self._intensity.setDecimals(3)
         self._intensity.setValue(1.0)
         controls.addWidget(self._intensity)
-        self._selectors = FluentButton("Selectors", edit)
-        self._selectors.setCheckable(True)
+        self._selectors = FluentSwitch("Selectors", edit)
         self._selectors.setToolTip(
             "Enable plot selectors, wheel zoom, and pan; disable to paint the target"
         )
@@ -293,7 +292,7 @@ class SlmEditorControl(QtCore.QObject):
                 minimum_height=360,
             )
         )
-        clear = FluentButton("Clear", edit, role="destructive", seated=True)
+        clear = FluentButton("Clear", edit, role="destructive")
         clear.clicked.connect(
             lambda: self.set_target(
                 np.zeros(self.shape, dtype=np.float32), objective_kind="spots"
