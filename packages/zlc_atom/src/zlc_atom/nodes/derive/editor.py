@@ -15,17 +15,19 @@ text.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from html import escape
 
 from PyQt5 import QtCore, QtWidgets
 
 from zlc_ui.fluent import (
-    AXIS_GROUP_COLORS, CARD_PAD, FluentButton, FluentCheckBox, FluentCodeEdit, FluentColumnLine, FluentColumnSet,
-    FluentComboBox, FluentFrame, FluentLabel, FluentLineEdit, FluentSectionLabel, FluentSegmentedButtons,
-    error_note_label, field_text_inset, hold_place, row_gap, muted_note_label, popup_gap, retire_widget,
-    scaled_px, show_note, signals_blocked,
+    AXIS_GROUP_COLORS, FluentButton, FluentCheckBox, FluentCodeEdit, FluentColumnLine, FluentColumnSet,
+    FluentComboBox, FluentFrame, FluentLabel, FluentLineEdit, FluentSegmentedButtons, card_pad,
+    error_note_label, field_text_inset, fluent_scrollbar_thickness, hold_place, muted_note_label, popup_gap,
+    retire_widget, row_gap, scaled_px, section_gap, show_note, signals_blocked,
 )
+from zlc_ui.fluent.column_set import section_header
 from zlc_ui.fluent.fluent import _FluentRoundedMenu
 
 from .expression import (
@@ -88,7 +90,7 @@ def _text_word(text: str) -> QtWidgets.QLabel:
 
 def _card_column(card: QtWidgets.QWidget) -> QtWidgets.QVBoxLayout:
     column = QtWidgets.QVBoxLayout(card)
-    pad = scaled_px(CARD_PAD)
+    pad = card_pad()
     column.setContentsMargins(pad, pad, pad, pad)
     column.setSpacing(row_gap())
     return column
@@ -414,6 +416,8 @@ class _CodeCard(FluentFrame):
         self.code.setLineWrapMode(QtWidgets.QPlainTextEdit.NoWrap)
         self.code.setTabStopDistance(self.code.fontMetrics().horizontalAdvance("    "))
         self.code.textChanged.connect(self._code_changed)
+        # A line wider than the box brings the horizontal bar: the box grows by it.
+        self.code.horizontalScrollBar().rangeChanged.connect(lambda _low, _high: self._fit_height())
         column.addWidget(self.code)
         self._inserts: tuple[str, ...] = ()
         self.example = _under_lines(editor.columns, muted_note_label(""))
@@ -437,12 +441,21 @@ class _CodeCard(FluentFrame):
             self._edit(code=self.code.toPlainText())
 
     def _fit_height(self) -> None:
-        lines = min(14, max(2, self.code.document().blockCount()))
-        margins = self.code.contentsMargins()
-        height = (lines * self.code.fontMetrics().lineSpacing() + 2 * self.code.document().documentMargin()
-                  + margins.top() + margins.bottom() + scaled_px(10))
-        if self.code.height() != int(height):
-            self.code.setFixedHeight(int(height))
+        """As tall as its lines (up to 14), with the inset a field's text has
+        above the first line and the same below the last.  A line is as tall
+        as the layout lays it -- the font's fractional height rounded up --
+        not the font metrics' rounded line spacing, a pixel short a line;
+        and a plain text edit counts its last line in view only with one
+        pixel to spare, so the box keeps that pixel or it scrolls.  A line
+        wider than the box adds the horizontal bar under the lines."""
+
+        document = self.code.document()
+        lines = min(14, max(1, document.blockCount()))
+        line = self.code.blockBoundingRect(document.firstBlock()).height()
+        bar = fluent_scrollbar_thickness() if self.code.horizontalScrollBar().maximum() > 0 else 0
+        height = math.ceil(lines * line) + 2 * field_text_inset() + 1 + bar
+        if self.code.height() != height:
+            self.code.setFixedHeight(height)
 
     def _show_inserts(self) -> None:
         """This bundle's names below Insert, built for this click."""
@@ -513,26 +526,22 @@ class DeriveEditor(QtWidgets.QWidget):
         inputs.addWidget(self.inputs_title, 0, QtCore.Qt.AlignTop)
         self.inputs = QtWidgets.QGridLayout()
         self.inputs.setContentsMargins(field_text_inset(), 0, 0, 0)
-        self.inputs.setHorizontalSpacing(scaled_px(14))
-        self.inputs.setVerticalSpacing(scaled_px(2))
+        # Words in columns, not bordered cells: the columns stand a section
+        # gap apart, or a member and its type read as one phrase.
+        self.inputs.setHorizontalSpacing(section_gap())
+        self.inputs.setVerticalSpacing(row_gap())
         inputs.addLayout(self.inputs)
         inputs.addStretch(1)
         layout.addLayout(inputs)
         self._input_rows: list[tuple[QtWidgets.QLabel, ...]] = []
 
-        header = QtWidgets.QHBoxLayout()
-        header.setSpacing(row_gap())
-        title = FluentSectionLabel("Outputs")
-        # Centred on the buttons beside it, not dropped below them like an own-line section.
-        title.setContentsMargins(0, 0, 0, 0)
-        header.addWidget(title)
-        header.addStretch(1)
         self.add_output = FluentButton("Add output", self)
         self.add_output.clicked.connect(lambda: self._add("structured"))
-        header.addWidget(self.add_output)
         self.add_code = FluentButton("Add code output", self)
         self.add_code.clicked.connect(lambda: self._add("code"))
-        header.addWidget(self.add_code)
+        _title, header = section_header("Outputs", actions=(self.add_output, self.add_code))
+        # A new section under the Inputs row: the section gap above its title.
+        layout.addSpacing(section_gap() - row_gap())
         layout.addLayout(header)
         self.empty = muted_note_label(
             "No outputs yet. An output picks a value, pins it at a frame, and can mask, combine and reduce it.")

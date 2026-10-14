@@ -246,8 +246,9 @@ def test_pair_overrides_keep_the_rule_and_last_identity() -> None:
 def test_pair_matrix_selects_like_a_table_and_writes_the_draft() -> None:
     from PyQt5 import QtCore, QtTest, QtWidgets
     from zlc_atom.nodes.frame_survival.logic_node import FRAME_SURVIVAL_SCHEMA, LOGIC_NODE
+    from zlc_ui.qt import ensure_qt_app
 
-    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    app = ensure_qt_app(["zlc-frame-survival-test"])
     form = LOGIC_NODE.ui_contributions[0]()
     drafts = []
     form.draft_changed.connect(drafts.append)

@@ -53,9 +53,11 @@ from zlc_ui.fluent import (
     fluent_unit_picker,
     row_gap,
     muted_note_label,
+    section_gap,
     show_note,
     signals_blocked,
 )
+from zlc_ui.fluent.column_set import section_header
 from zlc_ui.form import FluentParameterForm, FormFieldProps, FormSpec, being_edited
 
 from zlc_data.units import DEFAULT_UNITS
@@ -557,22 +559,18 @@ class ScanPlanEditor(QtWidgets.QWidget):
         column = QtWidgets.QVBoxLayout(self)
         column.setContentsMargins(0, 0, 0, 0)
         column.setSpacing(row_gap())
-        header = QtWidgets.QHBoxLayout()
-        header.setSpacing(row_gap())
-        title = FluentSectionLabel("Scan plan")
-        # Centred on the buttons beside it, not dropped below them like an own-line section.
-        title.setContentsMargins(0, 0, 0, 0)
         self.add_button = FluentButton("Add axis")
         self.add_manual_button = FluentButton("Add manual axis")
-        header.addWidget(title)
-        header.addStretch(1)
-        header.addWidget(self.add_button)
-        header.addWidget(self.add_manual_button)
+        _title, header = section_header("Scan plan", actions=(self.add_button, self.add_manual_button))
         column.addLayout(header)
         self.rows_layout = QtWidgets.QVBoxLayout()
         self.rows_layout.setSpacing(row_gap())
         column.addLayout(self.rows_layout)
-        self.summary = FluentLabel("")
+        # Why the plan cannot be read stands under its rows in the one error
+        # line; what the plan IS stands there as a muted note (:meth:`_say`).
+        self.problem = error_note_label()
+        column.addWidget(self.problem)
+        self.summary = muted_note_label("")
         self.summary.setWordWrap(True)
         column.addWidget(self.summary)
 
@@ -580,6 +578,11 @@ class ScanPlanEditor(QtWidgets.QWidget):
         # nothing sweeps them, they are the numbers the pulse holds while the
         # table plays.  A slot the plan DOES scan is left out -- the table
         # already says what it plays, and two places saying it is one too many.
+        # A section of its own: the section gap above its title is sized
+        # with the section's visibility (:meth:`_show_values`).
+        self._values_gap = QtWidgets.QSpacerItem(
+            0, 0, QtWidgets.QSizePolicy.Minimum, QtWidgets.QSizePolicy.Fixed)
+        column.addItem(self._values_gap)
         self.values_title = FluentSectionLabel("API values")
         column.addWidget(self.values_title)
         # THE SHARED FORM, RECONCILED.  This section was a grid rebuilt from
@@ -594,7 +597,9 @@ class ScanPlanEditor(QtWidgets.QWidget):
             lambda key: self._value_changed(key, normalized=True)
         )
         column.addWidget(self.values_form)
-        self.values_note = FluentLabel("")
+        self.values_error = error_note_label()
+        column.addWidget(self.values_error)
+        self.values_note = muted_note_label("")
         self.values_note.setWordWrap(True)
         column.addWidget(self.values_note)
 
@@ -674,9 +679,9 @@ class ScanPlanEditor(QtWidgets.QWidget):
                         row.custom_label.setToolTip("Range (inactive in Values mode)")
             self.add_button.hide()
             self.add_manual_button.hide()
-            self.values_title.hide()
-            self.values_form.hide()
+            self._show_values(False)
             self.values_note.hide()
+            show_note(self.values_error, "")
             return
         labels = dict(projection.get("device_labels") or {})
         labels_changed = labels != self._device_labels
@@ -739,7 +744,7 @@ class ScanPlanEditor(QtWidgets.QWidget):
                 self._start_port_read()
                 return
             self._apply_projection(template_ports, sequence, plan_text, values_text)
-            self.summary.setText("Device range reads require the console's device worker.")
+            show_note(self.problem, "Device range reads require the console's device worker.")
             return
         self._port_read_request = None
         self._apply_projection(template_ports, sequence, plan_text, values_text)
@@ -750,7 +755,7 @@ class ScanPlanEditor(QtWidgets.QWidget):
             return
         key, devices, units = request
         self._port_read_pending = True
-        self.summary.setText("Reading device ranges…")
+        self._say(summary="Reading device ranges…")
         owner_ref = weakref(self)
 
         def work():
@@ -768,7 +773,8 @@ class ScanPlanEditor(QtWidgets.QWidget):
                 owner._start_port_read()
                 return
             if error is not None:
-                owner.summary.setText(f"Cannot read device ranges: {error}")
+                owner._refresh_summary()
+                show_note(owner.problem, f"Cannot read device ranges: {error}")
                 return
             owner._port_read_request = None
             owner._device_scan_ports = (key, tuple(ports))
@@ -955,13 +961,25 @@ class ScanPlanEditor(QtWidgets.QWidget):
             self._loading = False
         self._values_broken = bool(broken)
         shown = bool(self.values_form.keys) or bool(broken)
-        self.values_title.setVisible(shown)
-        self.values_form.setVisible(shown)
-        self.values_note.setVisible(shown)
+        self._show_values(shown)
+        # A pulse that cannot be read says so in the error line; the muted
+        # note is for what the rows set.
+        show_note(self.values_error, broken)
+        self.values_note.setVisible(shown and not broken)
         if broken:
-            self.values_note.setText(broken)
             return
         self._refresh_values_note()
+
+    def _show_values(self, shown: bool) -> None:
+        """Show or hide the API values section, with the section gap above its title."""
+
+        self._values_gap.changeSize(
+            0, section_gap() - row_gap() if shown else 0,
+            QtWidgets.QSizePolicy.Minimum, QtWidgets.QSizePolicy.Fixed,
+        )
+        self.layout().invalidate()
+        self.values_title.setVisible(shown)
+        self.values_form.setVisible(shown)
 
     def _rescope_values(self) -> None:
         """The projected text, re-read against THIS pulse.
@@ -1194,7 +1212,7 @@ class ScanPlanEditor(QtWidgets.QWidget):
             if row.input_stack.currentIndex() == 0:
                 for spin in (row.start_spin, row.stop_spin, row.points_spin):
                     if error := spin.property("numericError"):
-                        self.summary.setText(str(error))
+                        self._say(problem=str(error))
                         return
         self._align_columns()
         ordered = sorted(self._rows, key=lambda row: host_advanced_port(
@@ -1214,17 +1232,23 @@ class ScanPlanEditor(QtWidgets.QWidget):
         self.draft_changed.emit(patch)
         self._refresh_summary()
 
+    def _say(self, *, summary: str = "", problem: str = "") -> None:
+        """Under the rows: what the plan is, or why it cannot be read."""
+
+        show_note(self.problem, problem)
+        show_note(self.summary, summary)
+
     def _refresh_summary(self) -> None:
         if not self._rows:
-            self.summary.setText(
+            self._say(summary=(
                 "No axes yet.  Each row is one axis, outermost first; "
                 "every point plays the pulse and captures one measurement."
-            )
+            ))
             return
         try:
             plan = self._current_plan()
         except (ValueError, TypeError) as error:
-            self.summary.setText(str(error))
+            self._say(problem=str(error))
             return
         shape = " × ".join(str(n) for n in plan.shape)
         manual = tuple(
@@ -1257,8 +1281,8 @@ class ScanPlanEditor(QtWidgets.QWidget):
                 "between fires."
             )
         )
-        self.summary.setText(
+        self._say(summary=(
             f"{len(plan.axes)} axis(es), {shape} = {plan.point_count} points, "
             "outermost first; each point resolves the template, plays it, and "
             f"captures one measurement.{by_hand}{by_device}"
-        )
+        ))

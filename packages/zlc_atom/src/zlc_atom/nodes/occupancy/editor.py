@@ -17,11 +17,17 @@ clicking its name.  A file row is one line, as tall as every other
 control: what the file is (its exposure, sites and model) is in the name's
 tooltip with its path.  The readout model -- which model each file is read
 with, set once -- is a segmented choice under the files it applies to: the
-four models are this node's closed set.  The file names are the
-editor's label column, shared with the form: the title, the model's label
-and the names end where the form's labels do (the longest name widens the
-column for all of them), so Add, the first card, the model choice and the
-form's fields start on one edge.  The console resolves the
+four models are this node's closed set.
+
+The section opens like every editor's section: its title, then at the right
+end its summary and "Add calibration…".  The file names stand in the
+editor's label column, shared with the form, so the first card, the model
+choice and the form's fields start on one edge.  The column is set by the
+labels that stay ("Readout model", the form's), never by a file name, so it
+does not move as files come and go.  A row names its file by its stem --
+every calibration is a .json, so the extension tells no row from another --
+elided in the middle when it is wider than the column; the tooltip reads
+the whole path.  The console resolves the
 files and projects how the source's frames read them; this widget only
 draws that and writes the edits back.
 """
@@ -30,22 +36,24 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PyQt5 import QtCore, QtWidgets
+from PyQt5 import QtCore, QtGui, QtWidgets
 
 from zlc_ui.fluent import (
+    FONT,
     TEXT,
     FluentButton,
     FluentLabel,
-    FluentSectionLabel,
     FluentSegmentedButtons,
     FluentSelectionGrid,
     error_note_label,
+    fluent_font_size,
     fluent_open_path,
-    row_gap,
     muted_note_label,
-    scaled_px,
+    row_gap,
+    setting_label_width,
     show_note,
 )
+from zlc_ui.fluent.column_set import section_header
 
 from zlc_atom.nodes._framework.frames import FIRST, LAST, REST, canonical_frames, reach_frames
 from zlc_atom.nodes.calibration import DEFAULT_READOUT_MODEL_CHOICE, READOUT_MODEL_CHOICES
@@ -70,20 +78,10 @@ class CalibrationsEditor(QtWidgets.QWidget):
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(row_gap())
-        header = QtWidgets.QHBoxLayout()
-        # The label-to-field spacing of a setting row: with the title in the
-        # label column, Add starts on the form's field edge.
-        header.setSpacing(row_gap())
-        self.title = FluentSectionLabel("Calibrations")
-        # Centred on the button beside it, not dropped below it like an own-line section.
-        self.title.setContentsMargins(0, 0, 0, 0)
-        header.addWidget(self.title)
+        self.summary = muted_note_label("")
         self.add_button = FluentButton("Add calibration…")
         self.add_button.clicked.connect(self._browse_new)
-        header.addWidget(self.add_button)
-        header.addStretch(1)
-        self.summary = muted_note_label("")
-        header.addWidget(self.summary)
+        _title, header = section_header("Calibrations", summary=self.summary, actions=(self.add_button,))
         layout.addLayout(header)
         self.grid = FluentSelectionGrid(
             self, toggle=True,
@@ -97,12 +95,9 @@ class CalibrationsEditor(QtWidgets.QWidget):
         layout.addWidget(self.grid, 0, QtCore.Qt.AlignLeft)
         self.note = error_note_label()
         layout.addWidget(self.note)
-        self.hint = muted_note_label(_HINT)
-        self.hint.setWordWrap(True)
-        layout.addWidget(self.hint)
         self.model_row = QtWidgets.QWidget(self)
         model_layout = QtWidgets.QHBoxLayout(self.model_row)
-        model_layout.setContentsMargins(0, scaled_px(6), 0, 0)
+        model_layout.setContentsMargins(0, 0, 0, 0)
         model_layout.setSpacing(row_gap())
         # A field label like "Frames" above it, not a second hint line.
         self.model_label = FluentLabel("Readout model")
@@ -116,24 +111,37 @@ class CalibrationsEditor(QtWidgets.QWidget):
         model_layout.addWidget(self.model)
         model_layout.addStretch(1)
         layout.addWidget(self.model_row)
+        # The section's hint is its last line, under everything it explains.
+        self.hint = muted_note_label(_HINT)
+        self.hint.setWordWrap(True)
+        layout.addWidget(self.hint)
         self._entries: tuple[dict, ...] = ()
         self._columns: tuple = ()
         self._shown: tuple = ()
         self._base_dir = ""
         self._filter = "All files (*)"
+        #: The label column the file names are fitted to; None until the host sets it.
+        self._label_width: int | None = None
+        #: What the grid was last drawn from, to draw it again for a new column.
+        self._drawn = None
 
     def row_labels(self) -> tuple[str, ...]:
-        """The labels this editor puts in the editor's label column: its
-        title, the model's label and the file names."""
+        """The labels that set the editor's label column: the model's label.
+        The file names stand in the column too, fitted to it (:func:`_fitted`),
+        so a long one never moves the form's fields."""
 
-        return (self.title.text(), self.model_label.text(), *(_name(entry) for entry in self._entries))
+        return (self.model_label.text(),)
 
     def set_label_width(self, width: int) -> None:
         """The editor's label column, shared with the form's "Frames" row."""
 
-        self.title.setFixedWidth(int(width))
-        self.model_label.setFixedWidth(int(width))
-        self.grid.set_label_width(int(width))
+        width = int(width)
+        self.model_label.setFixedWidth(width)
+        self.grid.set_label_width(width)
+        if width != self._label_width:
+            self._label_width = width
+            if self._drawn is not None:
+                self._draw(*self._drawn)
 
     # ---------------------------------------------------------------- reading
 
@@ -147,7 +155,8 @@ class CalibrationsEditor(QtWidgets.QWidget):
         self._filter = str(claims["file_filter"])
         frames = projection.get("source_frames")
         self.model.set_current(projection["form_values"]["model_kind"])
-        self._draw(frames, claims["files"], claims["problems"])
+        self._drawn = (frames, claims["files"], claims["problems"])
+        self._draw(*self._drawn)
 
     def _draw(self, frames, files, problems) -> None:
         entries = self._entries
@@ -219,11 +228,12 @@ class CalibrationsEditor(QtWidgets.QWidget):
             ) if part)
             for index, (entry, item) in enumerate(zip(entries, files))
         )
-        shown = (names, labels, tuple(sorted(cells.items())), row_tips)
+        fitted = tuple(_fitted(_stem(entry), self._label_width) for entry in entries)
+        shown = (fitted, labels, tuple(sorted(cells.items())), row_tips)
         if shown != self._shown:
             self._shown = shown
             self.grid.set_grid(
-                names, labels, cells, row_tips=row_tips,
+                fitted, labels, cells, row_tips=row_tips,
                 narrow_columns=(self._columns.index(_GAP),),
             )
         self.grid.set_cell_states(states, tips)
@@ -324,6 +334,25 @@ class CalibrationsEditor(QtWidgets.QWidget):
 
 def _name(entry) -> str:
     return Path(entry["path"]).name if entry["path"] else "(no file)"
+
+
+def _stem(entry) -> str:
+    return Path(entry["path"]).stem if entry["path"] else "(no file)"
+
+
+def _fitted(name: str, width: int | None) -> str:
+    """``name`` as the label column shows it: whole while it fits the room
+    any label has in a ``width`` column (the column less the slack
+    :func:`setting_label_width` leaves after its widest label), else elided
+    in the middle, keeping the start and the end that tell files apart
+    (``readout_50ms`` whole, ``backg…d_5ms``)."""
+
+    if width is None:
+        return name
+    metrics = QtGui.QFontMetrics(QtGui.QFont(FONT, fluent_font_size()))
+    advance = metrics.horizontalAdvance(name)
+    room = width - (setting_label_width((name,), minimum=0) - advance)
+    return name if advance <= room else metrics.elidedText(name, QtCore.Qt.ElideMiddle, room)
 
 
 __all__ = ["CalibrationsEditor"]
