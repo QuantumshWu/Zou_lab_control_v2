@@ -447,13 +447,6 @@ class NodeHost:
         self._input_delivery = delivery
         self._follow_max_pending = follow_max_pending
         self._follow_max_bytes = follow_max_bytes
-        self._input_view = getattr(node, "dataset_input_view", None)
-        self._input_window = getattr(node, "dataset_input_window", 50)
-        if self._input_view is not None and self._input_view not in {"event", "run", "window"}:
-            raise ValueError("dataset_input_view must be 'event', 'run', or 'window'")
-        if self._input_view == "window" and (type(self._input_window) is not int or self._input_window < 1):
-            raise ValueError("dataset_input_window must be a positive integer")
-        self._input_history_leases = ()
         self._required_artifacts = artifacts
         self._task_name = selected_task_name
         self._data_plane = data_plane
@@ -633,21 +626,8 @@ class NodeHost:
                 raise ValueError("only a Task start accepts run metadata")
             self._source_publication = self._data_plane.latest_publication(self._source_signal)
             try:
-                if self._input_view == "window":
-                    names = tuple(self._processor_signal_names().values())
-                    if not all(self._data_plane.supports_indexed_history(name) for name in names):
-                        raise ValueError(
-                            "window input requires source-index history on every sibling; "
-                            "use run input for a finite Dataset"
-                        )
-                    # An exact follower may read its window behind the newest
-                    # commit: its leases hold the rows it has yet to read.
-                    self._input_history_leases = self._data_plane.acquire_indexed_histories(
-                        names, self._input_window, hold=self._input_delivery == "exact",
-                    )
                 self._start_processor()
             except BaseException as error:
-                self._release_input_history()
                 self._refuse_start(error)
                 raise
         else:
@@ -744,7 +724,6 @@ class NodeHost:
             self._plane_state = False
         elif self._plane_state:
             self._plane_state = False
-        self._release_input_history()
         # Seal this host BEFORE the owner hop.  An owner that refuses to
         # release is its own loud failure and the caller still sees it, but it
         # must not be able to veto the retirement for ever: shutdown() returns
@@ -1238,7 +1217,6 @@ class NodeHost:
         self._terminal_event.set()
 
     def _retire_plane_state(self) -> None:
-        self._release_input_history()
         if not self._plane_state:
             return
         if self._mode == "processor":
@@ -1246,11 +1224,6 @@ class NodeHost:
         else:
             self._data_plane.retire(self)
         self._plane_state = False
-
-    def _release_input_history(self) -> None:
-        leases, self._input_history_leases = self._input_history_leases, ()
-        for lease in leases:
-            lease.close()
 
     def _seal_committed_plane_state(
         self, *, cut_short: bool = False, error: BaseException | None = None,
@@ -1289,24 +1262,20 @@ class NodeHost:
         *,
         terminal: bool = False,
     ) -> Mapping[str, SignalValue]:
-        view = self._input_view or ("run" if terminal else "event")
+        # Live, a processor reads each publication's event; at the end, the
+        # run's canonical Dataset.
         inputs: dict[str, SignalValue] = {}
-        signal_names = self._processor_signal_names()
-        for input_name, signal_name in signal_names.items():
+        for input_name, signal_name in self._processor_signal_names().items():
             value = publication.value(signal_name)
             if not isinstance(value, SignalValue):
                 raise RuntimeError(
                     f"processor publication lost sibling input {input_name!r}"
                 )
-            if view == "event":
+            if not terminal:
                 inputs[input_name] = value
                 continue
             snapshot, event_record = self._data_plane.current_dataset_view(
-                signal_name,
-                publication,
-                indexed_history=view == "window" or self._input_view is None,
-                history_window=self._input_window if view == "window" else None,
-                history_signals=tuple(signal_names.values()) if view == "window" else (),
+                signal_name, publication,
             )
             inputs[input_name] = SignalValue._from_owned_records(
                 signal_name,
@@ -1316,9 +1285,6 @@ class NodeHost:
                 primary_index=value.primary_index,
                 event_record=event_record,
             )
-        # A window input is the same N source positions of one publication
-        # for every sibling, with the bundle's common first row: its
-        # siblings cannot start apart.
         return MappingProxyType(inputs)
 
     def _refuse_start(self, error: BaseException) -> None:
@@ -1514,7 +1480,6 @@ class NodeHost:
                 self._phase = "done"
                 self._error = None
                 self._progress = None
-                self._release_input_history()
                 self._mark_terminal()
             owner.mark_owner_reaped()
 
@@ -1538,7 +1503,6 @@ class NodeHost:
             # restarts from.
             self._finish_processor_cancelled()
             return
-        self._release_input_history()
         self._end_run("failed", error)
 
     def _start_follow_processor(
@@ -1622,10 +1586,6 @@ class NodeHost:
                     return
                 source = self._validate_follow_source(publication.value(source_name))
                 outputs = self._evaluate_processor_outputs(source, publication)
-                # Its window is read; a later publication needs no row
-                # older than the second of it.
-                for lease in self._input_history_leases:
-                    lease.hold_from(source.primary_index - self._input_window + 2)
                 if self._stop_event.is_set():
                     raise _StartSuppressed()
                 self._commit_processor(
@@ -1639,7 +1599,6 @@ class NodeHost:
                 last_publication = publication
         finally:
             tap.close()
-            self._release_input_history()
 
     def validate_processor_source(self, source: SignalValue | None) -> None:
         """Validate identity only; the descriptor owns exact/latest delivery."""
@@ -1704,7 +1663,6 @@ class NodeHost:
     def accept_processor_failure(self, error: Exception) -> None:
         if not self._active:
             return
-        self._release_input_history()
         if isinstance(error, _SOURCE_LIFECYCLE):
             # A commit that lands in the window between the new generation's
             # retirement closure and the lane's own cancellation arrives
@@ -1716,7 +1674,6 @@ class NodeHost:
     def accept_processor_cancelled(self) -> None:
         if not self._active:
             return
-        self._release_input_history()
         self._plane_state = False
         self._active = False
         self._phase = "cancelled"
@@ -1730,7 +1687,6 @@ class NodeHost:
         if error is not None:
             self.accept_processor_failure(error)
             return
-        self._release_input_history()
         try:
             self._data_plane.seal_processor(self)
         except Exception as failure:

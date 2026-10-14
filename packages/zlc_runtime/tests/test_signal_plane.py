@@ -1922,15 +1922,13 @@ def test_a_stamped_history_window_carries_when_each_shot_was_taken() -> None:
         plane.close()
 
 
-def test_a_holding_window_keeps_its_shape_and_a_lagging_readers_rows() -> None:
+def test_a_named_window_keeps_its_shape_and_only_the_rows_held() -> None:
     """A named window is its N source positions, whenever it is read.
 
-    An exact follower's window has N rows from its first event on -- a row
-    the history never held is invalid -- and its holding lease keeps the
-    rows it has yet to read however far the newest commit moved on; the
-    history's own window, which a panel reads, stays the largest lease's.
-    A window rolled from another reader's -- wider, narrower, of an older
-    shot or of the same one -- shows only the rows the history holds now.
+    It has N rows from its first event on -- a row the history never held
+    is invalid -- while the history's own window, which a panel reads,
+    stays the largest lease's.  A window wider than what the history holds
+    shows only the rows it holds now; an event the history let go is gone.
     """
 
     from zlc_runtime import RetainedPublicationExpired
@@ -1950,28 +1948,17 @@ def test_a_holding_window_keeps_its_shape_and_a_lagging_readers_rows() -> None:
 
     try:
         plane.begin_generation(source)
-        (lease,) = plane.acquire_indexed_histories((name,), 2, hold=True)
+        lease = plane.acquire_indexed_history(name, 2)
         publications = []
         for value in (1.0, 2.0, 3.0, 4.0, 5.0):
             plane.commit_live(source, {"field": monitor_output(declaration, value)})
             publications.append(plane.latest_publication(name))
-        assert window(publications[0], 2) == ([0.0, 1.0], [False, True])
-        # Four commits behind, the follower still reads its whole window.
-        assert window(publications[1], 2) == ([1.0, 2.0], [True, True])
-        assert window(publications[-1]) == ([4.0, 5.0], [True, True])
-        assert window(publications[-1], 4) == ([2.0, 3.0, 4.0, 5.0], [True] * 4)
-        lease.hold_from(4)
-        plane.commit_live(source, {"field": monitor_output(declaration, 6.0)})
-        assert not plane.retains(name, publications[1])
+            if value == 1.0:
+                assert window(publications[0], 2) == ([0.0, 1.0], [False, True])
         with pytest.raises(RetainedPublicationExpired, match="precedes retained"):
             window(publications[1], 2)
-        assert window(publications[3], 2) == ([0.0, 4.0], [False, True])
-        # Rolled from the four rows read before row 3 was let go: a hole.
-        assert window(plane.latest_publication(name), 4) == (
-            [0.0, 4.0, 5.0, 6.0], [False, True, True, True]
-        )
-        # The panel's window of the same shot, rolled from that one.
-        assert window(plane.latest_publication(name)) == ([5.0, 6.0], [True, True])
+        assert window(publications[-1]) == ([4.0, 5.0], [True, True])
+        assert window(publications[-1], 4) == ([0.0, 0.0, 4.0, 5.0], [False, False, True, True])
     finally:
         if lease is not None:
             lease.close()
