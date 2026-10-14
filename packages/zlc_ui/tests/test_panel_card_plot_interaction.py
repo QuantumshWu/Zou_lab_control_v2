@@ -336,10 +336,11 @@ app.processEvents()
 # card is the strip plus that picture plus its own padding, exactly.
 planned = widget.presented_front.logical_size
 assert (widget.width(), widget.height()) == planned, (widget.size(), planned)
-# The strip sits inside the card's edge, which the body pad does not count.
-body_pad = tested_module.scaled_px(2) + tested_module.CARD_PAD + tested_module.FIELD_BORDER_PX
+# The strip sits inside the card's edge, which the body pad does not count;
+# the pads scale with the window, like every other part of the card.
+body_pad = tested_module.scaled_px(2) + tested_module.scaled_px(tested_module.CARD_PAD) + tested_module.FIELD_BORDER_PX
 assert card.height() - band.height() - widget.height() == body_pad
-assert card.width() - widget.width() == 2 * tested_module.CARD_PAD
+assert card.width() - widget.width() == 2 * tested_module.scaled_px(tested_module.CARD_PAD)
 
 # Two lines, and what they say does not move the rectangle.
 assert '<br>' in card._title_label.text()
@@ -387,12 +388,13 @@ app.processEvents()
 assert card.size() == reserved, (card.size(), reserved)
 assert card.minimumSizeHint().width() <= reserved.width()
 
-# Compact Setting and × sit together on the strip; × owns the right padding.
+# Compact Setting and × sit together on the strip, concentric in its corner:
+# × is as far from the band's right end as Setting is from its top.
 close_x = card.close_button.mapTo(band, QtCore.QPoint()).x()
 settings_x = card.settings_button.mapTo(band, QtCore.QPoint()).x()
 right_pad = band.width() - (close_x + card.close_button.width())
 top_pad = card.settings_button.mapTo(band, QtCore.QPoint()).y()
-assert right_pad == tested_module.CARD_TITLE_PAD, (right_pad, top_pad)
+assert abs(right_pad - top_pad) <= 1, (right_pad, top_pad)
 assert abs((band.height() - card.settings_button.height()) // 2 - top_pad) <= 1
 assert card.settings_button.width() < tested_module.scaled_px(74, minimum=64)
 assert 0 < close_x - (
@@ -435,7 +437,7 @@ card, widget = mounted_card(host)
 card.set_interval_choices((100,), 100)
 card.set_size_choices(('1x2', '2x2', '4x4'), '2x2')
 band = card._title_band
-pad = tested_module.scaled_px(2) + tested_module.CARD_PAD + tested_module.FIELD_BORDER_PX
+pad = tested_module.scaled_px(2) + tested_module.scaled_px(tested_module.CARD_PAD) + tested_module.FIELD_BORDER_PX
 packed = []
 card.geometry_changed.connect(lambda: packed.append(card.size()))
 
@@ -460,7 +462,7 @@ for size in ('4x4', '2x2'):
     # picture exactly, and told the board exactly once.
     assert len(packed) == 1, packed
     assert card.height() - band.height() - widget.height() == pad, size
-    assert card.width() - widget.width() == 2 * tested_module.CARD_PAD, size
+    assert card.width() - widget.width() == 2 * tested_module.scaled_px(tested_module.CARD_PAD), size
 
 # Whatever this context can say a preset's picture measures: with the
 # Workbench present that IS the plotting package's plan, and in this
@@ -469,7 +471,7 @@ bare = PanelCardView('panel-2', 'Plot')
 bare.set_size_choices(('1x2', '2x2', '4x4'), '2x2')
 bare.set_panel_projection({**bare._state_projection, 'size': '4x4'}, {})
 planned = panel_display_size('4x4')
-assert bare.width() == planned[0] + 2 * tested_module.CARD_PAD, (bare.width(), planned)
+assert bare.width() == planned[0] + 2 * tested_module.scaled_px(tested_module.CARD_PAD), (bare.width(), planned)
 assert bare.height() == planned[1] + bare._title_band.height() + pad, (bare.height(), planned)
 
 # A widget made over a host that already has a front shows it from its
@@ -480,7 +482,7 @@ framed_card = PanelCardView('panel-3', 'Plot')
 framed_card.set_size_choices(('1x2', '2x2', '4x4'), '2x2')
 framed_card.set_surface(late)
 app.processEvents()
-assert framed_card.width() - late.width() == 2 * tested_module.CARD_PAD
+assert framed_card.width() - late.width() == 2 * tested_module.scaled_px(tested_module.CARD_PAD)
 assert framed_card.height() - framed_card._title_band.height() - late.height() == pad
 framed_card.set_surface(None)
 late.close_adapter()

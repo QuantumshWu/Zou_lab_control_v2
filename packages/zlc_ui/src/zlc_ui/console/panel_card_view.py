@@ -418,9 +418,6 @@ class PanelCardView(FluentGroupBox):
             f"border-top-right-radius: {inner_radius}px;"
         )
         band_layout = QtWidgets.QHBoxLayout(self._title_band)
-        band_layout.setContentsMargins(
-            pad - FIELD_BORDER_PX, title_pad, title_pad - FIELD_BORDER_PX, title_pad
-        )
         band_layout.setSpacing(pad)
         # Centred on the band, so a one-line title sits level with Setting.
         band_layout.addWidget(self._title_label, 1, QtCore.Qt.AlignVCenter)
@@ -432,7 +429,12 @@ class PanelCardView(FluentGroupBox):
         command_layout.addWidget(self.settings_button)
         command_layout.addWidget(self.close_button)
         band_layout.addWidget(self._title_commands, 0, QtCore.Qt.AlignVCenter)
-        self._title_band.setFixedHeight(self._band_height())
+        band_height = self._band_height()
+        self._title_band.setFixedHeight(band_height)
+        # Setting and x sit concentric in the band's corner: as far from its
+        # right end as from its top and bottom, not pressed against the edge.
+        trailing = max(title_pad, (band_height - self._title_commands.sizeHint().height()) // 2)
+        band_layout.setContentsMargins(pad - FIELD_BORDER_PX, title_pad, trailing, title_pad)
 
         # The body is exactly CARD_PAD / 2 px / CARD_PAD around the surface,
         # counted from the card's edge, with no invented header, footer,
