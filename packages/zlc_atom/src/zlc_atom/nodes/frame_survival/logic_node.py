@@ -68,9 +68,9 @@ def _build(*, source_signal: str, **values: object) -> FrameSurvivalProcessor:
 def _editor_factory(parent=None):
     from PyQt5 import QtCore, QtWidgets
     from zlc_ui.fluent import (
-        FluentSectionLabel, FluentSegmentedButtons, FluentSelectionGrid, error_note_label, row_gap,
-        muted_note_label, show_note,
+        FluentSegmentedButtons, FluentSelectionGrid, error_note_label, muted_note_label, row_gap, show_note,
     )
+    from zlc_ui.fluent.column_set import section_header
     from .processor import PAIR_RULES
 
     labels = {choice.value: choice.label for choice in _SELECTIONS}
@@ -104,20 +104,12 @@ def _editor_factory(parent=None):
             layout = QtWidgets.QVBoxLayout(self)
             layout.setContentsMargins(0, 0, 0, 0)
             layout.setSpacing(row_gap())
-            header = QtWidgets.QHBoxLayout()
-            header.setSpacing(row_gap())
-            self.title = FluentSectionLabel("Pairs")
-            # Centred on the strip beside it, not dropped below it like an own-line section.
-            self.title.setContentsMargins(0, 0, 0, 0)
-            header.addWidget(self.title)
             # None clears every mark: an explicit, still-empty selection to mark pairs into.
             self.presets = FluentSegmentedButtons(
                 (*((rule, labels[rule]) for rule in PAIR_RULES), ("none", "None"), ("custom", "Selected")), self)
             self.presets.activated.connect(self._preset)
-            header.addWidget(self.presets)
-            header.addStretch(1)
             self.summary = muted_note_label("")
-            header.addWidget(self.summary)
+            self.title, header = section_header("Pairs", lead=(self.presets,), summary=self.summary)
             layout.addLayout(header)
             self.table = FluentSelectionGrid(self)
             self.table.selection_edited.connect(self._marked)
