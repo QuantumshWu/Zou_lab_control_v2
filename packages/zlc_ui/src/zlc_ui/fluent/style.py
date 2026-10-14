@@ -6,11 +6,19 @@ custom host surfaces.
 
 from __future__ import annotations
 
+#: The accent, and what every "this is the one chosen" state wears -- a
+#: toggle chip that is on, the current segmented choice, a chosen grid card,
+#: the picked row of a popup list, an active cycle combo: the fill alone, no
+#: edge, with TEXT ink (5.3:1).  It is told from a command by FILL -- 1.9:1
+#: against BUTTON_TINT -- and from the main command by ACCENT_STRONG (2.1:1).
 ACCENT = "#77AADD"
+#: The selection's hover and pressed faces: ACCENT stepped toward HOVER,
+#: TEXT ink still 4.8:1 and 4.6:1 on them.
+ACCENT_HOVER = "#6DA2D5"
+ACCENT_PRESSED = "#699ED1"
 #: The accent at reading strength: a wash a dark number stays legible
-#: on.  ACCENT itself is a BUTTON colour -- it carries white text --
-#: and a table cell painted with it hides the very number the click
-#: was asking to see.
+#: on -- the hover of a list row, a selected table value, a grid card a
+#: rule reached rather than a click.
 ACCENT_TINT = "#E4EFF9"
 #: The edge of a selected Period card or table cell: the accent brought halfway to the resting
 #: divider.  The fill (ACCENT_TINT) is what says "selected"; the edge only
@@ -22,43 +30,40 @@ SELECTION_EDGE = "#ACC4DD"
 #: a button there read as a selected cell, not a thing to press.  Dark-blue
 #: (HOVER) ink on it reads 7.8:1.
 BUTTON_TINT = "#D6E6F5"
-#: The face of a surface's ONE main command (Start, Add Panel): the accent's
-#: own hue, deep enough to carry white ink at 5.2:1.  ACCENT itself carried
-#: white at 2.45:1 and dark ink on it read as one more tonal button.
+#: The face of a surface's ONE run or commit command (Start, Init devices,
+#: Save Pulse): the accent's own hue, deep enough to carry white ink at 5.2:1.
 ACCENT_STRONG = "#2F6FB0"
-#: What every "this is the one chosen" state wears -- a toggle chip that is
-#: on, the current segmented choice, a chosen grid card, the picked row of a
-#: popup list: a fill a step past BUTTON_TINT (HOVER ink 6.9:1) closed by an
-#: accent edge SELECTED_EDGE_PX wide (3.4:1 on a white card, 3.1:1 on the
-#: grey page).  A chip that was on wore primary's fill, so "on" and "the main
-#: command" were the same pixels; a tint alone was a shade from a resting
-#: tonal button.
-SELECTED_FILL = "#C5DAF0"
-SELECTED_EDGE = "#5A8FC7"
-SELECTED_EDGE_PX = 1.5
-#: A grid card reached by a rule rather than chosen: lighter than a chosen
-#: card, its edge dashed and one pixel, its name in DERIVED_INK (4.8:1).
-DERIVED_FILL = "#F0F6FC"
-DERIVED_INK = "#4A6F94"
+#: A grid card reached by a rule rather than chosen: the ACCENT_TINT wash, a
+#: dashed edge in DERIVED_EDGE (3.4:1 on white, dashes as long as their
+#: gaps) and its name in DERIVED_INK (5.0:1 on the wash).
+DERIVED_EDGE = "#5A8FC7"
+DERIVED_INK = "#40688F"
+#: Dark accent: the ink of a standard command (7.8:1 on BUTTON_TINT) and the
+#: keyboard-focus ring.
 HOVER = "#004578"
 BG = "#F3F3F3"
 TEXT = "#323130"
+#: The edge of a field, and of an empty grid cell one can fill: 2.6:1 on
+#: white.  As text it is a prompt only -- see MUTED_INK.
 PLACEHOLDER = "#A19F9D"
 #: The label of a command that cannot be pressed now: still readable
 #: (3.2:1 on the BG face) where PLACEHOLDER read 2.4:1.
 DISABLED_INK = "#8A8886"
-#: A placeholder that is INFORMATION, not a prompt -- what a blank field
-#: does ("full sensor", "camera's current") or that nothing is chosen
-#: ("No value file selected"): 4.9:1, still lighter than a typed value.
-PLACEHOLDER_INFO = "#73716F"
+#: Quiet text that still CARRIES information -- a status line, a kind
+#: "(processor)", a summary, a hint, a table or grid header, a grid row's
+#: sub-line, an unselected tab, a placeholder that says what a blank does:
+#: 5.2:1 on white, 4.7:1 on the BG page, still lighter than TEXT.  GREY and
+#: GRAPHITE are strokes and dots, never words.
+MUTED_INK = "#6E6C6A"
 DIVIDER = "#E1DFDD"
 GREEN = "#7FC2AD"
 RED = "#CD7380"
-#: Red at reading strength: the ink of a destructive command and of an error
-#: line.  RED itself is a dot and a fill colour; as text on white it was
-#: 3.3:1, too pale to read as the warning it is.
+#: Red at reading strength: the ink of a destructive command (6.6:1 on
+#: white) and of an error line.  RED itself is a dot and a fill colour; as
+#: text on white it was 3.3:1, too pale to read as the warning it is.
 RED_DARK = "#9E3B4A"
-#: The face of a destructive command: RED as a wash, carrying RED_DARK ink.
+#: RED as a wash: what a destructive command -- a ghost, no face at rest --
+#: wears under the pointer, RED_DARK ink still 5.4:1 on it.
 RED_TINT = "#F7E3E6"
 ORANGE = "#D69A6E"
 ORANGE_TINT = "#F6E3D4"
@@ -76,7 +81,7 @@ GREY = "#A2A2A2"
 GRAPHITE = "#808080"
 SURFACE = "#FFFFFF"
 
-MUTED_LABEL_STYLE = f"color: {GREY}; background: transparent; border: none;"
+MUTED_LABEL_STYLE = f"color: {MUTED_INK}; background: transparent; border: none;"
 
 RADIUS = 4
 CARD_TITLE_PX = 32
@@ -126,16 +131,15 @@ WINDOW_SCREEN_FRACTION = 0.90
 
 __all__ = [
     "ACCENT",
+    "ACCENT_HOVER",
+    "ACCENT_PRESSED",
     "ACCENT_STRONG",
     "ACCENT_TINT",
     "BUTTON_TINT",
-    "DERIVED_FILL",
+    "DERIVED_EDGE",
     "DERIVED_INK",
     "DISABLED_INK",
-    "PLACEHOLDER_INFO",
-    "SELECTED_EDGE",
-    "SELECTED_EDGE_PX",
-    "SELECTED_FILL",
+    "MUTED_INK",
     "SELECTION_EDGE",
     "API_VIOLET",
     "API_VIOLET_DARK",

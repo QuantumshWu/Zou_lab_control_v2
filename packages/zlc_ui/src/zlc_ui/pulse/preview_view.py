@@ -12,7 +12,7 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 from zlc_ui.fluent import (
     detach_widget,
     FluentButton, FluentComboBox, FluentFrame, FluentLabel,
-    FluentLineEdit, FluentScrollArea, signals_blocked,
+    FluentReadoutEdit, FluentScrollArea, signals_blocked,
 )
 
 from ._layout import px
@@ -57,8 +57,7 @@ class PulsePreviewView(QtWidgets.QWidget):
         self.preview_save_figure_button = FluentButton("Save Figure")
         self.preview_save_figure_button.setFixedHeight(control_h)
         self.preview_save_figure_button.clicked.connect(self.save_requested)
-        self.preview_status = FluentLineEdit("")
-        self.preview_status.setEnabled(False)
+        self.preview_status = FluentReadoutEdit("")
         self.preview_status.setFixedHeight(control_h)
         for widget in (self.preview_include_off, self.preview_selectors_switch,
                        self.preview_size_label, self.preview_size_combo):

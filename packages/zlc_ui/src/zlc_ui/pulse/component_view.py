@@ -218,6 +218,8 @@ class PulseComponentView(QtWidgets.QWidget):
         for action, button in self._buttons.items():
             button.setEnabled(not busy and (schedule is not None or action in ("new", "open")))
         self._buttons["save"].set_dirty(dirty)
+        # Saving is this page's commit only while there is something to save.
+        self._buttons["save"].set_role("primary" if dirty else "standard")
         self.path_label.setText(path or ("Embedded in the current Pulse" if instance else "Unsaved Subpulse"))
         self.path_label.setToolTip(path)
         self.scope_label.setText(

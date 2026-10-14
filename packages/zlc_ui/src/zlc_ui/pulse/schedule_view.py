@@ -16,10 +16,10 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 from zlc_ui.form import FormChoice, being_edited
 from zlc_ui.fluent import (
     retire_widget,
-    ACCENT, BG, GREY, TEXT, CONFIG_GREEN, CONFIG_GREEN_DARK,
+    ACCENT, BG, MUTED_INK, TEXT, CONFIG_GREEN, CONFIG_GREEN_DARK,
     CONFIG_GREEN_TINT, FluentButton, FluentCheckBox, FluentSwitch,
     FluentComboBox, FluentFrame, FluentGroupBox, fluent_count_box,
-    FluentLabel, FluentLineEdit, FluentScrollArea, LinkedScrollPanes,
+    FluentLabel, FluentLineEdit, FluentReadoutEdit, FluentScrollArea, LinkedScrollPanes,
     ElidedLabel, FluentPopup, FluentSettingsPopupAnchor,
     show_fluent_popup_for_anchor, signals_blocked,
 )
@@ -117,7 +117,7 @@ class PeriodCard(FluentGroupBox):
             raise TypeError("period must be PeriodVM")
         self.kind = period.kind
         spacer = period.kind == PERIOD_KIND_SPACER
-        super().__init__("", parent, title_color=GREY if spacer else TEXT)
+        super().__init__("", parent, title_color=MUTED_INK if spacer else TEXT)
         self.period_id = period.period_id
         self._period = period
         self._ports: dict[str, PortRowVM] = {}
@@ -461,11 +461,11 @@ class ChannelNamesPanel(FluentGroupBox):
         self.document_name_edit = self.name_edit
         self.name_edit.setPlaceholderText("pulse name")
         self.name_edit.editingFinished.connect(lambda: self.document_name_committed.emit(self.name_edit.text()))
-        self.total_label = FluentLineEdit("")
-        self.periods_label = FluentLineEdit("")
-        self.visible_label = FluentLineEdit("")
-        for field in (self.total_label, self.periods_label, self.visible_label):
-            field.setEnabled(False)
+        # What the pulse adds up to is read, not typed: readouts, not
+        # switched-off fields.
+        self.total_label = FluentReadoutEdit("")
+        self.periods_label = FluentReadoutEdit("")
+        self.visible_label = FluentReadoutEdit("")
         self._layout = QtWidgets.QVBoxLayout(self)
         top_margin, row_gap = row_region_vmetrics()
         self._layout.setContentsMargins(px(8), top_margin, px(8), px(8))
@@ -571,10 +571,8 @@ class ChannelPanel(FluentGroupBox):
         top_layout = QtWidgets.QVBoxLayout(top)
         top_layout.setContentsMargins(0, 0, 0, 0)
         top_layout.setSpacing(px(6, minimum=4))
-        self.clock_label = FluentLineEdit("")
-        self.clock_label.setEnabled(False)
-        self.scan_summary_label = FluentLineEdit("")
-        self.scan_summary_label.setEnabled(False)
+        self.clock_label = FluentReadoutEdit("")
+        self.scan_summary_label = FluentReadoutEdit("")
         # How many times the whole thing plays is a number the PULSE carries,
         # like its clock and its scan table -- not an action, which is all the
         # Control group beside it holds.  Reading it directly under the scan
@@ -1698,14 +1696,15 @@ class PulseScheduleView(QtWidgets.QWidget):
         controls.setContentsMargins(0, 0, 0, 0)
         controls.setHorizontalSpacing(bar_gap)
         controls.setVerticalSpacing(bar_gap)
-        self.run_button = FluentButton("On Pulse*", role="primary")
+        self.run_button = FluentButton("On Pulse*")
         self.stop_button = FluentButton("Stop Pulse")
         self.sync_button = FluentButton("Sync")
         self.add_button = FluentButton("Add Period")
         self.spacer_button = FluentButton("Add Spacer")
         self.remove_button = FluentButton("Remove", role="destructive")
         self.bracket_button = FluentButton("Add Bracket")
-        self.save_button = FluentButton("Save Pulse*")
+        # Saving the document being edited is this page's one commit.
+        self.save_button = FluentButton("Save Pulse*", role="primary")
         self.load_button = FluentButton("Load")
         self.collapse_button = FluentButton("Collapse")
         self.group_button = FluentButton("Group Subpulse")
@@ -1747,8 +1746,7 @@ class PulseScheduleView(QtWidgets.QWidget):
         self.connection_endpoint.setFixedHeight(control_height)
         self.connection_button = FluentButton("Connect")
         self.connection_button.setFixedHeight(control_height)
-        self.connection_status = FluentLineEdit("")
-        self.connection_status.setEnabled(False)
+        self.connection_status = FluentReadoutEdit("")
         self.connection_status.setFixedHeight(control_height)
         connection_layout.addWidget(self.connection_combo)
         connection_row = QtWidgets.QHBoxLayout()
@@ -1771,8 +1769,7 @@ class PulseScheduleView(QtWidgets.QWidget):
         self.add_port_button = FluentButton("Add")
         self.hide_off_button = FluentButton("Hide Off")
         self.show_all_button = FluentButton("Show All")
-        self.visible_label = FluentLineEdit("")
-        self.visible_label.setEnabled(False)
+        self.visible_label = FluentReadoutEdit("")
         for button in (self.add_port_button, self.hide_off_button, self.show_all_button):
             button.setFixedHeight(control_height)
         self.visible_label.setFixedHeight(control_height)

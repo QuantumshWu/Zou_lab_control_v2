@@ -29,6 +29,8 @@ from zlc_ui.fluent import (
     FluentStatusDot,
     fluent_text_width,
     GREY,
+    MUTED_INK,
+    RED_DARK,
     popup_gap,
     RADIUS,
     RED,
@@ -666,11 +668,11 @@ class PanelCardView(FluentGroupBox):
         )
         # The caption is a NAME and names are read from the left, so it gives
         # up its tail; a shape is read from both ends and gives up its middle.
-        # The card's own id leads it in grey: it answers "which card", and
+        # The card's own id leads it in muted ink: it answers "which card", and
         # the name after it is what the operator reads.
         caption = self._caption()
         sizes: list[tuple[str, str | None, object]] = (
-            [(self.panel_id, GREY, None), (caption[len(self.panel_id):], None, QtCore.Qt.ElideRight)]
+            [(self.panel_id, MUTED_INK, None), (caption[len(self.panel_id):], None, QtCore.Qt.ElideRight)]
             if caption.startswith(self.panel_id) and len(caption) > len(self.panel_id)
             else [(caption, None, QtCore.Qt.ElideRight)]
         )
@@ -958,7 +960,7 @@ class PanelCardView(FluentGroupBox):
             return
         label.setText(self._status_text)
         label.setStyleSheet(
-            f'QLabel {{ color: {RED if self._status_error else GREY}; '
+            f'QLabel {{ color: {RED_DARK if self._status_error else MUTED_INK}; '
             f'font: {fluent_font_size()}pt "{FONT}"; background: transparent; '
             f"border: none; }}"
         )

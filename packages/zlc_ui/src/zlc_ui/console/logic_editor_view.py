@@ -14,6 +14,7 @@ from PyQt5 import QtCore, QtWidgets
 from zlc_ui.fluent import (
     GREEN,
     GREY,
+    MUTED_INK,
     ORANGE,
     ORANGE_DARK,
     RED,
@@ -103,7 +104,7 @@ class LogicEditorView(QtWidgets.QWidget):
             "font-weight: 600; background: transparent; }"
         )
         self.kind_label = FluentLabel("")
-        self.kind_label.setStyleSheet(f"color: {GREY}; background: transparent; border: none;")
+        self.kind_label.setStyleSheet(f"color: {MUTED_INK}; background: transparent; border: none;")
         title_row.addWidget(self.title_label)
         title_row.addWidget(self.kind_label)
         title_row.addStretch(1)
@@ -296,7 +297,7 @@ class LogicEditorView(QtWidgets.QWidget):
             (RED, RED_DARK) if error
             else (ORANGE, ORANGE_DARK) if issue
             else (GREEN, TEXT) if running
-            else (GREY, GREY)
+            else (GREY, MUTED_INK)
         )
         if colours != self._status_colours:
             self._status_colours = colours

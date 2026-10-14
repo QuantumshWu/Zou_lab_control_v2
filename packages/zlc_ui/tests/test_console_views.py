@@ -2369,8 +2369,8 @@ signal = '@logic/camera_measurement/frames'
 project(card, signal, signal, 'panel-2@camera_measurement/frames')
 assert card._caption() == 'panel-2@camera_measurement/frames', card._caption()
 line = card._band_fragments()[0]
-# The card's own id leads in grey; the name the operator reads follows it.
-assert line[0][:2] == ('panel-2', tested_module.GREY), line
+# The card's own id leads in muted ink; the name the operator reads follows it.
+assert line[0][:2] == ('panel-2', tested_module.MUTED_INK), line
 assert line[0][0] + line[1][0] == 'panel-2@camera_measurement/frames', line
 
 # The name itself is untouched, everywhere it is the NAME and not a caption.

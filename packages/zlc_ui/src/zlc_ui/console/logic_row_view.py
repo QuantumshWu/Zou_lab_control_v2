@@ -7,6 +7,7 @@ from PyQt5 import QtCore, QtWidgets
 from zlc_ui.fluent import (
     GREEN,
     GREY,
+    MUTED_INK,
     RED,
     RED_DARK,
     ElidedLabel,
@@ -66,7 +67,7 @@ class LogicRowView(FluentFrame):
         # at the same x, instead of floating with the length of the name.
         self.name_label.setFixedWidth(scaled_px(200, minimum=150))
         self.kind_label = FluentLabel(f"({self.kind})")
-        self.kind_label.setStyleSheet(f"color: {GREY}; background: transparent; border: none;")
+        self.kind_label.setStyleSheet(f"color: {MUTED_INK}; background: transparent; border: none;")
         self.kind_label.setFixedWidth(setting_label_width(_KINDS))
         self.status_label = ElidedLabel("idle")
         self.status_label.setMinimumWidth(0)
@@ -81,7 +82,7 @@ class LogicRowView(FluentFrame):
             "Open this node's plot panel when it starts"
         )
         self.preview_switch.toggled.connect(self.auto_preview_changed.emit)
-        self.run_button = FluentButton("Stop", role="primary")
+        self.run_button = FluentButton("Stop")
         stop_width = self.run_button.sizeHint().width()
         self.run_button.setText("Start")
         # Wide enough for either word, so the row does not shift when it flips.
@@ -172,7 +173,7 @@ class LogicRowView(FluentFrame):
         # status tick arrives ten times a second, so almost every write said
         # what the last one said -- and a stylesheet write re-parses the
         # sheet, repolishes the widget and schedules a repaint regardless.
-        colour = RED_DARK if state == "error" else GREY
+        colour = RED_DARK if state == "error" else MUTED_INK
         if colour != self._status_colour:
             self._status_colour = colour
             self.status_label.setStyleSheet(
@@ -197,9 +198,6 @@ class LogicRowView(FluentFrame):
         enabled = not self._task_takeover
         running = self._running()
         self.run_button.setText("Stop" if running else "Start")
-        # Starting is the row's one main action; stopping a running node is
-        # an ordinary command beside it.
-        self.run_button.set_role("standard" if running else "primary")
         self.run_button.setEnabled(enabled and (self._can_stop if running else self._can_start))
         # It says what the next Start will do, so a row that cannot Start
         # cannot re-aim Start either.

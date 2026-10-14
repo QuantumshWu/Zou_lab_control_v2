@@ -8,10 +8,15 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 
 from zlc_ui.fluent import (
     ACCENT,
+    BG,
+    FONT,
     GREEN,
     GREY,
+    HOVER,
+    MUTED_INK,
     ORANGE,
     RED,
+    TEXT,
     ElidedLabel,
     FluentLabel,
     FluentButton,
@@ -24,8 +29,10 @@ from zlc_ui.fluent import (
     FluentStatusDot,
     FluentSwitch,
     FluentTabWidget,
+    fluent_font_size,
     muted_note_label,
     retire_widget,
+    scaled_px,
     signals_blocked,
     window_pad,
 )
@@ -53,8 +60,18 @@ class _DeviceCard(FluentFrame):
         outer.setContentsMargins(0, window_pad(0.3), 0, window_pad(0.6))
         outer.setSpacing(window_pad(0.35))
         header = QtWidgets.QHBoxLayout()
-        self.collapse_button = FluentButton("−")
-        self.collapse_button.setFixedWidth(window_pad(2.0))
+        # A disclosure, not a command: a ghost chevron, which a tonal
+        # square with a minus sign beside the Role box was read as.
+        self.collapse_button = QtWidgets.QToolButton()
+        self.collapse_button.setCursor(QtCore.Qt.PointingHandCursor)
+        self.collapse_button.setFixedSize(scaled_px(24, minimum=20), scaled_px(30, minimum=22))
+        self.collapse_button.setStyleSheet(
+            f"QToolButton {{ border: none; background: transparent; color: {MUTED_INK}; "
+            f"border-radius: {scaled_px(4)}px; padding: 0px; "
+            f"font-size: {round(fluent_font_size() * 1.5)}pt; }} "
+            f"QToolButton:hover {{ background: {BG}; color: {HOVER}; }}"
+        )
+        self._show_collapsed()
         self.name_label = muted_note_label("Role")
         self.role_edit = FluentLineEdit()
         self.role_edit.setPlaceholderText("role")
@@ -142,7 +159,11 @@ class _DeviceCard(FluentFrame):
         self._collapsed = not self._collapsed
         if self.form is not None:
             self.form.setVisible(not self._collapsed)
-        self.collapse_button.setText("+" if self._collapsed else "−")
+        self._show_collapsed()
+
+    def _show_collapsed(self) -> None:
+        self.collapse_button.setText("▸" if self._collapsed else "▾")
+        self.collapse_button.setToolTip("Show parameters" if self._collapsed else "Hide parameters")
 
 
 class _LiveDeviceCard(FluentFrame):
@@ -383,7 +404,7 @@ class DeviceControlView(QtWidgets.QWidget):
         # cannot read whole tells them nothing, so the text asks for its
         # full width and the column (and the snug window) grow to it.
         limits = FluentLabel("")
-        limits.setStyleSheet(f"color: {GREY}; background: transparent; border: none;")
+        limits.setStyleSheet(f"color: {MUTED_INK}; background: transparent; border: none;")
         limits.setToolTip(
             "The instrument's own range for this field; the editable window "
             "is the tighter of it and the bench policy"
@@ -1118,20 +1139,35 @@ class DeviceManagerView(QtWidgets.QWidget):
     def _ensure_domain(self, domain: str) -> None:
         if domain in self.domain_groups:
             return
-        group = FluentGroupBox(domain.replace("_", " ").title(), self.left_body)
+        # The card lays out its own title row so Add device sits beside the
+        # domain's name.  At the foot of a long list it was the last thing
+        # in the scrolled column and was usually cut in half by its edge.
+        title = domain.replace("_", " ").title()
+        group = FluentGroupBox(title, self.left_body, title_strip_px=0)
         group_layout = QtWidgets.QVBoxLayout(group)
         pad = window_pad(0.7)
-        group_layout.setContentsMargins(pad, pad, pad, pad)
+        # The title row stands where a painted title strip would: its name
+        # level with the neighbouring cards' titles.
+        group_layout.setContentsMargins(pad, scaled_px(2), pad, pad)
         group_layout.setSpacing(window_pad(0.4))
-        cards = QtWidgets.QVBoxLayout()
-        cards.setContentsMargins(0, 0, 0, 0)
-        cards.setSpacing(window_pad(0.4))
-        group_layout.addLayout(cards)
+        header = QtWidgets.QHBoxLayout()
+        heading = FluentLabel(title)
+        heading.setStyleSheet(
+            f'QLabel {{ color: {TEXT}; font: {fluent_font_size()}pt "{FONT}"; '
+            "font-weight: 600; background: transparent; }"
+        )
         button = FluentButton("Add device")
         button.clicked.connect(
             lambda _checked=False, value=domain: self._add_domain_clicked(value)
         )
-        group_layout.addWidget(button)
+        header.addWidget(heading)
+        header.addStretch(1)
+        header.addWidget(button)
+        group_layout.addLayout(header)
+        cards = QtWidgets.QVBoxLayout()
+        cards.setContentsMargins(0, 0, 0, 0)
+        cards.setSpacing(window_pad(0.4))
+        group_layout.addLayout(cards)
         self.domain_groups[domain] = group
         self.domain_card_layouts[domain] = cards
         self.domain_add_buttons[domain] = button

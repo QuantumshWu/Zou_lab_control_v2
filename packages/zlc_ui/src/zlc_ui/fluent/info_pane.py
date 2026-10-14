@@ -40,6 +40,7 @@ from .style import (
     FONT,
     GRAPHITE,
     GREY,
+    MUTED_INK,
     ORANGE,
     ORANGE_DARK,
     ORANGE_TINT,
@@ -386,7 +387,7 @@ class InfoTree(QtWidgets.QTreeWidget):
             # How many rows are under it -- a count of what follows, not a
             # value of its own: set in the muted ink so the eye tells them
             # apart.
-            item.setForeground(1, QtGui.QBrush(QtGui.QColor(GRAPHITE)))
+            item.setForeground(1, QtGui.QBrush(QtGui.QColor(MUTED_INK)))
             entries = (
                 value.items()
                 if isinstance(value, Mapping)
@@ -915,7 +916,7 @@ class InfoPane(QtWidgets.QWidget):
         view._flow_edge_count = 0
         if not nodes:
             empty = scene.addSimpleText("No saved Logic flow", QtGui.QFont(FONT, fluent_font_size()))
-            empty.setBrush(QtGui.QColor(GREY))
+            empty.setBrush(QtGui.QColor(MUTED_INK))
             empty.setPos(scaled_px(18), scaled_px(18))
             scene.setSceneRect(empty.boundingRect().adjusted(-12, -12, 24, 24))
             return
@@ -1135,7 +1136,7 @@ class InfoPane(QtWidgets.QWidget):
             badge_font.setBold(True)
             badge = scene.addSimpleText("DEVICE" if is_device else "LOGIC", badge_font)
             badge.setAcceptedMouseButtons(QtCore.Qt.NoButton)
-            badge.setBrush(QtGui.QColor(ORANGE_DARK if is_device else GREY))
+            badge.setBrush(QtGui.QColor(ORANGE_DARK if is_device else MUTED_INK))
             badge.setPos(rect.left() + inset, rect.top() + scaled_px(5, minimum=4))
             title_font = QtGui.QFont(FONT, max(8, fluent_font_size() - 1))
             title_font.setBold(True)
@@ -1158,7 +1159,7 @@ class InfoPane(QtWidgets.QWidget):
             )
             detail_item = scene.addSimpleText(detail, detail_font)
             detail_item.setAcceptedMouseButtons(QtCore.Qt.NoButton)
-            detail_item.setBrush(QtGui.QColor(GREY))
+            detail_item.setBrush(QtGui.QColor(MUTED_INK))
             detail_item.setPos(rect.left() + inset, rect.top() + scaled_px(40, minimum=32))
 
         scene_width = widest + 2 * margin

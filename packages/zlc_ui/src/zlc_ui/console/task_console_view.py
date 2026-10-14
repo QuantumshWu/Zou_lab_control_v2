@@ -14,7 +14,7 @@ from zlc_ui.fluent import (
     detach_widget,
     ElidedLabel,
     GREEN,
-    GREY,
+    MUTED_INK,
     FluentButton,
     FluentComboBox,
     FluentFrame,
@@ -86,7 +86,7 @@ class TaskConsoleView(QtWidgets.QWidget):
         self.name_label = FluentLabel("task")
         self.name_label.setFixedWidth(scaled_px(150, minimum=110))
         self.summary_label = ElidedLabel("")
-        self.summary_label.setStyleSheet(f"color: {GREY}; background: transparent; border: none;")
+        self.summary_label.setStyleSheet(f"color: {MUTED_INK}; background: transparent; border: none;")
 
         self.kind_combo = FluentComboBox()
         self._task_takeover = False
@@ -95,7 +95,7 @@ class TaskConsoleView(QtWidgets.QWidget):
         # Keep the full kind label and its arrow in the
         # same fixed slot on every screen scale.
         self.kind_combo.setFixedWidth(scaled_px(170, minimum=130))
-        self.add_panel_button = FluentButton("Add Panel", role="primary")
+        self.add_panel_button = FluentButton("Add Panel")
         self.add_panel_button.setEnabled(False)
 
         # Rendered as a push button rather than a toggle, so the button carries
@@ -183,7 +183,7 @@ class TaskConsoleView(QtWidgets.QWidget):
             "(it starts STOPPED); open its Edit to set parameters and Start it."
         )
         self.logic_hint.setWordWrap(True)
-        self.logic_hint.setStyleSheet(f"color: {GREY}; background: transparent; border: none;")
+        self.logic_hint.setStyleSheet(f"color: {MUTED_INK}; background: transparent; border: none;")
         self.logic_layout.addWidget(self.logic_hint)
         self.logic_layout.addStretch(1)
         self._logic_rows: tuple[LogicRowView, ...] = ()
