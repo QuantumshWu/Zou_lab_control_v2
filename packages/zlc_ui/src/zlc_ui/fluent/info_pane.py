@@ -17,6 +17,7 @@ from functools import partial
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 from .fluent import (
+    FIELD_BORDER_PX,
     FluentButton,
     FluentFrame,
     FluentLineEdit,
@@ -26,7 +27,9 @@ from .fluent import (
     FluentTabWidget,
     _FluentRoundedMenu,
     apply_fluent_scrollbars,
+    device_snap,
     fluent_font_size,
+    frame_border_px,
     retire_widget,
     scaled_px,
     setting_label_width,
@@ -259,15 +262,18 @@ class InfoTree(QtWidgets.QTreeWidget):
             depth += 1
             parent = parent.parent()
         painter.save()
-        painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
-        guide = QtGui.QPen(QtGui.QColor(DIVIDER))
-        guide.setWidthF(1.0)
-        painter.setPen(guide)
+        # Each guide is a filled column one edge-width wide on a device
+        # pixel: a 1.0 pen on a half-integer x smeared into two half-lit
+        # columns at 1x, and its square caps ran into the next row.
+        surface = self.viewport()
+        width = frame_border_px(surface)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing, False)
         for level in range(depth):
-            x = rect.left() + level * indent + indent / 2
-            painter.drawLine(
-                QtCore.QPointF(x, rect.top()), QtCore.QPointF(x, rect.bottom() + 1)
+            x = device_snap(surface, rect.left() + level * indent + indent / 2 - FIELD_BORDER_PX / 2)
+            painter.fillRect(
+                QtCore.QRectF(x, rect.top(), width, rect.height()), QtGui.QColor(DIVIDER)
             )
+        painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
         if index.model().hasChildren(index):
             centre_x = rect.left() + depth * indent + indent / 2
             centre_y = rect.center().y() + 0.5

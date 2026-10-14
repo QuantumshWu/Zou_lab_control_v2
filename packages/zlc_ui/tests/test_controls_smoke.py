@@ -686,7 +686,8 @@ def test_one_save_rule_one_destructive_look_and_a_flush_readout(run_qt) -> None:
     """Every Save is standard when clean and the primary with a star when
     unsaved; every labelled destructive command sits on the red tint while a
     one-glyph row remover stays a ghost; a command on a tinted card is white
-    with no edge; a readout starts where the text above it starts."""
+    with a hairline in the card's green; a readout starts where the text
+    above it starts."""
 
     run_qt(
         """
@@ -732,7 +733,8 @@ app.processEvents()
 image = on_tint.grab().toImage()
 assert face(on_tint).name().upper() == SURFACE.upper(), face(on_tint).name()
 edge = image.pixelColor(image.width() // 2, 0).name().upper()
-assert edge == SURFACE.upper(), ('a command on a tint has no field edge', edge)
+from zlc_ui.fluent.fluent import _ON_TINT_EDGE
+assert edge == _ON_TINT_EDGE.upper(), ('a command on a tint keeps a boundary in its green', edge)
 
 column = QtWidgets.QWidget()
 column.setStyleSheet('background: white;')

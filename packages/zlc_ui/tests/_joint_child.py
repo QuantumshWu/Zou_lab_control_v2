@@ -697,6 +697,244 @@ def focus_ring_case() -> None:
     host.close()
 
 
+def tabs_case() -> None:
+    """A closable tab is as far from its underline's ends on both sides; the
+    first tab stands a card padding inside the card."""
+
+    case = "tabs"
+    host = Host(560, 140)
+    tabs = F.FluentTabWidget(host)
+    tabs.setGeometry(16, 16, 520, 100)
+    tabs.addTab(QtWidgets.QLabel("one"), "Monitor")
+    tabs.addTab(QtWidgets.QLabel("two"), "Logic")
+    tabs.add_closable_tab(QtWidgets.QLabel("three"), "Edit camera")
+    tabs.setCurrentIndex(0)
+    show(host)
+    pump(0.2)
+    image = grab(host)
+    bar = tabs.tabBar()
+    origin = bar.mapTo(host, QtCore.QPoint(0, 0))
+    first = bar.tabRect(0).translated(origin)
+    row = edge_px(first.y() + first.height()) - 1
+    accent = image[row, dev(first.center().x())]
+    start = next((x for x in range(edge_px(tabs.x()), edge_px(first.right() + 1)) if eq(image[row, x], accent)), None)
+    check(case, "T-K4 first tab inside the card padding",
+          start is not None and start >= edge_px(tabs.x() + F.scaled_px(F.CARD_PAD)),
+          f"underline starts at {start}, card at {edge_px(tabs.x())}")
+    tabs.setCurrentIndex(2)
+    pump(0.3)
+    image = grab(host)
+    rect = bar.tabRect(2).translated(origin)
+    underline_row = edge_px(rect.y() + rect.height()) - 1
+    ground = image[edge_px(rect.y()) + 2, edge_px(rect.x()) + 2]
+    accent = image[underline_row, dev(rect.center().x())]
+    under = [x for x in range(edge_px(rect.left()), edge_px(rect.right() + 1)) if eq(image[underline_row, x], accent)]
+    region = image[edge_px(rect.y() + 4):edge_px(rect.bottom() - 4), edge_px(rect.left()):edge_px(rect.right() + 1)]
+    ink = np.nonzero((np.abs(region - np.asarray(ground)).max(axis=2) > 60).any(axis=0))[0]
+    if not under or not len(ink):
+        check(case, "T-K4 closable tab drawn", False, "no underline or no ink")
+    else:
+        left_gap = edge_px(rect.left()) + int(ink.min()) - under[0]
+        right_gap = under[-1] - (edge_px(rect.left()) + int(ink.max()))
+        check(case, "T-K4 closable tab balanced", abs(left_gap - right_gap) <= math.ceil(DPR),
+              f"underline to text {left_gap}, x to underline end {right_gap}", image=image,
+              box=(edge_px(rect.left()) - 4, edge_px(rect.top()) - 4, edge_px(rect.right()) + 4,
+                   edge_px(rect.bottom()) + 4))
+    host.close()
+
+
+def grid_case() -> None:
+    """A chosen card and an empty one have one outer extent, and their
+    outlines are whole device pixels."""
+
+    case = "grid"
+    host = Host(360, 200)
+    grid = F.FluentSelectionGrid(host)
+    frames = ("0", "1", "2", "3")
+    grid.set_grid(tuple(f"{f} →" for f in frames[:-1]), tuple(f"→ {f}" for f in frames[1:]),
+                  {(a, b - 1): f"{frames[a]}→{frames[b]}" for a in range(3) for b in range(a + 1, 4)})
+    grid.set_selected([(0, 0)])
+    grid.move(16, 16)
+    grid.resize(grid.sizeHint())
+    show(host)
+    pump(0.2)
+    image = grab(host)
+    viewport = grid.viewport()
+    origin = viewport.mapTo(host, QtCore.QPoint(0, 0))
+
+    def extent(row, column):
+        rect = grid.visualRect(grid.model().index(row, column))
+        cx = dev(origin.x() + rect.center().x())
+        y0, y1 = edge_px(origin.y() + rect.top()), edge_px(origin.y() + rect.bottom() + 1)
+        ground = image[y0, cx]
+        rows = [y for y in range(y0, y1) if not eq(image[y, cx], ground)]
+        return (rows[0], rows[-1]) if rows else None, cx, ground
+
+    chosen, cx, ground = extent(0, 0)
+    empty, ex, _ = extent(0, 1)
+    crop = (cx - 40, (chosen or (0, 0))[0] - 6, ex + 40, (chosen or (0, 0))[1] + 6)
+    check(case, "T-P5 chosen and empty cards share one extent", chosen is not None and chosen == empty,
+          f"chosen rows {chosen} empty rows {empty}", image=image, box=crop)
+    if INTEGRAL and empty is not None:
+        outline = image[empty[0], ex]
+        rows = [image[y, ex] for y in range(empty[0], empty[0] + BD + 1)]
+        whole = all(eq(row, outline) for row in rows[:BD]) and not eq(rows[BD], outline)
+        check(case, "T-P5 outline is whole device pixels", whole,
+              f"top rows {[hexs(r) for r in rows]}", image=image, box=crop)
+    host.close()
+
+
+def segmented_case() -> None:
+    """The current face is concentric with the track: its rim is the same
+    along the diagonal of the corner as along the straight edge."""
+
+    case = "segmented"
+    host = Host(300, 80)
+    control = F.FluentSegmentedButtons(((1, "One"), (2, "Two"), (3, "Three")), host)
+    control.set_current(1)
+    control.move(16, 16)
+    control.resize(control.sizeHint())
+    show(host)
+    pump(0.2)
+    image = grab(host)
+    x0, y0 = edge_px(control.x()), edge_px(control.y())
+    first = control.button(1)
+    fy = edge_px(control.y() + first.y())
+    fx = edge_px(control.x() + first.x())
+    background = image[y0 - 2, x0 + 20]
+    track = image[y0 + max(1, BD // 2), x0 + 20 * BD]
+    middle = dev(control.x() + first.x() + first.width() / 2.0)
+    straight = fy - next(y for y in range(y0 - 2, fy + 1) if not eq(image[y, middle], background))
+
+    def first_off(colour, limit):
+        for step in range(limit):
+            if not eq(image[y0 + step, x0 + step], colour):
+                return step
+        return None
+
+    outer = first_off(background, 40)
+    inner = None
+    if outer is not None:
+        for step in range(outer, 60):
+            pixel = image[y0 + step, x0 + step]
+            if np.abs(pixel - track).max() > 24 and np.abs(pixel - background).max() > 24:
+                inner = step
+                break
+    diagonal = None if inner is None or outer is None else (inner - outer) * math.sqrt(2.0)
+    check(case, "T-P6 current face concentric with the track",
+          # A diagonal is read in whole diagonal steps of sqrt(2) device px.
+          diagonal is not None and abs(diagonal - straight) <= math.sqrt(2.0) + 1e-6 + (0 if INTEGRAL else 1),
+          f"straight rim {straight} diagonal rim {diagonal}", image=image,
+          box=(x0 - 4, y0 - 4, fx + 20 * BD, fy + 20 * BD))
+    host.close()
+
+
+def round_case() -> None:
+    """Round things have even sizes."""
+
+    case = "round"
+    host = Host(200, 80)
+    dot = F.FluentStatusDot(host, size=12)
+    dot.move(16, 16)
+    closer = F._FluentTabCloseButton(host)
+    closer.move(60, 16)
+    check(case, "T-P7 status dot even and square", dot.width() == dot.height() and dot.width() % 2 == 0,
+          f"{dot.width()}x{dot.height()}")
+    check(case, "T-P7 tab close disk even", closer.height() % 2 == 0, f"{closer.width()}x{closer.height()}")
+    show(host)
+    closer.setAttribute(QtCore.Qt.WA_UnderMouse, True)
+    APP.sendEvent(closer, QtCore.QEvent(QtCore.QEvent.Enter))
+    closer.style().unpolish(closer)
+    closer.style().polish(closer)
+    closer.repaint()
+    pump(0.1)
+    image = grab(host)
+    size = closer.height()
+    x0, y0 = edge_px(closer.x()), edge_px(closer.y())
+    disk = image[y0:y0 + edge_px(size) - y0 + y0 - y0, x0:x0 + (edge_px(closer.x() + size) - x0)]
+    disk = image[y0:edge_px(closer.y() + size), x0:edge_px(closer.x() + size)]
+    ground = image[y0 - 2, x0 - 2]
+    mask = (np.asarray(ground).sum() - disk.sum(axis=2)) > 6
+    # The x itself is symmetric too; the disk's outline must be.
+    symmetric = int(np.logical_xor(mask, mask[:, ::-1]).sum()) <= 2 * BD and \
+        int(np.logical_xor(mask, mask[::-1, :]).sum()) <= 2 * BD
+    check(case, "T-P7 hover disk mirror-symmetric", symmetric and mask.any(),
+          f"ink {int(mask.sum())}", image=image, box=(x0 - 4, y0 - 4, x0 + 3 * dev(size), y0 + dev(size) + 4))
+    host.close()
+
+
+def guides_case() -> None:
+    """Tree guides are one edge-width of full ink; a menu separator is a
+    band one edge-width tall across the item inset."""
+
+    case = "guides"
+    from zlc_ui.fluent.info_pane import InfoTree
+
+    host = Host(360, 260)
+    tree = InfoTree(name_width=120)
+    tree.setParent(host)
+    tree.set_rows((("alpha", {"beta": {"gamma": 1, "delta": 2}, "eps": 3}), ("zeta", 4)))
+    tree.setGeometry(16, 16, 320, 220)
+    tree.expandAll()
+    show(host)
+    pump(0.2)
+    image = grab(host)
+    viewport = tree.viewport()
+    origin = viewport.mapTo(host, QtCore.QPoint(0, 0))
+    deepest = None
+    iterator = QtWidgets.QTreeWidgetItemIterator(tree)
+    while iterator.value():
+        item = iterator.value()
+        depth, parent = 0, item.parent()
+        while parent is not None:
+            depth, parent = depth + 1, parent.parent()
+        if depth >= 2:
+            deepest = item
+            break
+        iterator += 1
+    if deepest is None:
+        check(case, "T-P8 tree has nested rows", False, "no depth-2 row")
+    else:
+        rect = tree.visualItemRect(deepest)
+        row = dev(origin.y() + rect.center().y())
+        indent = tree.indentation()
+        for level in range(2):
+            centre = origin.x() + level * indent + indent / 2.0
+            zone = range(dev(centre - 4), dev(centre + 4))
+            ground = image[row, dev(centre - 5)]
+            lit = [x for x in zone if not eq(image[row, x], ground)]
+            colours = {hexs(image[row, x]) for x in lit}
+            check(case, f"T-P8 guide level {level} one edge-width",
+                  len(lit) == BD and len(colours) == 1, f"cols {lit} colours {colours}",
+                  image=image, box=(dev(centre) - 12, row - 12, dev(centre) + 12, row + 12))
+    edit = F.FluentLineEdit("1.5", host)
+    edit.setGeometry(16, 16, 200, edit.sizeHint().height())
+    menu = F._FluentRoundedMenu(edit)
+    menu.addAction("Copy")
+    menu.addSeparator()
+    menu.addAction("Edit step…")
+    menu.popup(host.mapToGlobal(QtCore.QPoint(30, 60)))
+    pump(0.4)
+    shot = menu.grab().toImage().convertToFormat(QtGui.QImage.Format_RGB32)
+    pointer = shot.constBits()
+    pointer.setsize(shot.byteCount())
+    menu_image = np.frombuffer(pointer, np.uint8).reshape(shot.height(), shot.bytesPerLine() // 4, 4)[
+        :, :shot.width(), 2::-1].astype(int).copy()
+    separator = next(action for action in menu.actions() if action.isSeparator())
+    band = menu.actionGeometry(separator)
+    cx = dev(band.center().x())
+    ground = menu_image[dev(band.top()), cx]
+    rows = [y for y in range(dev(band.top()), edge_px(band.bottom() + 1)) if not eq(menu_image[y, cx], ground)]
+    colours = {hexs(menu_image[y, cx]) for y in rows}
+    # The separator is the style sheet's own band: whole device pixels at a
+    # whole ratio (R1), one colour at any.
+    check(case, "T-P8 menu separator one edge-width band",
+          (len(rows) == BD or not INTEGRAL) and len(colours) == 1 and bool(rows),
+          f"rows {rows} colours {colours}")
+    menu.hide()
+    host.close()
+
+
 def main() -> None:
     probe = Host(40, 40)
     probe.show()
@@ -720,6 +958,11 @@ def main() -> None:
     table_case(True)
     frame_rule_case()
     focus_ring_case()
+    tabs_case()
+    grid_case()
+    segmented_case()
+    round_case()
+    guides_case()
     pump(0.1)
     for widget in APP.topLevelWidgets():
         widget.close()
