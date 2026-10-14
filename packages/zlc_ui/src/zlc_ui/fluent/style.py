@@ -17,6 +17,11 @@ ACCENT_TINT = "#E4EFF9"
 #: closes the shape.  A full-strength 2 px accent border read as an outline
 #: drawn around a card, not as the card being picked.
 SELECTION_EDGE = "#ACC4DD"
+#: The face of a standard command: the accent a step past ACCENT_TINT.
+#: ACCENT_TINT is the selection wash and sat 1.17:1 on a white card --
+#: a button there read as a selected cell, not a thing to press.  Dark-blue
+#: (HOVER) ink on it reads 7.8:1.
+BUTTON_TINT = "#D6E6F5"
 HOVER = "#004578"
 BG = "#F3F3F3"
 TEXT = "#323130"
@@ -28,6 +33,8 @@ RED = "#CD7380"
 #: line.  RED itself is a dot and a fill colour; as text on white it was
 #: 3.3:1, too pale to read as the warning it is.
 RED_DARK = "#9E3B4A"
+#: The face of a destructive command: RED as a wash, carrying RED_DARK ink.
+RED_TINT = "#F7E3E6"
 ORANGE = "#D69A6E"
 ORANGE_TINT = "#F6E3D4"
 ORANGE_DARK = "#8A4B1F"

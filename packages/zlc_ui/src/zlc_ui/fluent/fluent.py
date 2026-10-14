@@ -35,6 +35,7 @@ from .style import (
     SELECTION_EDGE,
     AUTO_SCALE_BASIS,
     BUTTON_PADDING_H,
+    BUTTON_TINT,
     AUTO_SCALE_MARGIN,
     BG,
     CARD_PAD,
@@ -60,6 +61,7 @@ from .style import (
     RADIUS,
     RED,
     RED_DARK,
+    RED_TINT,
     TEXT,
     TITLE_ICON_GAP,
     TITLE_ICON_RATIO,
@@ -1166,10 +1168,11 @@ class FluentGroupBox(QtWidgets.QGroupBox):
 #: What a button DOES, which is all its look may say.  A colour chosen per
 #: call gave one verb a different hue in every window -- Remove orange here,
 #: grey there, blue in the editor -- with white text at 1.65-2.55:1 on top.
-#: ``primary`` is a surface's one main action (the only accent fill),
-#: ``standard`` every other command, ``destructive`` a command that takes
-#: something away (standard, red ink), and ``destructive_primary`` the
-#: confirm of a destructive question -- the one other white-on-colour fill.
+#: ``primary`` is a surface's one main action (the full accent fill),
+#: ``standard`` every other command (the light-blue tint), ``destructive`` a
+#: command that takes something away (the red tint, red ink), and
+#: ``destructive_primary`` the confirm of a destructive question -- the one
+#: white-on-colour fill.
 BUTTON_ROLES = ("primary", "standard", "destructive", "destructive_primary")
 
 _BUTTON_STYLE_CACHE: tuple[float, str] | None = None
@@ -1178,50 +1181,57 @@ _BUTTON_STYLE_CACHE: tuple[float, str] | None = None
 def _button_stylesheet() -> str:
     """The one sheet every FluentButton wears; role and state pick the rules.
 
-    Standard is the resting look of the segmented choice the operator
-    already reads as calm: a white face, a hairline edge, the accent only on
-    the edge under the pointer.  A checkable button checked is a toggle chip
-    and wears that control's "current" state.  Disabled is an OUTLINE: a
-    filled grey disabled button and an enabled grey one were the same
-    pixels, and nobody could tell whether Start could be pressed.
+    Every enabled command is a FILLED face with dark ink, so it reads as a
+    thing to press on a white card and on the grey page alike: standard is
+    the light-blue BUTTON_TINT with HOVER ink, primary the full ACCENT with
+    TEXT ink (5.3:1, where white on ACCENT was 2.45:1), destructive the red
+    wash with RED_DARK ink.  Pointer and press each step the face toward its
+    accent.  A checkable button checked is a toggle chip and wears primary's
+    face: on must differ from a resting tonal chip by more than a shade.
+    Disabled is an OUTLINE: a filled disabled button and an enabled one were
+    the same pixels, and nobody could tell whether Start could be pressed.
     """
 
     global _BUTTON_STYLE_CACHE
     if _BUTTON_STYLE_CACHE is not None and _BUTTON_STYLE_CACHE[0] == _FLUENT_SCALE:
         return _BUTTON_STYLE_CACHE[1]
-    accent_hover = QtGui.QColor(ACCENT).darker(110).name()
-    accent_pressed = QtGui.QColor(ACCENT).darker(122).name()
+    tint_hover = _mixed(BUTTON_TINT, ACCENT, 0.25).name()
+    tint_pressed = _mixed(BUTTON_TINT, ACCENT, 0.45).name()
+    accent_hover = QtGui.QColor(ACCENT).darker(108).name()
+    accent_pressed = QtGui.QColor(ACCENT).darker(116).name()
+    red_tint_hover = _mixed(RED_TINT, RED, 0.18).name()
+    red_tint_pressed = _mixed(RED_TINT, RED, 0.34).name()
     red_hover = QtGui.QColor(RED).darker(110).name()
     red_pressed = QtGui.QColor(RED).darker(122).name()
     style = f"""
     QPushButton {{
-        background: {SURFACE};
-        color: {TEXT};
-        border: 1px solid {DIVIDER};
+        background: {BUTTON_TINT};
+        color: {HOVER};
+        border: 1px solid {BUTTON_TINT};
         border-radius: {_radius()}px;
         padding: 0px {scaled_px(BUTTON_PADDING_H, minimum=6)}px;
         font: {fluent_font_size()}pt "{FONT}";
         outline: none;
     }}
-    QPushButton:hover {{ border-color: {ACCENT}; }}
-    QPushButton:pressed {{ background: {ACCENT_TINT}; }}
-    QPushButton:checked {{
-        background: {ACCENT_TINT};
-        border-color: {SELECTION_EDGE};
-        color: {HOVER};
+    QPushButton:hover {{ background: {tint_hover}; border-color: {tint_hover}; }}
+    QPushButton:pressed {{ background: {tint_pressed}; border-color: {tint_pressed}; }}
+    QPushButton[role="primary"], QPushButton:checked {{
+        background: {ACCENT}; border-color: {ACCENT}; color: {TEXT};
     }}
-    QPushButton:checked:hover {{ border-color: {ACCENT}; }}
-    QPushButton[role="destructive"] {{ color: {RED_DARK}; }}
-    QPushButton[role="destructive"]:hover {{ border-color: {RED}; }}
-    QPushButton[role="destructive"]:pressed {{ background: {BG}; }}
-    QPushButton[role="primary"] {{
-        background: {ACCENT}; border-color: {ACCENT}; color: white;
-    }}
-    QPushButton[role="primary"]:hover {{
+    QPushButton[role="primary"]:hover, QPushButton:checked:hover {{
         background: {accent_hover}; border-color: {accent_hover};
     }}
-    QPushButton[role="primary"]:pressed {{
+    QPushButton[role="primary"]:pressed, QPushButton:checked:pressed {{
         background: {accent_pressed}; border-color: {accent_pressed};
+    }}
+    QPushButton[role="destructive"] {{
+        background: {RED_TINT}; border-color: {RED_TINT}; color: {RED_DARK};
+    }}
+    QPushButton[role="destructive"]:hover {{
+        background: {red_tint_hover}; border-color: {red_tint_hover};
+    }}
+    QPushButton[role="destructive"]:pressed {{
+        background: {red_tint_pressed}; border-color: {red_tint_pressed};
     }}
     QPushButton[role="destructive_primary"] {{
         background: {RED}; border-color: {RED}; color: white;
@@ -1240,6 +1250,7 @@ def _button_stylesheet() -> str:
         font-size: {round(fluent_font_size() * 1.35)}pt;
     }}
     QPushButton:disabled, QPushButton[role="primary"]:disabled,
+    QPushButton[role="destructive"]:disabled,
     QPushButton[role="destructive_primary"]:disabled, QPushButton[dirty="true"]:disabled,
     QPushButton:checked:disabled {{
         background: {BG}; border-color: {DIVIDER}; color: {PLACEHOLDER};
@@ -7072,23 +7083,26 @@ class FluentSegmentedButtons(QtWidgets.QWidget):
             button.clicked.connect(lambda _checked=False, value=value: self.activated.emit(value))
             layout.addWidget(button)
             self._buttons[value] = button
+        tint_hover = _mixed(BUTTON_TINT, ACCENT, 0.25).name()
         self.setStyleSheet(
             f"""
             QPushButton {{
-                background: {SURFACE};
-                color: {TEXT};
-                border: 1px solid {DIVIDER};
+                background: {BUTTON_TINT};
+                color: {HOVER};
+                border: 1px solid {BUTTON_TINT};
                 border-radius: {_radius()}px;
                 padding: {scaled_px(3, minimum=2)}px {scaled_px(10, minimum=6)}px;
                 font: {fluent_font_size()}pt "{FONT}";
             }}
-            QPushButton:hover {{ border-color: {ACCENT}; }}
+            QPushButton:hover {{ background: {tint_hover}; border-color: {tint_hover}; }}
             QPushButton[current="true"] {{
-                background: {ACCENT_TINT};
-                border-color: {SELECTION_EDGE};
-                color: {HOVER};
+                background: {ACCENT};
+                border-color: {ACCENT};
+                color: {TEXT};
             }}
-            QPushButton:disabled {{ color: {PLACEHOLDER}; }}
+            QPushButton:disabled {{
+                background: {BG}; border-color: {DIVIDER}; color: {PLACEHOLDER};
+            }}
             """
         )
 
