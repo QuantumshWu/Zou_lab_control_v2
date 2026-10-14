@@ -18,7 +18,9 @@ class PublishedItemsLegend(QtWidgets.QWidget):
     are given.  It was a monospace ``items:`` block that read like debug
     output, then a white chip in a hairline, one more outline on a white
     row.  The descriptions are the tooltip; :meth:`text` is the same
-    inventory as plain words.
+    inventory as plain words.  With no items it is one chip's height with
+    its note where a chip's name starts, so a row without outputs is as
+    tall as its neighbours and its words stand in their column.
     """
 
     def __init__(self, parent=None) -> None:
@@ -55,10 +57,19 @@ class PublishedItemsLegend(QtWidgets.QWidget):
         return self._text
 
     # -- geometry: chips flow left to right and wrap -----------------------
+    @staticmethod
+    def _pad_x() -> int:
+        """The room before a chip's name, inside its face."""
+
+        return scaled_px(8, minimum=6)
+
+    def _chip_height(self) -> int:
+        return self.fontMetrics().height() + scaled_px(4, minimum=3)
+
     def _chips(self, width: int) -> list[tuple[QtCore.QRect, str, str]]:
         metrics = self.fontMetrics()
-        pad_x, gap = scaled_px(8, minimum=6), scaled_px(6, minimum=4)
-        height = metrics.height() + scaled_px(4, minimum=3)
+        pad_x, gap = self._pad_x(), scaled_px(6, minimum=4)
+        height = self._chip_height()
         placed, x, y = [], 0, 0
         for name, shape, _description in self._rows:
             shown = f"  {shape}" if shape else ""
@@ -75,7 +86,7 @@ class PublishedItemsLegend(QtWidgets.QWidget):
     def heightForWidth(self, width: int) -> int:  # noqa: N802 - Qt API
         chips = self._chips(max(1, width))
         if not chips:
-            return self.fontMetrics().height()
+            return self._chip_height()
         return max(rect.bottom() for rect, _name, _shape in chips) + 1
 
     def sizeHint(self) -> QtCore.QSize:  # noqa: N802 - Qt API
@@ -98,11 +109,14 @@ class PublishedItemsLegend(QtWidgets.QWidget):
         chips = self._chips(max(1, self.width()))
         if not chips:
             painter.setPen(QtGui.QColor(MUTED_INK))
-            painter.drawText(self.rect(), QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter, self._text)
+            painter.drawText(
+                QtCore.QRect(0, 0, self.width(), self._chip_height()).adjusted(self._pad_x(), 0, 0, 0),
+                QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter, self._text,
+            )
             painter.end()
             return
         metrics = self.fontMetrics()
-        pad_x = scaled_px(8, minimum=6)
+        pad_x = self._pad_x()
         radius = float(_radius())
         for rect, name, shape in chips:
             painter.setPen(QtCore.Qt.NoPen)

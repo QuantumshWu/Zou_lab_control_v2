@@ -50,13 +50,13 @@ from .style import (
     CARD_TITLE_PX,
     COMBO_TRI_SIZE,
     COMBO_WIDTH,
+    CONFIG_GREEN_DARK,
     DIVIDER,
     EDIT_PADDING_H,
     FLUENT_SCALE_MAX,
     FLUENT_SCALE_MIN,
     FONT,
     FONT_SIZE,
-    GREEN,
     GRAPHITE,
     GREY,
     HOVER,
@@ -181,6 +181,13 @@ def scaled_px(value: int | float, *, minimum: int = 1) -> int:
     return max(int(minimum), int(round(float(value) * _FLUENT_SCALE)))
 
 
+def control_height() -> int:
+    """The ONE height of a control in a row -- a field, a combo, a button,
+    a switch, a grid card's face, a section title -- display-scaled."""
+
+    return scaled_px(30, minimum=22)
+
+
 # ---------------------------------------------------------------- frame geometry
 #
 # THE ONE GEOMETRY RULE for a frame with parts inside it (a spin box's
@@ -207,10 +214,9 @@ def scaled_px(value: int | float, *, minimum: int = 1) -> int:
 #: ``FIELD_BORDER_PX * devicePixelRatioF()`` device px; painted code reads the
 #: same constant.  Nothing else defines the edge width.
 FIELD_BORDER_PX = 1
-#: QLineEditPrivate::horizontalMargin / verticalMargin: the text inset Qt
-#: keeps inside a line edit's contents rect (logical px, never scaled).
+#: QLineEditPrivate::horizontalMargin: the text inset Qt keeps inside a line
+#: edit's contents rect on the left and right (logical px, never scaled).
 _QLINEEDIT_HMARGIN = 2
-_QLINEEDIT_VMARGIN = 1
 
 
 def scaled_even_px(value: float, *, minimum: int = 2) -> int:
@@ -378,6 +384,27 @@ def paint_centred_ink(
     painter.fillPath(path, QtGui.QColor(colour))
     painter.restore()
     return ink.translated(dx, dy)
+
+
+def centred_line_top(top: float, height: float, font: QtGui.QFont) -> int:
+    """The top of the ONE line box that centres ``font``'s capitals on the
+    span ``top .. top + height``, in whole logical px: where a field's
+    text, a row label, a button's label and a combo's collapsed text all
+    put their line, so a row of them shares one baseline.
+
+    Qt centres the line BOX, by two rules: a label or a button on the
+    box's fractional height, a QLineEdit on its integer height with the odd
+    pixel above.  A field's text sat two device pixels under the label
+    beside it, and both sat low, because Segoe UI's ascent holds the room
+    for accents: the capitals of a field were 1.3 px under its middle.  The
+    capitals -- and the digits, which are as tall -- are what the eye
+    centres.  Whole pixels, because a QLineEdit can put its line only on
+    one: everything that paints its line on the same integer top, over the
+    same ascent, lands on the same device row at every ratio."""
+
+    metrics = QtGui.QFontMetricsF(font)
+    centre = float(top) + float(height) / 2.0
+    return math.floor(centre + metrics.capHeight() / 2.0 - metrics.ascent() + 0.5)
 
 
 def _available_geometry_at(
@@ -754,11 +781,23 @@ def align_to_resolution(value: str | float, resolution: float, *, allow_any: boo
     return snap_number(re.match(r".+", text))
 
 
+def status_dot_gap() -> int:
+    """The air between a status dot and the words after it: the status
+    strip's, and that of every header that leads with a dot, so the words
+    of stacked strips start on one x."""
+
+    return scaled_px(8)
+
+
 class FluentStatusDot(QtWidgets.QLabel):
+    """A round severity or state mark.  One size by default, the status
+    strip's: a header's larger dot beside a strip's smaller one, each with
+    its own gap, started their words 2.7 px apart."""
+
     #: Class attribute: set_color runs from __init__ before any assignment.
     _color = ""
 
-    def __init__(self, parent=None, *, color: str = GREY, size: int = 16):
+    def __init__(self, parent=None, *, color: str = GREY, size: int = 12):
         super().__init__(parent)
         # Even, so the half-size radius is a whole pixel and the dot round.
         self._size = scaled_even_px(size)
@@ -781,10 +820,66 @@ class FluentStatusDot(QtWidgets.QLabel):
         self.setStyleSheet(status_dot_stylesheet(wanted, radius=max(1, self._size // 2)))
 
 
+def _paint_label_line(label: QtWidgets.QLabel) -> bool:
+    """Paint a one-line, plain-text, vertically centred ``label`` with its
+    line on :func:`centred_line_top` of its contents -- the line the field
+    beside it puts its text on -- and say whether it did.
+
+    Everything else QLabel does is kept: the frame and the sheet's
+    background, the margin, the indent, the horizontal alignment, the
+    palette and the enabled state.  A label that is not one plain line (it
+    wraps, is rich text, is selectable, has a buddy's mnemonic) or has no
+    room for its line is left to QLabel."""
+
+    text = QtWidgets.QLabel.text(label)
+    kind = label.textFormat()
+    rich = kind == QtCore.Qt.RichText or (kind == QtCore.Qt.AutoText and QtCore.Qt.mightBeRichText(text))
+    interactive = int(label.textInteractionFlags()) & int(
+        QtCore.Qt.TextSelectableByMouse | QtCore.Qt.TextSelectableByKeyboard | QtCore.Qt.TextEditable
+    )
+    if (not text or "\n" in text or rich or interactive or label.wordWrap()
+            or label.buddy() is not None or not int(label.alignment()) & int(QtCore.Qt.AlignVCenter)):
+        return False
+    margin = label.margin()
+    rect = label.contentsRect().adjusted(margin, margin, -margin, -margin)
+    metrics = label.fontMetrics()
+    line = metrics.height()
+    if rect.height() < line:
+        return False
+    align = int(QtWidgets.QStyle.visualAlignment(label.layoutDirection(), label.alignment()))
+    indent = label.indent()
+    if indent < 0 and label.frameWidth():
+        indent = metrics.horizontalAdvance("x") // 2 - margin
+    if indent > 0:
+        if align & int(QtCore.Qt.AlignLeft):
+            rect.setLeft(rect.left() + indent)
+        if align & int(QtCore.Qt.AlignRight):
+            rect.setRight(rect.right() - indent)
+    top = centred_line_top(rect.top(), rect.height(), label.font())
+    rect.setTop(max(rect.top(), min(top, rect.bottom() + 1 - line)))
+    painter = QtGui.QPainter(label)
+    label.drawFrame(painter)
+    label.style().drawItemText(
+        painter, rect, (align & int(QtCore.Qt.AlignHorizontal_Mask)) | int(QtCore.Qt.AlignTop),
+        label.palette(), label.isEnabled(), text, label.foregroundRole(),
+    )
+    painter.end()
+    return True
+
+
 class FluentLabel(QtWidgets.QLabel):
+    """Plain text in the body font.  One line of it, centred in its box, is
+    painted on the line a field of that box's height puts its text on
+    (:func:`_paint_label_line`), so a row label reads on the baseline of
+    the field it names."""
+
     def __init__(self, text: str = "", parent=None):
         super().__init__(text, parent)
         self.setStyleSheet(f'QLabel {{ color: {TEXT}; font: {fluent_font_size()}pt "{FONT}"; background: transparent; }}')
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        if not _paint_label_line(self):
+            super().paintEvent(event)
 
 
 def muted_note_label(text: str) -> "QtWidgets.QLabel":
@@ -795,6 +890,22 @@ def muted_note_label(text: str) -> "QtWidgets.QLabel":
     lbl = FluentLabel(text)
     lbl.setStyleSheet(f'{MUTED_LABEL_STYLE} font: {fluent_font_size()}pt "{FONT}";')
     return lbl
+
+
+def column_header_label(text: str) -> "FluentLabel":
+    """The name of a column laid out by hand -- a grid of bindings, a form
+    set in columns -- in the look of a FluentTableView's column names:
+    weight 600 in MUTED_INK, on the line of the row it heads.  ``setBold``
+    on a FluentLabel changes nothing (its sheet's ``font`` shorthand wins
+    over a QFont), and headings made that way read as one more row of
+    data."""
+
+    label = FluentLabel(text)
+    label.setStyleSheet(
+        f'QLabel {{ color: {MUTED_INK}; font: 600 {fluent_font_size()}pt "{FONT}"; '
+        f"background: transparent; border: none; }}"
+    )
+    return label
 
 
 class FluentFrame(QtWidgets.QFrame):
@@ -1313,14 +1424,17 @@ class FluentGroupBox(QtWidgets.QGroupBox):
     def set_selected(self, selected: bool) -> None:
         """Mark this card as the one the next edit acts on, or unmark it.
 
-        Selection is a FILL, not a frame: the body takes the accent tint and
-        the edge stays the card's own (a spacer's dashes, a bracket's
-        colour, the divider grey).  A 2 px accent border was tried first and
-        read as an outline drawn around the card rather than as the card
-        being picked; a softer accent edge was still a second line.  Painted
-        in paintEvent, never via stylesheet -- an unscoped ``border:``
-        cascades to every CHILD widget, so each inner checkbox/lineedit grew
-        its own box.
+        Selection is a FILL, not a frame: the body takes the ACCENT_TINT
+        wash and the edge stays the card's own (a spacer's dashes, a
+        bracket's colour, the divider grey).  A 2 px accent border was tried
+        first and read as an outline drawn around the card rather than as
+        the card being picked; a softer accent edge was still a second line.
+        The wash, not SELECTED: a card holds fields, muted names and
+        disabled ports, which SELECTED would sink to 3.3:1 and 2.1:1; and a
+        card takes no hover wash, so on a card the wash means only
+        selected.  Painted in paintEvent, never via stylesheet -- an
+        unscoped ``border:`` cascades to every CHILD widget, so each inner
+        checkbox/lineedit grew its own box.
         """
 
         value = bool(selected)
@@ -1536,7 +1650,7 @@ class FluentButton(QtWidgets.QPushButton):
         self._dirty = False
         super().__init__(text, parent)
         self.setProperty("on_tint", False)
-        self.setMinimumHeight(scaled_px(30, minimum=22))
+        self.setMinimumHeight(control_height())
         # Default sizing is set ONCE here: a caller that opts into Expanding
         # (a button grid) keeps it.
         self.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
@@ -1580,19 +1694,34 @@ class FluentButton(QtWidgets.QPushButton):
         return HOVER
 
     def paintEvent(self, event) -> None:  # noqa: N802 - Qt naming
-        """A one-symbol label is centred on its INK, not on its line box
-        (see :func:`paint_centred_ink`): the face is drawn by the style, the
-        glyph as a path on the face's centre."""
+        """The face is drawn by the style; the label by the row's rules.
 
-        if not self.property("glyph"):
-            super().paintEvent(event)
-            return
+        A word sits on :func:`centred_line_top` of the face, the line the
+        field and the label beside the button put their text on -- the
+        style centred its line box, two device pixels from theirs.  A
+        one-symbol label is centred on its INK (:func:`paint_centred_ink`).
+        A button with an icon is the style's to lay out."""
+
         option = QtWidgets.QStyleOptionButton()
         self.initStyleOption(option)
+        glyph = bool(self.property("glyph"))
+        if not glyph and not option.icon.isNull():
+            super().paintEvent(event)
+            return
         painter = QtWidgets.QStylePainter(self)
         painter.drawControl(QtWidgets.QStyle.CE_PushButtonBevel, option)
-        paint_centred_ink(painter, self, QtCore.QRectF(self.rect()), self.font(), option.text,
-                          self._glyph_ink())
+        if glyph:
+            paint_centred_ink(painter, self, QtCore.QRectF(self.rect()), self.font(), option.text,
+                              self._glyph_ink())
+        else:
+            style = self.style()
+            area = style.subElementRect(QtWidgets.QStyle.SE_PushButtonContents, option, self)
+            area.setTop(centred_line_top(0, self.height(), self.font()))
+            flags = QtCore.Qt.AlignHCenter | QtCore.Qt.AlignTop | QtCore.Qt.TextShowMnemonic
+            if not style.styleHint(QtWidgets.QStyle.SH_UnderlineShortcut, option, self):
+                flags |= QtCore.Qt.TextHideMnemonic
+            style.drawItemText(painter, area, int(flags), option.palette, self.isEnabled(),
+                               option.text, QtGui.QPalette.ButtonText)
         painter.end()
 
     def setEnabled(self, enabled: bool) -> None:  # noqa: N802 - Qt API name
@@ -1761,6 +1890,29 @@ def _line_edit_text_line(edit: QtWidgets.QLineEdit) -> QtCore.QRect:
     )
 
 
+def _seat_line_edit_text(edit: QtWidgets.QLineEdit) -> None:
+    """Give ``edit`` the top and bottom text margins that move Qt's line box
+    onto :func:`centred_line_top` of its own height.
+
+    The edit's height is its field's: a plain field is its own frame, and
+    the editor inside a spin box or an editable combo is laid out
+    symmetrically inside theirs.  The margins are equal and opposite -- the
+    room Qt centres the line in is moved, not shrunk -- so the line moves
+    by exactly their size and the edit asks for no other height than it
+    did.  The left and right margins stay the owner's (a readout's inset,
+    a badge's room)."""
+
+    option = QtWidgets.QStyleOptionFrame()
+    option.initFrom(edit)
+    contents = edit.style().subElementRect(QtWidgets.QStyle.SE_LineEditContents, option, edit)
+    line = edit.fontMetrics().height()
+    qt_top = contents.y() + (contents.height() - line + 1) // 2
+    shift = centred_line_top(0, edit.height(), edit.font()) - qt_top
+    margins = edit.textMargins()
+    if (margins.top(), margins.bottom()) != (shift, -shift):
+        edit.setTextMargins(margins.left(), shift, margins.right(), -shift)
+
+
 def field_text_inset() -> int:
     """Where a field's text starts inside its box, from the box's left
     edge: the edge, the padding and Qt's own text margin (logical px).
@@ -1815,7 +1967,7 @@ class FluentLineEdit(QtWidgets.QLineEdit):
         self._normalization_timer: QtCore.QTimer | None = None
         self._normalizing = False
         self._numeric_layout_key: tuple | None = None
-        self.setMinimumHeight(scaled_px(30, minimum=22))
+        self.setMinimumHeight(control_height())
         self._apply_style()
         self.set_placeholder_prompt(False)
         self.setText(str(text))
@@ -2030,6 +2182,7 @@ class FluentLineEdit(QtWidgets.QLineEdit):
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
+        _seat_line_edit_text(self)
         self._normalize_visible_number()
 
     def showEvent(self, event) -> None:  # noqa: N802
@@ -2038,6 +2191,8 @@ class FluentLineEdit(QtWidgets.QLineEdit):
 
     def changeEvent(self, event) -> None:  # noqa: N802
         super().changeEvent(event)
+        if event.type() in (QtCore.QEvent.FontChange, QtCore.QEvent.StyleChange):
+            _seat_line_edit_text(self)
         if event.type() in (
             QtCore.QEvent.FontChange,
             QtCore.QEvent.StyleChange,
@@ -2305,15 +2460,21 @@ class FluentReadoutEdit(FluentLineEdit):
     the operator was meant to read looked like a control that was switched off.
 
     Inherits FluentLineEdit's sizing / API (``setText`` / ``text``) so it drops into the same
-    rows.  Being text, it starts where text starts -- flush with its widget's left edge, so a
-    value sits exactly under its column header or beside the label it continues.  It kept a
-    field's inner padding when it lost the box, and every value then started nine pixels to
-    the right of the header above it."""
+    rows.  A value stands in a column of fields -- a card's Total under its Name, a result
+    path under the parameters it came from, a status under the address it reports on -- so
+    its text starts where a field's text starts (:func:`field_text_inset`), not at the edge
+    of the boxes: flush, the values sat six pixels left of the typed text above them, out of
+    the column the eye reads down.  ``flush=True`` is for a value that continues a line of
+    text or sits under a column header's words: it starts at its widget's own edge."""
 
-    def __init__(self, text: str = "", parent=None):
+    def __init__(self, text: str = "", parent=None, *, flush: bool = False):
         super().__init__(text, parent)
-        # QLineEdit keeps two pixels before its text; a readout has no box to keep them from.
-        self.setTextMargins(-2, 0, 0, 0)
+        # The left text margin moves Qt's own two pixels before the text to
+        # the field inset, or takes them back for a flush value.  Top and
+        # bottom are the seated line's (_seat_line_edit_text).
+        left = -_QLINEEDIT_HMARGIN if flush else field_text_inset() - _QLINEEDIT_HMARGIN
+        margins = self.textMargins()
+        self.setTextMargins(left, margins.top(), margins.right(), margins.bottom())
         self.setReadOnly(True)
         self.setCursor(QtCore.Qt.IBeamCursor)        # the I-beam signals "selectable text"
         self.set_display_elide(QtCore.Qt.ElideMiddle)
@@ -2324,7 +2485,8 @@ class FluentReadoutEdit(FluentLineEdit):
         self.setToolTip(self.text())
 
     def _apply_style(self) -> None:
-        # No box and no side inset: the transparent top and bottom edges keep a field's height.
+        # No box: the transparent top and bottom edges keep a field's height, and the left text
+        # margin (__init__) says where the text starts.
         self.setStyleSheet(
             f"""
             QLineEdit {{
@@ -2386,9 +2548,11 @@ class FluentReadoutMultiline(QtWidgets.QPlainTextEdit):
         # its text.  At PADDING_V the row's content box lines up with the line edit's, so the anchored
         # height formula (single-row height + one lineSpacing per extra line) shows every line in full.
         self.document().setDocumentMargin(scaled_px(PADDING_V))
-        # That margin is on every side; a readout's text still starts at its widget's left edge,
-        # under the header or beside the label it continues, so the viewport takes it back.
-        self.setViewportMargins(-scaled_px(PADDING_V), 0, 0, 0)
+        # That margin is on every side; the viewport takes it back on the left, so a value's text
+        # starts where a field's text starts (field_text_inset), as a FluentReadoutEdit's does,
+        # and a MESSAGE body (plain) at its widget's own edge, flush with the card's words.
+        inset = 0 if self._plain else field_text_inset()
+        self.setViewportMargins(inset - scaled_px(PADDING_V), 0, 0, 0)
         self._apply_style()
         if self._plain:
             # A MESSAGE body is not an input: hide the blinking text caret and don't steal the dialog's
@@ -2422,7 +2586,7 @@ class FluentReadoutMultiline(QtWidgets.QPlainTextEdit):
             """
         else:
             # The SAME readout look as FluentReadoutEdit: plain TEXT-ink text on the surface, no
-            # box (a grey box was the disabled button's chrome) and no side inset.
+            # box (a grey box was the disabled button's chrome); the viewport margin insets it.
             base = f"""
             QPlainTextEdit {{
                 background: transparent;
@@ -2621,27 +2785,27 @@ class FluentPathEdit(QtWidgets.QWidget):
         self.edit.setToolTip("\n".join(part for part in (self.edit.text(), self._hint) if part))
 
 
-class FluentSectionLabel(QtWidgets.QLabel):
-    """Bold, own-line section header for vertical settings popups.
+class FluentSectionLabel(FluentLabel):
+    """THE section title: a group's name on its own line, or the title of a
+    header row whose commands and summary sit beside it.
 
-    A settings page uses ONE QGroupBox to mark sections; we use a
-    bold dim label per section instead so multiple sections stack cleanly in a
-    single VBox without nested borders.  Reuse this for every settings popup so the
-    visual rhythm is identical across GUIs."""
+    One style, everywhere a section is named: TEXT ink at the weight of a
+    card's title and a table's column names (600), as tall as a control,
+    its line on the line a field of that height puts its text on.  It kept
+    a top margin for an own-line header, and as the title of a row of
+    fields that margin put it two pixels under their text; the space above
+    a section is the section gap of the layout it stands in."""
 
     def __init__(self, text: str = "", parent=None):
         super().__init__(text, parent)
-        # Bold must go in the STYLESHEET (it is what actually renders): setting a stylesheet AFTER
-        # setFont re-polishes the widget and drops a QFont-only bold, so a section ended up the same
-        # weight as a row label (the "can't tell a section from a row" bug).  Set the stylesheet
-        # (with font-weight: bold) FIRST, then setFont last so widget.font().bold() also stays True.
-        self.setStyleSheet(f"color: {TEXT}; background: transparent; border: none; font-weight: bold;")
-        font = self.font()
-        font.setBold(True)
-        font.setPointSize(fluent_font_size())
-        self.setFont(font)
+        # The weight goes in the SHEET, the one that renders: a QFont-only
+        # weight set before a sheet is dropped when the sheet repolishes.
+        self.setStyleSheet(
+            f'QLabel {{ color: {TEXT}; font: 600 {fluent_font_size()}pt "{FONT}"; '
+            f"background: transparent; border: none; }}"
+        )
         self.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
-        self.setContentsMargins(0, scaled_px(4), 0, 0)
+        self.setMinimumHeight(control_height())
 
 
 def setting_label_width(labels, *, minimum: int = 72) -> int:
@@ -2665,7 +2829,7 @@ class FluentSettingRow(QtWidgets.QWidget):
     ``[fixed-width label | control flush-left, expanding]``.
 
     THE design system (one logic everywhere): a form is built from exactly two primitives --
-    :class:`FluentSectionLabel` (bold, dark, own-line) for a GROUP header, and this row (regular
+    :class:`FluentSectionLabel` (semibold, dark) for a GROUP header, and this row (regular
     weight, fixed-width column) for each control.  The section/row hierarchy is shown by
     weight ONLY -- never by indentation.  Labels are TEXT: grey read as disabled beside a
     required field, and grey is what a HINT wears.  Share ONE column width
@@ -2699,7 +2863,7 @@ class FluentSettingRow(QtWidgets.QWidget):
             lbl = label
             lbl.setParent(self)
         else:
-            lbl = QtWidgets.QLabel(str(label), self)
+            lbl = FluentLabel(str(label), self)
         lbl.setFixedWidth(int(label_width) if label_width is not None else scaled_px(60, minimum=48))
         if isinstance(lbl, QtWidgets.QLabel):
             lbl.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
@@ -2903,7 +3067,7 @@ class FluentCardDialog(QtWidgets.QDialog):
 
 
 class _FluentMessageDialog(FluentCardDialog):
-    """A modal message / warning box on the shared card: a bold title
+    """A modal message / warning box on the shared card: the section title
     (``FluentSectionLabel``), the wrapped message and a single Fluent OK
     button, centred on its parent.  ``fluent_message`` is the ONE entry
     point -- use it in place of ``QMessageBox.information`` / ``.warning``."""
@@ -3169,7 +3333,7 @@ class FluentComboBox(QtWidgets.QAbstractButton):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setMinimumHeight(scaled_px(30, minimum=22))
+        self.setMinimumHeight(control_height())
         self.setCheckable(False)
         self.setSizePolicy(
             QtWidgets.QSizePolicy.Preferred,
@@ -3505,7 +3669,7 @@ class FluentComboBox(QtWidgets.QAbstractButton):
             # style polish, so a combo asked for a 26 px row settled at 22 and
             # every row laid out beside it drifted.
             if self.minimumHeight() != self.maximumHeight():
-                self.setMinimumHeight(scaled_px(30, minimum=22))
+                self.setMinimumHeight(control_height())
             self._invalidate_content_width()
 
     def event(self, event) -> bool:
@@ -3542,21 +3706,22 @@ class FluentComboBox(QtWidgets.QAbstractButton):
         )
 
     def _collapsed_text_rect(self) -> QtCore.QRect:
-        """Where the collapsed text's line box sits, laid out the way
-        QLineEdit lays out its own (an integer centring inside the edge,
-        padding and vertical text margin), so baselines in a row agree."""
+        """Where the collapsed text's line box sits: on the line every
+        field's text takes (:func:`centred_line_top` of the box), so the
+        typed text of an editable combo, a line edit beside it and the
+        label before it share its baseline."""
 
         left, right, drop_width = self._collapsed_text_chrome()
         width = max(0, self.width() - drop_width - left - right)
-        line = QtGui.QFontMetrics(self._collapsed_font()).height()
-        inner_top = FIELD_BORDER_PX + scaled_px(PADDING_V) + _QLINEEDIT_VMARGIN
-        inner_height = self.height() - 2 * inner_top
-        top = inner_top + (inner_height - line + 1) // 2
-        return QtCore.QRect(left, top, width, line)
+        font = self._collapsed_font()
+        line = QtGui.QFontMetrics(font).height()
+        return QtCore.QRect(left, centred_line_top(0, self.height(), font), width, line)
 
     def _editor_rect(self) -> QtCore.QRect:
-        """The editable combo's line edit: the collapsed text rect plus the
-        margins the line edit keeps around its own text, so typed text sits
+        """The editable combo's line edit: the collapsed text's columns plus
+        the inset the line edit keeps before its text, and the room inside
+        the edge and padding, as high above the box's middle as below it --
+        the edit seats its line on its own middle, so typed text sits
         exactly where the collapsed text was."""
 
         text = self._collapsed_text_rect()
@@ -5259,7 +5424,7 @@ class FluentSwitch(QtWidgets.QAbstractButton):
 
     def _apply_metrics(self) -> None:
         # A control's height, the same number a FluentButton takes.
-        self.setMinimumSize(fluent_switch_width(self.text()), scaled_px(30, minimum=22))
+        self.setMinimumSize(fluent_switch_width(self.text()), control_height())
 
     def setText(self, text: str) -> None:  # noqa: N802 - Qt API
         value = str(text)
@@ -5339,9 +5504,12 @@ class FluentSwitch(QtWidgets.QAbstractButton):
             painter.setPen(QtGui.QColor(TEXT if enabled else DISABLED_INK))
             painter.setFont(self.font())
             left = track_w + scaled_px(8)
+            # On the row's one line (centred_line_top), with the buttons
+            # and fields beside it.
+            top = centred_line_top(0, self.height(), self.font())
             painter.drawText(
-                QtCore.QRect(left, 0, max(0, self.width() - left), self.height()),
-                QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter,
+                QtCore.QRect(left, top, max(0, self.width() - left), self.height() - top),
+                QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop,
                 self.text(),
             )
         painter.end()
@@ -5610,7 +5778,7 @@ class FluentSpinBox(_WheelFocusGuardMixin, QtWidgets.QSpinBox):
         # the focus leaving -- which is also when the range applies.
         self.setKeyboardTracking(False)
         self.setButtonSymbols(QtWidgets.QAbstractSpinBox.PlusMinus)
-        self.setMinimumHeight(scaled_px(30, minimum=22))
+        self.setMinimumHeight(control_height())
         # Left-align with zero internal text margins so the text's left inset is
         # exactly the stylesheet ``padding`` (EDIT_PADDING_H) -- identical to a
         # plain FluentLineEdit.  Center alignment made the
@@ -5737,14 +5905,20 @@ class FluentSpinBox(_WheelFocusGuardMixin, QtWidgets.QSpinBox):
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
+        # The box has just laid its edit out; the edit Qt made is a plain
+        # QLineEdit, so the box seats its text (see _seat_line_edit_text).
+        _seat_line_edit_text(self.lineEdit())
         self._update_number_geometry()
 
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
+        _seat_line_edit_text(self.lineEdit())
         self._update_number_geometry()
 
     def changeEvent(self, event) -> None:  # noqa: N802
         super().changeEvent(event)
+        if event.type() in (QtCore.QEvent.FontChange, QtCore.QEvent.StyleChange):
+            _seat_line_edit_text(self.lineEdit())
         if event.type() in (
             QtCore.QEvent.FontChange,
             QtCore.QEvent.StyleChange,
@@ -5798,7 +5972,7 @@ class FluentInputDialog(FluentCardDialog):
         layout.setSpacing(scaled_px(8, minimum=5))
 
         # The card has no title bar to carry a title, so a titled dialog
-        # renders its own -- the same bold section label the message box
+        # renders its own -- the same section title the message box
         # uses, because they are the same kind of thing.
         if title:
             layout.addWidget(FluentSectionLabel(str(title)))
@@ -5847,6 +6021,13 @@ class _PythonHighlighter(QtGui.QSyntaxHighlighter):
     sentence that says what its columns MEAN, and that sentence is the part a
     physicist reads.  Everything else is deliberately thin -- this is a code
     field in an instrument window, not an IDE.
+
+    Every colour is an ink at reading strength on the white field: keywords
+    the dark accent of a command's label (9.9:1), numbers and strings the
+    deep orange (6.8:1), comments the deep config green (6.2:1).  The accent
+    (2.6:1), the light orange (2.4:1) and the light green are marker
+    colours, and the words drawn in them were the hardest on the page to
+    read.
     """
 
     KEYWORDS = (
@@ -5866,14 +6047,12 @@ class _PythonHighlighter(QtGui.QSyntaxHighlighter):
                 fmt.setFontWeight(QtGui.QFont.DemiBold)
             return fmt
 
-        self._comment = _format(GREEN, italic=True)
-        self._string = _format(ORANGE_DARK)
-        self._number = _format(ORANGE)
-        self._keyword = _format(ACCENT, bold=True)
+        self._comment = _format(CONFIG_GREEN_DARK, italic=True)
+        literal = _format(ORANGE_DARK)
         self._rules = (
-            (re.compile(r"\b(" + "|".join(self.KEYWORDS) + r")\b"), self._keyword),
-            (re.compile(r"\b\d+\.?\d*([eE][-+]?\d+)?\b"), self._number),
-            (re.compile(r"'[^'\n]*'|\"[^\"\n]*\""), self._string),
+            (re.compile(r"\b(" + "|".join(self.KEYWORDS) + r")\b"), _format(HOVER, bold=True)),
+            (re.compile(r"\b\d+\.?\d*([eE][-+]?\d+)?\b"), literal),
+            (re.compile(r"'[^'\n]*'|\"[^\"\n]*\""), literal),
         )
 
     def highlightBlock(self, text: str) -> None:  # noqa: N802 - Qt naming
@@ -5906,20 +6085,29 @@ class FluentCodeEdit(QtWidgets.QPlainTextEdit):
     """A monospace code/expression editor with the house Fluent chrome (white card, light
     border, Consolas font, Fluent scrollbars).  ONE source for the look so every code editor
     -- a scan-tab generator + table view, or a source-choice popup -- renders
-    identically; changing the recipe here changes them all."""
+    identically; changing the recipe here changes them all.
+
+    Its text starts where a field's text starts (:func:`field_text_inset`), so code under a
+    name field reads in that field's column -- the document's own 4 px margin on top of the
+    padding put it 2.3 px further in -- and the first line sits as far below the top edge.
+    Only code being WRITTEN is coloured: a read-only view shows what a program produced, a
+    table or the sentence that says there is none yet, and Python colouring painted the
+    "and" of that sentence as a keyword."""
 
     def __init__(self, text: str = "", parent=None, *, read_only: bool = False):
         super().__init__(parent)
         if text:
             self.setPlainText(text)
         self.setReadOnly(read_only)
-        pad = scaled_px(4)
+        self.document().setDocumentMargin(0)
+        pad = field_text_inset() - FIELD_BORDER_PX
         self.setStyleSheet(
             f'QPlainTextEdit {{ background: white; color: {TEXT}; border: {FIELD_BORDER_PX}px solid {PLACEHOLDER}; '
             f'border-radius: {scaled_px(4)}px; font: {fluent_font_size()}pt "Consolas", "Courier New", '
             f'monospace; padding: {pad}px; }}')
         apply_fluent_scrollbars(self)
-        self._highlighter = _PythonHighlighter(self.document())
+        if not read_only:
+            self._highlighter = _PythonHighlighter(self.document())
 
     def contextMenuEvent(self, event) -> None:  # noqa: N802 - Qt naming
         _apply_fluent_context_menu(self, event)   # Fluent right-click (undo/cut/copy/paste), not the native menu
@@ -6134,7 +6322,7 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
         # the focus leaving -- which is also when the range applies.
         self.setKeyboardTracking(False)
         self.setButtonSymbols(QtWidgets.QAbstractSpinBox.PlusMinus)
-        self.setMinimumHeight(scaled_px(30, minimum=22))
+        self.setMinimumHeight(control_height())
         # See FluentSpinBox: left-align + zero text margins for left-padding
         # parity with the line edits.
         self.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
@@ -6554,16 +6742,20 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
+        _seat_line_edit_text(self.lineEdit())
         self._place_step_chip()
         self._update_number_geometry()
 
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
+        _seat_line_edit_text(self.lineEdit())
         self._place_step_chip()
         self._update_number_geometry()
 
     def changeEvent(self, event) -> None:  # noqa: N802
         super().changeEvent(event)
+        if event.type() in (QtCore.QEvent.FontChange, QtCore.QEvent.StyleChange):
+            _seat_line_edit_text(self.lineEdit())
         if event.type() in (
             QtCore.QEvent.FontChange,
             QtCore.QEvent.StyleChange,
@@ -6983,7 +7175,7 @@ class FluentCheckBox(QtWidgets.QCheckBox):
 
     def __init__(self, text: str = "", parent=None):
         super().__init__(text, parent)
-        self.setMinimumHeight(scaled_px(30, minimum=22))
+        self.setMinimumHeight(control_height())
         rest_hover = _mixed(NEUTRAL_FILL, ACCENT, 0.4).name()
         self.setStyleSheet(
             f"""
@@ -7175,13 +7367,39 @@ class _RuledRowHeader(QtWidgets.QHeaderView):
     The rules continue the viewport's own, one edge-width at each row's
     bottom, and the rule that would lie on the frame's bottom edge is not
     drawn -- as a section border it doubled the edge and squared the
-    rounded corner beside it."""
+    rounded corner beside it.
+
+    A row's label is drawn as a CELL of its row, by the table's own item
+    painter: the header's section painter centred its line box another
+    way and put every row number a pixel under the values beside it."""
 
     def __init__(self, parent=None):
         super().__init__(QtCore.Qt.Vertical, parent)
         # What QTableView gives the header it makes for itself.
         self.setSectionsClickable(True)
         self.setHighlightSections(True)
+
+    def paintSection(self, painter, rect, section: int) -> None:  # noqa: N802 - Qt naming
+        table = self.parent()
+        model = self.model()
+        if not isinstance(table, QtWidgets.QTableView) or model is None or not rect.isValid():
+            super().paintSection(painter, rect, section)
+            return
+        option = table.viewOptions()
+        option.rect = rect
+        option.text = str(model.headerData(section, QtCore.Qt.Vertical, QtCore.Qt.DisplayRole) or "")
+        option.features |= QtWidgets.QStyleOptionViewItem.HasDisplay
+        option.displayAlignment = self.defaultAlignment()
+        option.state &= ~(QtWidgets.QStyle.State_Selected | QtWidgets.QStyle.State_MouseOver
+                          | QtWidgets.QStyle.State_HasFocus)
+        option.palette.setColor(QtGui.QPalette.Text, QtGui.QColor(MUTED_INK))
+        selection = table.selectionModel()
+        # A row of the selection names itself in bold, as Qt's own header did.
+        option.font.setBold(bool(
+            self.highlightSections() and selection is not None
+            and selection.rowIntersectsSelection(section, table.rootIndex())
+        ))
+        table.style().drawControl(QtWidgets.QStyle.CE_ItemViewItem, option, painter, table)
 
     def paintEvent(self, event) -> None:  # noqa: N802 - Qt naming
         super().paintEvent(event)
@@ -7981,6 +8199,38 @@ class _SelectionGridModel(QtCore.QAbstractTableModel):
         return QtCore.Qt.NoItemFlags
 
 
+def _grid_gutter() -> int:
+    """The gutter between a grid card and its cell's edge, on every side."""
+
+    return scaled_px(2, minimum=1)
+
+
+def _grid_card_band(surface: QtWidgets.QWidget, cell: QtCore.QRect) -> tuple[float, float]:
+    """``(top, bottom)`` of the cards of the row ``cell`` is in: the cell
+    less the gutter, snapped to device pixels.  The row label is centred on
+    the same band as the cards beside it."""
+
+    raw = QtCore.QRectF(cell).adjusted(0, _grid_gutter(), 0, -_grid_gutter())
+    return device_snap(surface, raw.top(), axis="y"), device_snap(surface, raw.bottom(), axis="y")
+
+
+def _paint_grid_label(
+    painter: QtGui.QPainter, rect: QtCore.QRectF, band: tuple[float, float],
+    align, font: QtGui.QFont, text: str, colour,
+) -> None:
+    """A grid label on the one line of its row: :func:`centred_line_top` of
+    the cards' band.  Every card of a row and its row label share that
+    baseline whatever their letters; centred on its own ink each name sat
+    as high as its letters were tall, and the row label beside them, on
+    its line box, a pixel lower than all of them."""
+
+    top = centred_line_top(band[0], band[1] - band[0], font)
+    line = QtCore.QRectF(rect.left(), top, rect.width(), max(0.0, band[1] - top))
+    painter.setFont(font)
+    painter.setPen(QtGui.QColor(colour))
+    painter.drawText(line, int(align) | int(QtCore.Qt.AlignTop), str(text))
+
+
 def _paint_grid_card(
     painter: QtGui.QPainter,
     surface: QtWidgets.QWidget,
@@ -7998,7 +8248,7 @@ def _paint_grid_card(
     INSIDE the extent, concentric with it, so an edged card is exactly as
     large as its plain neighbours and the gutters stay even."""
 
-    inset = scaled_px(2, minimum=1)
+    inset = _grid_gutter()
     # QRectF(QRect) is exclusive at the right and bottom already: the cell's
     # far edges are right() and bottom(), with no QRect "+ 1".
     raw = QtCore.QRectF(cell).adjusted(inset, inset, -inset, -inset)
@@ -8043,8 +8293,8 @@ class _SelectionGridDelegate(QtWidgets.QStyledItemDelegate):
     selection; a MISSING cell is an empty card in red dashes and a HELD one
     an empty dashed outline (somebody else's frame).  A disabled grid shows
     every card on the BG face with the chosen names in DISABLED_INK, so
-    what is chosen still reads but nothing invites a click.  Labels are
-    centred on their ink (:func:`paint_centred_ink`).
+    what is chosen still reads but nothing invites a click.  Names sit on
+    their row's one line (:func:`_paint_grid_label`), centred across.
     """
 
     def paint(self, painter, option, index) -> None:
@@ -8089,7 +8339,8 @@ class _SelectionGridDelegate(QtWidgets.QStyledItemDelegate):
             # The font the grid sizes its columns with (set_grid).
             font = QtGui.QFont(FONT)
             font.setPointSize(fluent_font_size())
-            paint_centred_ink(painter, grid.viewport(), rect, font, str(index.data() or ""), ink)
+            _paint_grid_label(painter, rect, _grid_card_band(grid.viewport(), option.rect),
+                              QtCore.Qt.AlignHCenter, font, str(index.data() or ""), ink)
         painter.restore()
 
     def _paint_action(self, painter, option, index) -> None:
@@ -8097,8 +8348,9 @@ class _SelectionGridDelegate(QtWidgets.QStyledItemDelegate):
         object as FluentButton's ghost ×: no face and no edge at rest, its
         glyph in MUTED_INK; under the pointer the RED_TINT face and RED_DARK
         ink, held down one shade deeper -- red at rest belongs to problems.
-        As tall as the row's cells, so it lines up with them, and centred on
-        its ink."""
+        Its face is a square as tall as a control, centred in its cell like
+        a glyph button beside a field: the whole cell of a two-line row made
+        it a tall bar.  The glyph is centred on its ink."""
 
         grid = self.parent()
         cell = (index.row(), index.column())
@@ -8106,9 +8358,12 @@ class _SelectionGridDelegate(QtWidgets.QStyledItemDelegate):
         hovered = live and grid.hovered_action() == cell
         pressed = live and grid.pressed_action() == cell
         hover_face, pressed_face = _destructive_glyph_faces()
+        side = grid.row_height()
+        square = QtCore.QRect(0, 0, side, side)
+        square.moveCenter(option.rect.center())
         painter.save()
         rect = _paint_grid_card(
-            painter, grid.viewport(), option.rect,
+            painter, grid.viewport(), square,
             pressed_face if pressed else hover_face if hovered else None,
         )
         font = QtGui.QFont(FONT)
@@ -8181,33 +8436,32 @@ class _SelectionGridRowHeader(QtWidgets.QHeaderView):
         pad = scaled_px(8, minimum=5)
         inner = rect.adjusted(0 if self._left() else pad, 0, -pad, 0)
         align = QtCore.Qt.AlignLeft if self._left() else QtCore.Qt.AlignRight
+        surface = self.viewport()
+        band = _grid_card_band(surface, rect)
         painter.save()
         if self.activatable and hovered:
             # A label that acts is a row like any other under the pointer:
             # the hover wash behind it, its words still in TEXT.
-            # As tall as the row's cards (the same gutter), the width of
+            # As tall as the row's cards (the same band), the width of
             # the label column.
-            inset = scaled_px(2, minimum=1)
-            surface = self.viewport()
-            area = QtCore.QRectF(rect)
-            left = device_snap(surface, area.left())
-            top = device_snap(surface, area.top() + inset, axis="y")
-            band = QtCore.QRectF(
-                left, top,
-                device_snap(surface, area.right() - inset) - left,
-                device_snap(surface, area.bottom() - inset, axis="y") - top,
+            left = device_snap(surface, float(rect.left()))
+            wash = QtCore.QRectF(
+                left, band[0],
+                device_snap(surface, QtCore.QRectF(rect).right() - _grid_gutter()) - left,
+                band[1] - band[0],
             )
             painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
             painter.setPen(QtCore.Qt.NoPen)
             painter.setBrush(QtGui.QColor(ACCENT_TINT))
-            painter.drawRoundedRect(band, _radius(), _radius())
-        painter.setFont(label_font)
-        painter.setPen(QtGui.QColor(
+            painter.drawRoundedRect(wash, _radius(), _radius())
+        ink = (
             DISABLED_INK if not self.isEnabled()
             else TEXT if self.activatable or hovered else MUTED_INK
-        ))
+        )
+        painter.setFont(label_font)
+        painter.setPen(QtGui.QColor(ink))
         if not note:
-            painter.drawText(inner, align | QtCore.Qt.AlignVCenter, label)
+            _paint_grid_label(painter, QtCore.QRectF(inner), band, align, label_font, label, ink)
         else:
             label_height = QtGui.QFontMetrics(label_font).height()
             note_height = QtGui.QFontMetrics(note_font).height()
@@ -8275,12 +8529,11 @@ class FluentSelectionGrid(QtWidgets.QTableView):
     selection_edited = QtCore.pyqtSignal(object)
     row_action = QtCore.pyqtSignal(int, object)
 
-    def __init__(self, parent=None, *, cell_width: int = 52, cell_height: int = 34,
+    def __init__(self, parent=None, *, cell_width: int = 52,
                  toggle: bool = False, row_actions: Sequence[tuple[object, str, str]] = (),
                  label_action: tuple[object, str] | None = None):
         super().__init__(parent)
         self._cell_width = cell_width
-        self._cell_height = cell_height
         self._toggle = bool(toggle)
         self._grid_model = _SelectionGridModel(
             self, actions=tuple((value, str(glyph), str(tip)) for value, glyph, tip in row_actions),
@@ -8311,12 +8564,12 @@ class FluentSelectionGrid(QtWidgets.QTableView):
         self.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
         self.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
         self.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
-        for header, size in ((self.horizontalHeader(), cell_width), (row_header, cell_height)):
+        for header, size in ((self.horizontalHeader(), scaled_px(cell_width)), (row_header, self.row_height())):
             header.setSectionResizeMode(QtWidgets.QHeaderView.Fixed)
             # Qt's own floor is measured from the header font and padding --
             # wider than a gap column, and than a short cell, ever asks for.
             header.setMinimumSectionSize(scaled_px(4, minimum=2))
-            header.setDefaultSectionSize(scaled_px(size))
+            header.setDefaultSectionSize(size)
             header.setHighlightSections(False)
             header.setSectionsMovable(False)
             if self._toggle or header is row_header and label_action is not None:
@@ -8376,13 +8629,21 @@ class FluentSelectionGrid(QtWidgets.QTableView):
             horizontal.resizeSection(column, gap)
         trailing = self._grid_model.action_columns()
         for column in trailing:
-            horizontal.resizeSection(column, gap if column == trailing.start else scaled_px(36))
+            # An action's column holds its square face and the gutters.
+            horizontal.resizeSection(column, gap if column == trailing.start else self.row_height())
         rows_header = self.verticalHeader()
         rows_header.setDefaultSectionSize(max(
-            scaled_px(self._cell_height),
+            self.row_height(),
             rows_header.two_line_height() if any(row_notes) else 0,
         ))
         self.updateGeometry()
+
+    @staticmethod
+    def row_height() -> int:
+        """A one-line row: a card whose face is as tall as every control
+        beside the grid, and its gutters."""
+
+        return control_height() + 2 * _grid_gutter()
 
     def label_width_hint(self) -> int:
         """The form label column at which every row label still fits."""
@@ -8404,7 +8665,7 @@ class FluentSelectionGrid(QtWidgets.QTableView):
     def _label_offset() -> int:
         # A setting row's label-to-field spacing, less the inset that keeps
         # a card off its cell's edge.
-        return scaled_px(6, minimum=4) - scaled_px(2, minimum=1)
+        return scaled_px(6, minimum=4) - _grid_gutter()
 
     def set_cell_states(self, states: "dict[tuple[int, int], str]",
                         tips: "dict[tuple[int, int], str] | None" = None) -> None:
@@ -8575,10 +8836,11 @@ class FluentSegmentedButtons(QtWidgets.QWidget):
             button = QtWidgets.QPushButton(label, self)
             button.setCursor(QtCore.Qt.PointingHandCursor)
             button.setFocusPolicy(QtCore.Qt.TabFocus)
-            button.setMinimumHeight(scaled_px(30, minimum=22) - 2 * rim)
+            button.setMinimumHeight(control_height() - 2 * rim)
             button.setMinimumWidth(fluent_text_width(metrics, str(label)) + 2 * pad + 2)
             button.setProperty("current", False)
             button.clicked.connect(lambda _checked=False, value=value: self.activated.emit(value))
+            button.installEventFilter(self)
             layout.addWidget(button)
             self._buttons[value] = button
         self.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
@@ -8623,6 +8885,28 @@ class FluentSegmentedButtons(QtWidgets.QWidget):
         radius = float(_radius() + self._rim)
         painter.drawRoundedRect(QtCore.QRectF(self.rect()), radius, radius)
         painter.end()
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802 - Qt naming
+        """Paint a choice: its face by the sheet, its label on the line
+        every text of the row sits on (:func:`centred_line_top` of the
+        control), not the style's centred line box."""
+
+        if event.type() != QtCore.QEvent.Paint or watched not in self._buttons.values():
+            return super().eventFilter(watched, event)
+        option = QtWidgets.QStyleOptionButton()
+        watched.initStyleOption(option)
+        painter = QtWidgets.QStylePainter(watched)
+        painter.drawControl(QtWidgets.QStyle.CE_PushButtonBevel, option)
+        style = watched.style()
+        area = style.subElementRect(QtWidgets.QStyle.SE_PushButtonContents, option, watched)
+        # The control's middle, not the face's: the track's rim is even
+        # above and below, so they are one.
+        offset = watched.y()
+        area.setTop(centred_line_top(-offset, self.height(), watched.font()))
+        style.drawItemText(painter, area, int(QtCore.Qt.AlignHCenter | QtCore.Qt.AlignTop),
+                           option.palette, watched.isEnabled(), option.text, QtGui.QPalette.ButtonText)
+        painter.end()
+        return True
 
     def button(self, value) -> QtWidgets.QPushButton:
         return self._buttons[value]
@@ -9279,6 +9563,11 @@ class ElidedLabel(QtWidgets.QLabel):
         super().resizeEvent(event)
         self._elide()
 
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        # On the row's one line, as a FluentLabel is.
+        if not _paint_label_line(self):
+            super().paintEvent(event)
+
     def _elide(self) -> None:
         metrics = self.fontMetrics()
         available = max(0, self.width() - scaled_px(2))
@@ -9326,9 +9615,9 @@ class FluentStatusStrip(FluentFrame):
         super().__init__(parent, bordered=False)
         self.setFixedHeight(scaled_px(38, minimum=30))
         lay = QtWidgets.QHBoxLayout(self)
-        lay.setContentsMargins(scaled_px(12), scaled_px(4), scaled_px(12), scaled_px(4))
-        lay.setSpacing(scaled_px(8))
-        self.dot = FluentStatusDot(size=12)
+        lay.setSpacing(status_dot_gap())
+        self.set_inset(True)
+        self.dot = FluentStatusDot()
         self.message = ElidedLabel("")
         lay.addWidget(self.dot)
         lay.addWidget(self.message, 1)
@@ -9340,6 +9629,16 @@ class FluentStatusStrip(FluentFrame):
             lay.addWidget(self.action_button)
         self._severity = None
         self.show_message("", severity="idle")
+
+    def set_inset(self, inset: bool) -> None:
+        """Whether the strip keeps its content one CARD_PAD in from its
+        sides -- a strip that is its own white card, whose dot then starts
+        where a card's title and the tabs' first underline start -- or lies
+        flush, in a page that is already white and padded, where the page's
+        own edge is the one its dot starts on."""
+
+        pad = scaled_px(CARD_PAD) if inset else 0
+        self.layout().setContentsMargins(pad, scaled_px(4), pad, scaled_px(4))
 
     @property
     def current_severity(self) -> str:
