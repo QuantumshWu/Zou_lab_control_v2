@@ -23,16 +23,16 @@ from zlc_ui.fluent import (
     FluentStatusDot,
     FluentSwitch,
     add_row_switch,
+    card_pad,
     FluentTabWidget,
     fluent_widget_stylesheet,
     muted_note_label,
+    row_gap,
     scaled_px,
     window_pad,
 )
 
 from .board_view import ConsoleBoardView
-from zlc_ui.fluent import row_gap
-
 from .logic_row_view import STATUS_DOT, LogicRowView, mount_logic_page
 from .panel_card_view import PanelCardView
 from .status_strip import StatusStrip
@@ -91,7 +91,7 @@ class TaskConsoleView(QtWidgets.QWidget):
         header_frame.setFixedHeight(scaled_px(48, minimum=38))
         header = QtWidgets.QHBoxLayout(header_frame)
         header.setContentsMargins(side, scaled_px(6), side, scaled_px(6))
-        header.setSpacing(scaled_px(7, minimum=4))
+        header.setSpacing(row_gap())
 
         self.status_dot = FluentStatusDot(size=STATUS_DOT)
         self.status_dot.set_color(GREEN)
@@ -152,12 +152,19 @@ class TaskConsoleView(QtWidgets.QWidget):
         outer.addWidget(header_frame)
         outer.addWidget(self.status_strip)
 
+        # Every page of the tabs starts its content a window pad in -- the
+        # Logic list and every Edit page (mount_logic_page), and the board,
+        # whose own card-pad edge makes up the rest -- and the first tab's
+        # underline starts there too, so switching pages moves nothing.
+        page = window_pad()
+        lead = page - card_pad()
         self.tabs = FluentTabWidget()
+        self.tabs.set_page_inset(page)
         self.tabs.tab_close_requested.connect(self.editor_close_requested.emit)
         monitor_page = QtWidgets.QWidget()
         monitor_page.setStyleSheet("background: transparent;")
         monitor_layout = QtWidgets.QVBoxLayout(monitor_page)
-        monitor_layout.setContentsMargins(0, 0, 0, 0)
+        monitor_layout.setContentsMargins(lead, lead, 0, 0)
         self.board = ConsoleBoardView()
         self.board.order_committed.connect(self.panel_order_committed.emit)
         # An empty Monitor said nothing at all; it says how a panel arrives.
@@ -168,10 +175,10 @@ class TaskConsoleView(QtWidgets.QWidget):
         self.monitor_hint.setWordWrap(True)
         # Where the board's first card will stand: its words start where a
         # card's title does and end where its text would, and its top is a
-        # card's top -- the board's gap under the tabs.
+        # card's top -- the board's gap under the page's own lead.
         words = self.board.text_left()
         self.monitor_hint.setContentsMargins(
-            words, words - PanelCardView.strip_text_inset(), words, 0
+            words, words - PanelCardView.strip_text_inset(), words + lead, 0
         )
         monitor_layout.addWidget(self.monitor_hint)
         self.scroll = FluentScrollArea()

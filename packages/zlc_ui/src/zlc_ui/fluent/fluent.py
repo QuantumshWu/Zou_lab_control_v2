@@ -4988,12 +4988,38 @@ def _tab_margin_h() -> int:
     return scaled_px(3)
 
 
+def _tab_label_height() -> int:
+    """A pivot tab's label band: the tab's height above its underline,
+    where the style centres the label's line."""
+
+    return scaled_px(32, minimum=26)
+
+
+def _tab_underline() -> int:
+    """A pivot tab's underline: the bottom border of every tab, ACCENT
+    under the current one."""
+
+    return scaled_px(2, minimum=2)
+
+
 def _tab_font() -> QtGui.QFont:
     """The font the tab sheet names for a label."""
 
     font = QtGui.QFont(FONT)
     font.setPointSizeF(fluent_font_size())
     return font
+
+
+def _tab_cap_centre() -> float:
+    """Where a tab label's capitals are centred, down from the tab's top.
+
+    The style centres the label's LINE on the band above the underline
+    (on the line's fractional height, as a label's); the capitals' middle
+    lies the line's ascent down from its top, less half a capital."""
+
+    metrics = QtGui.QFontMetricsF(_tab_font())
+    line_top = (_tab_label_height() - metrics.ascent() - metrics.descent()) / 2.0
+    return line_top + metrics.ascent() - metrics.capHeight() / 2.0
 
 
 class _FluentTabCloseButton(QtWidgets.QToolButton):
@@ -5020,6 +5046,14 @@ class _FluentTabCloseButton(QtWidgets.QToolButton):
     laid the tab out (``_FluentTabBar.tabLayoutChange``), from where the
     style actually seated the button and where the glyph's ink actually
     ends -- not from a fitted constant.
+
+    Up and down, the x stands on its label's line: the disk is centred on
+    the middle of the label's capitals (:func:`_tab_cap_centre`).  The
+    button is as tall as the whole tab, underline included, so the style
+    seats it on the tab's top and every relayout -- a current tab changed,
+    a tab added -- puts it back there.  Centred by the style on the tab
+    with its underline, a disk-high button stood under the words, which
+    the style centres on the band above the underline.
     """
 
     def __init__(self, parent=None):
@@ -5056,8 +5090,17 @@ class _FluentTabCloseButton(QtWidgets.QToolButton):
         if trail == self._trail:
             return
         self._trail = trail
-        self.setFixedSize(self._size + trail, self._size)
+        self.setFixedSize(self._size + trail, _tab_label_height() + _tab_underline())
         self.update()
+
+    def disk_rect(self) -> QtCore.QRectF:
+        """The hover disk: an even number of device pixels across, on
+        whole device pixels, its middle on the label's capitals."""
+
+        ratio = float(self.devicePixelRatioF())
+        across = max(2, int(round(self._size * ratio)) & ~1) / ratio
+        top = device_snap(self, _tab_cap_centre() - across / 2.0, axis="y")
+        return QtCore.QRectF(device_snap(self, 0.0), top, across, across)
 
     def enterEvent(self, event) -> None:  # noqa: N802 - Qt naming
         self.update()
@@ -5069,9 +5112,7 @@ class _FluentTabCloseButton(QtWidgets.QToolButton):
 
     def paintEvent(self, event) -> None:  # noqa: N802 - Qt naming
         del event
-        ratio = float(self.devicePixelRatioF())
-        across = max(2, int(round(self._size * ratio)) & ~1) / ratio
-        disk = QtCore.QRectF(device_snap(self, 0.0), device_snap(self, 0.0, axis="y"), across, across)
+        disk = self.disk_rect()
         washed = self.isEnabled() and (self.isDown() or self.underMouse())
         painter = QtGui.QPainter(self)
         if washed:
@@ -5199,9 +5240,13 @@ class FluentTabWidget(QtWidgets.QTabWidget):
     :attr:`tab_close_requested` with the page widget so the host can tear it
     down -- the tab widget never removes a page behind its owner's back.
 
-    The first tab, and its underline, starts where the pages' content
-    starts (:meth:`set_page_inset`), so the strip and the page below it
-    share one left edge."""
+    THE rule for where the strip starts: the first tab's underline starts
+    on its pages' content edge -- the x, in from this widget's left edge,
+    where a page's cards and header start -- so the strip and the page
+    below it share one left edge in every window.  The host whose pages
+    they are says where that edge is (:meth:`set_page_inset`); a page that
+    keeps the one page inset, :func:`section_gap` from its edge to its
+    content, is the default."""
 
     tab_close_requested = QtCore.pyqtSignal(QtWidgets.QWidget)
 
@@ -5243,9 +5288,10 @@ class FluentTabWidget(QtWidgets.QTabWidget):
 
     def set_page_inset(self, inset: int) -> None:
         """Where the pages' content starts, in from this widget's left edge:
-        the first tab's underline starts there too.  A page's content starts
-        :func:`section_gap` in (the default); a host whose pages lay their
-        content elsewhere -- flush, or a card's padding in -- says where."""
+        the first tab's underline starts there too.  Every page of one tab
+        widget starts its content on this one x, so switching tabs moves
+        nothing.  :func:`section_gap` (a page's own inset) unless the host
+        lays its pages out on another edge -- a card's padding in, say."""
 
         inset = max(0, int(inset))
         if inset != self._page_inset:
@@ -5285,8 +5331,8 @@ class FluentTabWidget(QtWidgets.QTabWidget):
                 background: transparent;
                 color: {MUTED_INK};
                 border: none;
-                border-bottom: {scaled_px(2, minimum=2)}px solid transparent;
-                height: {scaled_px(32, minimum=26)}px;
+                border-bottom: {_tab_underline()}px solid transparent;
+                height: {_tab_label_height()}px;
                 padding: 0px {_tab_padding_h()}px;
                 margin: 0px {_tab_margin_h()}px;
                 font: {fluent_font_size()}pt "{FONT}";
@@ -5294,7 +5340,7 @@ class FluentTabWidget(QtWidgets.QTabWidget):
             QTabBar::tab:first {{ margin-left: {self._page_inset}px; }}
             QTabBar::tab:selected {{
                 color: {TEXT};
-                border-bottom: {scaled_px(2, minimum=2)}px solid {ACCENT};
+                border-bottom: {_tab_underline()}px solid {ACCENT};
             }}
             QTabBar::tab:!selected:hover {{
                 color: {TEXT};
