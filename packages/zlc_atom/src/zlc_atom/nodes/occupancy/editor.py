@@ -13,7 +13,9 @@ source no longer has between its ends, is a red-edged card with the reason
 below.  Nothing here changes a claim
 because the frame count changed: what was authored stays until the operator
 edits it.  A file is removed by the × that ends its row and replaced by
-clicking its name.  The readout model -- which model each file is read
+clicking its name.  A file row is one line, as tall as every other
+control: what the file is (its exposure, sites and model) is in the name's
+tooltip with its path.  The readout model -- which model each file is read
 with, set once -- is a segmented choice under the files it applies to: the
 four models are this node's closed set.  The file names are the
 editor's label column, shared with the form: the title, the model's label
@@ -31,16 +33,18 @@ from pathlib import Path
 from PyQt5 import QtCore, QtWidgets
 
 from zlc_ui.fluent import (
-    RED_DARK,
     TEXT,
     FluentButton,
     FluentLabel,
     FluentSectionLabel,
     FluentSegmentedButtons,
     FluentSelectionGrid,
+    error_note_label,
     fluent_open_path,
+    line_gap,
     muted_note_label,
     scaled_px,
+    show_note,
 )
 
 from zlc_atom.nodes._framework.frames import FIRST, LAST, REST, canonical_frames, reach_frames
@@ -65,10 +69,11 @@ class CalibrationsEditor(QtWidgets.QWidget):
         super().__init__(parent)
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(line_gap())
         header = QtWidgets.QHBoxLayout()
         # The label-to-field spacing of a setting row: with the title in the
         # label column, Add starts on the form's field edge.
-        header.setSpacing(scaled_px(6, minimum=4))
+        header.setSpacing(line_gap())
         self.title = FluentSectionLabel("Calibrations")
         # Centred on the button beside it, not dropped below it like an own-line section.
         self.title.setContentsMargins(0, 0, 0, 0)
@@ -90,9 +95,7 @@ class CalibrationsEditor(QtWidgets.QWidget):
         self.grid.selection_edited.connect(self._marked)
         self.grid.row_action.connect(self.row_action)
         layout.addWidget(self.grid, 0, QtCore.Qt.AlignLeft)
-        self.note = FluentLabel("")
-        self.note.setWordWrap(True)
-        self.note.setStyleSheet(f"color: {RED_DARK}; background: transparent; border: none;")
+        self.note = error_note_label()
         layout.addWidget(self.note)
         self.hint = muted_note_label(_HINT)
         self.hint.setWordWrap(True)
@@ -100,7 +103,7 @@ class CalibrationsEditor(QtWidgets.QWidget):
         self.model_row = QtWidgets.QWidget(self)
         model_layout = QtWidgets.QHBoxLayout(self.model_row)
         model_layout.setContentsMargins(0, scaled_px(6), 0, 0)
-        model_layout.setSpacing(scaled_px(6, minimum=4))
+        model_layout.setSpacing(line_gap())
         # A field label like "Frames" above it, not a second hint line.
         self.model_label = FluentLabel("Readout model")
         self.model_label.setStyleSheet(f"color: {TEXT}; background: transparent; border: none;")
@@ -119,11 +122,11 @@ class CalibrationsEditor(QtWidgets.QWidget):
         self._base_dir = ""
         self._filter = "All files (*)"
 
-    def label_width_hint(self) -> int:
-        """The label column this editor's title, model label and file names need."""
+    def row_labels(self) -> tuple[str, ...]:
+        """The labels this editor puts in the editor's label column: its
+        title, the model's label and the file names."""
 
-        names = self.grid.label_width_hint() if self._entries else 0
-        return max(names, self.title.sizeHint().width(), self.model_label.sizeHint().width())
+        return (self.title.text(), self.model_label.text(), *(_name(entry) for entry in self._entries))
 
     def set_label_width(self, width: int) -> None:
         """The editor's label column, shared with the form's "Frames" row."""
@@ -204,22 +207,23 @@ class CalibrationsEditor(QtWidgets.QWidget):
                 cells[(row, column)] = label
                 if token in entry["frames"]:
                     selected.append((row, column))
-        notes = tuple(
-            "cannot be read" if item is None and entry["path"] else
-            "no file yet" if item is None else item["summary"]
-            for entry, item in zip(entries, files)
-        )
+        # What each file is rides with its path in the name's tooltip: a
+        # second line under every name made each row two lines tall beside
+        # one-line controls, and floated the name above its cards' text.
         row_tips = tuple(
-            (entry["path"] or "no file yet")
-            + ("" if reach is None else
-               "\nreads " + (", ".join(str(frame) for frame in reach.frames_of(index)) or "no frame"))
-            for index, entry in enumerate(entries)
+            "\n".join(part for part in (
+                entry["path"] or "no file yet",
+                "cannot be read" if item is None and entry["path"] else "" if item is None else item["summary"],
+                "" if reach is None else
+                "reads " + (", ".join(str(frame) for frame in reach.frames_of(index)) or "no frame"),
+            ) if part)
+            for index, (entry, item) in enumerate(zip(entries, files))
         )
-        shown = (names, labels, tuple(sorted(cells.items())), notes, row_tips)
+        shown = (names, labels, tuple(sorted(cells.items())), row_tips)
         if shown != self._shown:
             self._shown = shown
             self.grid.set_grid(
-                names, labels, cells, row_notes=notes, row_tips=row_tips,
+                names, labels, cells, row_tips=row_tips,
                 narrow_columns=(self._columns.index(_GAP),),
             )
         self.grid.set_cell_states(states, tips)
@@ -238,8 +242,7 @@ class CalibrationsEditor(QtWidgets.QWidget):
             self.summary.setText(f"{names[0]} reads every frame")
         else:
             self.summary.setText(f"{count} frames · each read once")
-        self.note.setText("\n".join(problems))
-        self.note.setVisible(bool(problems))
+        show_note(self.note, "\n".join(problems))
 
     # ---------------------------------------------------------------- editing
 

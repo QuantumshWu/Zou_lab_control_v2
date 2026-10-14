@@ -327,7 +327,7 @@ def test_the_calibrations_editor_gives_frames_to_files_by_clicking(monkeypatch) 
     from PyQt5 import QtCore, QtTest, QtWidgets
 
     from zlc_atom.nodes.occupancy import editor as editor_module
-    from zlc_ui.fluent import scaled_px
+    from zlc_ui.fluent import scaled_px, setting_label_width
 
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     editor = OCCUPANCY_NODE.ui_contributions[0]()
@@ -374,7 +374,7 @@ def test_the_calibrations_editor_gives_frames_to_files_by_clicking(monkeypatch) 
         assert "3 frames · each read once" in editor.summary.text()
         # The file names are the label column: with it, Add and the first
         # card start on one edge, however long the names are.
-        editor.set_label_width(editor.label_width_hint())
+        editor.set_label_width(setting_label_width(editor.row_labels()))
         app.processEvents()
         card = grid.viewport().mapTo(editor, grid.visualRect(grid.model().index(0, 0)).topLeft())
         assert abs(card.x() + scaled_px(2, minimum=1) - editor.add_button.x()) <= 1
