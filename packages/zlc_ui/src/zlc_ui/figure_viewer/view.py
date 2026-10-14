@@ -71,6 +71,10 @@ _STATIC_LABELS = (
 #: the page then scrolls to the rest of the card.
 _LEAST_TABLE_ROWS = 3
 
+#: The data editor's two pages: the Dataset and Axes cards, and the Data
+#: card.  Each page is what its one value table scrolls in.
+_EDITOR_PAGES = (("dataset", "Dataset and axes"), ("data", "Data"))
+
 
 def _surface_right_inset() -> int:
     """How far in from the right surface's right edge its rows end.
@@ -322,7 +326,18 @@ def _fill_choice_combo(combo: FluentComboBox, rows: object, current: object) -> 
 
 
 class _DataEditorView(QtWidgets.QWidget):
-    """Fluent working-copy editor; all Dataset meaning remains in its presenter."""
+    """Fluent working-copy editor; all Dataset meaning remains in its presenter.
+
+    Two pages, chosen at the editor's top: the Dataset and Axes cards, with
+    the selected axis's values, and the Data card, with the value table.
+    Each page holds one value table and the table is what scrolls: it is
+    sized to the room its page leaves (_fit_table_to_page), so the page
+    itself has nothing to scroll -- a page and its table each scrolling
+    stood two vertical bars side by side, the wheel moving the one under
+    the pointer.  Only a window too short for a page's controls and the
+    fewest table rows scrolls the page as well.  The working copy's own
+    commands and their messages stand under both pages.
+    """
 
     intent_requested = QtCore.pyqtSignal(object)
 
@@ -359,21 +374,30 @@ class _DataEditorView(QtWidgets.QWidget):
         # on the left, and on the right the surface's inset less the gutter
         # the scroll area keeps for its bar, so the bar lies in the surface's
         # padding and the cards end where the data bar over the tabs ends.
-        outer.setContentsMargins(pad, 0, _surface_right_inset() - gutter, 0)
-        # A section gap between the cards and the action bar under them.
-        outer.setSpacing(section_gap())
+        # One card pad under the tab strip, as every tab page of the window.
+        outer.setContentsMargins(pad, pad, _surface_right_inset() - gutter, 0)
+        outer.setSpacing(0)
+        # Which page: a closed choice heading the editor where the Monitor
+        # page has its commands, its first card one card pad under it as the
+        # board's first card is under those -- switching tabs moves nothing.
+        self._page = _EDITOR_PAGES[0][0]
+        self.page_choice = FluentSegmentedButtons(_EDITOR_PAGES)
+        # A control high, as the board's commands are, at every scale: at
+        # the smallest its faces' own hint made the track taller.
+        self.page_choice.setFixedHeight(control_height())
+        outer.addWidget(self.page_choice, 0, QtCore.Qt.AlignLeft)
+        outer.addSpacing(pad)
         self.editor_scroll = FluentScrollArea(self)
         self.editor_scroll.setMinimumSize(0, 0)
         # The same opaque, surface-white page body the console's Edit page
         # scrolls: transparent content showed the viewport's own grey.
         content = FluentPageBody()
         root = QtWidgets.QVBoxLayout(content)
-        # One card pad under the tab strip, as every tab page of the window.
-        root.setContentsMargins(0, pad, 0, 0)
+        root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(row_gap())
         # The gutter is held whether or not the bar shows: the cards and the
-        # action bar end on one edge, and adding an axis that makes the page
-        # scroll does not narrow every card under the pointer.
+        # action bar end on one edge whichever page is shown, and a window
+        # short enough to scroll a page does not narrow every card.
         self.editor_scroll.set_width_bounded_widget(content)
         outer.addWidget(self.editor_scroll, 1)
 
@@ -399,13 +423,7 @@ class _DataEditorView(QtWidgets.QWidget):
         dataset_layout.addLayout(dataset_grid)
         root.addWidget(dataset_group)
 
-        body = QtWidgets.QWidget(self)
-        body.setStyleSheet("background: transparent;")
-        body_layout = QtWidgets.QVBoxLayout(body)
-        body_layout.setContentsMargins(0, 0, 0, 0)
-        body_layout.setSpacing(row_gap())
-
-        axes_group = FluentGroupBox("Axes", body, title_strip_px=0)
+        axes_group = FluentGroupBox("Axes", content, title_strip_px=0)
         self.axes_group = axes_group
         axes_layout = QtWidgets.QVBoxLayout(axes_group)
         axes_layout.setContentsMargins(pad, pad, pad, pad)
@@ -481,9 +499,9 @@ class _DataEditorView(QtWidgets.QWidget):
         self.axis_value_table.set_content_rows_limit(12)
         axis_form.addWidget(self.axis_value_table, 3, 0)
         axes_layout.addLayout(axis_form)
-        body_layout.addWidget(axes_group, 0)
+        root.addWidget(axes_group)
 
-        data_group = FluentGroupBox("Data", body, title_strip_px=0)
+        data_group = FluentGroupBox("Data", content, title_strip_px=0)
         self.data_group = data_group
         data_layout = QtWidgets.QVBoxLayout(data_group)
         data_layout.setContentsMargins(pad, pad, pad, pad)
@@ -533,50 +551,52 @@ class _DataEditorView(QtWidgets.QWidget):
         self.value_table.horizontalHeader().setStretchLastSection(True)
         self.value_table.set_value_columns()
         self.value_table.set_content_rows_limit(12)
-        data_layout.addWidget(self.value_table, 1)
-        # Shown only while it has something to say: an empty line under the
-        # table was a second bottom padding on the card.
+        data_layout.addWidget(self.value_table)
+        root.addWidget(data_group)
+        # Under a page's cards, what the window has to spare: a table that
+        # is whole ends its card, not the page.
+        root.addStretch(1)
+
+        # Apply, save and discard act on the whole working copy, so they
+        # close the editor under both pages: Discard at the left edge, the
+        # two steps that keep the edit at the right, in the order they are
+        # taken, ending where the cards end, a section gap under them.  The
+        # same rule as every other Save, in two steps: while the fields hold
+        # edits not yet applied, Apply & preview is the primary (with its
+        # star); once applied and not yet saved, Save as… is.  What the
+        # working copy last said -- an axis refused, a file saved -- is the
+        # line over these commands, read from either page, and shown only
+        # while it has something to say.
         self.message_label = muted_note_label("")
         self.message_label.setWordWrap(True)
         self.message_label.setVisible(False)
-        data_layout.addWidget(self.message_label)
-        body_layout.addWidget(data_group, 1)
-        root.addWidget(body, 1)
-
-        # Apply, save and discard act on the whole working copy, so they
-        # close the editor instead of sitting in its first card: Discard at
-        # the left edge, the two steps that keep the edit at the right, in
-        # the order they are taken.  Under the scrolled cards, always in
-        # reach, ending where the cards end.  The same rule as every other
-        # Save, in two steps: while the fields hold edits not yet applied,
-        # Apply & Preview is the primary (with its star); once applied and
-        # not yet saved, Save as… is.
-        self.apply_button = FluentButton("Apply && Preview")
+        self.apply_button = FluentButton("Apply && preview")
         self.save_button = FluentButton("Save as…")
         self.discard_button = FluentButton("Discard", role="destructive")
         actions = QtWidgets.QHBoxLayout()
-        actions.setContentsMargins(0, 0, gutter, 0)
         actions.setSpacing(row_gap())
         actions.addWidget(self.discard_button)
         actions.addStretch(1)
         actions.addWidget(self.apply_button)
         actions.addWidget(self.save_button)
-        outer.addLayout(actions)
+        foot = QtWidgets.QVBoxLayout()
+        foot.setContentsMargins(0, section_gap(), gutter, 0)
+        foot.setSpacing(row_gap())
+        foot.addWidget(self.message_label)
+        foot.addLayout(actions)
+        outer.addLayout(foot)
 
-        #: Each value table, its card, and what closes the card under it,
-        #: in page order: the room a table may take is what the page's
-        #: viewport leaves once what stands above it where it is read
-        #: (_fit_tables_to_page) and these below it are counted.
-        self._page_tables = (
-            (self.axis_value_table, axes_group, ()),
-            (self.value_table, data_group, (self.message_label,)),
-        )
+        #: Each page's value table and the card it closes.
+        self._page_tables = {
+            "dataset": (self.axis_value_table, axes_group),
+            "data": (self.value_table, data_group),
+        }
         self._table_rows: dict[FluentTableView, int] = {}
         # After the layouts the change set off have settled.
         self._table_fit = QtCore.QTimer(self)
         self._table_fit.setSingleShot(True)
         self._table_fit.setInterval(0)
-        self._table_fit.timeout.connect(self._fit_tables_to_page)
+        self._table_fit.timeout.connect(self._fit_table_to_page)
 
         self.name_edit.editingFinished.connect(lambda: self._dataset_field("name", self.name_edit.text()))
         self.dtype_combo.activated.connect(lambda _index: self._dataset_field("dtype", self.dtype_combo.currentData()))
@@ -604,6 +624,8 @@ class _DataEditorView(QtWidgets.QWidget):
         self.apply_button.clicked.connect(lambda: self._emit("apply_preview", note=self.note_edit.text()))
         self.save_button.clicked.connect(self._save_as)
         self.discard_button.clicked.connect(lambda: self._emit("discard"))
+        self.page_choice.activated.connect(self._show_page)
+        self._show_page(self._page)
         self.update_projection(projection)
 
     def _labelled_row(
@@ -637,58 +659,57 @@ class _DataEditorView(QtWidgets.QWidget):
         for holder, label, _mode in self._axis_view_widgets.values():
             holder.set_label(label.text(), width=width)
 
+    def _show_page(self, page: object) -> None:
+        """Show one page's cards, from their top."""
+
+        self._page = str(page)
+        self.page_choice.set_current(self._page)
+        on_data = self._page == "data"
+        self.dataset_group.setVisible(not on_data)
+        self.axes_group.setVisible(not on_data)
+        self.data_group.setVisible(on_data)
+        self.editor_scroll.verticalScrollBar().setValue(0)
+        self._table_fit.start()
+
     def resizeEvent(self, event) -> None:  # noqa: N802 - Qt naming
         super().resizeEvent(event)
         self._table_fit.start()
 
-    def _fit_tables_to_page(self) -> None:
-        """Let each value table be as tall as the page, where it is read,
-        can show it whole.
+    def _fit_table_to_page(self) -> None:
+        """Let the shown page's value table be as tall as the page can show
+        it whole.
 
-        The page scrolls its cards and a long table scrolls its own rows.
-        A table taller than the viewport leaves it would run under the
-        page's fold, its last rows and its horizontal bar cut off by the
-        page where its own bar cannot bring them.  Sized to the room the
-        viewport leaves under it, a table is whole when its rows fit and
-        otherwise a viewport of exactly that many rows, its column names
-        and horizontal bar on screen with it.
-
-        Where a table is read: the editor opens on its first table's card,
-        so that table ends above the fold of the page as it opens -- sized
-        for its card scrolled to the top, it ran a hundred pixels under the
-        fold of the opening screen.  A later table's card is one the page
-        scrolls to, so that table ends above the fold with its card
-        scrolled to the top.
+        Sized to the room the viewport leaves under the cards above it and
+        its card's foot, a table is whole when its rows fit -- its card
+        ends under its last row -- and otherwise a viewport of exactly that
+        many rows that scrolls itself, its column names and horizontal bar
+        on screen with it, and the page has nothing left to scroll.  Below
+        the fewest rows a table still shows, the page scrolls the rest.
         """
 
+        # The line over the commands comes and goes: settle the editor's
+        # own layout before reading the viewport it leaves.
+        self.layout().activate()
         viewport = self.editor_scroll.viewport().height()
         if viewport <= 0:
             return
         page = self.editor_scroll.widget()
         page.layout().activate()
-        for position, (table, card, closing) in enumerate(self._page_tables):
-            card.layout().activate()
-            above = table.mapTo(page if position == 0 else card, QtCore.QPoint()).y()
-            below = card.layout().contentsMargins().bottom() + sum(
-                row_gap() + (
-                    widget.heightForWidth(table.width())
-                    if widget.hasHeightForWidth()
-                    else widget.sizeHint().height()
-                )
-                for widget in closing
-                if not widget.isHidden()
-            )
-            rows = table.verticalHeader()
-            pitch = rows.sectionSize(0) if rows.count() else rows.defaultSectionSize()
-            chrome = (
-                table.horizontalHeader().sizeHint().height()
-                + table.horizontalScrollBar().sizeHint().height()
-                + 2 * table.frameWidth()
-            )
-            fit = max(_LEAST_TABLE_ROWS, (viewport - above - below - chrome) // max(1, pitch))
-            if self._table_rows.get(table) != fit:
-                self._table_rows[table] = fit
-                table.set_content_rows_limit(fit, viewport_rows=fit)
+        table, card = self._page_tables[self._page]
+        card.layout().activate()
+        above = table.mapTo(page, QtCore.QPoint()).y()
+        below = card.layout().contentsMargins().bottom()
+        rows = table.verticalHeader()
+        pitch = rows.sectionSize(0) if rows.count() else rows.defaultSectionSize()
+        chrome = (
+            table.horizontalHeader().sizeHint().height()
+            + table.horizontalScrollBar().sizeHint().height()
+            + 2 * table.frameWidth()
+        )
+        fit = max(_LEAST_TABLE_ROWS, (viewport - above - below - chrome) // max(1, pitch))
+        if self._table_rows.get(table) != fit:
+            self._table_rows[table] = fit
+            table.set_content_rows_limit(fit, viewport_rows=fit)
 
     def is_dirty(self) -> bool:
         return bool(getattr(self, "_dirty", False))
@@ -707,7 +728,7 @@ class _DataEditorView(QtWidgets.QWidget):
         text = str(message)
         self.message_label.setText(text)
         self.message_label.setVisible(bool(text))
-        # A line under the value table is room the table no longer has.
+        # A line over the commands is room the page no longer has.
         self._table_fit.start()
 
     def _show_domain(self, domain: object) -> None:
@@ -1024,7 +1045,7 @@ class FigureViewerView(QtWidgets.QWidget):
             path_caption="Open a saved figure archive (.npz)",
             file_filter="Saved figure archives (*.npz)",
             path_base_dir=str(path_base_dir),
-            initial_status="Open a current saved Figure (.npz).",
+            initial_status="Open a saved figure archive (.npz).",
             graph_tabs=("Flow",),
             parent=self,
         )
@@ -1121,7 +1142,7 @@ class FigureViewerView(QtWidgets.QWidget):
         self.add_panel_button = FluentButton("Add panel")
         self.add_panel_button.clicked.connect(self._add_selected_panel)
         self.add_panel_button.setEnabled(False)
-        self.save_image_button = FluentButton("Save image")
+        self.save_image_button = FluentButton("Save image…")
         self.save_image_button.clicked.connect(self.save_screenshot_requested)
         # A chooser and the command that reads it, spaced as the data row's.
         board_actions = QtWidgets.QHBoxLayout()
