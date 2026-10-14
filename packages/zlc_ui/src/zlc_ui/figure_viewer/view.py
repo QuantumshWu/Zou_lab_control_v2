@@ -342,9 +342,12 @@ class _DataEditorView(QtWidgets.QWidget):
         action_row.setSpacing(window_pad(0.5))
         self.source_note = muted_note_label("")
         action_row.addWidget(self.source_note, 1)
-        self.apply_button = FluentButton("Apply && Preview", role="primary")
+        # Applying is a step toward the commit; Save As… is the commit, and
+        # is drawn primary (with its star) only while there is something to
+        # save -- the same rule as every other Save.
+        self.apply_button = FluentButton("Apply && Preview")
         self.save_button = FluentButton("Save As…")
-        self.discard_button = FluentButton("Discard", role="destructive")
+        self.discard_button = FluentButton("Discard", role="destructive", seated=True)
         action_row.addWidget(self.apply_button)
         action_row.addWidget(self.save_button)
         action_row.addWidget(self.discard_button)

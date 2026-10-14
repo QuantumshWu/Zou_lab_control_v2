@@ -104,8 +104,8 @@ class LogicRowView(FluentFrame):
         top.addWidget(self.kind_label)
         top.addWidget(self.status_label, 1)
         for button in (
-            self.run_button,
             self.preview_switch,
+            self.run_button,
             self.edit_button,
             self.more_button,
         ):

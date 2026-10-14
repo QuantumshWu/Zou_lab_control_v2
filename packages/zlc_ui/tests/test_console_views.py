@@ -2246,8 +2246,8 @@ for index in range(layout.count()):
         row.run_button, row.preview_switch, row.edit_button, row.more_button,
     ):
         order.append(widget)
-assert order.index(row.preview_switch) == order.index(row.run_button) + 1, (
-    'the switch belongs immediately beside Start')
+assert order.index(row.preview_switch) == order.index(row.run_button) - 1, (
+    'the switch belongs immediately left of Start, as on the Edit page')
 
 row.set_task_takeover(True)
 assert not switch.isEnabled(), 'a row that cannot Start cannot re-aim Start'
@@ -2300,13 +2300,26 @@ switch = editor.preview_switch
 assert isinstance(switch, FluentButton) and switch.isCheckable(), type(switch)
 assert switch.isChecked() is False, 'the editor shows the stored preference'
 
-# Beside Start, in pixels: same row, immediately to its right.  A switch that
-# merely EXISTS somewhere is what an operator could not find.
+# Beside Start, in pixels: same row, immediately to its left.  Start keeps
+# the rightmost slot every edit page gives its main action, so a setting
+# never sits where the action is looked for.  A switch that merely EXISTS
+# somewhere is what an operator could not find.
 start = editor.run_button
 assert switch.isVisible() and start.isVisible()
 assert abs(switch.y() - start.y()) <= 2, (switch.geometry(), start.geometry())
-gap = switch.x() - (start.x() + start.width())
+gap = start.x() - (switch.x() + switch.width())
 assert 0 <= gap <= 40, (switch.geometry(), start.geometry())
+assert start.role() == 'primary'
+
+# Running, the one button is Stop -- still this page's primary, so the way to
+# stop is the loudest control exactly while it is needed.
+editor.update_projection(dict(projection, running=True, can_stop=True))
+app.processEvents()
+assert start.text() == 'Stop' and start.role() == 'primary', (start.text(), start.role())
+assert editor.restart_button.isVisible()
+assert editor.restart_button.x() < start.x() and switch.x() < editor.restart_button.x()
+editor.update_projection(projection)
+app.processEvents()
 
 raised = []
 switch.toggled.connect(raised.append)

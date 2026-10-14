@@ -1701,10 +1701,12 @@ class PulseScheduleView(QtWidgets.QWidget):
         self.sync_button = FluentButton("Sync")
         self.add_button = FluentButton("Add Period")
         self.spacer_button = FluentButton("Add Spacer")
-        self.remove_button = FluentButton("Remove", role="destructive")
+        self.remove_button = FluentButton("Remove", role="destructive", seated=True)
         self.bracket_button = FluentButton("Add Bracket")
-        # Saving the document being edited is this page's one commit.
-        self.save_button = FluentButton("Save Pulse*", role="primary")
+        # Saving the document being edited is this page's one commit: primary
+        # with its star while the file is behind the editor, a standard
+        # command while there is nothing to save.
+        self.save_button = FluentButton("Save Pulse")
         self.load_button = FluentButton("Load")
         self.collapse_button = FluentButton("Collapse")
         self.group_button = FluentButton("Group Subpulse")

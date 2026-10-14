@@ -62,7 +62,6 @@ from .style import (
     MUTED_LABEL_STYLE,
     ORANGE,
     ORANGE_DARK,
-    ORANGE_TINT,
     PADDING_V,
     PLACEHOLDER,
     RADIUS,
@@ -1203,12 +1202,15 @@ def _button_stylesheet() -> str:
     white ink (5.2:1), the one dark face on its surface; destructive a GHOST
     -- no face and no edge at rest, RED_DARK ink (6.6:1), the red wash only
     under the pointer -- because a row of Remove buttons with faces shouted
-    louder than the rows they removed; destructive_primary the RED_DARK fill
-    with white ink.  Pointer and press each step the face a shade.  A
+    louder than the rows they removed.  A ghost SEATED among filled
+    neighbours (a button grid, an equal-width action row) keeps a faint red
+    face and a 35% red edge at their size, or its cell reads as a hole or a
+    red label.  destructive_primary is the RED_DARK fill with white ink.  Pointer and press each step the face a shade.  A
     checkable button checked is a toggle chip and wears the SELECTION's
     look: the ACCENT fill, TEXT ink (5.3:1), no edge, its label led by
-    CHIP_CHECK.  Dirty (something new to save) is the orange tint on a
-    standard command; a primary keeps its face and says it with the star.
+    CHIP_CHECK.  Dirty (something new to save) is ONE rule for every save or
+    commit: clean it is the role it was given, unsaved it is the primary
+    with a trailing star.
     Disabled is an outline on the page grey with DISABLED_INK; a disabled
     ghost stays a ghost.
     """
@@ -1221,6 +1223,8 @@ def _button_stylesheet() -> str:
     strong_hover = QtGui.QColor(ACCENT_STRONG).darker(110).name()
     strong_pressed = QtGui.QColor(ACCENT_STRONG).darker(122).name()
     red_tint_pressed = _mixed(RED_TINT, RED, 0.18).name()
+    seated_face = _mixed(SURFACE, RED_TINT, 0.55).name()
+    seated_edge = _mixed(SURFACE, RED, 0.35).name()
     red_hover = QtGui.QColor(RED_DARK).darker(112).name()
     red_pressed = QtGui.QColor(RED_DARK).darker(126).name()
     style = f"""
@@ -1256,6 +1260,9 @@ def _button_stylesheet() -> str:
     QPushButton[role="destructive"] {{
         background: transparent; border-color: transparent; color: {RED_DARK};
     }}
+    QPushButton[role="destructive"][seated="true"] {{
+        background: {seated_face}; border-color: {seated_edge};
+    }}
     QPushButton[role="destructive"]:hover {{
         background: {RED_TINT}; border-color: {RED_TINT};
     }}
@@ -1271,20 +1278,19 @@ def _button_stylesheet() -> str:
     QPushButton[role="destructive_primary"]:pressed {{
         background: {red_pressed}; border-color: {red_pressed};
     }}
-    QPushButton[dirty="true"][role="standard"] {{
-        background: {ORANGE_TINT}; border-color: {ORANGE}; color: {ORANGE_DARK};
-    }}
     QPushButton[glyph="true"] {{
         padding: 0px {scaled_px(4, minimum=2)}px;
         font-size: {round(fluent_font_size() * 1.35)}pt;
     }}
     QPushButton:disabled, QPushButton[role="primary"]:disabled,
-    QPushButton[role="destructive_primary"]:disabled,
-    QPushButton[dirty="true"][role="standard"]:disabled, QPushButton:checked:disabled {{
+    QPushButton[role="destructive_primary"]:disabled, QPushButton:checked:disabled {{
         background: {BG}; border-color: {DIVIDER}; color: {DISABLED_INK};
     }}
     QPushButton[role="destructive"]:disabled {{
         background: transparent; border-color: transparent; color: {DISABLED_INK};
+    }}
+    QPushButton[role="destructive"][seated="true"]:disabled {{
+        background: {BG}; border-color: {DIVIDER}; color: {DISABLED_INK};
     }}
     """
     _BUTTON_STYLE_CACHE = (_FLUENT_SCALE, style)
@@ -1302,15 +1308,20 @@ class FluentButton(QtWidgets.QPushButton):
     layout's to fix.
     """
 
-    def __init__(self, text: str = "", parent=None, *, role: str = "standard"):
+    def __init__(
+        self, text: str = "", parent=None, *, role: str = "standard", seated: bool = False,
+    ):
         self._label = str(text)
         self._dirty = False
         super().__init__(text, parent)
+        # Only a destructive ghost reads it: one that sits among filled
+        # buttons keeps a faint face so its cell is not a hole.
+        self.setProperty("seated", bool(seated))
         self.setMinimumHeight(scaled_px(30, minimum=22))
         # Default sizing is set ONCE here: a caller that opts into Expanding
         # (a button grid) keeps it.
         self.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
-        self.setProperty("dirty", False)
+        self._role = ""
         self._mark_glyph()
         self.set_role(role)
         self.setStyleSheet(_button_stylesheet())
@@ -1365,6 +1376,8 @@ class FluentButton(QtWidgets.QPushButton):
             self._repolish()
 
     def role(self) -> str:
+        """The role it is drawn with now: primary while dirty."""
+
         return str(self.property("role"))
 
     def set_role(self, role: str) -> None:
@@ -1373,8 +1386,13 @@ class FluentButton(QtWidgets.QPushButton):
         value = str(role)
         if value not in BUTTON_ROLES:
             raise ValueError(f"button role must be one of {BUTTON_ROLES}, not {value!r}")
-        if self.property("role") != value:
-            self.setProperty("role", value)
+        self._role = value
+        self._show_role()
+
+    def _show_role(self) -> None:
+        shown = "primary" if self._dirty else self._role
+        if self.property("role") != shown:
+            self.setProperty("role", shown)
             self._repolish()
 
     def _repolish(self) -> None:
@@ -1385,11 +1403,13 @@ class FluentButton(QtWidgets.QPushButton):
     def set_dirty(self, dirty: bool = True) -> None:
         """Mark that pressing this would save or apply something new.
 
-        A trailing ``*``, and on a standard command the orange attention
-        tint: the star alone was easy to miss, and the yellow fill it used to
-        come with carried white text at 1.65:1.  A primary keeps its face --
-        it is already the one thing to press.  Idempotent and width-stable:
-        the label never accumulates stars.
+        One rule for every save or commit: clean, the button wears the role
+        it was given (a Save is a standard command); unsaved, it is drawn
+        primary with a trailing ``*`` -- the one thing on its surface to
+        press.  A Save that was primary while there was nothing to save
+        shouted for no reason, and an orange tint on one tab beside a
+        primary on the next made one verb two looks.  Idempotent and
+        width-stable: the label never accumulates stars.
         """
 
         dirty = bool(dirty)
@@ -1397,9 +1417,7 @@ class FluentButton(QtWidgets.QPushButton):
             self._label = self._label[:-1]
         self._dirty = dirty
         self._show_label()
-        if self.property("dirty") != dirty:
-            self.setProperty("dirty", dirty)
-            self._repolish()
+        self._show_role()
 
     def is_dirty(self) -> bool:
         return self._dirty
@@ -2053,10 +2071,15 @@ class FluentReadoutEdit(FluentLineEdit):
     the operator was meant to read looked like a control that was switched off.
 
     Inherits FluentLineEdit's sizing / API (``setText`` / ``text``) so it drops into the same
-    rows, its text on the same left edge as the fields above and below it."""
+    rows.  Being text, it starts where text starts -- flush with its widget's left edge, so a
+    value sits exactly under its column header or beside the label it continues.  It kept a
+    field's inner padding when it lost the box, and every value then started nine pixels to
+    the right of the header above it."""
 
     def __init__(self, text: str = "", parent=None):
         super().__init__(text, parent)
+        # QLineEdit keeps two pixels before its text; a readout has no box to keep them from.
+        self.setTextMargins(-2, 0, 0, 0)
         self.setReadOnly(True)
         self.setCursor(QtCore.Qt.IBeamCursor)        # the I-beam signals "selectable text"
         self.set_display_elide(QtCore.Qt.ElideMiddle)
@@ -2067,14 +2090,15 @@ class FluentReadoutEdit(FluentLineEdit):
         self.setToolTip(self.text())
 
     def _apply_style(self) -> None:
-        # No box: the transparent edge keeps the text where an edit's text sits.
+        # No box and no side inset: the transparent top and bottom edges keep a field's height.
         self.setStyleSheet(
             f"""
             QLineEdit {{
                 background: transparent;
                 border: 1px solid transparent;
-                border-radius: {_radius()}px;
-                padding: {scaled_px(PADDING_V)}px {scaled_px(EDIT_PADDING_H)}px;
+                border-left-width: 0px;
+                border-right-width: 0px;
+                padding: {scaled_px(PADDING_V)}px 0px;
                 color: {TEXT};
                 font: {fluent_font_size()}pt "{FONT}";
             }}
@@ -2128,6 +2152,9 @@ class FluentReadoutMultiline(QtWidgets.QPlainTextEdit):
         # its text.  At PADDING_V the row's content box lines up with the line edit's, so the anchored
         # height formula (single-row height + one lineSpacing per extra line) shows every line in full.
         self.document().setDocumentMargin(scaled_px(PADDING_V))
+        # That margin is on every side; a readout's text still starts at its widget's left edge,
+        # under the header or beside the label it continues, so the viewport takes it back.
+        self.setViewportMargins(-scaled_px(PADDING_V), 0, 0, 0)
         self._apply_style()
         if self._plain:
             # A MESSAGE body is not an input: hide the blinking text caret and don't steal the dialog's
@@ -2161,13 +2188,14 @@ class FluentReadoutMultiline(QtWidgets.QPlainTextEdit):
             """
         else:
             # The SAME readout look as FluentReadoutEdit: plain TEXT-ink text on the surface, no
-            # box (a grey box was the disabled button's chrome), its text where an edit's sits.
+            # box (a grey box was the disabled button's chrome) and no side inset.
             base = f"""
             QPlainTextEdit {{
                 background: transparent;
                 border: 1px solid transparent;
-                border-radius: {_radius()}px;
-                padding: {scaled_px(PADDING_V)}px {scaled_px(EDIT_PADDING_H)}px;
+                border-left-width: 0px;
+                border-right-width: 0px;
+                padding: {scaled_px(PADDING_V)}px 0px;
                 color: {TEXT};
                 font: {fluent_font_size()}pt "{FONT}";
             }}

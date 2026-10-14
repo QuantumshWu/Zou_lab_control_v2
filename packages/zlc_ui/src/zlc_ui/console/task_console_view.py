@@ -114,7 +114,7 @@ class TaskConsoleView(QtWidgets.QWidget):
         self.save_layout_button.setToolTip("Save the layout and signal wiring")
         self.load_layout_button = FluentButton("Load")
         self.load_layout_button.setToolTip("Load a saved layout and signal wiring")
-        self.clear_board_button = FluentButton("Clear", role="destructive")
+        self.clear_board_button = FluentButton("Clear", role="destructive", seated=True)
         self.clear_board_button.setToolTip("Remove every panel and logic node from the board")
 
         for widget in (

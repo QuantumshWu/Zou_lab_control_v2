@@ -167,7 +167,8 @@ class LogicEditorView(QtWidgets.QWidget):
         self._body_layout.addWidget(self._artifact_result_frame)
 
         # The lifecycle in one button, as on the node's row: Start while it is
-        # stopped, Stop while it runs.  Restart shows only while it runs, and
+        # stopped, Stop while it runs -- primary either way, the one run action
+        # of this page.  Restart shows only while it runs, and
         # Remove keeps to the far side, away from the button pressed most.
         actions = QtWidgets.QHBoxLayout()
         self.remove_button = FluentButton("Remove", role="destructive")
@@ -193,9 +194,14 @@ class LogicEditorView(QtWidgets.QWidget):
             "Open this node's plot panel when it starts"
         )
         self.preview_switch.toggled.connect(self.auto_preview_changed.emit)
+        # Start/Stop stays the rightmost control, where every edit page keeps
+        # its main action; the Plot setting sits to its left, ahead of Restart.
+        actions.addWidget(self.preview_switch)
         actions.addWidget(self.restart_button)
         actions.addWidget(self.run_button)
-        actions.addWidget(self.preview_switch)
+        # Clear of the help paragraph above, so the ghost Remove reads as a
+        # command on the action row and not as one more red sentence.
+        self._body_layout.addSpacing(scaled_px(12, minimum=8))
         self._body_layout.addLayout(actions)
         self._show_actions = bool(show_actions)
         for button in (self.remove_button, self.restart_button, self.run_button, self.preview_switch):
@@ -384,7 +390,6 @@ class LogicEditorView(QtWidgets.QWidget):
         can_start = bool(self._projection.get("can_start"))
         can_stop = bool(self._projection.get("can_stop"))
         self.run_button.setText("Starting…" if pending else "Stop" if running else "Start")
-        self.run_button.set_role("standard" if running else "primary")
         self.run_button.setEnabled(
             self._mutation_enabled and not pending and (can_stop if running else can_start)
         )

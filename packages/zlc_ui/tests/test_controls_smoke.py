@@ -679,3 +679,70 @@ def test_a_widget_named_twice_is_unblocked_when_the_block_ends() -> None:
     with signals_blocked(target, target):
         assert target.signalsBlocked()
     assert not target.signalsBlocked()
+
+
+def test_one_save_rule_a_seated_ghost_and_a_flush_readout(run_qt) -> None:
+    """Every Save is standard when clean and the primary with a star when
+    unsaved; a ghost destructive among filled buttons keeps a face; a readout
+    starts where the text above it starts."""
+
+    run_qt(
+        """
+from PyQt5 import QtGui, QtWidgets
+from zlc_ui.qt import ensure_qt_app
+from zlc_ui.fluent import FluentButton, FluentLabel, FluentReadoutEdit
+from zlc_ui.fluent.fluent import FluentReadoutMultiline
+app = ensure_qt_app(['zlc-ui-tests'])
+
+save = FluentButton('Save')
+assert save.role() == 'standard' and save.text() == 'Save'
+save.set_dirty(True)
+assert save.role() == 'primary' and save.text() == 'Save*', (save.role(), save.text())
+save.set_dirty(True)
+assert save.text() == 'Save*'
+save.set_dirty(False)
+assert save.role() == 'standard' and save.text() == 'Save'
+run = FluentButton('Run', role='primary')
+run.set_dirty(True)
+run.set_dirty(False)
+assert run.role() == 'primary', 'a primary stays primary when clean'
+
+host = QtWidgets.QWidget()
+host.setStyleSheet('background: white;')
+row = QtWidgets.QHBoxLayout(host)
+ghost = FluentButton('Remove', role='destructive')
+seated = FluentButton('Remove', role='destructive', seated=True)
+row.addWidget(ghost)
+row.addWidget(seated)
+host.show()
+app.processEvents()
+def face(button):
+    image = button.grab().toImage()
+    return image.pixelColor(image.width() // 2, image.height() // 5).alpha()
+assert face(ghost) == 0, face(ghost)
+assert face(seated) == 255, 'a seated ghost keeps a resting face'
+
+column = QtWidgets.QWidget()
+column.setStyleSheet('background: white;')
+stack = QtWidgets.QVBoxLayout(column)
+header = FluentLabel('Default')
+single = FluentReadoutEdit('2 ms')
+multi = FluentReadoutMultiline('5 ms')
+for widget in (header, single, multi):
+    stack.addWidget(widget)
+column.resize(240, 140)
+column.show()
+app.processEvents()
+def first_ink(widget):
+    image = widget.grab().toImage()
+    ratio = image.devicePixelRatio() or 1.0
+    for x in range(image.width()):
+        for y in range(image.height()):
+            if QtGui.QColor(image.pixel(x, y)).lightness() < 128:
+                return widget.x() + x / ratio
+    raise AssertionError('no ink')
+left = first_ink(header)
+for widget in (single, multi):
+    assert abs(first_ink(widget) - left) <= 1.5, (type(widget).__name__, first_ink(widget), left)
+"""
+    )

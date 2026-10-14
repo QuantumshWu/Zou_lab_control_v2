@@ -50,7 +50,7 @@ class PulseConfigView(QtWidgets.QWidget):
             ("refresh", "Refresh", "standard"), ("save", "Save", "standard"),
             ("save_as", "Save as", "standard"), ("unload", "Unload", "destructive"),
         ):
-            button = FluentButton(text, role=role)
+            button = FluentButton(text, role=role, seated=True)
             button.setFixedHeight(row_height())
             button.clicked.connect(getattr(self, f"{name}_requested"))
             setattr(self, f"{name}_button", button)
@@ -92,7 +92,7 @@ class PulseConfigView(QtWidgets.QWidget):
         file_layout.addWidget(self.values_table)
         actions = QtWidgets.QHBoxLayout()
         self.add_button = FluentButton("Add parameter")
-        self.remove_button = FluentButton("Remove selected", role="destructive")
+        self.remove_button = FluentButton("Remove selected", role="destructive", seated=True)
         self.add_button.clicked.connect(self._add_entry)
         self.remove_button.clicked.connect(self._remove_entries)
         actions.addWidget(self.add_button)
@@ -178,9 +178,8 @@ class PulseConfigView(QtWidgets.QWidget):
             status += "  Unsaved edits do not participate in Fire."
         self.file_status.setText(status)
         self.file_status.setToolTip(record.active_path)
+        # Primary with its star only while there is something to save.
         self.save_button.set_dirty(record.dirty)
-        # Saving is this page's commit only while there is something to save.
-        self.save_button.set_role("primary" if record.dirty else "standard")
         for button in self._file_buttons:
             button.setEnabled(not record.busy)
         self.refresh_button.setEnabled(bool(record.file_path) and not record.busy)
