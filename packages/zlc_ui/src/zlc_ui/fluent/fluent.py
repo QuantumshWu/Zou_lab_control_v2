@@ -181,6 +181,13 @@ def scaled_px(value: int | float, *, minimum: int = 1) -> int:
     return max(int(minimum), int(round(float(value) * _FLUENT_SCALE)))
 
 
+def control_height() -> int:
+    """The ONE height of a control in a row -- a field, a combo, a button,
+    a switch, a grid card's face, a section title -- display-scaled."""
+
+    return scaled_px(30, minimum=22)
+
+
 # ---------------------------------------------------------------- frame geometry
 #
 # THE ONE GEOMETRY RULE for a frame with parts inside it (a spin box's
@@ -207,10 +214,9 @@ def scaled_px(value: int | float, *, minimum: int = 1) -> int:
 #: ``FIELD_BORDER_PX * devicePixelRatioF()`` device px; painted code reads the
 #: same constant.  Nothing else defines the edge width.
 FIELD_BORDER_PX = 1
-#: QLineEditPrivate::horizontalMargin / verticalMargin: the text inset Qt
-#: keeps inside a line edit's contents rect (logical px, never scaled).
+#: QLineEditPrivate::horizontalMargin: the text inset Qt keeps inside a line
+#: edit's contents rect on the left and right (logical px, never scaled).
 _QLINEEDIT_HMARGIN = 2
-_QLINEEDIT_VMARGIN = 1
 
 
 def scaled_even_px(value: float, *, minimum: int = 2) -> int:
@@ -378,6 +384,27 @@ def paint_centred_ink(
     painter.fillPath(path, QtGui.QColor(colour))
     painter.restore()
     return ink.translated(dx, dy)
+
+
+def centred_line_top(top: float, height: float, font: QtGui.QFont) -> int:
+    """The top of the ONE line box that centres ``font``'s capitals on the
+    span ``top .. top + height``, in whole logical px: where a field's
+    text, a row label, a button's label and a combo's collapsed text all
+    put their line, so a row of them shares one baseline.
+
+    Qt centres the line BOX, by two rules: a label or a button on the
+    box's fractional height, a QLineEdit on its integer height with the odd
+    pixel above.  A field's text sat two device pixels under the label
+    beside it, and both sat low, because Segoe UI's ascent holds the room
+    for accents: the capitals of a field were 1.3 px under its middle.  The
+    capitals -- and the digits, which are as tall -- are what the eye
+    centres.  Whole pixels, because a QLineEdit can put its line only on
+    one: everything that paints its line on the same integer top, over the
+    same ascent, lands on the same device row at every ratio."""
+
+    metrics = QtGui.QFontMetricsF(font)
+    centre = float(top) + float(height) / 2.0
+    return math.floor(centre + metrics.capHeight() / 2.0 - metrics.ascent() + 0.5)
 
 
 def _available_geometry_at(
@@ -781,10 +808,66 @@ class FluentStatusDot(QtWidgets.QLabel):
         self.setStyleSheet(status_dot_stylesheet(wanted, radius=max(1, self._size // 2)))
 
 
+def _paint_label_line(label: QtWidgets.QLabel) -> bool:
+    """Paint a one-line, plain-text, vertically centred ``label`` with its
+    line on :func:`centred_line_top` of its contents -- the line the field
+    beside it puts its text on -- and say whether it did.
+
+    Everything else QLabel does is kept: the frame and the sheet's
+    background, the margin, the indent, the horizontal alignment, the
+    palette and the enabled state.  A label that is not one plain line (it
+    wraps, is rich text, is selectable, has a buddy's mnemonic) or has no
+    room for its line is left to QLabel."""
+
+    text = QtWidgets.QLabel.text(label)
+    kind = label.textFormat()
+    rich = kind == QtCore.Qt.RichText or (kind == QtCore.Qt.AutoText and QtCore.Qt.mightBeRichText(text))
+    interactive = int(label.textInteractionFlags()) & int(
+        QtCore.Qt.TextSelectableByMouse | QtCore.Qt.TextSelectableByKeyboard | QtCore.Qt.TextEditable
+    )
+    if (not text or "\n" in text or rich or interactive or label.wordWrap()
+            or label.buddy() is not None or not int(label.alignment()) & int(QtCore.Qt.AlignVCenter)):
+        return False
+    margin = label.margin()
+    rect = label.contentsRect().adjusted(margin, margin, -margin, -margin)
+    metrics = label.fontMetrics()
+    line = metrics.height()
+    if rect.height() < line:
+        return False
+    align = int(QtWidgets.QStyle.visualAlignment(label.layoutDirection(), label.alignment()))
+    indent = label.indent()
+    if indent < 0 and label.frameWidth():
+        indent = metrics.horizontalAdvance("x") // 2 - margin
+    if indent > 0:
+        if align & int(QtCore.Qt.AlignLeft):
+            rect.setLeft(rect.left() + indent)
+        if align & int(QtCore.Qt.AlignRight):
+            rect.setRight(rect.right() - indent)
+    top = centred_line_top(rect.top(), rect.height(), label.font())
+    rect.setTop(max(rect.top(), min(top, rect.bottom() + 1 - line)))
+    painter = QtGui.QPainter(label)
+    label.drawFrame(painter)
+    label.style().drawItemText(
+        painter, rect, (align & int(QtCore.Qt.AlignHorizontal_Mask)) | int(QtCore.Qt.AlignTop),
+        label.palette(), label.isEnabled(), text, label.foregroundRole(),
+    )
+    painter.end()
+    return True
+
+
 class FluentLabel(QtWidgets.QLabel):
+    """Plain text in the body font.  One line of it, centred in its box, is
+    painted on the line a field of that box's height puts its text on
+    (:func:`_paint_label_line`), so a row label reads on the baseline of
+    the field it names."""
+
     def __init__(self, text: str = "", parent=None):
         super().__init__(text, parent)
         self.setStyleSheet(f'QLabel {{ color: {TEXT}; font: {fluent_font_size()}pt "{FONT}"; background: transparent; }}')
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        if not _paint_label_line(self):
+            super().paintEvent(event)
 
 
 def muted_note_label(text: str) -> "QtWidgets.QLabel":
@@ -1536,7 +1619,7 @@ class FluentButton(QtWidgets.QPushButton):
         self._dirty = False
         super().__init__(text, parent)
         self.setProperty("on_tint", False)
-        self.setMinimumHeight(scaled_px(30, minimum=22))
+        self.setMinimumHeight(control_height())
         # Default sizing is set ONCE here: a caller that opts into Expanding
         # (a button grid) keeps it.
         self.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
@@ -1580,19 +1663,34 @@ class FluentButton(QtWidgets.QPushButton):
         return HOVER
 
     def paintEvent(self, event) -> None:  # noqa: N802 - Qt naming
-        """A one-symbol label is centred on its INK, not on its line box
-        (see :func:`paint_centred_ink`): the face is drawn by the style, the
-        glyph as a path on the face's centre."""
+        """The face is drawn by the style; the label by the row's rules.
 
-        if not self.property("glyph"):
-            super().paintEvent(event)
-            return
+        A word sits on :func:`centred_line_top` of the face, the line the
+        field and the label beside the button put their text on -- the
+        style centred its line box, two device pixels from theirs.  A
+        one-symbol label is centred on its INK (:func:`paint_centred_ink`).
+        A button with an icon is the style's to lay out."""
+
         option = QtWidgets.QStyleOptionButton()
         self.initStyleOption(option)
+        glyph = bool(self.property("glyph"))
+        if not glyph and not option.icon.isNull():
+            super().paintEvent(event)
+            return
         painter = QtWidgets.QStylePainter(self)
         painter.drawControl(QtWidgets.QStyle.CE_PushButtonBevel, option)
-        paint_centred_ink(painter, self, QtCore.QRectF(self.rect()), self.font(), option.text,
-                          self._glyph_ink())
+        if glyph:
+            paint_centred_ink(painter, self, QtCore.QRectF(self.rect()), self.font(), option.text,
+                              self._glyph_ink())
+        else:
+            style = self.style()
+            area = style.subElementRect(QtWidgets.QStyle.SE_PushButtonContents, option, self)
+            area.setTop(centred_line_top(0, self.height(), self.font()))
+            flags = QtCore.Qt.AlignHCenter | QtCore.Qt.AlignTop | QtCore.Qt.TextShowMnemonic
+            if not style.styleHint(QtWidgets.QStyle.SH_UnderlineShortcut, option, self):
+                flags |= QtCore.Qt.TextHideMnemonic
+            style.drawItemText(painter, area, int(flags), option.palette, self.isEnabled(),
+                               option.text, QtGui.QPalette.ButtonText)
         painter.end()
 
     def setEnabled(self, enabled: bool) -> None:  # noqa: N802 - Qt API name
@@ -1761,6 +1859,29 @@ def _line_edit_text_line(edit: QtWidgets.QLineEdit) -> QtCore.QRect:
     )
 
 
+def _seat_line_edit_text(edit: QtWidgets.QLineEdit) -> None:
+    """Give ``edit`` the top and bottom text margins that move Qt's line box
+    onto :func:`centred_line_top` of its own height.
+
+    The edit's height is its field's: a plain field is its own frame, and
+    the editor inside a spin box or an editable combo is laid out
+    symmetrically inside theirs.  The margins are equal and opposite -- the
+    room Qt centres the line in is moved, not shrunk -- so the line moves
+    by exactly their size and the edit asks for no other height than it
+    did.  The left and right margins stay the owner's (a readout's inset,
+    a badge's room)."""
+
+    option = QtWidgets.QStyleOptionFrame()
+    option.initFrom(edit)
+    contents = edit.style().subElementRect(QtWidgets.QStyle.SE_LineEditContents, option, edit)
+    line = edit.fontMetrics().height()
+    qt_top = contents.y() + (contents.height() - line + 1) // 2
+    shift = centred_line_top(0, edit.height(), edit.font()) - qt_top
+    margins = edit.textMargins()
+    if (margins.top(), margins.bottom()) != (shift, -shift):
+        edit.setTextMargins(margins.left(), shift, margins.right(), -shift)
+
+
 def field_text_inset() -> int:
     """Where a field's text starts inside its box, from the box's left
     edge: the edge, the padding and Qt's own text margin (logical px).
@@ -1815,7 +1936,7 @@ class FluentLineEdit(QtWidgets.QLineEdit):
         self._normalization_timer: QtCore.QTimer | None = None
         self._normalizing = False
         self._numeric_layout_key: tuple | None = None
-        self.setMinimumHeight(scaled_px(30, minimum=22))
+        self.setMinimumHeight(control_height())
         self._apply_style()
         self.set_placeholder_prompt(False)
         self.setText(str(text))
@@ -2030,6 +2151,7 @@ class FluentLineEdit(QtWidgets.QLineEdit):
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
+        _seat_line_edit_text(self)
         self._normalize_visible_number()
 
     def showEvent(self, event) -> None:  # noqa: N802
@@ -2038,6 +2160,8 @@ class FluentLineEdit(QtWidgets.QLineEdit):
 
     def changeEvent(self, event) -> None:  # noqa: N802
         super().changeEvent(event)
+        if event.type() in (QtCore.QEvent.FontChange, QtCore.QEvent.StyleChange):
+            _seat_line_edit_text(self)
         if event.type() in (
             QtCore.QEvent.FontChange,
             QtCore.QEvent.StyleChange,
@@ -2621,27 +2745,27 @@ class FluentPathEdit(QtWidgets.QWidget):
         self.edit.setToolTip("\n".join(part for part in (self.edit.text(), self._hint) if part))
 
 
-class FluentSectionLabel(QtWidgets.QLabel):
-    """Bold, own-line section header for vertical settings popups.
+class FluentSectionLabel(FluentLabel):
+    """THE section title: a group's name on its own line, or the title of a
+    header row whose commands and summary sit beside it.
 
-    A settings page uses ONE QGroupBox to mark sections; we use a
-    bold dim label per section instead so multiple sections stack cleanly in a
-    single VBox without nested borders.  Reuse this for every settings popup so the
-    visual rhythm is identical across GUIs."""
+    One style, everywhere a section is named: TEXT ink at the weight of a
+    card's title and a table's column names (600), as tall as a control,
+    its line on the line a field of that height puts its text on.  It kept
+    a top margin for an own-line header, and as the title of a row of
+    fields that margin put it two pixels under their text; the space above
+    a section is the section gap of the layout it stands in."""
 
     def __init__(self, text: str = "", parent=None):
         super().__init__(text, parent)
-        # Bold must go in the STYLESHEET (it is what actually renders): setting a stylesheet AFTER
-        # setFont re-polishes the widget and drops a QFont-only bold, so a section ended up the same
-        # weight as a row label (the "can't tell a section from a row" bug).  Set the stylesheet
-        # (with font-weight: bold) FIRST, then setFont last so widget.font().bold() also stays True.
-        self.setStyleSheet(f"color: {TEXT}; background: transparent; border: none; font-weight: bold;")
-        font = self.font()
-        font.setBold(True)
-        font.setPointSize(fluent_font_size())
-        self.setFont(font)
+        # The weight goes in the SHEET, the one that renders: a QFont-only
+        # weight set before a sheet is dropped when the sheet repolishes.
+        self.setStyleSheet(
+            f'QLabel {{ color: {TEXT}; font: 600 {fluent_font_size()}pt "{FONT}"; '
+            f"background: transparent; border: none; }}"
+        )
         self.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
-        self.setContentsMargins(0, scaled_px(4), 0, 0)
+        self.setMinimumHeight(control_height())
 
 
 def setting_label_width(labels, *, minimum: int = 72) -> int:
@@ -2665,7 +2789,7 @@ class FluentSettingRow(QtWidgets.QWidget):
     ``[fixed-width label | control flush-left, expanding]``.
 
     THE design system (one logic everywhere): a form is built from exactly two primitives --
-    :class:`FluentSectionLabel` (bold, dark, own-line) for a GROUP header, and this row (regular
+    :class:`FluentSectionLabel` (semibold, dark) for a GROUP header, and this row (regular
     weight, fixed-width column) for each control.  The section/row hierarchy is shown by
     weight ONLY -- never by indentation.  Labels are TEXT: grey read as disabled beside a
     required field, and grey is what a HINT wears.  Share ONE column width
@@ -2699,7 +2823,7 @@ class FluentSettingRow(QtWidgets.QWidget):
             lbl = label
             lbl.setParent(self)
         else:
-            lbl = QtWidgets.QLabel(str(label), self)
+            lbl = FluentLabel(str(label), self)
         lbl.setFixedWidth(int(label_width) if label_width is not None else scaled_px(60, minimum=48))
         if isinstance(lbl, QtWidgets.QLabel):
             lbl.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
@@ -2903,7 +3027,7 @@ class FluentCardDialog(QtWidgets.QDialog):
 
 
 class _FluentMessageDialog(FluentCardDialog):
-    """A modal message / warning box on the shared card: a bold title
+    """A modal message / warning box on the shared card: the section title
     (``FluentSectionLabel``), the wrapped message and a single Fluent OK
     button, centred on its parent.  ``fluent_message`` is the ONE entry
     point -- use it in place of ``QMessageBox.information`` / ``.warning``."""
@@ -3169,7 +3293,7 @@ class FluentComboBox(QtWidgets.QAbstractButton):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setMinimumHeight(scaled_px(30, minimum=22))
+        self.setMinimumHeight(control_height())
         self.setCheckable(False)
         self.setSizePolicy(
             QtWidgets.QSizePolicy.Preferred,
@@ -3505,7 +3629,7 @@ class FluentComboBox(QtWidgets.QAbstractButton):
             # style polish, so a combo asked for a 26 px row settled at 22 and
             # every row laid out beside it drifted.
             if self.minimumHeight() != self.maximumHeight():
-                self.setMinimumHeight(scaled_px(30, minimum=22))
+                self.setMinimumHeight(control_height())
             self._invalidate_content_width()
 
     def event(self, event) -> bool:
@@ -3542,21 +3666,22 @@ class FluentComboBox(QtWidgets.QAbstractButton):
         )
 
     def _collapsed_text_rect(self) -> QtCore.QRect:
-        """Where the collapsed text's line box sits, laid out the way
-        QLineEdit lays out its own (an integer centring inside the edge,
-        padding and vertical text margin), so baselines in a row agree."""
+        """Where the collapsed text's line box sits: on the line every
+        field's text takes (:func:`centred_line_top` of the box), so the
+        typed text of an editable combo, a line edit beside it and the
+        label before it share its baseline."""
 
         left, right, drop_width = self._collapsed_text_chrome()
         width = max(0, self.width() - drop_width - left - right)
-        line = QtGui.QFontMetrics(self._collapsed_font()).height()
-        inner_top = FIELD_BORDER_PX + scaled_px(PADDING_V) + _QLINEEDIT_VMARGIN
-        inner_height = self.height() - 2 * inner_top
-        top = inner_top + (inner_height - line + 1) // 2
-        return QtCore.QRect(left, top, width, line)
+        font = self._collapsed_font()
+        line = QtGui.QFontMetrics(font).height()
+        return QtCore.QRect(left, centred_line_top(0, self.height(), font), width, line)
 
     def _editor_rect(self) -> QtCore.QRect:
-        """The editable combo's line edit: the collapsed text rect plus the
-        margins the line edit keeps around its own text, so typed text sits
+        """The editable combo's line edit: the collapsed text's columns plus
+        the inset the line edit keeps before its text, and the room inside
+        the edge and padding, as high above the box's middle as below it --
+        the edit seats its line on its own middle, so typed text sits
         exactly where the collapsed text was."""
 
         text = self._collapsed_text_rect()
@@ -5259,7 +5384,7 @@ class FluentSwitch(QtWidgets.QAbstractButton):
 
     def _apply_metrics(self) -> None:
         # A control's height, the same number a FluentButton takes.
-        self.setMinimumSize(fluent_switch_width(self.text()), scaled_px(30, minimum=22))
+        self.setMinimumSize(fluent_switch_width(self.text()), control_height())
 
     def setText(self, text: str) -> None:  # noqa: N802 - Qt API
         value = str(text)
@@ -5339,9 +5464,12 @@ class FluentSwitch(QtWidgets.QAbstractButton):
             painter.setPen(QtGui.QColor(TEXT if enabled else DISABLED_INK))
             painter.setFont(self.font())
             left = track_w + scaled_px(8)
+            # On the row's one line (centred_line_top), with the buttons
+            # and fields beside it.
+            top = centred_line_top(0, self.height(), self.font())
             painter.drawText(
-                QtCore.QRect(left, 0, max(0, self.width() - left), self.height()),
-                QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter,
+                QtCore.QRect(left, top, max(0, self.width() - left), self.height() - top),
+                QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop,
                 self.text(),
             )
         painter.end()
@@ -5610,7 +5738,7 @@ class FluentSpinBox(_WheelFocusGuardMixin, QtWidgets.QSpinBox):
         # the focus leaving -- which is also when the range applies.
         self.setKeyboardTracking(False)
         self.setButtonSymbols(QtWidgets.QAbstractSpinBox.PlusMinus)
-        self.setMinimumHeight(scaled_px(30, minimum=22))
+        self.setMinimumHeight(control_height())
         # Left-align with zero internal text margins so the text's left inset is
         # exactly the stylesheet ``padding`` (EDIT_PADDING_H) -- identical to a
         # plain FluentLineEdit.  Center alignment made the
@@ -5737,14 +5865,20 @@ class FluentSpinBox(_WheelFocusGuardMixin, QtWidgets.QSpinBox):
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
+        # The box has just laid its edit out; the edit Qt made is a plain
+        # QLineEdit, so the box seats its text (see _seat_line_edit_text).
+        _seat_line_edit_text(self.lineEdit())
         self._update_number_geometry()
 
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
+        _seat_line_edit_text(self.lineEdit())
         self._update_number_geometry()
 
     def changeEvent(self, event) -> None:  # noqa: N802
         super().changeEvent(event)
+        if event.type() in (QtCore.QEvent.FontChange, QtCore.QEvent.StyleChange):
+            _seat_line_edit_text(self.lineEdit())
         if event.type() in (
             QtCore.QEvent.FontChange,
             QtCore.QEvent.StyleChange,
@@ -5798,7 +5932,7 @@ class FluentInputDialog(FluentCardDialog):
         layout.setSpacing(scaled_px(8, minimum=5))
 
         # The card has no title bar to carry a title, so a titled dialog
-        # renders its own -- the same bold section label the message box
+        # renders its own -- the same section title the message box
         # uses, because they are the same kind of thing.
         if title:
             layout.addWidget(FluentSectionLabel(str(title)))
@@ -6134,7 +6268,7 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
         # the focus leaving -- which is also when the range applies.
         self.setKeyboardTracking(False)
         self.setButtonSymbols(QtWidgets.QAbstractSpinBox.PlusMinus)
-        self.setMinimumHeight(scaled_px(30, minimum=22))
+        self.setMinimumHeight(control_height())
         # See FluentSpinBox: left-align + zero text margins for left-padding
         # parity with the line edits.
         self.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
@@ -6554,16 +6688,20 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
+        _seat_line_edit_text(self.lineEdit())
         self._place_step_chip()
         self._update_number_geometry()
 
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
+        _seat_line_edit_text(self.lineEdit())
         self._place_step_chip()
         self._update_number_geometry()
 
     def changeEvent(self, event) -> None:  # noqa: N802
         super().changeEvent(event)
+        if event.type() in (QtCore.QEvent.FontChange, QtCore.QEvent.StyleChange):
+            _seat_line_edit_text(self.lineEdit())
         if event.type() in (
             QtCore.QEvent.FontChange,
             QtCore.QEvent.StyleChange,
@@ -6983,7 +7121,7 @@ class FluentCheckBox(QtWidgets.QCheckBox):
 
     def __init__(self, text: str = "", parent=None):
         super().__init__(text, parent)
-        self.setMinimumHeight(scaled_px(30, minimum=22))
+        self.setMinimumHeight(control_height())
         rest_hover = _mixed(NEUTRAL_FILL, ACCENT, 0.4).name()
         self.setStyleSheet(
             f"""
@@ -8575,10 +8713,11 @@ class FluentSegmentedButtons(QtWidgets.QWidget):
             button = QtWidgets.QPushButton(label, self)
             button.setCursor(QtCore.Qt.PointingHandCursor)
             button.setFocusPolicy(QtCore.Qt.TabFocus)
-            button.setMinimumHeight(scaled_px(30, minimum=22) - 2 * rim)
+            button.setMinimumHeight(control_height() - 2 * rim)
             button.setMinimumWidth(fluent_text_width(metrics, str(label)) + 2 * pad + 2)
             button.setProperty("current", False)
             button.clicked.connect(lambda _checked=False, value=value: self.activated.emit(value))
+            button.installEventFilter(self)
             layout.addWidget(button)
             self._buttons[value] = button
         self.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
@@ -8623,6 +8762,28 @@ class FluentSegmentedButtons(QtWidgets.QWidget):
         radius = float(_radius() + self._rim)
         painter.drawRoundedRect(QtCore.QRectF(self.rect()), radius, radius)
         painter.end()
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802 - Qt naming
+        """Paint a choice: its face by the sheet, its label on the line
+        every text of the row sits on (:func:`centred_line_top` of the
+        control), not the style's centred line box."""
+
+        if event.type() != QtCore.QEvent.Paint or watched not in self._buttons.values():
+            return super().eventFilter(watched, event)
+        option = QtWidgets.QStyleOptionButton()
+        watched.initStyleOption(option)
+        painter = QtWidgets.QStylePainter(watched)
+        painter.drawControl(QtWidgets.QStyle.CE_PushButtonBevel, option)
+        style = watched.style()
+        area = style.subElementRect(QtWidgets.QStyle.SE_PushButtonContents, option, watched)
+        # The control's middle, not the face's: the track's rim is even
+        # above and below, so they are one.
+        offset = watched.y()
+        area.setTop(centred_line_top(-offset, self.height(), watched.font()))
+        style.drawItemText(painter, area, int(QtCore.Qt.AlignHCenter | QtCore.Qt.AlignTop),
+                           option.palette, watched.isEnabled(), option.text, QtGui.QPalette.ButtonText)
+        painter.end()
+        return True
 
     def button(self, value) -> QtWidgets.QPushButton:
         return self._buttons[value]
@@ -9278,6 +9439,11 @@ class ElidedLabel(QtWidgets.QLabel):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._elide()
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        # On the row's one line, as a FluentLabel is.
+        if not _paint_label_line(self):
+            super().paintEvent(event)
 
     def _elide(self) -> None:
         metrics = self.fontMetrics()
