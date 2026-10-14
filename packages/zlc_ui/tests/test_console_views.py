@@ -845,6 +845,12 @@ row.edit_requested.connect(lambda: events.append('edit'))
 row.remove_requested.connect(lambda: events.append('remove'))
 QtTest.QTest.mouseClick(start, QtCore.Qt.LeftButton)
 QtTest.QTest.mouseClick(stop, QtCore.Qt.LeftButton)
+# A draft that cannot start is a state of its own, drawn as the node's Edit
+# page draws it -- a word the row refused would raise out of a Qt slot.
+from zlc_ui.console.logic_row_view import STATE_COLOURS
+row.set_state('draft', 'Draft: select a compatible source')
+dot, ink = STATE_COLOURS['draft']
+assert dot in row.dot.styleSheet() and ink in row.status_label.styleSheet()
 row.set_state('idle', 'stopped')
 row.set_commands(can_start=True, can_stop=False)
 app.processEvents()
@@ -935,6 +941,23 @@ handle.set_logic_commands('camera-1', can_start=False, can_stop=False)
 view.show()
 app.processEvents()
 assert editor.artifact_form.widget_for('calibration_path').mapTo(editor, QtCore.QPoint()).x() == editor.form.widget_for('repeat').mapTo(editor, QtCore.QPoint()).x()
+# ONE RHYTHM AND ONE PAGE EDGE.  Selectors, both forms and the results are
+# one run of rows a form gap apart, whichever widget holds them; a section
+# gap follows the header and precedes the action bar; every control starts
+# on one column; and the content sits a window pad inside the page on both
+# sides, the scrollbar's gutter held although no bar shows.
+from zlc_ui.fluent import FluentSettingRow, window_pad
+from zlc_ui.form import form_gap
+top_of = lambda widget: widget.mapTo(editor, QtCore.QPoint()).y()
+rows = sorted((row for row in editor.findChildren(FluentSettingRow) if row.isVisible()), key=top_of)
+assert len(rows) == 5, [row.layout().itemAt(0).widget().text() for row in rows]
+gaps = [top_of(below) - top_of(above) - above.height() for above, below in zip(rows, rows[1:])]
+assert gaps == [form_gap()] * 4, gaps
+assert top_of(rows[0]) - top_of(editor.status_label) - editor.status_label.height() == window_pad()
+assert top_of(editor.remove_button) - top_of(rows[-1]) - rows[-1].height() == window_pad()
+assert len({row.layout().itemAt(1).widget().mapTo(editor, QtCore.QPoint()).x() for row in rows}) == 1
+left = rows[0].mapTo(editor, QtCore.QPoint()).x()
+assert (left, editor.width() - left - rows[0].width()) == (window_pad(), window_pad())
 publisher = handle._panel_publisher_rows['panel-1']
 assert tuple(view._logic_rows) == (handle._rows['camera-1'], publisher)
 assert not publisher.publishes_label.isHidden()

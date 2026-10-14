@@ -1,26 +1,38 @@
-"""Pure operator chrome for one console logic row."""
+"""Pure operator chrome for one console logic row.
+
+Also what the row shares with its node's Edit page and with the Logic list
+around it -- the status look, the Start words, the gaps and the page edges --
+so the list and every Edit page are built from one set of numbers.
+"""
 
 from __future__ import annotations
 
 from PyQt5 import QtCore, QtWidgets
 
 from zlc_ui.fluent import (
+    CARD_PAD,
     GREEN,
     GREY,
     MUTED_INK,
+    ORANGE,
+    ORANGE_DARK,
     RED,
     RED_DARK,
+    TEXT,
     ElidedLabel,
     FluentButton,
     FluentFrame,
     FluentLabel,
+    FluentScrollArea,
     FluentStatusDot,
     FluentSwitch,
     add_row_switch,
     scaled_px,
     setting_label_width,
+    window_pad,
 )
 from zlc_ui.fluent import PublishedItemsLegend
+from zlc_ui.form import form_gap
 
 #: Every kind a row can carry, so the kind column is one width on every row
 #: and the status beside it starts at one x down the page.
@@ -28,6 +40,40 @@ _KINDS = ("(measurement)", "(processor)", "(task)", "(panel publisher)")
 
 #: Every word the Start slot can say, on the row and on the node's Edit page.
 START_LABELS = ("Start", "Restart", "Starting…")
+
+#: The size of every status dot on the console (design px): the status
+#: strip's own, so the window's dot in the header, a node's dot on its row
+#: and the same node's dot on its Edit page are one mark.
+STATUS_DOT = 12
+
+#: How each node state looks, as (dot, ink).  ONE table for the row and the
+#: node's Edit page: a draft that was grey on its row and orange on its page
+#: was one status drawn two ways.  The words follow the status strip's: idle
+#: grey, a draft that cannot start yet the warning amber, a run the plain
+#: ink of something under way, a failure red.
+STATE_COLOURS = {
+    "idle": (GREY, MUTED_INK),
+    "draft": (ORANGE, ORANGE_DARK),
+    "running": (GREEN, TEXT),
+    "error": (RED, RED_DARK),
+}
+
+
+def mount_logic_page(scroll: FluentScrollArea, body: QtWidgets.QWidget) -> None:
+    """Put ``body`` -- a Logic page: the list, or one node's Edit -- in ``scroll``.
+
+    Every page has ONE content edge on each side, a window pad inside the tab
+    pane, so nothing moves when the operator switches between the list and
+    an Edit tab.  The vertical bar's gutter is held whether or not the bar
+    shows (a width-bounded mount), and the right margin is the pad less that
+    gutter: the content ends at the same x with or without a bar, instead of
+    every stretching control jumping left the moment a page outgrew its tab.
+    """
+
+    pad = window_pad()
+    gutter = scroll.verticalScrollBar().sizeHint().width()
+    body.layout().setContentsMargins(pad, pad, max(0, pad - gutter), pad)
+    scroll.set_width_bounded_widget(body)
 
 
 def start_label(*, pending: bool, active: bool) -> str:
@@ -77,8 +123,6 @@ class LogicRowView(FluentFrame):
     remove_requested = QtCore.pyqtSignal()
     auto_preview_changed = QtCore.pyqtSignal(bool)
 
-    _STATE_COLORS = {"idle": GREY, "running": GREEN, "error": RED}
-
     def __init__(self, title: str = "Logic", kind: str = "logic", parent=None) -> None:
         super().__init__(parent)
         self.title = str(title)
@@ -91,12 +135,17 @@ class LogicRowView(FluentFrame):
         self._task_takeover = False
         self._owns_task = False
         outer = QtWidgets.QVBoxLayout(self)
-        outer.setContentsMargins(scaled_px(12), scaled_px(8), scaled_px(12), scaled_px(8))
-        outer.setSpacing(scaled_px(6, minimum=4))
+        # A card's one padding on all four sides, and the form's gap between
+        # the command line and the legend under it.  The commands are spaced
+        # by that gap too, as on the node's Edit page, so the same
+        # Plot | Start | Stop group has the same air in both places.
+        pad = scaled_px(CARD_PAD)
+        outer.setContentsMargins(pad, pad, pad, pad)
+        outer.setSpacing(form_gap())
 
         top = QtWidgets.QHBoxLayout()
-        top.setSpacing(scaled_px(8, minimum=5))
-        self.dot = FluentStatusDot(size=14, color=GREY)
+        top.setSpacing(form_gap())
+        self.dot = FluentStatusDot(size=STATUS_DOT, color=GREY)
         self.name_label = ElidedLabel(self.title)
         # Name and kind are fixed columns: every row's kind and status start
         # at the same x, instead of floating with the length of the name.
@@ -174,16 +223,16 @@ class LogicRowView(FluentFrame):
 
     def set_state(self, state: str, status_text: str = "") -> None:
         state = str(state)
-        if state not in self._STATE_COLORS:
-            raise ValueError("state must be idle, running, or error")
+        if state not in STATE_COLOURS:
+            raise ValueError(f"state must be one of {tuple(STATE_COLOURS)}")
         self._status_text = str(status_text or state)
-        self.dot.set_color(self._STATE_COLORS[state])
+        dot, colour = STATE_COLOURS[state]
+        self.dot.set_color(dot)
         self.status_label.setText(self._status_text)
-        # Written only when it CHANGES.  The colour has two values and a
-        # status tick arrives ten times a second, so almost every write said
-        # what the last one said -- and a stylesheet write re-parses the
-        # sheet, repolishes the widget and schedules a repaint regardless.
-        colour = RED_DARK if state == "error" else MUTED_INK
+        # Written only when it CHANGES.  A status tick arrives ten times a
+        # second, so almost every write said what the last one said -- and a
+        # stylesheet write re-parses the sheet, repolishes the widget and
+        # schedules a repaint regardless.
         if colour != self._status_colour:
             self._status_colour = colour
             self.status_label.setStyleSheet(
@@ -228,4 +277,12 @@ class LogicRowView(FluentFrame):
         self.publishes_label.set_rows(tuple(tuple(str(value) for value in row) for row in rows))
 
 
-__all__ = ["START_LABELS", "LogicRowView", "fit_start_button", "start_label"]
+__all__ = [
+    "START_LABELS",
+    "STATE_COLOURS",
+    "STATUS_DOT",
+    "LogicRowView",
+    "fit_start_button",
+    "mount_logic_page",
+    "start_label",
+]

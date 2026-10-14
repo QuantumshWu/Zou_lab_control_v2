@@ -31,7 +31,9 @@ from zlc_ui.fluent import (
 )
 
 from .board_view import ConsoleBoardView
-from .logic_row_view import LogicRowView
+from zlc_ui.form import form_gap
+
+from .logic_row_view import STATUS_DOT, LogicRowView, mount_logic_page
 from .panel_card_view import PanelCardView
 from .status_strip import StatusStrip
 
@@ -75,18 +77,29 @@ class TaskConsoleView(QtWidgets.QWidget):
         # only flexible middle cell, and commands pinned to the right.  The
         # telemetry elides when space is tight; commands never wrap into a
         # second pseudo-toolbar whose alignment depends on label size hints.
+        # Keep this status surface between the header and tabs.  It is not
+        # a bottom log panel and therefore never shifts the board vertically.
+        self.status_strip = StatusStrip(action_text="Stop task")
+        self.status_strip.action_clicked.connect(self.stop_task_requested.emit)
+        # The header's dot and word are laid out as the strip's dot and line
+        # right under them -- its side margin, one dot size, its gap -- so
+        # the two dots stand on one x and the two texts start on one x.
+        strip_layout = self.status_strip.layout()
+        side = strip_layout.contentsMargins().left()
+
         header_frame = FluentFrame(bordered=False)
         header_frame.setFixedHeight(scaled_px(48, minimum=38))
         header = QtWidgets.QHBoxLayout(header_frame)
-        header.setContentsMargins(scaled_px(12), scaled_px(6), scaled_px(12), scaled_px(6))
+        header.setContentsMargins(side, scaled_px(6), side, scaled_px(6))
         header.setSpacing(scaled_px(7, minimum=4))
 
-        self.status_dot = FluentStatusDot(size=16)
+        self.status_dot = FluentStatusDot(size=STATUS_DOT)
         self.status_dot.set_color(GREEN)
         # The window's identity, as a word: nothing reads a name typed here,
-        # so an edit box in its place was an input that changed nothing.
+        # so an edit box in its place was an input that changed nothing.  At
+        # its own width, so the summary follows the word instead of a blank
+        # column a hundred pixels wide.
         self.name_label = FluentLabel("task")
-        self.name_label.setFixedWidth(scaled_px(150, minimum=110))
         self.summary_label = ElidedLabel("")
         self.summary_label.setStyleSheet(f"color: {MUTED_INK}; background: transparent; border: none;")
 
@@ -117,11 +130,11 @@ class TaskConsoleView(QtWidgets.QWidget):
         self.clear_board_button = FluentButton("Clear", role="destructive")
         self.clear_board_button.setToolTip("Remove every panel and logic node from the board")
 
-        for widget in (
-            self.status_dot,
-            self.name_label,
-        ):
-            header.addWidget(widget, 0, QtCore.Qt.AlignVCenter)
+        identity = QtWidgets.QHBoxLayout()
+        identity.setSpacing(strip_layout.spacing())
+        identity.addWidget(self.status_dot, 0, QtCore.Qt.AlignVCenter)
+        identity.addWidget(self.name_label, 0, QtCore.Qt.AlignVCenter)
+        header.addLayout(identity)
         header.addWidget(self.summary_label, 1, QtCore.Qt.AlignVCenter)
         header.addWidget(self.kind_combo, 0, QtCore.Qt.AlignVCenter)
         header.addWidget(self.add_panel_button, 0, QtCore.Qt.AlignVCenter)
@@ -137,11 +150,6 @@ class TaskConsoleView(QtWidgets.QWidget):
         ):
             header.addWidget(widget, 0, QtCore.Qt.AlignVCenter)
         outer.addWidget(header_frame)
-
-        # Keep this status surface between the header and tabs.  It is not
-        # a bottom log panel and therefore never shifts the board vertically.
-        self.status_strip = StatusStrip(action_text="Stop task")
-        self.status_strip.action_clicked.connect(self.stop_task_requested.emit)
         outer.addWidget(self.status_strip)
 
         self.tabs = FluentTabWidget()
@@ -178,8 +186,9 @@ class TaskConsoleView(QtWidgets.QWidget):
         self.logic_body = QtWidgets.QWidget()
         self.logic_body.setStyleSheet("background: transparent;")
         self.logic_layout = QtWidgets.QVBoxLayout(self.logic_body)
-        self.logic_layout.setContentsMargins(scaled_px(10, minimum=6), scaled_px(10, minimum=6), scaled_px(10, minimum=6), scaled_px(10, minimum=6))
-        self.logic_layout.setSpacing(scaled_px(8, minimum=5))
+        # Cards stack a form gap apart, like rows; the page edges are every
+        # Logic page's (mount_logic_page).
+        self.logic_layout.setSpacing(form_gap())
         self.logic_hint = FluentLabel(
             "No logic nodes yet.  Add a Measurement / Processor / Task from the header "
             "(it starts STOPPED); open its Edit to set parameters and Start it."
@@ -189,7 +198,7 @@ class TaskConsoleView(QtWidgets.QWidget):
         self.logic_layout.addWidget(self.logic_hint)
         self.logic_layout.addStretch(1)
         self._logic_rows: tuple[LogicRowView, ...] = ()
-        self.logic_scroll.set_width_bounded_widget(self.logic_body)
+        mount_logic_page(self.logic_scroll, self.logic_body)
         logic_outer.addWidget(self.logic_scroll, 1)
         self.tabs.add_permanent_tab(logic_page, "Logic")
         outer.addWidget(self.tabs, 1)
