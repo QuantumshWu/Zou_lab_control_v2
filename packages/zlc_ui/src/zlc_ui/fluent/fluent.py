@@ -8329,6 +8329,7 @@ class _SelectionGridDelegate(QtWidgets.QStyledItemDelegate):
         if not held and not index.flags() & QtCore.Qt.ItemIsSelectable:
             return
         grid = self.parent()
+        cell = grid._card_cell(option.rect, index.row())
         live = grid.isEnabled()
         selected = bool(option.state & QtWidgets.QStyle.State_Selected)
         hovered = bool(option.state & QtWidgets.QStyle.State_MouseOver) and not held and live
@@ -8350,7 +8351,7 @@ class _SelectionGridDelegate(QtWidgets.QStyledItemDelegate):
             if state == "missing":
                 edge = RED
         painter.save()
-        rect = _paint_grid_card(painter, grid.viewport(), option.rect, fill, edge)
+        rect = _paint_grid_card(painter, grid.viewport(), cell, fill, edge)
         # A name says the row has the cell; the empty states say nobody, or
         # somebody else, has it -- named only as the preview under the pointer.
         if selected or hovered or derived or warning:
@@ -8362,7 +8363,7 @@ class _SelectionGridDelegate(QtWidgets.QStyledItemDelegate):
             # The font the grid sizes its columns with (set_grid).
             font = QtGui.QFont(FONT)
             font.setPointSize(fluent_font_size())
-            _paint_grid_label(painter, rect, _grid_card_band(grid.viewport(), option.rect),
+            _paint_grid_label(painter, rect, _grid_card_band(grid.viewport(), cell),
                               QtCore.Qt.AlignHCenter, font, str(index.data() or ""), ink)
         painter.restore()
 
@@ -8383,7 +8384,7 @@ class _SelectionGridDelegate(QtWidgets.QStyledItemDelegate):
         hover_face, pressed_face = _destructive_glyph_faces()
         side = grid.row_height()
         square = QtCore.QRect(0, 0, side, side)
-        square.moveCenter(option.rect.center())
+        square.moveCenter(grid._card_cell(option.rect, index.row()).center())
         painter.save()
         rect = _paint_grid_card(
             painter, grid.viewport(), square,
@@ -8454,6 +8455,7 @@ class _SelectionGridRowHeader(QtWidgets.QHeaderView):
         label, note = self._texts(section)
         label_font, note_font = self._fonts()
         hovered = section == self._hovered and self.isEnabled()
+        rect = self.parent()._card_cell(rect, section)
         # Left-aligned labels start on the grid's own edge, the edge the
         # content above and below it shares; right-aligned ones sit off it.
         pad = scaled_px(8, minimum=5)
@@ -8529,7 +8531,8 @@ class FluentSelectionGrid(QtWidgets.QTableView):
     whole line -- so nothing new is learned.  What differs from
     :class:`FluentTableView` is the reading: an unchosen cell is blank, a
     chosen one is a named card, cells without a label are no cells at all,
-    and the grid is exactly as large as its cells.  ``selection_edited``
+    and the grid is exactly as large as its cells -- its bottom edge is its
+    last row's cards'.  ``selection_edited``
     carries the chosen ``(row, column)`` cells after an operator's change;
     :meth:`set_selected` and :meth:`set_grid` never emit it.
 
@@ -8655,10 +8658,12 @@ class FluentSelectionGrid(QtWidgets.QTableView):
             # An action's column holds its square face and the gutters.
             horizontal.resizeSection(column, gap if column == trailing.start else self.row_height())
         rows_header = self.verticalHeader()
-        rows_header.setDefaultSectionSize(max(
-            self.row_height(),
-            rows_header.two_line_height() if any(row_notes) else 0,
-        ))
+        height = max(self.row_height(), rows_header.two_line_height() if any(row_notes) else 0)
+        rows_header.setDefaultSectionSize(height)
+        if rows:
+            # The grid ends where its last cards end: whatever follows it
+            # stands the layout's own gap away, not that and a gutter.
+            rows_header.resizeSection(len(rows) - 1, height - _grid_gutter())
         self.updateGeometry()
 
     @staticmethod
@@ -8667,6 +8672,16 @@ class FluentSelectionGrid(QtWidgets.QTableView):
         beside the grid, and its gutters."""
 
         return control_height() + 2 * _grid_gutter()
+
+    def _card_cell(self, rect: QtCore.QRect, row: int) -> QtCore.QRect:
+        """The cell ``rect`` of ``row`` that its cards and label are laid
+        in: the last row's section stops at its cards' bottom edge (the
+        grid has no gutter below it), so its cell is that section and the
+        gutter beneath it, and its cards are as tall as every other row's."""
+
+        if row == self._grid_model.rowCount() - 1:
+            return QtCore.QRect(rect).adjusted(0, 0, 0, _grid_gutter())
+        return QtCore.QRect(rect)
 
     def label_width_hint(self) -> int:
         """The form label column at which every row label still fits."""

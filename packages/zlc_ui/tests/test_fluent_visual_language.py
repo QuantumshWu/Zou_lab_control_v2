@@ -110,6 +110,12 @@ def test_a_chosen_grid_card_is_the_selected_fill_and_nothing_round_it(app, host)
         inked = [x for x in range(rect.left(), rect.right() + 1) if colour(x, row) != ground]
         return inked[0] - rect.left(), rect.right() - inked[-1]
     assert extent(chosen) == extent(derived) == extent(empty)
+    # The grid ends on its last row's cards: no gutter below them adds to
+    # the gap the layout puts after the grid.
+    faced = [y for y in range(warned.top(), viewport.height())
+             if colour(warned.left() + 6, y) == RED_TINT.upper()]
+    assert faced and faced[-1] == viewport.height() - 1
+    assert warned.height() < chosen.height()
 
     # Under the pointer: an empty card takes the hover wash.
     _under_pointer(viewport, empty.center())
