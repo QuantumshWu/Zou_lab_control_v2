@@ -36,7 +36,7 @@ for _name in (
     "LinkedScrollPanes", "apply_fluent_scrollbars", "FluentWindow", "FluentDialogWindow",
     "bind_body_close", "launch_fluent_window",
     "open_fluent_window",
-    "ElidedLabel", "FluentStatusStrip",
+    "ElidedLabel", "FluentStatusStrip", "status_dot_gap",
 ):
     _EXPORTS[_name] = ("zlc_ui.fluent.fluent", _name)
 for _name in (

@@ -781,11 +781,23 @@ def align_to_resolution(value: str | float, resolution: float, *, allow_any: boo
     return snap_number(re.match(r".+", text))
 
 
+def status_dot_gap() -> int:
+    """The air between a status dot and the words after it: the status
+    strip's, and that of every header that leads with a dot, so the words
+    of stacked strips start on one x."""
+
+    return scaled_px(8)
+
+
 class FluentStatusDot(QtWidgets.QLabel):
+    """A round severity or state mark.  One size by default, the status
+    strip's: a header's larger dot beside a strip's smaller one, each with
+    its own gap, started their words 2.7 px apart."""
+
     #: Class attribute: set_color runs from __init__ before any assignment.
     _color = ""
 
-    def __init__(self, parent=None, *, color: str = GREY, size: int = 16):
+    def __init__(self, parent=None, *, color: str = GREY, size: int = 12):
         super().__init__(parent)
         # Even, so the half-size radius is a whole pixel and the dot round.
         self._size = scaled_even_px(size)
@@ -9600,9 +9612,9 @@ class FluentStatusStrip(FluentFrame):
         super().__init__(parent, bordered=False)
         self.setFixedHeight(scaled_px(38, minimum=30))
         lay = QtWidgets.QHBoxLayout(self)
-        lay.setContentsMargins(scaled_px(12), scaled_px(4), scaled_px(12), scaled_px(4))
-        lay.setSpacing(scaled_px(8))
-        self.dot = FluentStatusDot(size=12)
+        lay.setSpacing(status_dot_gap())
+        self.set_inset(True)
+        self.dot = FluentStatusDot()
         self.message = ElidedLabel("")
         lay.addWidget(self.dot)
         lay.addWidget(self.message, 1)
@@ -9614,6 +9626,16 @@ class FluentStatusStrip(FluentFrame):
             lay.addWidget(self.action_button)
         self._severity = None
         self.show_message("", severity="idle")
+
+    def set_inset(self, inset: bool) -> None:
+        """Whether the strip keeps its content one CARD_PAD in from its
+        sides -- a strip that is its own white card, whose dot then starts
+        where a card's title and the tabs' first underline start -- or lies
+        flush, in a page that is already white and padded, where the page's
+        own edge is the one its dot starts on."""
+
+        pad = scaled_px(CARD_PAD) if inset else 0
+        self.layout().setContentsMargins(pad, scaled_px(4), pad, scaled_px(4))
 
     @property
     def current_severity(self) -> str:

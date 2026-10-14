@@ -13,6 +13,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from enum import Enum
 from functools import partial
+import math
 
 from PyQt5 import QtCore, QtGui, QtWidgets
 
@@ -37,6 +38,7 @@ from .fluent import (
 )
 from .style import (
     ACCENT,
+    CARD_PAD,
     ACCENT_TINT,
     DIVIDER,
     FONT,
@@ -367,31 +369,37 @@ class InfoTree(QtWidgets.QTreeWidget):
         whole, from Copy name."""
 
         signature = (self.font().key(), self.indentation(), self.devicePixelRatioF())
-        if self._name_measurement is not None and self._name_measurement[0] == signature:
-            widest = self._name_measurement[1]
-            limit = max(self._name_floor, self.viewport().width() * 6 // 10)
-            self.header().resizeSection(0, min(widest, limit))
-            return
-        metrics = self.fontMetrics()
-        slack = 2 * scaled_px(5, minimum=3) + scaled_px(6, minimum=4)
-        widest = self._name_floor
+        if self._name_measurement is None or self._name_measurement[0] != signature:
+            self._name_measurement = (signature, self._widest_name())
+        limit = max(self._name_floor, self.viewport().width() * 6 // 10)
+        self.header().resizeSection(0, min(self._name_measurement[1], limit))
+
+    def _widest_name(self) -> int:
+        """The name column every name fits in whole: each name's words at
+        its depth's indentation, plus what a name's cell holds besides its
+        words -- the item padding and the style's text margins -- asked of
+        the delegate itself.  A sum of those guessed by hand came out two
+        pixels short, and names were cut in the middle beside free room."""
+
+        items = self._top_level_items()
+        if not items:
+            return self._name_floor
+        self.ensurePolished()
+        metrics = QtGui.QFontMetricsF(self.font())
+        sample = items[0]
+        hint = self.itemDelegate().sizeHint(self.viewOptions(), self.indexFromItem(sample, 0))
+        chrome = hint.width() - math.ceil(metrics.horizontalAdvance(sample.text(0)))
+        widest = 0.0
 
         def measure(item: QtWidgets.QTreeWidgetItem, depth: int) -> None:
             nonlocal widest
-            widest = max(
-                widest,
-                metrics.horizontalAdvance(item.text(0))
-                + self.indentation() * depth
-                + slack,
-            )
+            widest = max(widest, metrics.horizontalAdvance(item.text(0)) + self.indentation() * depth)
             for index in range(item.childCount()):
                 measure(item.child(index), depth + 1)
 
-        for item in self._top_level_items():
+        for item in items:
             measure(item, 1)
-        self._name_measurement = (signature, widest)
-        limit = max(self._name_floor, self.viewport().width() * 6 // 10)
-        self.header().resizeSection(0, min(widest, limit))
+        return max(self._name_floor, math.ceil(widest) + chrome)
 
     def resizeEvent(self, event) -> None:  # noqa: N802 - Qt naming
         super().resizeEvent(event)
@@ -583,7 +591,10 @@ class _RowsTab(QtWidgets.QWidget):
         self.setStyleSheet("background: transparent;")
         layout = QtWidgets.QVBoxLayout(self)
         gap = scaled_px(6, minimum=4)
-        layout.setContentsMargins(0, gap, 0, gap)
+        # The pane's one inset: the filter and the tree start where the
+        # first tab's underline starts, as the header's words above do.
+        pad = scaled_px(CARD_PAD)
+        layout.setContentsMargins(pad, gap, pad, gap)
         layout.setSpacing(gap)
         self.filter_edit = FluentLineEdit()
         self.filter_edit.setPlaceholderText("filter names and values")
@@ -710,7 +721,11 @@ class InfoPane(QtWidgets.QWidget):
         header_frame = FluentFrame(bordered=False)
         header_frame.setFixedHeight(scaled_px(48, minimum=38))
         header = QtWidgets.QHBoxLayout(header_frame)
-        header.setContentsMargins(scaled_px(12), scaled_px(6), scaled_px(12), scaled_px(6))
+        # Every white strip of the pane keeps its content one CARD_PAD in --
+        # the header's words, the tabs' first underline, the filter, the
+        # tree and the status dot start on one x and end on one x.
+        pad = scaled_px(CARD_PAD)
+        header.setContentsMargins(pad, scaled_px(6), pad, scaled_px(6))
         header.setSpacing(scaled_px(8, minimum=5))
         header.addWidget(FluentSectionLabel(str(path_label)))
 
