@@ -6656,6 +6656,8 @@ class FluentTableView(QtWidgets.QTableView):
 #: Item-data roles of a selection grid beyond Qt's own.
 _GRID_STATE_ROLE = QtCore.Qt.UserRole + 1
 _GRID_NOTE_ROLE = QtCore.Qt.UserRole + 2
+#: The value a trailing action cell reports; None on every other cell.
+_GRID_ACTION_ROLE = QtCore.Qt.UserRole + 3
 #: Cell states besides chosen/unchosen: reached by a rule rather than marked,
 #: or marked but not honoured.
 GRID_CELL_STATES = ("derived", "warning")
@@ -6672,10 +6674,17 @@ def _mixed(first: str, second: str, weight: float) -> QtGui.QColor:
 
 
 class _SelectionGridModel(QtCore.QAbstractTableModel):
-    """Read-only labels; only cells given a label can be selected."""
+    """Read-only labels; only cells given a label can be selected.
 
-    def __init__(self, parent=None):
+    ``actions`` -- ``(value, glyph, tooltip)`` -- add, after a gap column,
+    one trailing cell per action to every row.  Action cells are never
+    selectable, so neither the selection nor the keyboard lands on them.
+    """
+
+    def __init__(self, parent=None, *, actions=(), label_tip: str = ""):
         super().__init__(parent)
+        self._actions = tuple(actions)
+        self._label_tip = str(label_tip)
         self._rows: tuple[str, ...] = ()
         self._columns: tuple[str, ...] = ()
         self._cells: dict[tuple[int, int], str] = {}
@@ -6705,10 +6714,23 @@ class _SelectionGridModel(QtCore.QAbstractTableModel):
         return 0 if parent.isValid() else len(self._rows)
 
     def columnCount(self, parent=QtCore.QModelIndex()) -> int:  # noqa: N802 - Qt API
-        return 0 if parent.isValid() else len(self._columns)
+        if parent.isValid():
+            return 0
+        return len(self._columns) + (1 + len(self._actions) if self._actions else 0)
+
+    def action_columns(self) -> range:
+        """The gap before the actions, then one column per action."""
+
+        start = len(self._columns)
+        return range(start, start + 1 + len(self._actions)) if self._actions else range(0)
 
     def data(self, index, role=QtCore.Qt.DisplayRole):
         cell = (index.row(), index.column())
+        action = index.column() - len(self._columns) - 1
+        if 0 <= action < len(self._actions):
+            value, glyph, tip = self._actions[action]
+            return {QtCore.Qt.DisplayRole: glyph, QtCore.Qt.ToolTipRole: tip,
+                    _GRID_ACTION_ROLE: value}.get(role)
         if role == QtCore.Qt.DisplayRole:
             return self._cells.get(cell)
         if role == QtCore.Qt.ToolTipRole:
@@ -6724,8 +6746,9 @@ class _SelectionGridModel(QtCore.QAbstractTableModel):
             return labels[section] if 0 <= section < len(labels) else None
         if rows and role == _GRID_NOTE_ROLE and 0 <= section < len(self._row_notes):
             return self._row_notes[section]
-        if rows and role == QtCore.Qt.ToolTipRole and 0 <= section < len(self._row_tips):
-            return self._row_tips[section] or None
+        if rows and role == QtCore.Qt.ToolTipRole and 0 <= section < len(self._rows):
+            tip = self._row_tips[section] if section < len(self._row_tips) else ""
+            return "\n".join(part for part in (tip, self._label_tip) if part) or None
         return None
 
     def flags(self, index):
@@ -6743,6 +6766,9 @@ class _SelectionGridDelegate(QtWidgets.QStyledItemDelegate):
     """
 
     def paint(self, painter, option, index) -> None:
+        if index.data(_GRID_ACTION_ROLE) is not None:
+            self._paint_action(painter, option, index)
+            return
         if not index.flags() & QtCore.Qt.ItemIsSelectable:
             return
         selected = bool(option.state & QtWidgets.QStyle.State_Selected)
@@ -6772,13 +6798,34 @@ class _SelectionGridDelegate(QtWidgets.QStyledItemDelegate):
             painter.drawText(rect, QtCore.Qt.AlignCenter, str(index.data() or ""))
         painter.restore()
 
+    def _paint_action(self, painter, option, index) -> None:
+        """A quiet glyph that turns red under the pointer, on a faint red card."""
+
+        hovered = self.parent().hovered_action() == (index.row(), index.column())
+        side = min(option.rect.width(), option.rect.height()) - 2 * scaled_px(4, minimum=2)
+        rect = QtCore.QRectF(0, 0, side, side)
+        rect.moveCenter(QtCore.QRectF(option.rect).center())
+        painter.save()
+        painter.setRenderHint(QtGui.QPainter.Antialiasing)
+        if hovered:
+            painter.setPen(QtCore.Qt.NoPen)
+            painter.setBrush(_mixed(SURFACE, RED, 0.16))
+            painter.drawRoundedRect(rect, _radius(), _radius())
+        font = QtGui.QFont(FONT)
+        font.setPointSize(round(fluent_font_size() * 1.35))
+        painter.setFont(font)
+        painter.setPen(QtGui.QColor(RED_DARK if hovered else GRAPHITE))
+        painter.drawText(rect, QtCore.Qt.AlignCenter, str(index.data()))
+        painter.restore()
+
 
 class _SelectionGridRowHeader(QtWidgets.QHeaderView):
     """Row labels, each with an optional muted line beneath it.
 
     ``activatable`` rows are things the grid's owner can act on (a file, say):
     their label lights up under the pointer and a click emits ``activated``
-    instead of selecting the row's cells.
+    instead of selecting the row's cells.  The labels follow the header's
+    ``defaultAlignment`` (right unless the owner says left).
     """
 
     activated = QtCore.pyqtSignal(int)
@@ -6809,6 +6856,9 @@ class _SelectionGridRowHeader(QtWidgets.QHeaderView):
         return (QtGui.QFontMetrics(label).height() + QtGui.QFontMetrics(note).height()
                 + scaled_px(6, minimum=4))
 
+    def _left(self) -> bool:
+        return bool(self.defaultAlignment() & QtCore.Qt.AlignLeft)
+
     def sectionSizeFromContents(self, section: int) -> QtCore.QSize:  # noqa: N802 - Qt API
         label, note = self._texts(section)
         label_font, note_font = self._fonts()
@@ -6816,7 +6866,8 @@ class _SelectionGridRowHeader(QtWidgets.QHeaderView):
             QtGui.QFontMetrics(label_font).horizontalAdvance(label),
             QtGui.QFontMetrics(note_font).horizontalAdvance(note),
         )
-        return QtCore.QSize(width + 2 * scaled_px(8, minimum=5), self.defaultSectionSize())
+        pad = scaled_px(8, minimum=5)
+        return QtCore.QSize(width + pad * (1 if self._left() else 2), self.defaultSectionSize())
 
     def paintSection(self, painter, rect, section: int) -> None:  # noqa: N802 - Qt API
         if not rect.isValid():
@@ -6824,8 +6875,11 @@ class _SelectionGridRowHeader(QtWidgets.QHeaderView):
         label, note = self._texts(section)
         label_font, note_font = self._fonts()
         hovered = section == self._hovered
-        inner = rect.adjusted(scaled_px(8, minimum=5), 0, -scaled_px(8, minimum=5), 0)
-        align = QtCore.Qt.AlignRight
+        # Left-aligned labels start on the grid's own edge, the edge the
+        # content above and below it shares; right-aligned ones sit off it.
+        pad = scaled_px(8, minimum=5)
+        inner = rect.adjusted(0 if self._left() else pad, 0, -pad, 0)
+        align = QtCore.Qt.AlignLeft if self._left() else QtCore.Qt.AlignRight
         painter.save()
         painter.setFont(label_font)
         painter.setPen(QtGui.QColor(
@@ -6885,9 +6939,11 @@ class FluentSelectionGrid(QtWidgets.QTableView):
     ``toggle=True`` is the grid for marking many cells one by one: a click
     turns one cell on or off and a drag sweeps a run of them, headers select
     nothing, and ``selection_edited`` comes once the gesture is over.  Rows
-    may carry a muted second line (:meth:`set_grid` ``row_notes``), and
-    ``row_actions`` -- ``(value, label)`` pairs -- make each row label open
-    a menu of them, reported as ``row_action(row, value)``.
+    may carry a muted second line (:meth:`set_grid` ``row_notes``).
+    ``row_actions`` -- ``(value, glyph, tooltip)`` -- end every row with one
+    small glyph cell per action, after a narrow gap; ``label_action`` --
+    ``(value, tooltip)`` -- makes each row label a link.  Both are reported
+    as ``row_action(row, value)`` and never change the selection.
     :meth:`set_cell_states` marks cells a rule reached ("derived") or that
     cannot be honoured ("warning").
     """
@@ -6896,16 +6952,23 @@ class FluentSelectionGrid(QtWidgets.QTableView):
     row_action = QtCore.pyqtSignal(int, object)
 
     def __init__(self, parent=None, *, cell_width: int = 52, cell_height: int = 34,
-                 toggle: bool = False, row_actions: Sequence[tuple[object, str]] = ()):
+                 toggle: bool = False, row_actions: Sequence[tuple[object, str, str]] = (),
+                 label_action: tuple[object, str] | None = None):
         super().__init__(parent)
         self._cell_width = cell_width
         self._cell_height = cell_height
         self._toggle = bool(toggle)
-        self._row_actions = tuple((value, str(label)) for value, label in row_actions)
-        self._grid_model = _SelectionGridModel(self)
+        self._grid_model = _SelectionGridModel(
+            self, actions=tuple((value, str(glyph), str(tip)) for value, glyph, tip in row_actions),
+            label_tip="" if label_action is None else str(label_action[1]),
+        )
+        #: The action cell under the pointer, and the one a press began on.
+        self._hovered_action: tuple[int, int] | None = None
+        self._pressed_action: tuple[int, int] | None = None
         row_header = _SelectionGridRowHeader(self)
-        row_header.activatable = bool(self._row_actions)
-        row_header.activated.connect(self._row_menu)
+        row_header.activatable = label_action is not None
+        if label_action is not None:
+            row_header.activated.connect(lambda row: self.row_action.emit(row, label_action[0]))
         self.setVerticalHeader(row_header)
         self.setModel(self._grid_model)
         self.setItemDelegate(_SelectionGridDelegate(self))
@@ -6925,10 +6988,13 @@ class FluentSelectionGrid(QtWidgets.QTableView):
         self.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
         for header, size in ((self.horizontalHeader(), cell_width), (row_header, cell_height)):
             header.setSectionResizeMode(QtWidgets.QHeaderView.Fixed)
+            # Qt's own floor is measured from the header font and padding --
+            # wider than a gap column, and than a short cell, ever asks for.
+            header.setMinimumSectionSize(scaled_px(4, minimum=2))
             header.setDefaultSectionSize(scaled_px(size))
             header.setHighlightSections(False)
             header.setSectionsMovable(False)
-            if self._toggle or header is row_header and self._row_actions:
+            if self._toggle or header is row_header and label_action is not None:
                 header.setSectionsClickable(False)
         row_header.setDefaultAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
         self.setStyleSheet(
@@ -6980,24 +7046,18 @@ class FluentSelectionGrid(QtWidgets.QTableView):
         horizontal = self.horizontalHeader()
         horizontal.setDefaultSectionSize(
             max(scaled_px(self._cell_width), widest + 2 * scaled_px(10, minimum=6)))
+        gap = scaled_px(14, minimum=8)
         for column in narrow_columns:
-            horizontal.resizeSection(column, scaled_px(14, minimum=8))
+            horizontal.resizeSection(column, gap)
+        trailing = self._grid_model.action_columns()
+        for column in trailing:
+            horizontal.resizeSection(column, gap if column == trailing.start else scaled_px(32))
         rows_header = self.verticalHeader()
         rows_header.setDefaultSectionSize(max(
             scaled_px(self._cell_height),
             rows_header.two_line_height() if any(row_notes) else 0,
         ))
         self.updateGeometry()
-
-    def _row_menu(self, row: int) -> None:
-        menu = _FluentRoundedMenu(self)
-        for value, label in self._row_actions:
-            menu.addAction(label).triggered.connect(
-                lambda _checked=False, value=value: self.row_action.emit(row, value))
-        try:
-            menu.exec_(QtGui.QCursor.pos())
-        finally:
-            retire_widget(menu)
 
     def set_cell_states(self, states: "dict[tuple[int, int], str]",
                         tips: "dict[tuple[int, int], str] | None" = None) -> None:
@@ -7028,12 +7088,60 @@ class FluentSelectionGrid(QtWidgets.QTableView):
             return
         self.selection_edited.emit(self.selected_cells())
 
+    def hovered_action(self) -> tuple[int, int] | None:
+        return self._hovered_action
+
+    def _action_cell(self, pos) -> tuple[int, int] | None:
+        index = self.indexAt(pos)
+        if not index.isValid() or index.data(_GRID_ACTION_ROLE) is None:
+            return None
+        return index.row(), index.column()
+
     def mousePressEvent(self, event) -> None:  # noqa: N802 - Qt API
+        # An action cell is a button: it acts on release, and neither starts
+        # a selection gesture nor ends one.
+        cell = self._action_cell(event.pos())
+        if cell is not None:
+            if event.button() == QtCore.Qt.LeftButton:
+                self._pressed_action = cell
+            event.accept()
+            return
         if self._toggle and event.button() == QtCore.Qt.LeftButton:
             self._gesture_start = self.selected_cells()
         super().mousePressEvent(event)
 
+    def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802 - Qt API
+        # The second click of a double click must not act again: the row
+        # under it may already be another one.
+        if self._action_cell(event.pos()) is not None:
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802 - Qt API
+        cell = self._action_cell(event.pos())
+        if cell != self._hovered_action:
+            self._hovered_action = cell
+            self.viewport().setCursor(QtCore.Qt.PointingHandCursor if cell is not None
+                                      else QtCore.Qt.ArrowCursor)
+            self.viewport().update()
+        if self._pressed_action is None:
+            super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: N802 - Qt API
+        if self._hovered_action is not None:
+            self._hovered_action = None
+            self.viewport().setCursor(QtCore.Qt.ArrowCursor)
+            self.viewport().update()
+        super().leaveEvent(event)
+
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802 - Qt API
+        pressed, self._pressed_action = self._pressed_action, None
+        if pressed is not None:
+            if event.button() == QtCore.Qt.LeftButton and self._action_cell(event.pos()) == pressed:
+                self.row_action.emit(pressed[0], self._grid_model.index(*pressed).data(_GRID_ACTION_ROLE))
+            event.accept()
+            return
         super().mouseReleaseEvent(event)
         started, self._gesture_start = self._gesture_start, None
         if started is not None and self.selected_cells() != started:

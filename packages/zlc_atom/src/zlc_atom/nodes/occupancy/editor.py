@@ -7,8 +7,11 @@ reached through Last or Rest shows as a dashed card in its file's row; a
 frame nobody reads, or two files reach, or a number the source does not
 carry, is edged in red with the reason below.  Nothing here changes a claim
 because the frame count changed: what was authored stays until the operator
-edits it.  The console resolves the files and projects how the source's
-frames read them; this widget only draws that and writes the edits back.
+edits it.  A file is removed by the × that ends its row and replaced by
+clicking its name.  The readout model -- which model each file is read
+with -- is chosen under the files it applies to.  The console resolves the
+files and projects how the source's frames read them; this widget only
+draws that and writes the edits back.
 """
 
 from __future__ import annotations
@@ -22,55 +25,75 @@ from zlc_ui.fluent import (
     FluentButton,
     FluentLabel,
     FluentSectionLabel,
+    FluentSegmentedButtons,
     FluentSelectionGrid,
     fluent_open_path,
     muted_note_label,
+    scaled_px,
 )
 
 from zlc_atom.nodes._framework.frames import LAST, REST, canonical_frames, reach_frames
+from zlc_atom.nodes.calibration import READOUT_MODEL_CHOICES
 
 #: The artifact input this editor manages.
 CALIBRATIONS = "calibrations"
 _NAMED = ((LAST, "Last"), (REST, "Rest"))
 _GAP = None
+_HINT = "Click a cell to give that frame to a file · Last and Rest follow the frame count"
+_EMPTY = "Add a calibration file; the first one reads every frame"
 
 
 class CalibrationsEditor(QtWidgets.QWidget):
     """Calibration files as rows, frames as columns; marked cells are claims."""
 
     draft_changed = QtCore.pyqtSignal(object)
-    managed_fields = ()
+    managed_fields = ("model_kind",)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         header = QtWidgets.QHBoxLayout()
-        header.addWidget(FluentSectionLabel("Calibrations"))
+        header.setSpacing(scaled_px(12))
+        title = FluentSectionLabel("Calibrations")
+        # Centred on the button beside it, not dropped below it like an own-line section.
+        title.setContentsMargins(0, 0, 0, 0)
+        header.addWidget(title)
+        self.add_button = FluentButton("Add calibration…")
+        self.add_button.clicked.connect(self._browse_new)
+        header.addWidget(self.add_button)
         header.addStretch(1)
         self.summary = muted_note_label("")
         header.addWidget(self.summary)
         layout.addLayout(header)
         self.grid = FluentSelectionGrid(
             self, toggle=True,
-            row_actions=(("replace", "Replace file…"), ("remove", "Remove")),
+            row_actions=(("remove", "×", "Remove this calibration"),),
+            label_action=("replace", "Click to choose another file"),
         )
+        # File names read as a list: they start on the editor's content edge.
+        self.grid.verticalHeader().setDefaultAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
         self.grid.selection_edited.connect(self._marked)
         self.grid.row_action.connect(self.row_action)
         layout.addWidget(self.grid, 0, QtCore.Qt.AlignLeft)
-        self.add_button = FluentButton("Add calibration…")
-        self.add_button.clicked.connect(self._browse_new)
-        layout.addWidget(self.add_button, 0, QtCore.Qt.AlignLeft)
         self.note = FluentLabel("")
         self.note.setWordWrap(True)
+        self.note.setStyleSheet(f"color: {RED_DARK}; background: transparent; border: none;")
         layout.addWidget(self.note)
-        self.hint = muted_note_label(
-            "Click a cell to give that frame to the file. Last and Rest follow the "
-            "frame count; Rest is every frame no other file names. Click a file "
-            "name to replace or remove it."
-        )
-        self.hint.setWordWrap(True)
+        self.hint = muted_note_label(_HINT)
         layout.addWidget(self.hint)
+        self.model_row = QtWidgets.QWidget(self)
+        model_layout = QtWidgets.QHBoxLayout(self.model_row)
+        model_layout.setContentsMargins(0, scaled_px(6), 0, 0)
+        model_layout.setSpacing(scaled_px(12))
+        model_layout.addWidget(muted_note_label("Readout model"))
+        self.model = FluentSegmentedButtons(
+            tuple((choice.value, choice.label) for choice in READOUT_MODEL_CHOICES), self.model_row)
+        self.model.activated.connect(
+            lambda value: self.draft_changed.emit({"values": {"model_kind": value}}))
+        model_layout.addWidget(self.model)
+        model_layout.addStretch(1)
+        layout.addWidget(self.model_row)
         self._entries: tuple[dict, ...] = ()
         self._columns: tuple = ()
         self._shown: tuple = ()
@@ -88,6 +111,7 @@ class CalibrationsEditor(QtWidgets.QWidget):
         self._base_dir = str(claims["base_dir"])
         self._filter = str(claims["file_filter"])
         frames = projection.get("source_frames")
+        self.model.set_current(projection["form_values"]["model_kind"])
         self._draw(frames, claims["files"], claims["problems"])
 
     def _draw(self, frames, files, problems) -> None:
@@ -167,6 +191,8 @@ class CalibrationsEditor(QtWidgets.QWidget):
         if self.grid.selected_cells() != tuple(sorted(selected)):
             self.grid.set_selected(selected)
         self.grid.setVisible(bool(entries))
+        self.model_row.setVisible(bool(entries))
+        self.hint.setText(_HINT if entries else _EMPTY)
         if not entries:
             self.summary.setText("No calibration yet")
         elif count is None:
@@ -178,7 +204,6 @@ class CalibrationsEditor(QtWidgets.QWidget):
         else:
             self.summary.setText(f"{count} frames · each read once")
         self.note.setText("\n".join(problems))
-        self.note.setStyleSheet(f"color: {RED_DARK}; background: transparent; border: none;")
         self.note.setVisible(bool(problems))
 
     # ---------------------------------------------------------------- editing
