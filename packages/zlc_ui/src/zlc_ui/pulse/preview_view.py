@@ -55,7 +55,7 @@ class PulsePreviewView(QtWidgets.QWidget):
         self.preview_save_figure_button = FluentButton("Save Figure")
         self.preview_save_figure_button.setFixedHeight(control_h)
         self.preview_save_figure_button.clicked.connect(self.save_requested)
-        self.preview_status = FluentReadoutEdit("")
+        self.preview_status = FluentReadoutEdit("", flush=True)
         self.preview_status.setFixedHeight(control_h)
         # Each setting and its label is a group of its own: the air after a
         # label keeps "Show off rows" from reading into "Selectors".

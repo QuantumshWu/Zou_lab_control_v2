@@ -73,7 +73,7 @@ class PulseEditorView(QtWidgets.QWidget):
         # What the editor holds -- its file, its period count, a config
         # error -- is a readout to read and copy, not a disabled input: the
         # disabled edit drew it at 2.4:1.
-        self.summary_label = FluentReadoutEdit("")
+        self.summary_label = FluentReadoutEdit("", flush=True)
         self.clear_button = FluentButton("Clear All", role="destructive")
         self.clear_button.clicked.connect(self.clear_all_requested)
         header_layout.addWidget(self.status_dot)

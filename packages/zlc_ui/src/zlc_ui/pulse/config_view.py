@@ -75,7 +75,9 @@ class PulseConfigView(QtWidgets.QWidget):
         toolbar.addStretch(1)
         file_layout.addLayout(toolbar)
         # The chosen file is read, not typed: Load and Save as choose it.
-        self.path_text = FluentReadoutEdit("")
+        # It stands on its own line under the commands, flush with the
+        # status below it -- no field above it to share a text column with.
+        self.path_text = FluentReadoutEdit("", flush=True)
         self.path_text.setPlaceholderText("No value file selected")
         file_layout.addWidget(self.path_text)
         self.file_status = ElidedLabel("Save the Config file before using its values.")
@@ -279,8 +281,10 @@ class PulseConfigView(QtWidgets.QWidget):
                 combo.lineEdit().setPlaceholderText("Config name")
                 combo.activated.connect(lambda _index, field=field_id: self._commit_binding(field))
                 combo.editingFinished.connect(lambda field=field_id: self._commit_binding(field))
-                # Default and Config value are read, not typed: readouts.
-                widgets = (ElidedLabel(), combo, FluentReadoutEdit(), FluentReadoutEdit(), ElidedLabel())
+                # Default and Config value are read, not typed: readouts, flush
+                # under their column headings like every other column here.
+                widgets = (ElidedLabel(), combo, FluentReadoutEdit(flush=True), FluentReadoutEdit(flush=True),
+                           ElidedLabel())
                 for widget in widgets:
                     widget.setFixedHeight(row_height())
                 combo.setFixedWidth(config_name_width())
