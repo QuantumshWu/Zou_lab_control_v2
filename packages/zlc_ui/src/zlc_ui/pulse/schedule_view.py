@@ -1224,11 +1224,18 @@ class PulseDragContainer(QtWidgets.QWidget):
         saw a press only in the few pixels of padding around them.  Clicking a
         period therefore selected nothing at all, or fell through to the strip
         underneath and selected a GAP instead.
+
+        Only what is drawn IN the card: a card's popups (a slot's binding
+        popup, the Subpulse source popup) are its children but separate
+        windows, and a press this filter took from one never reached the
+        popup's own outside-press handling, so it could not be closed again
+        once the card had been re-watched.
         """
 
         item.installEventFilter(self)
         for child in item.findChildren(QtWidgets.QWidget):
-            child.installEventFilter(self)
+            if child.window() is item.window():
+                child.installEventFilter(self)
 
     @staticmethod
     def _item_key(item: QtWidgets.QWidget) -> tuple[str, str]:
@@ -1500,7 +1507,9 @@ class PulseDragContainer(QtWidgets.QWidget):
 
     def eventFilter(self, obj, event):  # noqa: N802
         item = self._item_of(obj)
-        if item is None:
+        # A popup opened from a card (and everything in it) is another
+        # window: its presses are its own, never a card selection or drag.
+        if item is None or obj.window() is not item.window():
             return super().eventFilter(obj, event)
         key = self._item_key(item)
         mouse_types = (QtCore.QEvent.MouseButtonPress, QtCore.QEvent.MouseMove, QtCore.QEvent.MouseButtonRelease)

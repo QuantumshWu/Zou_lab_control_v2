@@ -2127,6 +2127,22 @@ assert actions[-1] == ("source", ("mot", "config", "cooling.subpulse.json"))
 assert not card.source_switch.isChecked()
 card.source_button.click()
 assert not card._source_popup.isVisible()
+# A popup holds the mouse while open, so the operator's click outside it --
+# on the slot that opened it, say -- is delivered TO the popup, which closes
+# itself.  A re-render re-watches the card for selection and drag; that
+# watch must leave the card's popups (other windows) alone, or the press is
+# taken as a card click and the popup can never be closed again.
+from PyQt5 import QtGui
+card.source_button.click(); app.processEvents()
+assert card._source_popup.isVisible()
+main.drag_container.watch_item_chrome(card)
+outside = QtCore.QPoint(-4, -4)
+QtWidgets.QApplication.sendEvent(card._source_popup, QtGui.QMouseEvent(
+    QtCore.QEvent.MouseButtonPress, QtCore.QPointF(outside),
+    QtCore.QPointF(card._source_popup.mapToGlobal(outside)),
+    QtCore.Qt.LeftButton, QtCore.Qt.LeftButton, QtCore.Qt.NoModifier))
+app.processEvents()
+assert not card._source_popup.isVisible(), "a re-watched card swallowed its popup's outside press"
 effective_periods = tuple(replace(period, readonly=True, duration=replace(
     period.duration, config_active=True, config_enabled=True, binding_editable=False,
     default_text=period.duration.text)) for period in periods)
