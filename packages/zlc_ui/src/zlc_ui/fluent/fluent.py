@@ -7303,9 +7303,10 @@ class _TableRules(QtWidgets.QWidget):
     and inside a FluentFrame (whose ``QFrame`` rule a QHeaderView inherits)
     they ended in rounded hooks that left ground at the cross.  Here each
     is ONE filled rectangle placed from the table's frame: the header rule
-    runs from the frame's inner left edge to the end of the viewport, the
-    row-header rule from the frame's inner top edge to the bottom of the
-    viewport, both snapped to device pixels, so the cross is exact.
+    runs from the frame's left edge to the end of the viewport (into the
+    right edge when nothing stands between), the row-header rule from the
+    frame's top edge to the bottom of the viewport, both snapped to device
+    pixels, so the cross and both joints with the frame are exact.
 
     The widget is transparent to the pointer and masked to the two rules,
     so it covers no cell and the viewport still scrolls by blitting.
@@ -7325,19 +7326,28 @@ class _TableRules(QtWidgets.QWidget):
         inner = frame_inner_rect(table)
         edge = frame_border_px(table)
         viewport = table.viewport().geometry()
+        # A rule that meets the frame runs INTO the frame's edge, which is
+        # the same colour: from the edge's first whole device pixel to its
+        # last, so at a fractional ratio the edge's partial pixel beside the
+        # joint is filled rather than left as a light notch.  Where a scroll
+        # bar stands between, the rule ends with the viewport.
+        outer_left = device_snap(table, 0.0, "ceil")
+        outer_top = device_snap(table, 0.0, "ceil", axis="y")
+        outer_right = device_snap(table, table.width(), "floor")
+        outer_bottom = device_snap(table, table.height(), "floor", axis="y")
         rules = []
         header = table.horizontalHeader()
         if not header.isHidden():
             y = device_snap(table, header.geometry().bottom() + 1, axis="y") - edge
-            # The viewport may end inside the frame's partial pixel at a
-            # fractional ratio; the rule stops at the inner edge.
-            right = min(device_snap(table, viewport.right() + 1), inner.right())
-            rules.append(QtCore.QRectF(inner.left(), y, right - inner.left(), edge))
+            right = device_snap(table, viewport.right() + 1)
+            right = outer_right if right >= inner.right() else right
+            rules.append(QtCore.QRectF(outer_left, y, right - outer_left, edge))
         side = table.verticalHeader()
         if not side.isHidden():
             x = device_snap(table, side.geometry().right() + 1) - edge
-            bottom = min(device_snap(table, viewport.bottom() + 1, axis="y"), inner.bottom())
-            rules.append(QtCore.QRectF(x, inner.top(), edge, bottom - inner.top()))
+            bottom = device_snap(table, viewport.bottom() + 1, axis="y")
+            bottom = outer_bottom if bottom >= inner.bottom() else bottom
+            rules.append(QtCore.QRectF(x, outer_top, edge, bottom - outer_top))
         return tuple(rules)
 
     def place(self) -> None:
@@ -7390,6 +7400,9 @@ class FluentTableView(QtWidgets.QTableView):
     _fitted_width = 0
     _fitting_values = False
     _fit_pending = False
+    #: The header rules' layer; None until __init__ makes it (Qt resizes
+    #: the view while its base constructor runs).
+    _rules = None
     #: Rows read per fit, from the top of the view: a fit is a sample of what
     #: is on screen, coalesced to one per turn, never a scan of the model.
     _FIT_SAMPLE_ROWS = 8
@@ -7576,7 +7589,8 @@ class FluentTableView(QtWidgets.QTableView):
 
     def resizeEvent(self, event) -> None:  # noqa: N802 - Qt API name
         super().resizeEvent(event)
-        self._rules.place()
+        if self._rules is not None:
+            self._rules.place()
         self._schedule_value_fit()
 
     def set_content_rows_limit(self, limit: int, *, viewport_rows: int = 8) -> None:
@@ -7598,9 +7612,8 @@ class FluentTableView(QtWidgets.QTableView):
     def updateGeometries(self) -> None:  # noqa: N802
         super().updateGeometries()
         self._fit_content_height()
-        rules = getattr(self, "_rules", None)
-        if rules is not None:
-            rules.place()
+        if self._rules is not None:
+            self._rules.place()
 
     def _fit_content_height(self) -> None:
         if not self._content_rows_limit or self._fitting_content_height or self.model() is None:
@@ -7725,7 +7738,7 @@ class FluentTableView(QtWidgets.QTableView):
             self._set_hover_row(self.rowAt(event.pos().y()))
         elif kind in (QtCore.QEvent.HoverLeave, QtCore.QEvent.Leave):
             self._set_hover_row(-1)
-        elif kind == QtCore.QEvent.Resize:
+        elif kind == QtCore.QEvent.Resize and self._rules is not None:
             # A scroll bar that comes or goes moves the viewport's end.
             self._rules.place()
         return super().viewportEvent(event)

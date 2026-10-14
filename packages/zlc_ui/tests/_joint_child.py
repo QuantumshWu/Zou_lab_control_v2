@@ -718,10 +718,16 @@ def table_case(fitted: bool, host_kind: str = "plain", rows: int = 4) -> None:
     rule_y = edge_px(oy + F.device_snap(table, header.bottom() + 1, axis="y")) - BD
     rule_x = edge_px(ox + F.device_snap(table, side.right() + 1)) - BD
     rule = image[rule_y, dev(ox + header.x() + header.width() / 2.0)]
-    # The rules end with the viewport, or at the frame's inner edge where a
-    # fractional ratio lets the viewport run into the edge's partial pixel.
+    # The rules end with the viewport, or run into the frame's edge (its
+    # own colour) where the viewport reaches it.
     view_right = min(edge_px(ox + viewport.x() + viewport.width()), edge_px(ox + inner.right()))
     view_bottom = min(edge_px(oy + viewport.y() + viewport.height()), edge_px(oy + inner.bottom()))
+    if view_right >= edge_px(ox + inner.right()):
+        view_right = edge_px(ox + F.device_snap(table, table.width(), "floor"))
+    if view_bottom >= edge_px(oy + inner.bottom()):
+        view_bottom = edge_px(oy + F.device_snap(table, table.height(), "floor", axis="y"))
+    in_left = edge_px(ox + F.device_snap(table, 0.0, "ceil"))
+    in_top = edge_px(oy + F.device_snap(table, 0.0, "ceil", axis="y"))
     across = [x for x in range(in_left, view_right) for y in range(rule_y, rule_y + BD) if not eq(image[y, x], rule)]
     check(case, "T-P2 header rule runs frame to viewport end through the corner", not across,
           f"rule {hexs(rule)} row {rule_y} off at cols {sorted(set(across))[:8]} ({in_left}..{view_right})",
@@ -732,7 +738,8 @@ def table_case(fitted: bool, host_kind: str = "plain", rows: int = 4) -> None:
           image=image, box=(rule_x - 8 * BD, y0 - 2, rule_x + 8 * BD, y0 + 30 * BD))
     # No hook: nothing rule-coloured just above the rule's ends or beside
     # the row-header rule's ends.
-    hooks = [(x, y) for x in (in_left, view_right - 1) for y in range(rule_y - 3 * BD, rule_y)
+    ends = (edge_px(ox + inner.left()), min(view_right, edge_px(ox + inner.right())) - 1)
+    hooks = [(x, y) for x in ends for y in range(rule_y - 3 * BD, rule_y)
              if eq(image[y, x], rule) and not eq(image[y, x], image[rule_y - 4 * BD, dev(ox + header.x() + 4)])]
     hooks += [(x, y) for y in (view_bottom - 1,) for x in range(rule_x + BD, rule_x + 4 * BD)
               if eq(image[y, x], rule) and y < rule_y]
@@ -740,7 +747,7 @@ def table_case(fitted: bool, host_kind: str = "plain", rows: int = 4) -> None:
           image=image, box=(view_right - 12 * BD, rule_y - 8 * BD, x1 + 2, rule_y + 8 * BD))
     if not table.verticalScrollBar().isVisible():
         frame_right = edge_px(ox + inner.right())
-        check(case, "T-P2 header rule reaches the frame", view_right == frame_right,
+        check(case, "T-P2 header rule reaches the frame", view_right >= frame_right,
               f"rule ends {view_right}, frame inner edge {frame_right}",
               image=image, box=(frame_right - 12 * BD, rule_y - 6 * BD, x1 + 2, rule_y + 6 * BD))
     row_index = min(2, rows - 2)
