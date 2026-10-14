@@ -2429,15 +2429,21 @@ class FluentReadoutEdit(FluentLineEdit):
     the operator was meant to read looked like a control that was switched off.
 
     Inherits FluentLineEdit's sizing / API (``setText`` / ``text``) so it drops into the same
-    rows.  Being text, it starts where text starts -- flush with its widget's left edge, so a
-    value sits exactly under its column header or beside the label it continues.  It kept a
-    field's inner padding when it lost the box, and every value then started nine pixels to
-    the right of the header above it."""
+    rows.  A value stands in a column of fields -- a card's Total under its Name, a result
+    path under the parameters it came from, a status under the address it reports on -- so
+    its text starts where a field's text starts (:func:`field_text_inset`), not at the edge
+    of the boxes: flush, the values sat six pixels left of the typed text above them, out of
+    the column the eye reads down.  ``flush=True`` is for a value that continues a line of
+    text or sits under a column header's words: it starts at its widget's own edge."""
 
-    def __init__(self, text: str = "", parent=None):
+    def __init__(self, text: str = "", parent=None, *, flush: bool = False):
         super().__init__(text, parent)
-        # QLineEdit keeps two pixels before its text; a readout has no box to keep them from.
-        self.setTextMargins(-2, 0, 0, 0)
+        # The left text margin moves Qt's own two pixels before the text to
+        # the field inset, or takes them back for a flush value.  Top and
+        # bottom are the seated line's (_seat_line_edit_text).
+        left = -_QLINEEDIT_HMARGIN if flush else field_text_inset() - _QLINEEDIT_HMARGIN
+        margins = self.textMargins()
+        self.setTextMargins(left, margins.top(), margins.right(), margins.bottom())
         self.setReadOnly(True)
         self.setCursor(QtCore.Qt.IBeamCursor)        # the I-beam signals "selectable text"
         self.set_display_elide(QtCore.Qt.ElideMiddle)
@@ -2448,7 +2454,8 @@ class FluentReadoutEdit(FluentLineEdit):
         self.setToolTip(self.text())
 
     def _apply_style(self) -> None:
-        # No box and no side inset: the transparent top and bottom edges keep a field's height.
+        # No box: the transparent top and bottom edges keep a field's height, and the left text
+        # margin (__init__) says where the text starts.
         self.setStyleSheet(
             f"""
             QLineEdit {{
@@ -2510,9 +2517,11 @@ class FluentReadoutMultiline(QtWidgets.QPlainTextEdit):
         # its text.  At PADDING_V the row's content box lines up with the line edit's, so the anchored
         # height formula (single-row height + one lineSpacing per extra line) shows every line in full.
         self.document().setDocumentMargin(scaled_px(PADDING_V))
-        # That margin is on every side; a readout's text still starts at its widget's left edge,
-        # under the header or beside the label it continues, so the viewport takes it back.
-        self.setViewportMargins(-scaled_px(PADDING_V), 0, 0, 0)
+        # That margin is on every side; the viewport takes it back on the left, so a value's text
+        # starts where a field's text starts (field_text_inset), as a FluentReadoutEdit's does,
+        # and a MESSAGE body (plain) at its widget's own edge, flush with the card's words.
+        inset = 0 if self._plain else field_text_inset()
+        self.setViewportMargins(inset - scaled_px(PADDING_V), 0, 0, 0)
         self._apply_style()
         if self._plain:
             # A MESSAGE body is not an input: hide the blinking text caret and don't steal the dialog's
@@ -2546,7 +2555,7 @@ class FluentReadoutMultiline(QtWidgets.QPlainTextEdit):
             """
         else:
             # The SAME readout look as FluentReadoutEdit: plain TEXT-ink text on the surface, no
-            # box (a grey box was the disabled button's chrome) and no side inset.
+            # box (a grey box was the disabled button's chrome); the viewport margin insets it.
             base = f"""
             QPlainTextEdit {{
                 background: transparent;

@@ -723,13 +723,14 @@ def test_one_save_rule_one_destructive_look_and_a_flush_readout(run_qt) -> None:
     one-glyph row remover stays a ghost; a command on a tinted card is a
     plain white face; a pressed command is SELECTED and a disabled one a
     flat DIVIDER face, neither with a frame of another colour; a readout
-    starts where the text above it starts."""
+    starts where the text of the field above it starts, a flush one where
+    the header above it starts."""
 
     run_qt(
         """
 from PyQt5 import QtGui, QtWidgets
 from zlc_ui.qt import ensure_qt_app
-from zlc_ui.fluent import FluentButton, FluentLabel, FluentReadoutEdit
+from zlc_ui.fluent import FluentButton, FluentLabel, FluentLineEdit, FluentReadoutEdit
 from zlc_ui.fluent.fluent import FluentReadoutMultiline
 app = ensure_qt_app(['zlc-ui-tests'])
 
@@ -788,24 +789,30 @@ column = QtWidgets.QWidget()
 column.setStyleSheet('background: white;')
 stack = QtWidgets.QVBoxLayout(column)
 header = FluentLabel('Default')
-single = FluentReadoutEdit('2 ms')
-multi = FluentReadoutMultiline('5 ms')
-for widget in (header, single, multi):
+flush = FluentReadoutEdit('Default', flush=True)
+field = FluentLineEdit('Default')
+single = FluentReadoutEdit('Default')
+multi = FluentReadoutMultiline('Default')
+for widget in (header, flush, field, single, multi):
     stack.addWidget(widget)
-column.resize(240, 140)
+column.resize(240, 220)
 column.show()
 app.processEvents()
+# The column, white, grabbed once: a readout's own grab is transparent,
+# and a transparent pixel reads as black ink at x = 0.
+column_image = column.grab().toImage()
+column_ratio = column_image.devicePixelRatio() or 1.0
 def first_ink(widget):
-    image = widget.grab().toImage()
-    ratio = image.devicePixelRatio() or 1.0
-    for x in range(image.width()):
-        for y in range(image.height()):
-            if QtGui.QColor(image.pixel(x, y)).lightness() < 128:
-                return widget.x() + x / ratio
+    top, bottom = widget.y() + 3, widget.y() + widget.height() - 3
+    for x in range(int(widget.x() * column_ratio), int((widget.x() + widget.width()) * column_ratio)):
+        for y in range(int(top * column_ratio), int(bottom * column_ratio)):
+            if QtGui.QColor(column_image.pixel(x, y)).lightness() < 128:
+                return x / column_ratio
     raise AssertionError('no ink')
-left = first_ink(header)
+assert abs(first_ink(flush) - first_ink(header)) <= 1.0, (first_ink(flush), first_ink(header))
+left = first_ink(field)
 for widget in (single, multi):
-    assert abs(first_ink(widget) - left) <= 1.5, (type(widget).__name__, first_ink(widget), left)
+    assert abs(first_ink(widget) - left) <= 1.0, (type(widget).__name__, first_ink(widget), left)
 """
     )
 
