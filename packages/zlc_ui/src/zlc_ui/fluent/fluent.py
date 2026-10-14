@@ -7578,6 +7578,11 @@ class _TableHeader(QtWidgets.QHeaderView):
             super().paintSection(painter, rect, section)
             return
         orientation = self.orientation()
+        if orientation == QtCore.Qt.Horizontal and isinstance(table, FluentTableView):
+            cut = table.cut_column_left()
+            if cut is not None and rect.left() >= cut:
+                # Its values are withheld too (FluentTableView.set_value_columns).
+                return
         option = table.viewOptions()
         option.rect = rect
         option.text = str(model.headerData(section, orientation, QtCore.Qt.DisplayRole) or "")
@@ -7860,11 +7865,44 @@ class FluentTableView(QtWidgets.QTableView):
         paints them -- and widens, never narrows, while the same data is
         shown, so scrolling does not make the columns breathe.  The tooltip
         of a cell is its whole value, for a column narrower than a value.
+
+        A value is never shown in part.  The table scrolls sideways by whole
+        columns, so none is cut on the left, and the column the viewport's
+        right edge cuts shows neither its values nor its name until it is
+        scrolled in: cut there, a right-aligned value showed its leading
+        digits -- a different number -- under no column name at all.
         """
 
         self._fits_values = True
         self.setTextElideMode(QtCore.Qt.ElideNone)
+        self.setHorizontalScrollMode(QtWidgets.QAbstractItemView.ScrollPerItem)
         self._refit_value_columns()
+
+    def scrollContentsBy(self, dx: int, dy: int) -> None:  # noqa: N802 - Qt naming
+        super().scrollContentsBy(dx, dy)
+        if dx and self._fits_values:
+            # A sideways scroll moves pixels already painted; the column cut
+            # before it, painted blank, is whole now and has to be painted.
+            self.viewport().update()
+            self.horizontalHeader().viewport().update()
+
+    def cut_column_left(self) -> int | None:
+        """Where, in the viewport, the value column its right edge cuts
+        begins -- None when no column is cut there (or the table does not
+        show values, :meth:`set_value_columns`).  A column that starts at
+        the viewport's left edge is never withheld: it is all there is."""
+
+        if not self._fits_values:
+            return None
+        header = self.horizontalHeader()
+        width = self.viewport().width()
+        column = header.logicalIndexAt(width - 1)
+        if column < 0:
+            return None
+        left = header.sectionViewportPosition(column)
+        if left <= 0 or left + header.sectionSize(column) <= width:
+            return None
+        return left
 
     def _refit_value_columns(self, *_args) -> None:
         self._fitted_width = 0
@@ -8084,6 +8122,12 @@ class FluentTableView(QtWidgets.QTableView):
             wash.addRoundedRect(self._row_band(hover, hover, left, left + columns.length()), radius, radius)
             painter.fillPath(wash, QtGui.QColor(ACCENT_TINT))
         painter.end()
+        cut = self.cut_column_left()
+        if cut is not None:
+            # The cells of a column the right edge cuts are not painted
+            # (set_value_columns): the view paints the cells its region
+            # reaches, and the region stops where that column starts.
+            event = QtGui.QPaintEvent(event.region() & QtGui.QRegion(0, 0, cut, viewport.height()))
         super().paintEvent(event)
         inside = {row for top_row, bottom_row, _left, _right in runs for row in range(top_row, bottom_row)}
         width = float(viewport.width())
