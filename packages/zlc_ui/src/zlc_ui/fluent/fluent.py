@@ -8128,6 +8128,38 @@ class _SelectionGridModel(QtCore.QAbstractTableModel):
         return QtCore.Qt.NoItemFlags
 
 
+def _grid_gutter() -> int:
+    """The gutter between a grid card and its cell's edge, on every side."""
+
+    return scaled_px(2, minimum=1)
+
+
+def _grid_card_band(surface: QtWidgets.QWidget, cell: QtCore.QRect) -> tuple[float, float]:
+    """``(top, bottom)`` of the cards of the row ``cell`` is in: the cell
+    less the gutter, snapped to device pixels.  The row label is centred on
+    the same band as the cards beside it."""
+
+    raw = QtCore.QRectF(cell).adjusted(0, _grid_gutter(), 0, -_grid_gutter())
+    return device_snap(surface, raw.top(), axis="y"), device_snap(surface, raw.bottom(), axis="y")
+
+
+def _paint_grid_label(
+    painter: QtGui.QPainter, rect: QtCore.QRectF, band: tuple[float, float],
+    align, font: QtGui.QFont, text: str, colour,
+) -> None:
+    """A grid label on the one line of its row: :func:`centred_line_top` of
+    the cards' band.  Every card of a row and its row label share that
+    baseline whatever their letters; centred on its own ink each name sat
+    as high as its letters were tall, and the row label beside them, on
+    its line box, a pixel lower than all of them."""
+
+    top = centred_line_top(band[0], band[1] - band[0], font)
+    line = QtCore.QRectF(rect.left(), top, rect.width(), max(0.0, band[1] - top))
+    painter.setFont(font)
+    painter.setPen(QtGui.QColor(colour))
+    painter.drawText(line, int(align) | int(QtCore.Qt.AlignTop), str(text))
+
+
 def _paint_grid_card(
     painter: QtGui.QPainter,
     surface: QtWidgets.QWidget,
@@ -8145,7 +8177,7 @@ def _paint_grid_card(
     INSIDE the extent, concentric with it, so an edged card is exactly as
     large as its plain neighbours and the gutters stay even."""
 
-    inset = scaled_px(2, minimum=1)
+    inset = _grid_gutter()
     # QRectF(QRect) is exclusive at the right and bottom already: the cell's
     # far edges are right() and bottom(), with no QRect "+ 1".
     raw = QtCore.QRectF(cell).adjusted(inset, inset, -inset, -inset)
@@ -8190,8 +8222,8 @@ class _SelectionGridDelegate(QtWidgets.QStyledItemDelegate):
     selection; a MISSING cell is an empty card in red dashes and a HELD one
     an empty dashed outline (somebody else's frame).  A disabled grid shows
     every card on the BG face with the chosen names in DISABLED_INK, so
-    what is chosen still reads but nothing invites a click.  Labels are
-    centred on their ink (:func:`paint_centred_ink`).
+    what is chosen still reads but nothing invites a click.  Names sit on
+    their row's one line (:func:`_paint_grid_label`), centred across.
     """
 
     def paint(self, painter, option, index) -> None:
@@ -8236,7 +8268,8 @@ class _SelectionGridDelegate(QtWidgets.QStyledItemDelegate):
             # The font the grid sizes its columns with (set_grid).
             font = QtGui.QFont(FONT)
             font.setPointSize(fluent_font_size())
-            paint_centred_ink(painter, grid.viewport(), rect, font, str(index.data() or ""), ink)
+            _paint_grid_label(painter, rect, _grid_card_band(grid.viewport(), option.rect),
+                              QtCore.Qt.AlignHCenter, font, str(index.data() or ""), ink)
         painter.restore()
 
     def _paint_action(self, painter, option, index) -> None:
@@ -8244,8 +8277,9 @@ class _SelectionGridDelegate(QtWidgets.QStyledItemDelegate):
         object as FluentButton's ghost ×: no face and no edge at rest, its
         glyph in MUTED_INK; under the pointer the RED_TINT face and RED_DARK
         ink, held down one shade deeper -- red at rest belongs to problems.
-        As tall as the row's cells, so it lines up with them, and centred on
-        its ink."""
+        Its face is a square as tall as a control, centred in its cell like
+        a glyph button beside a field: the whole cell of a two-line row made
+        it a tall bar.  The glyph is centred on its ink."""
 
         grid = self.parent()
         cell = (index.row(), index.column())
@@ -8253,9 +8287,12 @@ class _SelectionGridDelegate(QtWidgets.QStyledItemDelegate):
         hovered = live and grid.hovered_action() == cell
         pressed = live and grid.pressed_action() == cell
         hover_face, pressed_face = _destructive_glyph_faces()
+        side = grid.row_height()
+        square = QtCore.QRect(0, 0, side, side)
+        square.moveCenter(option.rect.center())
         painter.save()
         rect = _paint_grid_card(
-            painter, grid.viewport(), option.rect,
+            painter, grid.viewport(), square,
             pressed_face if pressed else hover_face if hovered else None,
         )
         font = QtGui.QFont(FONT)
@@ -8328,33 +8365,32 @@ class _SelectionGridRowHeader(QtWidgets.QHeaderView):
         pad = scaled_px(8, minimum=5)
         inner = rect.adjusted(0 if self._left() else pad, 0, -pad, 0)
         align = QtCore.Qt.AlignLeft if self._left() else QtCore.Qt.AlignRight
+        surface = self.viewport()
+        band = _grid_card_band(surface, rect)
         painter.save()
         if self.activatable and hovered:
             # A label that acts is a row like any other under the pointer:
             # the hover wash behind it, its words still in TEXT.
-            # As tall as the row's cards (the same gutter), the width of
+            # As tall as the row's cards (the same band), the width of
             # the label column.
-            inset = scaled_px(2, minimum=1)
-            surface = self.viewport()
-            area = QtCore.QRectF(rect)
-            left = device_snap(surface, area.left())
-            top = device_snap(surface, area.top() + inset, axis="y")
-            band = QtCore.QRectF(
-                left, top,
-                device_snap(surface, area.right() - inset) - left,
-                device_snap(surface, area.bottom() - inset, axis="y") - top,
+            left = device_snap(surface, float(rect.left()))
+            wash = QtCore.QRectF(
+                left, band[0],
+                device_snap(surface, QtCore.QRectF(rect).right() - _grid_gutter()) - left,
+                band[1] - band[0],
             )
             painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
             painter.setPen(QtCore.Qt.NoPen)
             painter.setBrush(QtGui.QColor(ACCENT_TINT))
-            painter.drawRoundedRect(band, _radius(), _radius())
-        painter.setFont(label_font)
-        painter.setPen(QtGui.QColor(
+            painter.drawRoundedRect(wash, _radius(), _radius())
+        ink = (
             DISABLED_INK if not self.isEnabled()
             else TEXT if self.activatable or hovered else MUTED_INK
-        ))
+        )
+        painter.setFont(label_font)
+        painter.setPen(QtGui.QColor(ink))
         if not note:
-            painter.drawText(inner, align | QtCore.Qt.AlignVCenter, label)
+            _paint_grid_label(painter, QtCore.QRectF(inner), band, align, label_font, label, ink)
         else:
             label_height = QtGui.QFontMetrics(label_font).height()
             note_height = QtGui.QFontMetrics(note_font).height()
@@ -8422,12 +8458,11 @@ class FluentSelectionGrid(QtWidgets.QTableView):
     selection_edited = QtCore.pyqtSignal(object)
     row_action = QtCore.pyqtSignal(int, object)
 
-    def __init__(self, parent=None, *, cell_width: int = 52, cell_height: int = 34,
+    def __init__(self, parent=None, *, cell_width: int = 52,
                  toggle: bool = False, row_actions: Sequence[tuple[object, str, str]] = (),
                  label_action: tuple[object, str] | None = None):
         super().__init__(parent)
         self._cell_width = cell_width
-        self._cell_height = cell_height
         self._toggle = bool(toggle)
         self._grid_model = _SelectionGridModel(
             self, actions=tuple((value, str(glyph), str(tip)) for value, glyph, tip in row_actions),
@@ -8458,12 +8493,12 @@ class FluentSelectionGrid(QtWidgets.QTableView):
         self.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
         self.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
         self.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
-        for header, size in ((self.horizontalHeader(), cell_width), (row_header, cell_height)):
+        for header, size in ((self.horizontalHeader(), scaled_px(cell_width)), (row_header, self.row_height())):
             header.setSectionResizeMode(QtWidgets.QHeaderView.Fixed)
             # Qt's own floor is measured from the header font and padding --
             # wider than a gap column, and than a short cell, ever asks for.
             header.setMinimumSectionSize(scaled_px(4, minimum=2))
-            header.setDefaultSectionSize(scaled_px(size))
+            header.setDefaultSectionSize(size)
             header.setHighlightSections(False)
             header.setSectionsMovable(False)
             if self._toggle or header is row_header and label_action is not None:
@@ -8523,13 +8558,21 @@ class FluentSelectionGrid(QtWidgets.QTableView):
             horizontal.resizeSection(column, gap)
         trailing = self._grid_model.action_columns()
         for column in trailing:
-            horizontal.resizeSection(column, gap if column == trailing.start else scaled_px(36))
+            # An action's column holds its square face and the gutters.
+            horizontal.resizeSection(column, gap if column == trailing.start else self.row_height())
         rows_header = self.verticalHeader()
         rows_header.setDefaultSectionSize(max(
-            scaled_px(self._cell_height),
+            self.row_height(),
             rows_header.two_line_height() if any(row_notes) else 0,
         ))
         self.updateGeometry()
+
+    @staticmethod
+    def row_height() -> int:
+        """A one-line row: a card whose face is as tall as every control
+        beside the grid, and its gutters."""
+
+        return control_height() + 2 * _grid_gutter()
 
     def label_width_hint(self) -> int:
         """The form label column at which every row label still fits."""
@@ -8551,7 +8594,7 @@ class FluentSelectionGrid(QtWidgets.QTableView):
     def _label_offset() -> int:
         # A setting row's label-to-field spacing, less the inset that keeps
         # a card off its cell's edge.
-        return scaled_px(6, minimum=4) - scaled_px(2, minimum=1)
+        return scaled_px(6, minimum=4) - _grid_gutter()
 
     def set_cell_states(self, states: "dict[tuple[int, int], str]",
                         tips: "dict[tuple[int, int], str] | None" = None) -> None:
