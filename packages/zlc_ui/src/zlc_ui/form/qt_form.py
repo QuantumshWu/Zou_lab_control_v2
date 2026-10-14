@@ -796,14 +796,7 @@ class _ChoiceHandler(FormWidgetHandler):
 
     def read(self, field, widget):
         if isinstance(widget, FluentSegmentedButtons):
-            return next(
-                (
-                    choice.value
-                    for choice in field.choices
-                    if widget.button(choice.value).property("current")
-                ),
-                None,
-            )
+            return widget.current()
         if widget.currentIndex() < 0:
             return None
         if isinstance(widget, FluentCycleComboBox) and widget.isCycleSelected():
