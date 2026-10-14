@@ -59,7 +59,6 @@ from .style import (
     RADIUS,
     RED,
     RED_DARK,
-    STEP_WIDTH,
     TEXT,
     TITLE_ICON_GAP,
     TITLE_ICON_RATIO,
@@ -1317,7 +1316,7 @@ def _paint_keyboard_focus(widget: QtWidgets.QWidget, rect: QtCore.QRectF | None 
     painter.end()
 
 
-def _apply_fluent_context_menu(widget, event) -> None:
+def _apply_fluent_context_menu(widget, event, *, extra=()) -> None:
     """Pop ``widget``'s right-click menu with the Fluent rounded-card chrome instead of the platform's
     opaque SQUARE "black box" menu.  The ONE shared context-menu builder for every editable text widget
     (``FluentLineEdit``, ``FluentReadoutMultiline``, ``FluentCodeEdit``): it REUSES Qt's own standard
@@ -1332,18 +1331,30 @@ def _apply_fluent_context_menu(widget, event) -> None:
     parented to the widget so it inherits the widget's screen and stacking,
     and a parented QObject outlives the Python name that made it -- every
     right-click used to leave one more menu, and its actions, on the widget
-    until the window died."""
+    until the window died.
+
+    ``extra`` is ``(text, callable)`` commands a control adds below the
+    standard ones -- a numeric box's "Edit step…".  Each runs after the menu
+    has closed, so a dialog it opens is not stacked on a closing menu."""
     std = widget.createStandardContextMenu()
     menu = _FluentRoundedMenu(widget)
     for act in list(std.actions()):
         act.setParent(menu)
         menu.addAction(act)
     std.deleteLater()
+    commands = {}
+    if extra:
+        menu.addSeparator()
+        for text, command in extra:
+            commands[menu.addAction(str(text))] = command
     try:
-        menu.exec_(event.globalPos())
+        chosen = menu.exec_(event.globalPos())
     finally:
         retire_widget(menu)
     event.accept()
+    command = commands.get(chosen)
+    if command is not None:
+        command()
 
 
 def _numeric_text_width(edit: QtWidgets.QLineEdit, right_edge: int | None = None) -> int:
@@ -2194,13 +2205,16 @@ class FluentSettingRow(QtWidgets.QWidget):
         # a FluentButton) must NOT be stretched: a stretch cell CENTRES a non-filling widget, so the
         # toggle would float in the middle of the row instead of left-aligning under its label.  Add it
         # left-aligned with a trailing stretch instead, so
-        # EVERY control -- filling or fixed -- starts at the SAME left edge.
+        # EVERY control -- filling or fixed -- starts at the SAME left edge.  A CAPPED control (a
+        # number box) stretches up to its cap beside a trailing stretch that takes the rest.
         if control.sizePolicy().horizontalPolicy() == QtWidgets.QSizePolicy.Fixed:
             h.addWidget(control, 0, QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
             if not after:
                 h.addStretch(1)
         else:
             h.addWidget(control, 1)
+            if not after and control.maximumWidth() < QtWidgets.QWIDGETSIZE_MAX:
+                h.addStretch(1)
         for cell, stretch in after:
             h.addWidget(cell, int(stretch))
 
@@ -2249,7 +2263,7 @@ class _FluentRoundedMenu(QtWidgets.QMenu):
             QMenu::item {{ padding: {scaled_px(5, minimum=4)}px {scaled_px(14, minimum=10)}px;
                           margin: 0px {scaled_px(2, minimum=2)}px;
                           border-radius: {_radius()}px; }}
-            QMenu::item:selected {{ background: {ACCENT}; color: white; }}
+            QMenu::item:selected {{ background: {ACCENT_TINT}; color: {TEXT}; }}
             QMenu::indicator {{ image: none; width: 0px; height: 0px; }}
             """
         )
@@ -2592,23 +2606,25 @@ QAbstractItemView {{
     border: none;
     padding: {gap}px;
     color: {TEXT};
-    selection-background-color: {ACCENT};
-    selection-color: white;
+    selection-background-color: {ACCENT_TINT};
+    selection-color: {HOVER};
     font: {fluent_font_size()}pt "{FONT}";
     outline: none;
 }}
 QAbstractItemView::item {{
     padding: {scaled_px(3, minimum=2)}px {scaled_px(6, minimum=4)}px;
+    border: 1px solid transparent;
     border-radius: {_radius()}px;
     color: {TEXT};
 }}
 QAbstractItemView::item:hover {{
-    background-color: {HOVER};
-    color: white;
+    background-color: {ACCENT_TINT};
+    color: {TEXT};
 }}
 QAbstractItemView::item:selected {{
-    background-color: {ACCENT};
-    color: white;
+    background-color: {ACCENT_TINT};
+    border-color: {SELECTION_EDGE};
+    color: {HOVER};
 }}
 QAbstractItemView::corner {{
     background: transparent;
@@ -2637,8 +2653,6 @@ class FluentComboBox(QtWidgets.QAbstractButton):
         super().__init__(parent)
         self.setMinimumHeight(scaled_px(30, minimum=22))
         self.setCheckable(False)
-        self.setMouseTracking(True)
-        self._drop_hover = False
         self.setSizePolicy(
             QtWidgets.QSizePolicy.Preferred,
             QtWidgets.QSizePolicy.Fixed,
@@ -3040,72 +3054,66 @@ class FluentComboBox(QtWidgets.QAbstractButton):
         return self.sizeHint()
 
     def paintEvent(self, event):
+        """A field like a line edit beside it, with a chevron and no block.
+
+        The solid accent block every combo carried repeated down a whole
+        form, and an open combo filled with tint.  The field now says its
+        states the way an edit does -- the accent edge under the pointer or
+        while it is open -- and only a cycle choice whose wheel is ACTIVE
+        wears the selection's tint, because that is a state it holds.
+        """
+
         del event
         painter = QtGui.QPainter(self)
         painter.setRenderHint(QtGui.QPainter.Antialiasing)
         radius = float(_radius())
         outer = QtCore.QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-        active = self.isEnabled() and (self.isChecked() or (self._line_edit is not None and self._line_edit.hasFocus()))
-        outline = QtGui.QPen(QtGui.QColor(ACCENT if active else PLACEHOLDER))
-        outline.setWidthF(2.0 if active else 1.0)
-        painter.setPen(QtCore.Qt.NoPen)
-        painter.setBrush(QtGui.QColor(ACCENT_TINT if active else "white" if self.isEnabled() else BG))
-        painter.drawRoundedRect(outer, radius, radius)
-        painter.setPen(outline)
-        painter.setBrush(QtCore.Qt.NoBrush)
-        painter.drawRoundedRect(outer, radius, radius)
-
-        _left, _right, drop_width = self._collapsed_text_chrome()
-        drop_left = max(0, self.width() - drop_width)
-        clip = QtGui.QPainterPath()
-        clip.addRoundedRect(QtCore.QRectF(self.rect()), radius, radius)
-        painter.save()
-        painter.setClipPath(clip)
-        painter.fillRect(
-            QtCore.QRectF(drop_left, 0, drop_width, self.height()),
-            QtGui.QColor(
-                PLACEHOLDER
-                if not self.isEnabled()
-                else HOVER if self._drop_hover else ACCENT
-            ),
+        enabled = self.isEnabled()
+        current = enabled and self.isChecked()
+        engaged = enabled and (
+            (self._popup is not None and self._popup.isVisible())
+            or (self._line_edit is not None and self._line_edit.hasFocus())
+            or self.underMouse()
         )
-        painter.restore()
+        fill = ACCENT_TINT if current else SURFACE if enabled else BG
+        edge = SELECTION_EDGE if current and not engaged else ACCENT if engaged else PLACEHOLDER
+        painter.setPen(QtGui.QPen(QtGui.QColor(edge), 1.0))
+        painter.setBrush(QtGui.QColor(fill))
+        painter.drawRoundedRect(outer, radius, radius)
 
         if self._line_edit is None:
             text_rect = self._collapsed_text_rect()
-            painter.setPen(QtGui.QColor(TEXT if self.isEnabled() else PLACEHOLDER))
+            painter.setPen(QtGui.QColor(HOVER if current else TEXT if enabled else PLACEHOLDER))
             painter.setFont(self._collapsed_font())
             text = painter.fontMetrics().elidedText(
                 self._display_text(), QtCore.Qt.ElideRight, text_rect.width()
             )
             painter.drawText(text_rect, QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter, text)
 
-        painter.setPen(QtCore.Qt.NoPen)
-        painter.setBrush(QtGui.QColor("#FFFFFF"))
-        cx = int(self.width() - drop_width / 2)
-        cy = int(self.height() / 2)
-        size = scaled_px(COMBO_TRI_SIZE)
-        points = [
-            QtCore.QPoint(cx - size // 2, cy - size // 4),
-            QtCore.QPoint(cx + size // 2, cy - size // 4),
-            QtCore.QPoint(cx, cy + size // 4),
-        ]
-        painter.drawPolygon(QtGui.QPolygon(points))
-        painter.end()
-
-    def _set_drop_hover(self, hovered: bool) -> None:
-        selected = bool(hovered)
-        if selected != self._drop_hover:
-            self._drop_hover = selected
-            self.update()
-
-    def mouseMoveEvent(self, event) -> None:  # noqa: N802 - Qt API name
         _left, _right, drop_width = self._collapsed_text_chrome()
-        self._set_drop_hover(event.pos().x() >= self.width() - drop_width)
-        super().mouseMoveEvent(event)
+        half = scaled_px(COMBO_TRI_SIZE) / 2.0
+        cx = self.width() - drop_width / 2.0 - scaled_px(2)
+        cy = self.height() / 2.0
+        chevron = QtGui.QPen(QtGui.QColor(GRAPHITE if enabled else PLACEHOLDER))
+        chevron.setWidthF(max(1.0, scaled_px(3) / 2.0))
+        chevron.setCapStyle(QtCore.Qt.RoundCap)
+        chevron.setJoinStyle(QtCore.Qt.RoundJoin)
+        painter.setPen(chevron)
+        painter.setBrush(QtCore.Qt.NoBrush)
+        painter.drawPolyline(QtGui.QPolygonF([
+            QtCore.QPointF(cx - half, cy - half / 2.0),
+            QtCore.QPointF(cx, cy + half / 2.0),
+            QtCore.QPointF(cx + half, cy - half / 2.0),
+        ]))
+        painter.end()
+        _paint_keyboard_focus(self)
+
+    def enterEvent(self, event) -> None:  # noqa: N802 - Qt API name
+        self.update()
+        super().enterEvent(event)
 
     def leaveEvent(self, event) -> None:  # noqa: N802 - Qt API name
-        self._set_drop_hover(False)
+        self.update()
         super().leaveEvent(event)
 
     def showPopup(self):  # noqa: N802 - Qt naming
@@ -3123,10 +3131,12 @@ class FluentComboBox(QtWidgets.QAbstractButton):
         popup.show()
         popup.raise_()
         view.setFocus(QtCore.Qt.PopupFocusReason)
+        self.update()
 
     def hidePopup(self) -> None:  # noqa: N802 - Qt API name
         if self._popup is not None:
             self._popup.hide()
+            self.update()
 
     def _toggle_popup(self) -> None:
         view = self._ensure_popup_view()
@@ -4307,6 +4317,7 @@ class FluentTabWidget(QtWidgets.QTabWidget):
         self.setTabPosition(QtWidgets.QTabWidget.North)
         self.setTabBar(_FluentTabBar(self))     # content-width pivot tabs; elides to fit, no arrows
         self.tabBar().setExpanding(False)
+        self.tabBar().setVisible(False)         # until a second page gives it a choice
         # No left/right scroll ARROWS (the native chevrons crowd the last tab's close "x"
         # and read as browser chrome, not Fluent).  With scroll buttons OFF and ElideRight,
         # Qt shrinks the OVERFLOWING tabs by eliding their labels so ALL tabs fit side by
@@ -4350,7 +4361,7 @@ class FluentTabWidget(QtWidgets.QTabWidget):
             }}
             QTabBar::tab {{
                 background: transparent;
-                color: {GREY};
+                color: {GRAPHITE};
                 border: none;
                 border-bottom: {scaled_px(2, minimum=2)}px solid transparent;
                 height: {scaled_px(32, minimum=26)}px;
@@ -4494,11 +4505,25 @@ class FluentTabWidget(QtWidgets.QTabWidget):
 
     def tabInserted(self, index):  # noqa: N802 - Qt naming
         super().tabInserted(index)
+        self._show_bar_when_it_chooses()
         self._schedule_overflow_update()
 
     def tabRemoved(self, index):  # noqa: N802 - Qt naming
         super().tabRemoved(index)
+        self._show_bar_when_it_chooses()
         self._schedule_overflow_update()
+
+    def _show_bar_when_it_chooses(self) -> None:
+        """No bar over one permanent page: a single pivot chooses nothing.
+
+        A lone CLOSABLE page keeps its bar, because the bar carries its
+        close button.  Asked at insertion, before a closable tab has its
+        button, the count already says two whenever a second page arrives.
+        """
+
+        bar = self.tabBar()
+        lone = self.count() == 1 and bar.tabButton(0, QtWidgets.QTabBar.RightSide) is None
+        bar.setVisible(not lone)
 
     def add_permanent_tab(self, widget: QtWidgets.QWidget, title: str) -> int:
         """Add a fixture tab with no close button (for example, Monitor)."""
@@ -4829,6 +4854,9 @@ class FluentTriSwitch(QtWidgets.QAbstractButton):
 
 
 def fluent_spinbox_stylesheet(selector: str) -> str:
+    # The steppers sit INSIDE the border (padding origin), so the tint under
+    # the pointer never paints over the field's own edge.
+    inner = max(0, _radius() - 1)
     return f"""
     {selector} {{
         background: white;
@@ -4843,69 +4871,66 @@ def fluent_spinbox_stylesheet(selector: str) -> str:
     {selector}::up-button, {selector}::down-button {{
         subcontrol-origin: border;
         width: {scaled_px(COMBO_WIDTH)}px;
+        margin: 1px;
         border: none;
-        background-color: {ACCENT};
+        background-color: transparent;
     }}
     {selector}::up-button {{
         subcontrol-position: top right;
-        border-top-right-radius: {_radius()}px;
+        border-top-right-radius: {inner}px;
     }}
     {selector}::down-button {{
         subcontrol-position: bottom right;
-        border-bottom-right-radius: {_radius()}px;
+        border-bottom-right-radius: {inner}px;
     }}
     {selector}::up-button:hover, {selector}::down-button:hover {{
-        background-color: {HOVER};
+        background-color: {ACCENT_TINT};
+    }}
+    {selector}::up-button:disabled, {selector}::down-button:disabled {{
+        background-color: transparent;
     }}
     {selector}::up-arrow, {selector}::down-arrow {{ image: none; }}
     """
 
 
 def _paint_fluent_spin_buttons(widget: QtWidgets.QAbstractSpinBox) -> None:
-    """Paint the one shared separator and arrow glyphs for numeric controls."""
+    """Paint the quiet stepper: two graphite chevrons beside a hairline.
+
+    The steppers were solid accent blocks with white triangles, repeated on
+    every number of every form.  They are drawn in the field's own white
+    now, tinted only under the pointer (the sheet does that), and this
+    supplies the glyphs -- Windows offscreen Qt paints no native spin
+    indicator at all -- and the hairline that marks where the digits end.
+    """
 
     if widget.buttonSymbols() == QtWidgets.QAbstractSpinBox.NoButtons:
         return
+    option = QtWidgets.QStyleOptionSpinBox()
+    widget.initStyleOption(option)
+    style = widget.style()
+    up = QtCore.QRectF(style.subControlRect(
+        QtWidgets.QStyle.CC_SpinBox, option, QtWidgets.QStyle.SC_SpinBoxUp, widget))
+    down = QtCore.QRectF(style.subControlRect(
+        QtWidgets.QStyle.CC_SpinBox, option, QtWidgets.QStyle.SC_SpinBoxDown, widget))
     painter = QtGui.QPainter(widget)
     painter.setRenderHint(QtGui.QPainter.Antialiasing)
-    size = scaled_px(COMBO_TRI_SIZE)
-    button_width = scaled_px(COMBO_WIDTH)
-    center_x = widget.width() - button_width / 2
-    height = widget.height()
-
-    # QSS owns the blue button surfaces, while this owner supplies the glyphs
-    # and the explicit split between the two hit regions.  Without the split,
-    # both buttons read as one solid blue bar; without these glyphs, Windows
-    # offscreen Qt paints no native spin indicator at all.
-    painter.setPen(QtGui.QPen(QtGui.QColor("#FFFFFF"), 1))
-    painter.drawLine(
-        widget.width() - button_width,
-        int(height / 2),
-        widget.width() - 1,
-        int(height / 2),
-    )
-    painter.setPen(QtCore.Qt.NoPen)
-    painter.setBrush(QtGui.QBrush(QtGui.QColor("#FFFFFF")))
-    up_y = height * 0.25
-    painter.drawPolygon(
-        QtGui.QPolygon(
-            [
-                QtCore.QPoint(int(center_x - size / 2), int(up_y + size / 4)),
-                QtCore.QPoint(int(center_x + size / 2), int(up_y + size / 4)),
-                QtCore.QPoint(int(center_x), int(up_y - size / 4)),
-            ]
-        )
-    )
-    down_y = height * 0.75
-    painter.drawPolygon(
-        QtGui.QPolygon(
-            [
-                QtCore.QPoint(int(center_x - size / 2), int(down_y - size / 4)),
-                QtCore.QPoint(int(center_x + size / 2), int(down_y - size / 4)),
-                QtCore.QPoint(int(center_x), int(down_y + size / 4)),
-            ]
-        )
-    )
+    left = min(up.left(), down.left()) - 0.5
+    painter.setPen(QtGui.QPen(QtGui.QColor(DIVIDER), 1.0))
+    painter.drawLine(QtCore.QPointF(left, up.top() + 2), QtCore.QPointF(left, down.bottom() - 1))
+    enabled = widget.isEnabled() and not widget.isReadOnly()
+    pen = QtGui.QPen(QtGui.QColor(GRAPHITE if enabled else PLACEHOLDER))
+    pen.setWidthF(max(1.0, scaled_px(3) / 2.0))
+    pen.setCapStyle(QtCore.Qt.RoundCap)
+    pen.setJoinStyle(QtCore.Qt.RoundJoin)
+    painter.setPen(pen)
+    half = scaled_px(COMBO_TRI_SIZE) / 2.0 - 0.5
+    for rect, sign in ((up, -1.0), (down, 1.0)):
+        centre = rect.center()
+        painter.drawPolyline(QtGui.QPolygonF([
+            QtCore.QPointF(centre.x() - half, centre.y() - sign * half / 2.0),
+            QtCore.QPointF(centre.x(), centre.y() + sign * half / 2.0),
+            QtCore.QPointF(centre.x() + half, centre.y() - sign * half / 2.0),
+        ]))
     painter.end()
 
 
@@ -5121,6 +5146,9 @@ class FluentSpinBox(_WheelFocusGuardMixin, QtWidgets.QSpinBox):
         super().paintEvent(event)
         _paint_fluent_spin_buttons(self)
 
+    def contextMenuEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        _apply_fluent_context_menu(self.lineEdit(), event)
+
 
 class FluentInputDialog(FluentCardDialog):
     """Small Fluent input dialog; the historical numeric API remains intact."""
@@ -5311,13 +5339,12 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
         QtWidgets.QApplication.sendEvent(
             self, QtGui.QResizeEvent(self.size(), self.size())
         )
-        right = None if self._step_btn.isHidden() else self._step_btn.x() - edit.x()
-        chrome = self.width() - _numeric_text_width(edit, right)
+        chrome = self.width() - _numeric_text_width(edit)
         return self.fontMetrics().horizontalAdvance(str(sample)) + 2 + chrome
 
     def sizeHint(self) -> QtCore.QSize:  # noqa: N802
         size = super().sizeHint()
-        size.setWidth(self.fontMetrics().horizontalAdvance("-123.456e-12") + scaled_px(2 * EDIT_PADDING_H + COMBO_WIDTH + STEP_WIDTH + 4))
+        size.setWidth(self.fontMetrics().horizontalAdvance("-123.456e-12") + scaled_px(2 * EDIT_PADDING_H + COMBO_WIDTH + 4))
         return size
 
     def minimumSizeHint(self) -> QtCore.QSize:  # noqa: N802
@@ -5340,24 +5367,6 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
         self.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
         self.lineEdit().setTextMargins(0, 0, 0, 0)
         self.setStyleSheet(fluent_spinbox_stylesheet("QDoubleSpinBox"))
-
-        self._step_btn = QtWidgets.QToolButton(self)
-        self._step_btn.setText(".")
-        self._step_btn.setCursor(QtCore.Qt.PointingHandCursor)
-        self._step_btn.setStyleSheet(
-            f"""
-            QToolButton {{
-                background: {ACCENT};
-                color: white;
-                border: none;
-                font: {fluent_font_size()}pt "{FONT}";
-            }}
-            QToolButton:hover {{
-                background: {HOVER};
-            }}
-            """
-        )
-        self._step_btn.clicked.connect(self._on_edit_step)
         self.editingFinished.connect(self._update_number_geometry)
 
         # No range of its own: a bound is the owner's, declared through
@@ -5734,10 +5743,6 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
-        btn_w = scaled_px(COMBO_WIDTH)
-        step_w = scaled_px(STEP_WIDTH)
-        if hasattr(self, "_step_btn"):
-            self._step_btn.setGeometry(self.width() - btn_w - step_w, 0, step_w, self.height())
         self._update_number_geometry()
 
     def showEvent(self, event) -> None:  # noqa: N802
@@ -5763,10 +5768,9 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
 
     def _update_number_geometry(self) -> None:
         edit = self.lineEdit()
-        if edit is None or not hasattr(self, "_step_btn") or not self.isVisible():
+        if edit is None or not self.isVisible():
             return
-        width = _numeric_text_width(edit, None if self._step_btn.isHidden() else self._step_btn.x() - edit.x())
-        geometry = (max(1, width), edit.font().key())
+        geometry = (max(1, _numeric_text_width(edit)), edit.font().key())
         if geometry == self._number_geometry and self._display_text:
             return
         self._number_geometry = geometry
@@ -5780,6 +5784,21 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
             self._commit(previous)
         if self._value != previous:
             self._queue_normalization()
+
+    def offers_step_edit(self) -> bool:
+        """Whether this box lets the operator choose its step.
+
+        A whole-number box moves one at a time; choosing a step size means
+        nothing there.
+        """
+
+        return self.decimals() != 0
+
+    def contextMenuEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        # "Edit step…" lives here, with the box's other commands.  It was a
+        # six-pixel button beside the stepper that read as a stray dot.
+        extra = (("Edit step…", self._on_edit_step),) if self.offers_step_edit() else ()
+        _apply_fluent_context_menu(self.lineEdit(), event, extra=extra)
 
     def _on_edit_step(self) -> None:
         current = self.singleStep()
@@ -5912,12 +5931,9 @@ def fluent_integer_box(
     Qt's integer spin stops at signed 31 bits and cannot say "no bound"; a
     zero-decimal decimal box holds every Python int exactly and a side left
     None is a side with no bound, so the control's domain IS the owner's.
-    The step button, which is for choosing a step size, means nothing on a
-    number that moves one at a time.
     """
 
     box = FluentDoubleSpinBox(parent)
-    box._step_btn.hide()
     box.setDecimals(0)
     box.setSingleStep(1)
     box.setRange(
@@ -5939,6 +5955,12 @@ def fluent_count_box(
 
 
 class FluentCheckBox(QtWidgets.QCheckBox):
+    """A square box with a painted tick.
+
+    It was a circle, and a round box reads as a radio button -- one choice
+    of several -- which an independent on/off is not.
+    """
+
     def __init__(self, text: str = "", parent=None):
         super().__init__(text, parent)
         self.setMinimumHeight(scaled_px(30, minimum=22))
@@ -5949,26 +5971,52 @@ class FluentCheckBox(QtWidgets.QCheckBox):
                 font: {fluent_font_size()}pt "{FONT}";
                 spacing: {scaled_px(6)}px;
                 background: transparent;
+                outline: none;
             }}
             QCheckBox::indicator {{
                 width: {scaled_px(16)}px;
                 height: {scaled_px(16)}px;
-                border-radius: {scaled_px(8)}px;
+                border-radius: {_radius()}px;
                 border: 1px solid {PLACEHOLDER};
-                background: white;
+                background: {SURFACE};
             }}
+            QCheckBox::indicator:hover {{ border: 1px solid {ACCENT}; }}
             QCheckBox::indicator:checked {{
                 background: {ACCENT};
                 border: 1px solid {ACCENT};
             }}
-            QCheckBox::indicator:hover {{
-                border: 1px solid {HOVER};
-            }}
             QCheckBox:disabled {{ color: {PLACEHOLDER}; }}
-            QCheckBox::indicator:disabled {{ border: 1px solid {BG}; background: {BG}; }}
+            QCheckBox::indicator:disabled {{ border: 1px solid {DIVIDER}; background: {BG}; }}
             QCheckBox::indicator:checked:disabled {{ background: {PLACEHOLDER}; border: 1px solid {PLACEHOLDER}; }}
             """
         )
+
+    def _indicator_rect(self) -> QtCore.QRect:
+        option = QtWidgets.QStyleOptionButton()
+        self.initStyleOption(option)
+        return self.style().subElementRect(QtWidgets.QStyle.SE_CheckBoxIndicator, option, self)
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        # The sheet draws the box; the tick is drawn here, white on the
+        # filled box, because a sheet can only fill it.
+        super().paintEvent(event)
+        box = QtCore.QRectF(self._indicator_rect())
+        if self.isChecked():
+            painter = QtGui.QPainter(self)
+            painter.setRenderHint(QtGui.QPainter.Antialiasing)
+            pen = QtGui.QPen(QtGui.QColor(SURFACE))
+            pen.setWidthF(max(1.5, box.width() / 8.0))
+            pen.setCapStyle(QtCore.Qt.RoundCap)
+            pen.setJoinStyle(QtCore.Qt.RoundJoin)
+            painter.setPen(pen)
+            w, h = box.width(), box.height()
+            painter.drawPolyline(QtGui.QPolygonF([
+                QtCore.QPointF(box.left() + 0.26 * w, box.top() + 0.52 * h),
+                QtCore.QPointF(box.left() + 0.43 * w, box.top() + 0.68 * h),
+                QtCore.QPointF(box.left() + 0.75 * w, box.top() + 0.34 * h),
+            ]))
+            painter.end()
+        _paint_keyboard_focus(self, box.adjusted(-3, -3, 3, 3))
 
 
 class FluentPageBody(QtWidgets.QWidget):

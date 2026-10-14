@@ -136,7 +136,7 @@ def test_a_count_box_counts_in_32_bits() -> None:
 
     ensure_qt_app(["count-box"])
     box = fluent_count_box()
-    assert box._step_btn.isHidden(), "a count moves one at a time"
+    assert not box.offers_step_edit(), "a count moves one at a time"
     box.setValue(4294967295)
     assert box.text() == "4294967295"
     assert _step(box, 1) == "4294967295", "uint32 is the board's ceiling"

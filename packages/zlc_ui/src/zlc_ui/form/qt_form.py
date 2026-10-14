@@ -30,6 +30,7 @@ from .form import (
 )
 
 from ..fluent import (
+    COMBO_WIDTH,
     FluentButton,
     FluentComboBox,
     FluentCycleComboBox,
@@ -988,6 +989,11 @@ def _in_shown_unit(widget: object, number: float, unit: str | None) -> float:
     )
 
 
+#: The widest number a capped box shows whole: a double's seventeen
+#: significant digits with sign and point, the most a field ever holds.
+_NUMBER_SAMPLE = "-1234567890.12345678"
+
+
 def _automatic_label(field: FormFieldProps, checked: bool) -> str:
     return f"{'Auto' if checked else 'Manual'} {field.row_label}"
 
@@ -1179,6 +1185,10 @@ class FluentParameterForm(QtWidgets.QWidget):
         #: so here, and never takes a built row apart: a row dismantled
         #: after the form had shown it painted with half its cells.
         self._row_cells = row_cells or (lambda field: ((), ()))
+        #: A form whose rows carry cells beside the control is a table, and
+        #: its editor column has one width budget; a plain form caps a
+        #: number box to the width a number needs.
+        self._caps_numbers = row_cells is None
         self._fields = {field.key: field for field in spec.fields}
         self._widgets: dict[str, QtWidgets.QWidget] = {}
         self._handlers: dict[str, FormWidgetHandler] = {}
@@ -1408,6 +1418,14 @@ class FluentParameterForm(QtWidgets.QWidget):
 
         automatic = None
         picker = self._unit_picker(field, widget)
+        capped = self._caps_numbers and field.kind in {"int", "float", "number"}
+        if capped:
+            # A number is a few digits; a box the width of the whole form
+            # put its stepper a screen away from them.  A blank-or-number
+            # edit has no stepper but keeps its room, so every number box
+            # of a form ends at the same edge.
+            stepper = 0 if isinstance(widget, FluentDoubleSpinBox) else scaled_px(COMBO_WIDTH)
+            widget.setMaximumWidth(widget.width_for(_NUMBER_SAMPLE) + stepper)
         cell = widget
         if picker is not None:
             holder = QtWidgets.QWidget(self)
@@ -1420,6 +1438,8 @@ class FluentParameterForm(QtWidgets.QWidget):
             beside.setSpacing(scaled_px(6, minimum=4))
             beside.addWidget(widget, 1)
             beside.addWidget(picker, 0)
+            if capped:
+                beside.addStretch(1)
             cell = holder
         label = self._label_for(field, picked=picker is not None)
         if field.automatic:
