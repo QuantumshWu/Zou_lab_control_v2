@@ -1107,6 +1107,23 @@ assert editor.status_label.text() == 'Draft: 2 problems in Calibrations'
 handle.update_logic_editor('camera-1', dict(
     projection, artifact_claims=claims, issues=('Frames must be selected', *claims['calibrations']['problems'])))
 assert editor.status_label.text() == 'Draft: Frames must be selected'
+# So is one a contribution states under the line it is about (Derive's
+# typing errors), by the section it names.
+from PyQt5 import QtWidgets
+typed = ('bright · where: the mask does not fit the value', 'same · combine: booleans do not mix with numbers')
+class Typed(QtWidgets.QWidget):
+    draft_changed = QtCore.pyqtSignal(object)
+    def update_projection(self, projection):
+        pass
+    def shown_problems(self):
+        return {problem: 'Outputs' for problem in typed}
+def typed_editor(parent):
+    return Typed(parent)
+handle.update_logic_editor('camera-1', dict(projection, ui_contributions=(typed_editor,), issues=typed))
+assert editor.status_label.text() == 'Draft: 2 problems in Outputs'
+handle.update_logic_editor('camera-1', dict(
+    projection, ui_contributions=(typed_editor,), issues=('Frames must be selected', *typed)))
+assert editor.status_label.text() == 'Draft: Frames must be selected'
 
 patches.clear()
 running = dict(

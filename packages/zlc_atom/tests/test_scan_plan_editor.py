@@ -491,13 +491,27 @@ def test_api_values_are_reconciled_under_the_operators_wheel() -> None:
     drafts.clear()
     form.value_normalized.emit("duration:p0")
     assert drafts and drafts[-1].get("normalized") is True
-    # The picker says the duration's unit, so its label does not: the
-    # editor's column is measured from, and relabelled with, the words shown.
-    assert editor.row_labels() == ("MOT.duration *", form.shown_labels()[1])
+    # The picker says the duration's unit, so its label does not.  The API
+    # values' names come with the pulse: they stand in the room the editor
+    # keeps for them and never set the column, so it does not move when a
+    # pulse that binds some is chosen.
+    from zlc_ui.fluent import setting_label_width
+
+    assert editor.row_labels() == ()
+    assert editor.label_width_floor() >= setting_label_width(form.shown_labels())
     editor.set_label_width(240)
-    assert form._rows["duration:p0"].layout().itemAt(0).widget().text() == "MOT.duration *"
-    # The editor's one number edge reaches the API values' boxes.
+    label = form._rows["duration:p0"].layout().itemAt(0).widget()
+    assert (label.text(), label.toolTip()) == ("MOT.duration *", "")
+    # One wider than the column is elided in the middle, whole in its tooltip.
+    editor.set_label_width(setting_label_width(("MOT.d",)))
+    assert "…" in label.text() and label.toolTip() == "MOT.duration *"
+    # The editor's one number edge reaches the API values' boxes -- and is
+    # the same before a pulse with API values is chosen, so the editor's
+    # other numbers do not move when they come.
     assert editor.number_edge_hint() == form.number_edge_hint() == hold.maximumWidth()
+    blank = ScanPlanEditor()
+    assert blank.number_edge_hint() == editor.number_edge_hint()
+    blank.deleteLater()
     editor.set_number_edge(form.number_edge_hint() + 30)
     assert hold.maximumWidth() == level.maximumWidth() == editor.number_edge_hint() + 30
     editor.close()

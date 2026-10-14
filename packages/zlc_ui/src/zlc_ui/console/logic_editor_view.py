@@ -291,8 +291,9 @@ class LogicEditorView(QtWidgets.QWidget):
             # manages is not a form row, and its label -- Frame Survival's
             # "Published pairs" -- had pushed every control right of a
             # column nobody's words filled; nor is the unit of a row whose
-            # picker says it (the forms measure the words their rows show,
-            # a scan's API values its shown_labels).
+            # picker says it (the forms measure the words their rows show).
+            # Words that come and go -- calibration files, a pulse's API
+            # values -- get the room their contribution keeps for them.
             label_width = max(
                 _form_label_width((*visible_spec.fields, *artifact_spec.fields)),
                 setting_label_width(_row_labels(incoming)),
@@ -343,7 +344,9 @@ class LogicEditorView(QtWidgets.QWidget):
         if error:
             state, status = "error", error
         elif issues:
-            state, status = "draft", _draft_status(issues, incoming.get("artifact_claims"))
+            state, status = "draft", _draft_status(
+                issues, incoming.get("artifact_claims"), self._shown_problems()
+            )
         self.status_label.setText(status)
         # Written when they CHANGE: the sheet is re-parsed and the widget
         # repolished on every write.
@@ -428,6 +431,23 @@ class LogicEditorView(QtWidgets.QWidget):
                 setter(self._mutation_enabled)
         return frozenset(managed)
 
+    def _shown_problems(self) -> dict[str, str]:
+        """The draft problems the contributions state under their own lines.
+
+        A contribution that writes a draft problem in red where it arises --
+        Derive's typing error under the output line it is about -- names
+        each one, with the section it stands in, as ``shown_problems()``;
+        the header counts them rather than saying one again.
+        """
+
+        shown: dict[str, str] = {}
+        for widget in self._contributions.values():
+            declared = getattr(widget, "shown_problems", None)
+            if callable(declared):
+                for problem, section in dict(declared()).items():
+                    shown.setdefault(str(problem), str(section))
+        return shown
+
     def _align_number_edges(self) -> None:
         """End every number box of the page on one x.
 
@@ -436,7 +456,9 @@ class LogicEditorView(QtWidgets.QWidget):
         them, as they share one label column: each evening out only its own
         boxes left the page two number edges, Repeats 49 px short of the API
         values under the same column.  A contribution takes part by
-        declaring ``number_edge_hint`` and ``set_number_edge``.
+        declaring ``number_edge_hint`` and ``set_number_edge``; one whose
+        numbers come and go answers the need they will have, so the edge
+        does not move when they come.
         """
 
         holders = (
@@ -736,20 +758,28 @@ def _device_label(name: str) -> str:
     return str(name).replace("_", " ").title()
 
 
-def _draft_status(issues: tuple[str, ...], claims: object) -> str:
+def _draft_status(
+    issues: tuple[str, ...],
+    claims: object,
+    shown: Mapping[str, str],
+) -> str:
     """The header's line for a draft Start refuses: each problem said once.
 
     A frame-claims input's problems stand in red under the grid whose cards
-    they are about, in the node's own editor, so the header counts them and
-    names their section rather than repeating the first one in grey above
-    -- one problem in two colours, and silence about the second.  A problem
-    nothing below shows is the header's to say, and it comes first.
+    they are about, and a contribution's (``shown``, problem to section)
+    under the line they are about, in the node's own editor; so the header
+    counts them and names their section rather than repeating the first one
+    in grey above -- one problem in two colours, and silence about the
+    rest.  A problem nothing below shows is the header's to say, and it
+    comes first.
     """
 
     shown_below: dict[str, str] = {}
     for item in dict(claims or {}).values():
         for problem in item.get("problems", ()):
             shown_below.setdefault(str(problem), str(item.get("label") or ""))
+    for problem, section in shown.items():
+        shown_below.setdefault(problem, section)
     own = [issue for issue in issues if issue not in shown_below]
     if own:
         return f"Draft: {own[0]}"
