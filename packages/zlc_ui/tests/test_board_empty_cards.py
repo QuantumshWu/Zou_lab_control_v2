@@ -513,6 +513,19 @@ for button in (setting, remover):
     top = button.mapTo(band, QtCore.QPoint(0, 0)).y()
     assert abs(top - (band.height() - top - button.height())) <= 1, (button.text(), top, band.height())
 assert card._title_label.mapTo(board, QtCore.QPoint(0, 0)).x() == board.text_left()
+# The two commands stand the row's one gap apart.
+from zlc_ui.fluent import card_pad, row_gap
+assert remover.x() - (setting.x() + setting.width()) == row_gap()
 window.close(); settle()
+# A board's own gap is the card pad: its first card starts where a white
+# page's content does, and its words one more card pad in.
+default = ConsoleBoardView()
+lone = empty_card('lone')
+default.resize(800, 600)
+default.set_cards((lone,))
+default.show(); settle()
+assert (lone.x(), lone.y()) == (card_pad(), card_pad())
+assert default.text_left() == card_pad() + PanelCardView.strip_text_inset()
+default.close(); settle()
 """
     )

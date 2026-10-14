@@ -1333,6 +1333,10 @@ def test_the_description_reports_only_facts_saved_in_the_archive(saved, monkeypa
     plot_rows = dict(tabs["Plot"])
     assert "data" in plot_rows and "uint16" in plot_rows["data"]
     assert plot_rows["plot data"].startswith("image")
+    # An array no panel shows says so after one separator, the one the
+    # viewer writes between a value and what it is everywhere else.
+    overlay = describe_archive(info, {**arrays, "overlay": np.zeros((35, 2))})
+    assert dict(dict(overlay.tabs)["Plot"])["overlay"] == "35x2 float64 · array only"
 
     # Task-generated report Figures have no Runtime publication to invent a
     # DAG from.  Their frozen source run record still projects as one real

@@ -21,7 +21,6 @@ from zlc_ui.fluent import (
     ACCENT_TINT,
     AXIS_GROUP_COLORS,
     BG,
-    CARD_PAD,
     CARD_TITLE_PAD,
     FIELD_BORDER_PX,
     FluentButton,
@@ -38,6 +37,8 @@ from zlc_ui.fluent import (
     popup_gap,
     RADIUS,
     RED,
+    card_pad,
+    row_gap,
     scaled_px,
     show_fluent_popup_for_anchor,
     FONT,
@@ -437,7 +438,7 @@ class PanelCardView(FluentGroupBox):
         self._title_commands = QtWidgets.QWidget(self._title_band)
         command_layout = QtWidgets.QHBoxLayout(self._title_commands)
         command_layout.setContentsMargins(0, 0, 0, 0)
-        command_layout.setSpacing(scaled_px(3, minimum=2))
+        command_layout.setSpacing(row_gap())
         command_layout.addWidget(self.settings_button)
         command_layout.addWidget(self.close_button)
         band_layout.addWidget(self._title_commands, 0, QtCore.Qt.AlignVCenter)
@@ -501,7 +502,7 @@ class PanelCardView(FluentGroupBox):
         own words up with it (see ``ConsoleBoardView.text_left``).
         """
 
-        return scaled_px(CARD_PAD)
+        return card_pad()
 
     def handle_rect(self) -> QtCore.QRect:
         """The part of the card it is carried by -- its strip -- in card
@@ -1366,7 +1367,7 @@ class PanelCardView(FluentGroupBox):
             popup = FluentOverlayFrame(self._settings_overlay_host())
             self.destroyed.connect(popup.deleteLater)
             layout = QtWidgets.QVBoxLayout(popup)
-            pad = max(1, scaled_px(10))
+            pad = card_pad()
             layout.setContentsMargins(pad, pad, 0, pad)
             # The title row sits in the same air above and below it.  With
             # no gap under it the row hugged the first field, and its close
@@ -1377,7 +1378,7 @@ class PanelCardView(FluentGroupBox):
             header.setStyleSheet("background: transparent;")
             header_layout = QtWidgets.QHBoxLayout(header)
             header_layout.setContentsMargins(0, 0, pad, 0)
-            header_layout.setSpacing(max(1, scaled_px(5)))
+            header_layout.setSpacing(row_gap())
             drag_handle = FluentLabel(
                 f"Setting · {self.panel_id}",
                 header,
@@ -1409,7 +1410,7 @@ class PanelCardView(FluentGroupBox):
             body.setStyleSheet("background: transparent;")
             body_layout = QtWidgets.QVBoxLayout(body)
             body_layout.setContentsMargins(0, 0, pad, 0)
-            body_layout.setSpacing(max(1, scaled_px(5)))
+            body_layout.setSpacing(row_gap())
             status = FluentLabel("", body)
             status.setWordWrap(True)
             status.hide()
@@ -1428,7 +1429,7 @@ class PanelCardView(FluentGroupBox):
             body_layout.addWidget(self._settings_form)
             buttons = QtWidgets.QHBoxLayout()
             buttons.setContentsMargins(0, 0, 0, 0)
-            buttons.setSpacing(max(1, scaled_px(5)))
+            buttons.setSpacing(row_gap())
             # Here rather than on the card face, which is where every other
             # per-panel decision already lives.  They existed as hidden widgets
             # nothing ever showed, so a panel opened in the real window could

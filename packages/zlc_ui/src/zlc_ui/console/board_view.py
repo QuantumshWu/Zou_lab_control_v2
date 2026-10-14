@@ -12,7 +12,7 @@ from zlc_ui.board import (
     pack,
     slot_under,
 )
-from zlc_ui.fluent import ACCENT_TINT, RADIUS, SELECTION_EDGE, retire_widget, scaled_px
+from zlc_ui.fluent import ACCENT_TINT, RADIUS, SELECTION_EDGE, card_pad, retire_widget, scaled_px
 from zlc_ui.fluent.fluent import frame_pen, frame_stroke_rect
 
 from .panel_card_view import PanelCardView
@@ -60,7 +60,11 @@ class ConsoleBoardView(QtWidgets.QWidget):
         super().__init__(parent)
         self.setMinimumSize(0, 0)
         self.setStyleSheet("background: transparent;")
-        self._metrics = metrics or BoardMetrics(gap=8)
+        # One card pad between cards and from the board's edges: the first
+        # card stands where a white page's content starts -- one pad in from
+        # its side, under the first tab's underline, and one pad below its
+        # tab strip.
+        self._metrics = metrics or BoardMetrics(gap=card_pad())
         self._cards: dict[str, PanelCardView] = {}
         self._order: tuple[str, ...] = ()
         #: Where the operator PUT a card, by panel id: written by a drop and

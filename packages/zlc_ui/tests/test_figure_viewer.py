@@ -510,6 +510,134 @@ app.processEvents()
     )
 
 
+def test_the_right_surface_has_one_left_edge_one_right_edge_and_one_page_gap(run_qt) -> None:
+    """The data bar, the tab strip and every tab page of the right surface
+    start on one card-pad edge and end on one right edge; a tab page starts
+    one card pad under its strip in both panes; the axis values stand under
+    a whole heading cell a section gap below the fields; and a value table,
+    scrolled into view with its card, is whole."""
+
+    run_qt(
+        """
+from PyQt5 import QtCore, QtWidgets
+from zlc_ui.figure_viewer import FigureViewerView
+from zlc_ui.fluent import (
+    FluentLabel, FluentSectionLabel, card_pad, control_height, fluent_scrollbar_thickness,
+    row_gap, section_gap,
+)
+from zlc_ui.qt import ensure_qt_app
+app = ensure_qt_app(['figure-surface-edges'])
+
+def settle():
+    for _ in range(6):
+        app.processEvents()
+
+def box(widget, top):
+    origin = widget.mapTo(top, QtCore.QPoint())
+    return origin.x(), origin.y(), origin.x() + widget.width(), origin.y() + widget.height()
+
+class Matrix:
+    def __init__(self, rows, columns): self.shape = (rows, columns)
+    def __getitem__(self, index): return index[0] + index[1]
+
+rows = 5_000
+projection = {
+    'dataset': {'name': 'frame', 'dtype': '<f8', 'unit': '', 'note': '', 'source': '',
+                'dtype_choices': (('<f8', 'Float 64'),)},
+    'domain_choices': (('point', 'Point'),),
+    'axes': ({'id': 'y', 'domain': 'point', 'domain_label': 'Point', 'name': 'y',
+              'size': rows, 'unit': ''},),
+    'selected_axis': 'y',
+    'axis_values': {'shape': (rows, 1), 'values': range(rows), 'row_headers': range(rows),
+                    'column_headers': ('Value',), 'editable': True},
+    'table': {
+        'component': 'values', 'component_choices': (('values', 'Values', True),),
+        'sigma_enabled': False, 'blank_help': '', 'blank_hint': '',
+        'shape': (rows, 60), 'values': Matrix(rows, 60), 'validity': None,
+        'row_headers': range(rows), 'column_headers': range(60),
+        'structure': ((('y', rows),), (), ()),
+        'axes': ({'axis_id': 'y', 'name': 'y', 'size': rows, 'unit': '', 'mode': 'rows',
+                  'index': 0, 'scope_choices': tuple((index, str(index)) for index in range(rows))},),
+    },
+    'dirty': False, 'can_apply': True, 'can_save': False,
+    'save_suggested': 'frame.npz', 'message': '',
+}
+
+view = FigureViewerView()
+view.set_panel_sizes(('2x2',), '2x2')
+view.set_panel_kinds((('image', 'Image'),))
+view.add_panel('panel-1', 'Camera frame')
+view.resize(1200, 640); view.show(); settle()
+surface = view.tabs.parentWidget()
+pad = card_pad()
+inset = max(pad, fluent_scrollbar_thickness())
+edge, end = pad, surface.width() - inset
+bar = view.tabs.tabBar()
+
+# The tab strip runs from side to side: the first tab's own card-pad inset
+# is what puts its underline on the surface's edge.
+assert box(view.tabs, surface)[0] == 0 and box(view.tabs, surface)[2] == surface.width()
+label = view.data_combo.parentWidget().layout().itemAt(0).widget()
+assert isinstance(label, FluentLabel) and not isinstance(label, FluentSectionLabel)
+assert box(label, surface)[0] == edge
+assert box(view.new_data_button, surface)[2] == end
+view.open_data_editor('frame', projection, 'Data · frame')
+editor = view._data_editors['frame']
+settle()
+# The Monitor page: its commands and its first card on the same two edges,
+# one card pad under the strip a second page has shown.
+view.tabs.setCurrentIndex(0); settle()
+strip_bottom = box(bar, surface)[3]
+assert bar.isVisible()
+assert box(view.kind_combo, surface)[0] == edge
+assert box(view.save_image_button, surface)[2] == end
+assert box(view.kind_combo, surface)[1] - strip_bottom == pad
+card = view._cards['panel-1']
+assert box(card, surface)[0] == edge
+assert box(card, surface)[1] - box(view.kind_combo, surface)[3] == pad
+view.tabs.setCurrentWidget(editor); settle()
+for widget in (editor.dataset_group, editor.axes_group, editor.data_group, editor.discard_button):
+    assert box(widget, surface)[0] == edge, widget
+for widget in (editor.dataset_group, editor.axes_group, editor.data_group, editor.save_button):
+    assert box(widget, surface)[2] == end, widget
+assert box(editor.dataset_group, surface)[1] - strip_bottom == pad
+# The left pane's pages start as far under their own strip.
+pane = view.info_pane
+page = pane.info_tabs.currentWidget()
+filter_edit = page.findChildren(QtWidgets.QLineEdit)[0]
+assert (box(filter_edit, view)[1] - box(pane.info_tabs.tabBar(), view)[3]) == pad
+assert box(filter_edit, view)[1] == box(editor.dataset_group, view)[1]
+# File names its path as Data names its chooser: a row label, one gap from it.
+header = pane.path_edit.parentWidget().layout()
+assert isinstance(header.itemAt(0).widget(), FluentLabel)
+assert not isinstance(header.itemAt(0).widget(), FluentSectionLabel)
+assert header.spacing() == row_gap()
+
+# Axis values: a whole control-high heading cell, a section gap under the
+# fields, and the table one row gap under it.
+heading = next(w for w in editor.axes_group.findChildren(FluentSectionLabel) if w.text() == 'Axis values')
+assert heading.contentsMargins().top() == 0 and heading.height() == control_height()
+unit_row = editor._axis_rows['unit']
+assert box(heading, editor)[1] - box(unit_row, editor)[3] == section_gap()
+assert box(editor.axis_value_table, editor)[1] - box(heading, editor)[3] == row_gap()
+
+# Each long table scrolls itself; with its card scrolled into view, the card
+# -- and so the table, its column names and its horizontal bar -- is whole.
+viewport = editor.editor_scroll.viewport()
+for table, card in ((editor.axis_value_table, editor.axes_group),
+                    (editor.value_table, editor.data_group)):
+    assert table.verticalScrollBar().maximum() > 0
+    assert card.height() <= viewport.height(), (card.height(), viewport.height())
+# A taller window gives the tables the rows it gains.
+before = editor.value_table.height()
+view.resize(1200, 900); settle()
+assert editor.value_table.height() > before
+assert editor.data_group.height() <= viewport.height()
+view.finish_close()
+"""
+    )
+
+
 def test_figure_viewer_demo_smoke(run_qt) -> None:
     completed = run_qt(
         "import runpy, sys; "

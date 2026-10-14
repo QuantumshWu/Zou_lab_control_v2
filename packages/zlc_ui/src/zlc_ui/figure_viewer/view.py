@@ -30,8 +30,10 @@ from zlc_ui.device_manager.view import (
 from zlc_ui.form.qt_form import being_edited
 from zlc_ui.fluent import (
     retire_widget,
+    card_pad,
+    control_height,
     row_gap,
-    CARD_PAD,
+    section_gap,
     ElidedLabel,
     FluentPageBody,
     ORANGE_TINT,
@@ -52,11 +54,9 @@ from zlc_ui.fluent import (
     FluentTabWidget,
     InfoPane,
     add_row_switch,
-    command_gap,
     fluent_save_path,
     fluent_scrollbar_thickness,
     muted_note_label,
-    scaled_px,
     setting_label_width,
     signals_blocked,
     window_pad,
@@ -69,11 +69,20 @@ _STATIC_LABELS = (
     "Name", "Type", "Value unit", "Note", "Editing", "Length", "Unit", "Domain", "Table shows",
 )
 
+#: The fewest rows a value table shows, in a window too short for its card:
+#: the page then scrolls to the rest of the card.
+_LEAST_TABLE_ROWS = 3
 
-def _tab_page_gap() -> int:
-    """The room between a tab strip and the first row of its page."""
 
-    return window_pad(0.5)
+def _surface_right_inset() -> int:
+    """How far in from the right surface's right edge its rows end.
+
+    One card pad, as on its left -- or the bar gutter a scrolled page keeps,
+    where that is the wider: the data editor's bar lies in the surface's
+    padding, so its cards and its action bar end where the data bar over the
+    tabs and the board's commands end."""
+
+    return max(card_pad(), fluent_scrollbar_thickness())
 
 
 def _two_column_grid() -> QtWidgets.QGridLayout:
@@ -83,7 +92,7 @@ def _two_column_grid() -> QtWidgets.QGridLayout:
 
     grid = QtWidgets.QGridLayout()
     grid.setContentsMargins(0, 0, 0, 0)
-    grid.setHorizontalSpacing(window_pad())
+    grid.setHorizontalSpacing(section_gap())
     grid.setVerticalSpacing(row_gap())
     grid.setColumnStretch(0, 1)
     grid.setColumnStretch(1, 1)
@@ -345,32 +354,35 @@ class _DataEditorView(QtWidgets.QWidget):
         self._label_rows: list[tuple[FluentSettingRow, str]] = []
         self._label_width = setting_label_width(_STATIC_LABELS, minimum=68)
 
+        gutter = fluent_scrollbar_thickness()
+        pad = card_pad()
         outer = QtWidgets.QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
+        # The page is as wide as the surface; its rows stand one card pad in
+        # on the left, and on the right the surface's inset less the gutter
+        # the scroll area keeps for its bar, so the bar lies in the surface's
+        # padding and the cards end where the data bar over the tabs ends.
+        outer.setContentsMargins(pad, 0, _surface_right_inset() - gutter, 0)
         # A section gap between the cards and the action bar under them.
-        outer.setSpacing(window_pad())
+        outer.setSpacing(section_gap())
         self.editor_scroll = FluentScrollArea(self)
         self.editor_scroll.setMinimumSize(0, 0)
         # The same opaque, surface-white page body the console's Edit page
         # scrolls: transparent content showed the viewport's own grey.
         content = FluentPageBody()
         root = QtWidgets.QVBoxLayout(content)
-        # The cards stand on the surface's own edges -- the edges of the data
-        # bar over the tabs -- with only the strip's gap above the first.
-        root.setContentsMargins(0, _tab_page_gap(), 0, 0)
+        # One card pad under the tab strip, as every tab page of the window.
+        root.setContentsMargins(0, pad, 0, 0)
         root.setSpacing(row_gap())
         # The gutter is held whether or not the bar shows: the cards and the
         # action bar end on one edge, and adding an axis that makes the page
         # scroll does not narrow every card under the pointer.
         self.editor_scroll.set_width_bounded_widget(content)
         outer.addWidget(self.editor_scroll, 1)
-        gutter = fluent_scrollbar_thickness()
-        card_pad = scaled_px(CARD_PAD)
 
         dataset_group = FluentGroupBox("Dataset", self, title_strip_px=0)
         self.dataset_group = dataset_group
         dataset_layout = QtWidgets.QVBoxLayout(dataset_group)
-        dataset_layout.setContentsMargins(card_pad, card_pad, card_pad, card_pad)
+        dataset_layout.setContentsMargins(pad, pad, pad, pad)
         dataset_layout.setSpacing(row_gap())
         # Where this working copy came from, on the card's title line.
         self.source_note = muted_summary_label()
@@ -398,7 +410,7 @@ class _DataEditorView(QtWidgets.QWidget):
         axes_group = FluentGroupBox("Axes", body, title_strip_px=0)
         self.axes_group = axes_group
         axes_layout = QtWidgets.QVBoxLayout(axes_group)
-        axes_layout.setContentsMargins(card_pad, card_pad, card_pad, card_pad)
+        axes_layout.setContentsMargins(pad, pad, pad, pad)
         axes_layout.setSpacing(row_gap())
         # Creating an axis is the card's own command, on its title line, with
         # what the fields below are doing -- editing the chosen axis or
@@ -451,10 +463,14 @@ class _DataEditorView(QtWidgets.QWidget):
             axis_form.addWidget(row, row_index, column_index)
         # The values are a block of their own under a heading, a section gap
         # below the fields, and as wide as the first column of the grid:
-        # one axis is one column of values, read down by index.
+        # one axis is one column of values, read down by index.  The heading
+        # keeps a whole control-high cell at the foot of its row, the row
+        # taller by what a section gap has over the grid's row gap: a margin
+        # inside the heading would come out of its cell and set its words,
+        # and the table under them, too high.
         values_heading = FluentSectionLabel("Axis values")
-        values_heading.setContentsMargins(0, window_pad() - row_gap(), 0, 0)
-        axis_form.addWidget(values_heading, 2, 0)
+        axis_form.addWidget(values_heading, 2, 0, QtCore.Qt.AlignBottom)
+        axis_form.setRowMinimumHeight(2, control_height() + section_gap() - row_gap())
         self.axis_value_model = _VirtualTextTableModel(self)
         self.axis_value_table = FluentTableView(self)
         self.axis_value_table.setModel(self.axis_value_model)
@@ -472,7 +488,7 @@ class _DataEditorView(QtWidgets.QWidget):
         data_group = FluentGroupBox("Data", body, title_strip_px=0)
         self.data_group = data_group
         data_layout = QtWidgets.QVBoxLayout(data_group)
-        data_layout.setContentsMargins(card_pad, card_pad, card_pad, card_pad)
+        data_layout.setContentsMargins(pad, pad, pad, pad)
         data_layout.setSpacing(row_gap())
         data_layout.addLayout(card_title_row("Data")[0])
         self.structure_label = FluentLabel("")
@@ -542,12 +558,26 @@ class _DataEditorView(QtWidgets.QWidget):
         self.discard_button = FluentButton("Discard", role="destructive")
         actions = QtWidgets.QHBoxLayout()
         actions.setContentsMargins(0, 0, gutter, 0)
-        actions.setSpacing(command_gap())
+        actions.setSpacing(row_gap())
         actions.addWidget(self.discard_button)
         actions.addStretch(1)
         actions.addWidget(self.apply_button)
         actions.addWidget(self.save_button)
         outer.addLayout(actions)
+
+        #: Each value table, its card, and what closes the card under it:
+        #: the room a table may take is what the page's viewport leaves once
+        #: its card's rows above it and these below it are counted.
+        self._page_tables = (
+            (self.axis_value_table, axes_group, ()),
+            (self.value_table, data_group, (self.message_label,)),
+        )
+        self._table_rows: dict[FluentTableView, int] = {}
+        # After the layouts the change set off have settled.
+        self._table_fit = QtCore.QTimer(self)
+        self._table_fit.setSingleShot(True)
+        self._table_fit.setInterval(0)
+        self._table_fit.timeout.connect(self._fit_tables_to_page)
 
         self.name_edit.editingFinished.connect(lambda: self._dataset_field("name", self.name_edit.text()))
         self.dtype_combo.activated.connect(lambda _index: self._dataset_field("dtype", self.dtype_combo.currentData()))
@@ -608,6 +638,50 @@ class _DataEditorView(QtWidgets.QWidget):
         for holder, label, _mode in self._axis_view_widgets.values():
             holder.set_label(label.text(), width=width)
 
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        super().resizeEvent(event)
+        self._table_fit.start()
+
+    def _fit_tables_to_page(self) -> None:
+        """Let each value table be as tall as its card, scrolled into view,
+        can show it whole.
+
+        The page scrolls its cards and a long table scrolls its own rows.
+        A table taller than the viewport leaves it would run under the
+        page's fold, its last rows and its horizontal bar cut off by the
+        page where its own bar cannot bring them.  Sized to the room the
+        viewport leaves under its card's rows, a table is whole when its
+        rows fit and otherwise a viewport of exactly that many rows, its
+        column names and horizontal bar on screen with it.
+        """
+
+        viewport = self.editor_scroll.viewport().height()
+        if viewport <= 0:
+            return
+        for table, card, closing in self._page_tables:
+            card.layout().activate()
+            above = table.mapTo(card, QtCore.QPoint()).y()
+            below = card.layout().contentsMargins().bottom() + sum(
+                row_gap() + (
+                    widget.heightForWidth(table.width())
+                    if widget.hasHeightForWidth()
+                    else widget.sizeHint().height()
+                )
+                for widget in closing
+                if not widget.isHidden()
+            )
+            rows = table.verticalHeader()
+            pitch = rows.sectionSize(0) if rows.count() else rows.defaultSectionSize()
+            chrome = (
+                table.horizontalHeader().sizeHint().height()
+                + table.horizontalScrollBar().sizeHint().height()
+                + 2 * table.frameWidth()
+            )
+            fit = max(_LEAST_TABLE_ROWS, (viewport - above - below - chrome) // max(1, pitch))
+            if self._table_rows.get(table) != fit:
+                self._table_rows[table] = fit
+                table.set_content_rows_limit(fit, viewport_rows=fit)
+
     def is_dirty(self) -> bool:
         return bool(getattr(self, "_dirty", False))
 
@@ -625,6 +699,8 @@ class _DataEditorView(QtWidgets.QWidget):
         text = str(message)
         self.message_label.setText(text)
         self.message_label.setVisible(bool(text))
+        # A line under the value table is room the table no longer has.
+        self._table_fit.start()
 
     def _show_domain(self, domain: object) -> None:
         # Part of the axis draft: sent with its name and length by Apply or
@@ -881,6 +957,9 @@ class _DataEditorView(QtWidgets.QWidget):
             self.save_button.setEnabled(bool(data.get("can_save", False)))
         finally:
             self._updating = False
+        # The rows above a table -- the Data card's axis rows, its wrapped
+        # structure line -- come and go with the projection.
+        self._table_fit.start()
 
 
 class FigureViewerView(QtWidgets.QWidget):
@@ -956,12 +1035,16 @@ class FigureViewerView(QtWidgets.QWidget):
 
         # The right half is one white Fluent work surface.  Cards remain
         # visibly separate inside it instead of dissolving into the grey
-        # top-level background.
+        # top-level background.  Its tab strip runs from side to side, as
+        # the left pane's does, so the first tab's own inset puts its
+        # underline on the one card-pad edge every row of the surface starts
+        # on; each row keeps that inset itself.
         holder = FluentFrame(parent=self, bordered=False)
         holder.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
         self._surface_layout = QtWidgets.QVBoxLayout(holder)
-        card_pad = scaled_px(CARD_PAD)
-        self._surface_layout.setContentsMargins(card_pad, 0, card_pad, card_pad)
+        side = card_pad()
+        inset = _surface_right_inset()
+        self._surface_layout.setContentsMargins(0, 0, 0, side)
         # The two panes are built alike: a header band, the gap, a tab strip.
         # The data band is as tall as the pane's path band and the gap is
         # the pane's own, so the two first rows share one centre line and
@@ -985,9 +1068,9 @@ class FigureViewerView(QtWidgets.QWidget):
         self.edit_data_button.clicked.connect(self._edit_selected_data)
         self.new_data_button = FluentButton("New data")
         self.new_data_button.clicked.connect(self.new_data_requested)
-        data_label = QtWidgets.QLabel("Data")
+        data_label = FluentLabel("Data")
         bar_layout = QtWidgets.QHBoxLayout(self._panel_bar)
-        bar_layout.setContentsMargins(0, 0, 0, 0)
+        bar_layout.setContentsMargins(side, 0, inset, 0)
         # One row of controls, as tall as they are, centred in the band: a
         # row stretched to the band centred its label on the band and the
         # controls on themselves, half a pixel apart.
@@ -1008,8 +1091,12 @@ class FigureViewerView(QtWidgets.QWidget):
         monitor = QtWidgets.QWidget()
         monitor.setStyleSheet("background: white;")
         monitor_layout = QtWidgets.QVBoxLayout(monitor)
-        monitor_layout.setContentsMargins(0, _tab_page_gap(), 0, 0)
-        monitor_layout.setSpacing(row_gap())
+        # One card pad under the tab strip, as every tab page of the window.
+        # The board runs from side to side and keeps its own card-pad gap at
+        # its edges, so its first card stands one pad under the commands and
+        # starts on their edge.
+        monitor_layout.setContentsMargins(0, side, 0, 0)
+        monitor_layout.setSpacing(0)
         # Adding a panel and saving the board's picture act on the board
         # alone, so they head the board's own tab; in a second bar above
         # every tab they pushed this pane's tab strip a row below the
@@ -1023,7 +1110,7 @@ class FigureViewerView(QtWidgets.QWidget):
         self.save_image_button.clicked.connect(self.save_screenshot_requested)
         # A chooser and the command that reads it, spaced as the data row's.
         board_actions = QtWidgets.QHBoxLayout()
-        board_actions.setContentsMargins(0, 0, 0, 0)
+        board_actions.setContentsMargins(side, 0, inset, 0)
         board_actions.setSpacing(row_gap())
         board_actions.addWidget(self.kind_combo)
         board_actions.addWidget(self.add_panel_button)
@@ -1040,7 +1127,7 @@ class FigureViewerView(QtWidgets.QWidget):
         self.tabs.add_permanent_tab(monitor, "Monitor")
         self._surface_layout.addWidget(self.tabs, 1)
 
-        self._placeholder = FluentFrame(parent=holder)
+        self._placeholder = FluentFrame(parent=holder, bordered=False)
         placeholder_layout = QtWidgets.QVBoxLayout(self._placeholder)
         placeholder_layout.addStretch(1)
         placeholder_label = FluentLabel("Open a saved figure to begin", self._placeholder)

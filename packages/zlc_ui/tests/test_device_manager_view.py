@@ -659,3 +659,56 @@ camera, discovered = title('Camera'), title('Discovered hardware')
 assert camera == discovered, (camera, discovered)
 """
     )
+
+
+def test_the_config_page_keeps_one_row_gap_one_section_gap_and_one_dot_gap(run_qt) -> None:
+    """Buttons on a row stand one row gap apart; the two columns' cards one
+    section gap apart, the left column's bar in that gap; the header's dot
+    as far from the document name's words as the status line's dot from
+    its own; and Role is a row label painted on its field's line."""
+
+    run_qt(
+        """
+from PyQt5 import QtCore
+from zlc_ui.device_manager import DeviceManagerView
+from zlc_ui.fluent import FluentLabel, fluent_scrollbar_thickness, row_gap, section_gap, status_dot_gap
+from zlc_ui.qt import ensure_qt_app
+app = ensure_qt_app(['device-manager-gaps'])
+view = DeviceManagerView()
+view.set_device_choices((('Camera', 'camera.fake', 'camera'),))
+view.set_templates((('Virtual', 'virtual'),))
+view.set_devices((('c1', 'one', 'camera.fake', 'camera'),))
+view.set_loaded_devices((('camera', 'qCMOS', 'camera.dcam'),))
+view.set_apparatus('apparatus.json', False, True)
+view.show_status('ready', 'idle')
+view.resize(1100, 700); view.show()
+for _ in range(4):
+    app.processEvents()
+
+def left(widget):
+    return widget.mapTo(view, QtCore.QPoint()).x()
+
+def right(widget):
+    return left(widget) + widget.width()
+
+def gaps(*widgets):
+    return {left(after) - right(before) for before, after in zip(widgets, widgets[1:])}
+
+assert gaps(view.new_button, view.load_button, view.save_button, view.save_as_button) == {row_gap()}
+live = view._loaded_cards['camera']
+assert gaps(live.control_button, live.log_button, live.close_button) == {row_gap()}
+# The left column's gutter is part of the section gap between the columns.
+gutter = fluent_scrollbar_thickness()
+assert right(view.left_scroll) - right(view.left_scroll.viewport()) == gutter
+assert left(view.right_scroll) - right(view.left_scroll.viewport()) == section_gap()
+# The name is right-aligned; its words start one dot gap after the dot.
+name = view.document_name
+words = right(name) - name.fontMetrics().horizontalAdvance(name.text())
+assert words - right(view.status_dot) == status_dot_gap()
+strip = view.status_strip
+assert left(strip.message) - right(strip.dot) == status_dot_gap()
+card = view._cards['c1']
+assert isinstance(card.name_label, FluentLabel)
+assert card.name_label.toolTip() == 'Internal ID: c1'
+"""
+    )
