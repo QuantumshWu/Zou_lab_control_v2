@@ -7388,9 +7388,10 @@ class FluentCheckBox(QtWidgets.QCheckBox):
     fill whose edge is that fill, never an outline: unticked it is
     NEUTRAL_FILL, dark enough to read on a white card and on the BG face of
     a Spacer card; ticked it is ACCENT with a white tick.  Under the pointer
-    the fill steps one shade toward blue; disabled it is DIVIDER, a ticked
-    one with a BG tick.  The tick is centred on the box's device-pixel
-    centre.
+    the fill steps one shade toward blue.  Disabled, unticked it is DIVIDER
+    and ticked it is DISABLED_INK with the same white tick (3.5:1, and 2.9:1
+    against the unticked box), so a read-only card still says which boxes
+    are on.  The tick is centred on the box's device-pixel centre.
     """
 
     def __init__(self, text: str = "", parent=None):
@@ -7417,8 +7418,9 @@ class FluentCheckBox(QtWidgets.QCheckBox):
             QCheckBox::indicator:checked {{ border-color: {ACCENT}; background: {ACCENT}; }}
             QCheckBox::indicator:checked:hover {{ border-color: {ACCENT_HOVER}; background: {ACCENT_HOVER}; }}
             QCheckBox:disabled {{ color: {DISABLED_INK}; }}
-            QCheckBox::indicator:disabled, QCheckBox::indicator:checked:disabled {{
-                border-color: {DIVIDER}; background: {DIVIDER};
+            QCheckBox::indicator:disabled {{ border-color: {DIVIDER}; background: {DIVIDER}; }}
+            QCheckBox::indicator:checked:disabled {{
+                border-color: {DISABLED_INK}; background: {DISABLED_INK};
             }}
             """
         )
@@ -7447,7 +7449,7 @@ class FluentCheckBox(QtWidgets.QCheckBox):
         dy = cy - (0.34 + 0.68) / 2.0 * h
         painter = QtGui.QPainter(self)
         painter.setRenderHint(QtGui.QPainter.Antialiasing)
-        pen = QtGui.QPen(QtGui.QColor(SURFACE if self.isEnabled() else BG))
+        pen = QtGui.QPen(QtGui.QColor(SURFACE))
         pen.setWidthF(max(1.5, w / 8.0))
         pen.setCapStyle(QtCore.Qt.RoundCap)
         pen.setJoinStyle(QtCore.Qt.RoundJoin)

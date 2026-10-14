@@ -253,6 +253,30 @@ def test_switches_and_ticks_are_solid_fills(app, host) -> None:
     assert abs((min(xs) + max(xs) + 1 / ratio) / 2.0 - centre.x()) <= 1.0
     assert abs((min(ys) + max(ys) + 1 / ratio) / 2.0 - centre.y()) <= 1.0
 
+    # Disabled (a read-only card), ticked and unticked still read apart: the
+    # unticked box is DIVIDER, the ticked one DISABLED_INK with the white tick.
+    from zlc_ui.fluent.style import DISABLED_INK, SURFACE
+    off_box = FluentCheckBox("Read-only off", host)
+    off_box.move(160, 80)
+    on_box = FluentCheckBox("Read-only on", host)
+    on_box.move(160, 120)
+    on_box.setChecked(True)
+    for check in (off_box, on_box):
+        check.setEnabled(False)
+    _shown(app, host, off_box, on_box)
+    box = off_box._indicator_rect()
+    assert _at(off_box, box.center().x(), box.top() + 1) == DIVIDER.upper()
+    box = on_box._indicator_rect()
+    assert _at(on_box, box.center().x(), box.top() + 1) == DISABLED_INK.upper()
+    image = on_box.grab().toImage()
+    ratio = image.devicePixelRatio() or 1.0
+    brightest = max(
+        QtGui.QColor(image.pixel(x, y)).lightness()
+        for x in range(int(box.left() * ratio), int((box.right() + 1) * ratio))
+        for y in range(int(box.top() * ratio), int((box.bottom() + 1) * ratio))
+    )
+    assert brightest == QtGui.QColor(SURFACE).lightness(), "a white tick, not a grey one"
+
 
 def test_the_current_segment_and_an_active_cycle_are_the_selected_fill(app, host) -> None:
     from zlc_ui.fluent import FluentCycleComboBox, FluentSegmentedButtons
