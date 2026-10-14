@@ -220,6 +220,48 @@ else:
     run_qt(code)
 
 
+def test_capture_waits_for_a_close_its_owner_finishes_later(run_qt) -> None:
+    code = """
+from PyQt5 import QtCore, QtWidgets
+from zlc_ui.acceptance import _wait_closed
+from zlc_ui.qt import ensure_qt_app
+
+app = ensure_qt_app(['capture-close'])
+
+class Deferred(QtWidgets.QWidget):
+    # A close is a request its owner finishes later (a console stopping its
+    # Logic nodes) or refuses.
+    def __init__(self, finish_ms):
+        super().__init__()
+        self.finish_ms = finish_ms
+    def closeEvent(self, event):
+        event.ignore()
+        if self.finish_ms is not None:
+            QtCore.QTimer.singleShot(self.finish_ms, self.hide)
+
+later = Deferred(400)
+later.show(); app.processEvents()
+later.close()
+closed, waited = _wait_closed(app, later, 5000)
+assert closed and 400 <= waited < 5000, (closed, waited)
+
+refused = Deferred(None)
+refused.show(); app.processEvents()
+refused.close()
+closed, waited = _wait_closed(app, refused, 300)
+assert not closed and waited >= 300, (closed, waited)
+refused.hide()
+
+deleted = QtWidgets.QWidget()
+deleted.setAttribute(QtCore.Qt.WA_DeleteOnClose, True)
+deleted.show(); app.processEvents()
+deleted.close()
+closed, _waited = _wait_closed(app, deleted, 2000)
+assert closed
+"""
+    run_qt(code)
+
+
 def test_fluent_window_uses_reference_frameless_shell_and_top_margin(run_qt) -> None:
     code = """
 from PyQt5 import QtWidgets
