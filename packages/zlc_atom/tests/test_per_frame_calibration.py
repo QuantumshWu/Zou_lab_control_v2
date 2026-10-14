@@ -324,12 +324,13 @@ def _claims_projection(entries, frames):
 
 
 def test_the_calibrations_editor_gives_frames_to_files_by_clicking(monkeypatch) -> None:
-    from PyQt5 import QtCore, QtTest, QtWidgets
+    from PyQt5 import QtCore, QtTest
 
     from zlc_atom.nodes.occupancy import editor as editor_module
     from zlc_ui.fluent import scaled_px, setting_label_width
+    from zlc_ui.qt import ensure_qt_app
 
-    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    app = ensure_qt_app(["zlc-calibrations-editor-test"])
     editor = OCCUPANCY_NODE.ui_contributions[0]()
     drafts = []
     editor.draft_changed.connect(drafts.append)
@@ -372,12 +373,22 @@ def test_the_calibrations_editor_gives_frames_to_files_by_clicking(monkeypatch) 
         assert state(1, 1) == "derived", "the last frame read as rest"
         assert drafts == [], "showing claims is not an edit"
         assert "3 frames · each read once" in editor.summary.text()
-        # The file names are the label column: with it, Add and the first
-        # card start on one edge, however long the names are.
+        # The file names stand in the label column without setting it: the
+        # first card starts on the model choice's edge, and a name wider than
+        # the column is elided there instead of moving every field.
         editor.set_label_width(setting_label_width(editor.row_labels()))
         app.processEvents()
-        card = grid.viewport().mapTo(editor, grid.visualRect(grid.model().index(0, 0)).topLeft())
-        assert abs(card.x() + scaled_px(2, minimum=1) - editor.add_button.x()) <= 1
+
+        def card_x():
+            card = grid.viewport().mapTo(editor, grid.visualRect(grid.model().index(0, 0)).topLeft())
+            return card.x() + scaled_px(2, minimum=1)
+
+        edge = editor.model.mapTo(editor, QtCore.QPoint(0, 0)).x()
+        assert abs(card_x() - edge) <= 1
+        project((load, {"path": "C:/data/readout_with_a_long_name.json", "frames": ("rest",)}))
+        assert "…" in grid.model().headerData(1, QtCore.Qt.Vertical)
+        assert abs(card_x() - edge) <= 1 and editor.row_labels() == ("Readout model",)
+        project((load, readout))
         # Last moves to the readout file; First taken here leaves the load file.
         claims = click(1, 1)
         assert claims == (load, {"path": readout["path"], "frames": ("last", "rest")})
