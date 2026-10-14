@@ -48,6 +48,7 @@ from zlc_ui.fluent import (
     fluent_font_size,
     fluent_open_path,
     muted_note_label,
+    retire_widget,
     row_gap,
     scaled_px,
     setting_label_width,
@@ -95,8 +96,15 @@ class CalibrationsEditor(QtWidgets.QWidget):
         self.grid.selection_edited.connect(self._marked)
         self.grid.row_action.connect(self.row_action)
         layout.addWidget(self.grid, 0, QtCore.Qt.AlignLeft)
-        self.note = error_note_label()
-        layout.addWidget(self.note)
+        # One red block per problem, half a row gap apart: a problem that
+        # wraps is still told from the next one.
+        self.problems = QtWidgets.QWidget(self)
+        self._problem_layout = QtWidgets.QVBoxLayout(self.problems)
+        self._problem_layout.setContentsMargins(0, 0, 0, 0)
+        self._problem_layout.setSpacing(row_gap() // 2)
+        self._problem_labels: list[QtWidgets.QLabel] = []
+        self.problems.hide()
+        layout.addWidget(self.problems)
         self.model_row = QtWidgets.QWidget(self)
         model_layout = QtWidgets.QHBoxLayout(self.model_row)
         model_layout.setContentsMargins(0, 0, 0, 0)
@@ -262,7 +270,21 @@ class CalibrationsEditor(QtWidgets.QWidget):
             self.summary.setText(f"{names[0]} reads every frame")
         else:
             self.summary.setText(f"{count} frames · each read once")
-        show_note(self.note, "\n".join(problems))
+        self._show_problems(problems)
+
+    def _show_problems(self, problems) -> None:
+        """Each problem as its own sentence in its own block, ending in a full
+        stop.  Not capitalised: a problem may start with a file's stem."""
+
+        labels = self._problem_labels
+        while len(labels) > len(problems):
+            retire_widget(labels.pop())
+        while len(labels) < len(problems):
+            labels.append(error_note_label())
+            self._problem_layout.addWidget(labels[-1])
+        for label, problem in zip(labels, problems):
+            show_note(label, problem if problem.endswith(".") else f"{problem}.")
+        self.problems.setVisible(bool(problems))
 
     # ---------------------------------------------------------------- editing
 
