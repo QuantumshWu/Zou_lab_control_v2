@@ -364,19 +364,22 @@ class _DeviceCard(FluentFrame):
 
     def set_columns(self, label_width: int, number_edge: int) -> None:
         """Stand this card on the window's columns: its labels in the one
-        label column, its Role box exactly as wide as the number boxes (a
-        share of the row like the type's when no card has one).  Capped
-        alone, the box took half of what the type and the commands left
-        and ended short of the boxes under it."""
+        label column, its Role box as wide as the number boxes (a share of
+        the row like the type's when no card has one).
+
+        The box asks for twice the type's share up to that width, so it
+        reaches the number boxes' edge and the type takes the rest; at an
+        equal share it ended short of the boxes under it, and held at the
+        width it pushed the commands off the card in a narrow window."""
 
         if self.name_label.width() != label_width:
             self.header_row.set_label("Role", width=label_width)
         if self.form is not None:
             self.form.set_label_width(label_width)
-        low, high = (number_edge, number_edge) if number_edge else (0, QtWidgets.QWIDGETSIZE_MAX)
-        if (self.role_edit.minimumWidth(), self.role_edit.maximumWidth()) != (low, high):
-            self.role_edit.setMinimumWidth(low)
-            self.role_edit.setMaximumWidth(high)
+        cap = number_edge or QtWidgets.QWIDGETSIZE_MAX
+        if self.role_edit.maximumWidth() != cap:
+            self.role_edit.setMaximumWidth(cap)
+        self.header_row.layout().setStretchFactor(self.role_edit, 2 if number_edge else 1)
 
     def _toggle_collapsed(self) -> None:
         self._collapsed = not self._collapsed
