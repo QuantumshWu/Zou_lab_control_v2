@@ -16,7 +16,7 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 from zlc_ui.form import FormChoice, being_edited
 from zlc_ui.fluent import (
     retire_widget,
-    ACCENT, BG, DERIVED_INK, FIELD_BORDER_PX, MUTED_INK, SELECTION_EDGE, TEXT, CONFIG_GREEN,
+    ACCENT, BG, DERIVED_INK, DISABLED_INK, FIELD_BORDER_PX, HOVER, MUTED_INK, SELECTION_EDGE, TEXT, CONFIG_GREEN,
     CONFIG_GREEN_DARK, CONFIG_GREEN_TINT, FluentButton, FluentCheckBox, FluentSegmentedButtons,
     FluentSwitch, FluentComboBox, FluentFrame, FluentGroupBox, fluent_count_box,
     FluentLabel, FluentLineEdit, FluentReadoutEdit, FluentScrollArea, LinkedScrollPanes,
@@ -73,6 +73,59 @@ def _apply_field(widget: FluentScanLineEdit, field: FieldVM) -> None:
                                can_api=field.can_api, config_active=field.config_active,
                                config_enabled=field.config_enabled, default_text=field.default_text,
                                binding_editable=field.binding_editable)
+
+
+class _PortToggleIcon(QtGui.QIconEngine):
+    """A Delay row's every-period on/off command: one ring, with a dot in
+    it for "on".  Two characters (a disc and a ring) never matched -- the
+    small disc read as a dot beside a circle, the large one as a dark blot
+    heavier than every word on the page -- so both are drawn: the same
+    ring, the same stroke, in the command's own ink."""
+
+    def __init__(self, on: bool) -> None:
+        super().__init__()
+        self._on = bool(on)
+
+    def paint(self, painter, rect, mode, state) -> None:  # noqa: N802 - Qt API name
+        del state
+        ink = QtGui.QColor(DISABLED_INK if mode == QtGui.QIcon.Disabled else HOVER)
+        side = float(min(rect.width(), rect.height()))
+        stroke = max(1.0, side / 9.0)
+        centre = QtCore.QRectF(rect).center()
+        radius = (side - stroke) / 2.0
+        painter.save()
+        painter.setRenderHint(QtGui.QPainter.Antialiasing)
+        painter.setPen(QtGui.QPen(ink, stroke))
+        painter.setBrush(QtCore.Qt.NoBrush)
+        painter.drawEllipse(centre, radius, radius)
+        if self._on:
+            painter.setPen(QtCore.Qt.NoPen)
+            painter.setBrush(ink)
+            dot = radius * 0.5
+            painter.drawEllipse(centre, dot, dot)
+        painter.restore()
+
+    def pixmap(self, size, mode, state):  # noqa: N802 - Qt API name
+        image = QtGui.QImage(size, QtGui.QImage.Format_ARGB32_Premultiplied)
+        image.fill(QtCore.Qt.transparent)
+        painter = QtGui.QPainter(image)
+        self.paint(painter, QtCore.QRect(QtCore.QPoint(0, 0), size), mode, state)
+        painter.end()
+        return QtGui.QPixmap.fromImage(image)
+
+    def clone(self):
+        return _PortToggleIcon(self._on)
+
+
+def _port_toggle_button(on: bool, tooltip: str) -> FluentButton:
+    button = FluentButton("")
+    button.setIcon(QtGui.QIcon(_PortToggleIcon(on)))
+    side = row_height()
+    glyph = max(8, round(side * 0.5))
+    button.setIconSize(QtCore.QSize(glyph, glyph))
+    button.setFixedSize(side, side)
+    button.setToolTip(tooltip)
+    return button
 
 
 def _read_only(field: FieldVM) -> FieldVM:
@@ -697,15 +750,8 @@ class ChannelPanel(FluentGroupBox):
                 edit.setFixedWidth(self._delay_width())
                 combo = FluentComboBox()
                 combo.setFixedWidth(time_unit_width())
-                # The pair reads as one family: a disc and a ring of about
-                # one diameter (the small black circle beside the ring read
-                # as a dot beside a circle), each centred on its own ink in
-                # a square as tall as the row's fields.
-                fill = FluentButton("⬤")
-                fill.setToolTip("Turn this output on in every period")
-                clear = FluentButton("○")
-                for button in (fill, clear):
-                    button.setFixedSize(row_height(), row_height())
+                fill = _port_toggle_button(True, "Turn this output on in every period")
+                clear = _port_toggle_button(False, "Turn this output off in every period")
                 edit.binding_committed.connect(lambda scan, source, key=row.port_key: self.binding_committed.emit("delay", None, key, scan, source))
                 edit.config_key_committed.connect(
                     lambda key, field=edit: self.config_binding_committed.emit(field.property("pulse_field_id"), key)

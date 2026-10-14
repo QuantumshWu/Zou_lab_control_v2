@@ -1718,7 +1718,9 @@ assert fill_d.isEnabled() and not fill_a.isEnabled() and clear_a.isEnabled()
 assert [widget.mapTo(view, QtCore.QPoint()).x() for widget in view.channel_panel._rows["d0"]] == [
     widget.mapTo(view, QtCore.QPoint()).x() for widget in view.channel_panel._rows["a0"]
 ]
-assert fill_d.text() == "⬤" and clear_d.text() == "○"
+# One drawn ring for both, a dot in it for "on": no characters of two sizes.
+assert fill_d.text() == clear_d.text() == "" and not fill_d.icon().isNull() and not clear_d.icon().isNull()
+assert fill_d.size() == clear_d.size() and fill_d.width() == fill_d.height()
 for button in (fill_d, clear_d, fill_a, clear_a):
     QtTest.QTest.mouseClick(button, QtCore.Qt.LeftButton)
 assert asked == [("on", "d0"), ("off", "d0"), ("off", "a0")], asked
