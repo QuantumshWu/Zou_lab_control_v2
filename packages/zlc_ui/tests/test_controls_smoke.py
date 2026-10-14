@@ -878,6 +878,27 @@ radius = track.height() / 2.0
 assert abs(track.center().y() - switch.rect().center().y()) <= 1, track
 assert track.right() < switch.width() - 1, 'the label sits beside the track, not in it'
 
+# Between two commands the switch is one group with one gap on each side,
+# measured from the ink: the track's start and the label's last letter.
+pair = QtWidgets.QWidget()
+pair.setStyleSheet('background: white;')
+line = QtWidgets.QHBoxLayout(pair)
+line.setSpacing(8)
+before_button, middle, after_button = FluentButton('Add'), FluentSwitch('Selectors'), FluentButton('Pause')
+line.addWidget(before_button)
+add_row_switch(line, middle)
+line.addWidget(after_button)
+line.addStretch(1)
+pair.show()
+app.processEvents()
+grabbed = middle.grab().toImage()
+scale = grabbed.devicePixelRatio() or 1.0
+inked = [x / scale for x in range(grabbed.width())
+         if any(QtGui.QColor(grabbed.pixel(x, y)).lightness() < 160 for y in range(grabbed.height()))]
+lead_gap = middle.x() + inked[0] - (before_button.x() + before_button.width())
+trail_gap = after_button.x() - (middle.x() + inked[-1] + 1 / scale)
+assert abs(trail_gap - lead_gap) <= 1.0, (lead_gap, trail_gap)
+
 switch.setChecked(True)
 QtTest.QTest.qWait(300)  # the thumb slides for 150 ms
 image = switch.grab().toImage()

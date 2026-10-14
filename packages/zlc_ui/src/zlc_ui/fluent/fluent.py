@@ -5557,9 +5557,16 @@ def fluent_switch_width(text: str) -> int:
 
     track_w, _track_h = _switch_track_size()
     if not text:
+        # A pixel of room for the bare track's anti-aliased ends.
         return track_w + 2
-    metrics = QtGui.QFontMetrics(QtGui.QFont(FONT, fluent_font_size()))
-    return track_w + scaled_px(8) + fluent_text_width(metrics, str(text)) + 2
+    metrics = QtGui.QFontMetricsF(QtGui.QFont(FONT, fluent_font_size()))
+    label = str(text)
+    # A labelled switch ends on the pixel where its word's ink does -- the
+    # advance less the last glyph's right bearing, which is negative for a
+    # glyph that overhangs -- so a row's gap after the switch is measured
+    # from the word, as the gap before it is from the track.
+    ink = metrics.horizontalAdvance(label) - metrics.rightBearing(label[-1])
+    return track_w + scaled_px(8) + int(math.ceil(ink))
 
 
 class FluentSwitch(QtWidgets.QAbstractButton):
