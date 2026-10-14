@@ -1090,6 +1090,23 @@ assert patches[-1] == ('camera-1', {'values': {'repeat': 3}, 'normalized': True}
 readout = editor._artifact_result_readouts['artifact_path']
 assert readout.isReadOnly()
 assert readout.text() == 'C:/data/calibration-2.json'
+# The result path starts on the fields' text x, once: the readout's own
+# inset is a field's, and the page adds none of its own.
+from PyQt5 import QtWidgets
+def text_x(edit):
+    option = QtWidgets.QStyleOptionFrame()
+    option.initFrom(edit)
+    contents = edit.style().subElementRect(QtWidgets.QStyle.SE_LineEditContents, option, edit)
+    return edit.mapTo(editor, QtCore.QPoint()).x() + contents.left() + edit.textMargins().left()
+assert text_x(readout) == text_x(artifact_picker.edit), (text_x(readout), text_x(artifact_picker.edit))
+# A problem the node's own editor shows in red under its grid is counted in
+# the header, not said again in grey; one nothing below shows comes first.
+claims = {'calibrations': {'label': 'Calibrations', 'problems': ('frame 1 has no file', 'b.json is listed twice')}}
+handle.update_logic_editor('camera-1', dict(projection, artifact_claims=claims, issues=claims['calibrations']['problems']))
+assert editor.status_label.text() == 'Draft: 2 problems in Calibrations'
+handle.update_logic_editor('camera-1', dict(
+    projection, artifact_claims=claims, issues=('Frames must be selected', *claims['calibrations']['problems'])))
+assert editor.status_label.text() == 'Draft: Frames must be selected'
 
 patches.clear()
 running = dict(

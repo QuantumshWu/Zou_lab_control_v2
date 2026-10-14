@@ -27,6 +27,7 @@ from zlc_ui.fluent import (
     add_row_switch,
     scaled_px,
     setting_label_width,
+    status_dot_gap,
     window_pad,
 )
 from zlc_ui.fluent import PublishedItemsLegend
@@ -179,6 +180,9 @@ class LogicRowView(FluentFrame):
         self.remove_button.setToolTip("Remove this node")
         self.remove_button.clicked.connect(self.remove_requested.emit)
         top.addWidget(self.dot)
+        # A dot's words stand a status gap after it, as on the node's Edit
+        # page and in the status strip: one status look wherever it is.
+        top.addSpacing(status_dot_gap() - row_gap())
         top.addWidget(self.name_label)
         top.addWidget(self.kind_label)
         top.addWidget(self.status_label, 1)
