@@ -8982,9 +8982,9 @@ class ConsolePresenter:
 
         The state is a word of the row's vocabulary -- idle, draft, running,
         error -- and a draft whose issues refuse a Start is ``draft``, never
-        ``idle``: the row and the node's Edit page draw a state one way, and
-        a draft drawn grey on one and amber on the other was two looks for
-        one status.
+        ``idle``.  The node's Edit page is told the same word, so the row
+        and the page draw one status one way: a draft drawn grey on one and
+        amber on the other was two looks for one status.
         """
 
         def draft_issues() -> tuple[str, ...]:

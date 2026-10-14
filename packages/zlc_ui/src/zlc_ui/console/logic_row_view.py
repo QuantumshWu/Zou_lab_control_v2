@@ -14,8 +14,6 @@ from zlc_ui.fluent import (
     GREEN,
     GREY,
     MUTED_INK,
-    ORANGE,
-    ORANGE_DARK,
     RED,
     RED_DARK,
     TEXT,
@@ -48,12 +46,13 @@ STATUS_DOT = 12
 
 #: How each node state looks, as (dot, ink).  ONE table for the row and the
 #: node's Edit page: a draft that was grey on its row and orange on its page
-#: was one status drawn two ways.  The words follow the status strip's: idle
-#: grey, a draft that cannot start yet the warning amber, a run the plain
-#: ink of something under way, a failure red.
+#: was one status drawn two ways.  A draft is drawn as calmly as a stopped
+#: node: what keeps it from starting is something still to fill in, not a
+#: fault, and amber is what reads as "something is wrong".  A run wears the
+#: plain ink of something under way, and only a failure is red.
 STATE_COLOURS = {
     "idle": (GREY, MUTED_INK),
-    "draft": (ORANGE, ORANGE_DARK),
+    "draft": (GREY, MUTED_INK),
     "running": (GREEN, TEXT),
     "error": (RED, RED_DARK),
 }
