@@ -512,7 +512,8 @@ app.processEvents()
 
 def test_the_right_surface_has_one_left_edge_one_right_edge_and_one_page_gap(run_qt) -> None:
     """The data bar, the tab strip and every tab page of the right surface
-    start on one card-pad edge and end on one right edge; a tab page starts
+    -- the board, the data editor and a panel's Edit page -- start on one
+    card-pad edge and end on one right edge; a tab page starts
     one card pad under its strip in both panes; the axis values stand under
     a whole heading cell a section gap below the fields; and a value table,
     scrolled into view with its card, is whole."""
@@ -667,6 +668,35 @@ before = editor.value_table.height()
 view.resize(1200, 900); settle()
 assert editor.value_table.height() > before
 assert editor.data_group.height() <= viewport.height()
+
+# A panel's Edit page lays its content on this surface's page inset, as
+# the board and the data editor do: its first line one card pad under the
+# strip, its cards on the left and right edges and padded by a card pad.
+view.resize(1200, 640); settle()
+state ={'signal': '@figure/1/data', 'kind': 'image', 'cell_kind': '', 'size': '2x2',
+         'interval_ms': 400, 'title': 'Camera frame', 'semantic': {}, 'display': {},
+         'fit': {}, 'overlay_signal': ''}
+panel_surface = {'semantic': (), 'display': (), 'fit': (), 'data_structure': (),
+                 'data_scope': (), 'paints_images': True}
+view.set_panel_intervals((100, 400), 400)
+view.set_panel_projection('panel-1', state, panel_surface)
+view.open_panel_editor('panel-1', {
+    'state': state, 'parameter_surface': panel_surface,
+    'signal_options': (('this archive', (('Camera frame', 'data'),)),),
+    'overlay_signal_options': (), 'frozen_signal': '@figure/1/data',
+    'frozen_snapshot': None, 'save_directory': '.',
+}, 'Edit · Camera frame')
+settle()
+panel_editor = view._editors['panel-1']
+assert view.tabs.currentWidget() is panel_editor
+assert box(panel_editor.title_label, surface)[0] == edge
+assert box(panel_editor.title_label, surface)[1] - strip_bottom == pad
+for group in (panel_editor.snapshot_group, panel_editor.save_group):
+    assert box(group, surface)[0] == edge and box(group, surface)[2] == end, group.title()
+assert box(panel_editor.refresh_button, panel_editor.snapshot_group)[0] == pad
+saved = panel_editor.save_group
+assert box(panel_editor.save_button, saved)[2] == saved.width() - pad
+assert box(panel_editor.save_button, saved)[3] == saved.height() - pad
 view.finish_close()
 """
     )

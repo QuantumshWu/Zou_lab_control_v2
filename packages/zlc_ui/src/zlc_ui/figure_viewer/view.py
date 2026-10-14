@@ -1330,7 +1330,10 @@ class FigureViewerView(QtWidgets.QWidget):
             editor.update_projection(panel_editor_projection(self, projection))
             self.tabs.setCurrentWidget(editor)
         else:
-            editor = new_panel_editor(self, key, projection)
+            # On this surface's page inset (its tab widget's), not the
+            # console's: the Edit page starts where the Monitor and data
+            # pages do.
+            editor = new_panel_editor(self, key, projection, page_inset=card_pad())
             self._editors[key] = editor
             self.tabs.add_closable_tab(editor, str(title), focus=True)
         editor.set_selectors_enabled(self._cards[key].selectors_enabled)
