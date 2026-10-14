@@ -29,7 +29,7 @@ from zlc_data import (
 from zlc_runtime import DatasetCoverage, SignalValue
 
 from zlc_atom.nodes.frame_survival import FrameSurvivalProcessor
-from zlc_atom.nodes.frame_survival.processor import _forward_pairs
+from zlc_atom.nodes.frame_survival.processor import PAIR_RULES, _forward_pairs
 
 
 def _occupied_snapshot(
@@ -262,12 +262,23 @@ def test_pair_matrix_selects_like_a_table_and_writes_the_draft() -> None:
     def marked():
         return sorted((index.row(), index.column() + 1) for index in form.table.selectedIndexes())
 
+    def derived():
+        from zlc_ui.fluent.fluent import _GRID_STATE_ROLE
+
+        return sorted((row, column + 1) for row in range(form.model.rowCount())
+                      for column in range(form.model.columnCount())
+                      if form.model.index(row, column).data(_GRID_STATE_ROLE) == "derived")
+
     try:
         form.update_projection({"form_values": dict(values), "source_frames": None})
         assert not form.table.isEnabled() and "Waiting" in form.note.text()
         project()
         assert marked() == list(_forward_pairs(4)) and "6 of 6" in form.summary.text()
         assert drafts == [], "showing a rule is not an edit"
+        # What a rule selects by itself reads as derived, as in Occupancy.
+        assert derived() == marked()
+        assert [form.presets.button(rule).text() for rule in ("all", "consecutive", "from_first", "to_last")] == [
+            choice.label for choice in FRAME_SURVIVAL_SCHEMA.fields[0].choices[:4]]
         project(selection="consecutive")
         assert marked() == [(0, 1), (1, 2), (2, 3)]
         # A drag is a rectangle: rows 0-1 x end frames 2-3.
@@ -291,6 +302,9 @@ def test_pair_matrix_selects_like_a_table_and_writes_the_draft() -> None:
             ("1", "last", True), ("2", "last", False)}
         project(**drafts[-1]["values"])
         assert marked() == [(0, 2), (0, 3), (1, 2), (1, 3)]
+        # Only 1->2 is still the rule's; 0->2, 0->3 and 1->3 were added by
+        # hand (chosen cards), 0->1 and 2->3 left out (empty cards).
+        assert derived() == [(1, 2)]
         # Ctrl adds one more pair; a lower-triangle cell is never selectable.
         corner = form.table.visualRect(form.model.index(2, 2)).center()
         QtTest.QTest.mouseClick(view, QtCore.Qt.LeftButton, QtCore.Qt.ControlModifier, corner)
@@ -312,6 +326,8 @@ def test_pair_matrix_selects_like_a_table_and_writes_the_draft() -> None:
         drafts.clear()
         project(selection="custom", pairs=({"start": "0", "end": "1"}, {"start": "2", "end": "5"}))
         assert marked() == [(0, 1)] and "2-5" in form.note.text() and drafts == []
+        assert derived() == [] and not any(
+            form.presets.button(value).property("current") for value in (*PAIR_RULES, "none"))
         # The reported 22-frame case: a real Ctrl click excludes only first→last.
         frames = tuple(str(index) for index in range(22))
         project(selection="from_first", pairs=())
