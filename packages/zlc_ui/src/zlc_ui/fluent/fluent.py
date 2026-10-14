@@ -31,7 +31,15 @@ from ..status import STATUS_SEVERITIES
 
 from .style import (
     ACCENT,
+    ACCENT_STRONG,
     ACCENT_TINT,
+    DERIVED_FILL,
+    DERIVED_INK,
+    DISABLED_INK,
+    PLACEHOLDER_INFO,
+    SELECTED_EDGE,
+    SELECTED_EDGE_PX,
+    SELECTED_FILL,
     SELECTION_EDGE,
     AUTO_SCALE_BASIS,
     BUTTON_PADDING_H,
@@ -1168,28 +1176,63 @@ class FluentGroupBox(QtWidgets.QGroupBox):
 #: What a button DOES, which is all its look may say.  A colour chosen per
 #: call gave one verb a different hue in every window -- Remove orange here,
 #: grey there, blue in the editor -- with white text at 1.65-2.55:1 on top.
-#: ``primary`` is a surface's one main action (the full accent fill),
-#: ``standard`` every other command (the light-blue tint), ``destructive`` a
-#: command that takes something away (the red tint, red ink), and
-#: ``destructive_primary`` the confirm of a destructive question -- the one
-#: white-on-colour fill.
+#: ``primary`` is a surface's one main action (the deep ACCENT_STRONG fill,
+#: white ink), ``standard`` every other command (the light-blue tint),
+#: ``destructive`` a command that takes something away (a white face with a
+#: red edge and red ink), and ``destructive_primary`` the confirm of a
+#: destructive question -- the one white-on-red fill.
 BUTTON_ROLES = ("primary", "standard", "destructive", "destructive_primary")
 
 _BUTTON_STYLE_CACHE: tuple[float, str] | None = None
 
 
+def _selected_steps() -> tuple[str, str]:
+    """The hover and pressed faces of a selected chip: SELECTED_FILL stepped
+    toward the accent, HOVER ink still 6.2:1 and 5.8:1 on them."""
+
+    return (
+        _mixed(SELECTED_FILL, ACCENT, 0.2).name(),
+        _mixed(SELECTED_FILL, ACCENT, 0.35).name(),
+    )
+
+
+def _paint_selected_edge(widget: QtWidgets.QWidget) -> None:
+    """Close a selected face with the SELECTED_EDGE stroke.
+
+    A sheet's border width is whole pixels; the selection's edge is
+    SELECTED_EDGE_PX, so the sheet leaves the edge the fill's colour and
+    the stroke is drawn here, inside the widget's own rectangle.
+    """
+
+    painter = QtGui.QPainter(widget)
+    painter.setRenderHint(QtGui.QPainter.Antialiasing)
+    pen = QtGui.QPen(QtGui.QColor(SELECTED_EDGE))
+    pen.setWidthF(SELECTED_EDGE_PX)
+    painter.setPen(pen)
+    painter.setBrush(QtCore.Qt.NoBrush)
+    half = SELECTED_EDGE_PX / 2.0
+    painter.drawRoundedRect(
+        QtCore.QRectF(widget.rect()).adjusted(half, half, -half, -half), _radius(), _radius()
+    )
+    painter.end()
+
+
 def _button_stylesheet() -> str:
     """The one sheet every FluentButton wears; role and state pick the rules.
 
-    Every enabled command is a FILLED face with dark ink, so it reads as a
-    thing to press on a white card and on the grey page alike: standard is
-    the light-blue BUTTON_TINT with HOVER ink, primary the full ACCENT with
-    TEXT ink (5.3:1, where white on ACCENT was 2.45:1), destructive the red
-    wash with RED_DARK ink.  Pointer and press each step the face toward its
-    accent.  A checkable button checked is a toggle chip and wears primary's
-    face: on must differ from a resting tonal chip by more than a shade.
-    Disabled is an OUTLINE: a filled disabled button and an enabled one were
-    the same pixels, and nobody could tell whether Start could be pressed.
+    Standard is the light-blue BUTTON_TINT with HOVER ink (7.8:1); primary
+    the deep ACCENT_STRONG with white ink (5.2:1), so a surface's main
+    command is the one dark face on it; destructive a WHITE face with a RED
+    edge and RED_DARK ink (6.6:1) -- a row of Remove buttons in a pink fill
+    shouted louder than the rows they removed -- and the red wash only under
+    the pointer; destructive_primary the RED_DARK fill with white ink.
+    Pointer and press each step the face toward its accent.  A checkable
+    button checked is a toggle chip and wears the SELECTION's look
+    (SELECTED_FILL, HOVER ink, the SELECTED_EDGE stroke the button paints):
+    on must differ from a resting tonal chip by more than a shade, and must
+    not look like the main command.  Disabled is an OUTLINE on the page grey
+    with DISABLED_INK: a filled disabled button and an enabled one were the
+    same pixels, and nobody could tell whether Start could be pressed.
     """
 
     global _BUTTON_STYLE_CACHE
@@ -1197,12 +1240,12 @@ def _button_stylesheet() -> str:
         return _BUTTON_STYLE_CACHE[1]
     tint_hover = _mixed(BUTTON_TINT, ACCENT, 0.25).name()
     tint_pressed = _mixed(BUTTON_TINT, ACCENT, 0.45).name()
-    accent_hover = QtGui.QColor(ACCENT).darker(108).name()
-    accent_pressed = QtGui.QColor(ACCENT).darker(116).name()
-    red_tint_hover = _mixed(RED_TINT, RED, 0.18).name()
-    red_tint_pressed = _mixed(RED_TINT, RED, 0.34).name()
-    red_hover = QtGui.QColor(RED).darker(110).name()
-    red_pressed = QtGui.QColor(RED).darker(122).name()
+    strong_hover = QtGui.QColor(ACCENT_STRONG).darker(110).name()
+    strong_pressed = QtGui.QColor(ACCENT_STRONG).darker(122).name()
+    selected_hover, selected_pressed = _selected_steps()
+    red_tint_pressed = _mixed(RED_TINT, RED, 0.18).name()
+    red_hover = QtGui.QColor(RED_DARK).darker(112).name()
+    red_pressed = QtGui.QColor(RED_DARK).darker(126).name()
     style = f"""
     QPushButton {{
         background: {BUTTON_TINT};
@@ -1215,26 +1258,31 @@ def _button_stylesheet() -> str:
     }}
     QPushButton:hover {{ background: {tint_hover}; border-color: {tint_hover}; }}
     QPushButton:pressed {{ background: {tint_pressed}; border-color: {tint_pressed}; }}
-    QPushButton[role="primary"], QPushButton:checked {{
-        background: {ACCENT}; border-color: {ACCENT}; color: {TEXT};
+    QPushButton[role="primary"] {{
+        background: {ACCENT_STRONG}; border-color: {ACCENT_STRONG}; color: white;
     }}
-    QPushButton[role="primary"]:hover, QPushButton:checked:hover {{
-        background: {accent_hover}; border-color: {accent_hover};
+    QPushButton[role="primary"]:hover {{
+        background: {strong_hover}; border-color: {strong_hover};
     }}
-    QPushButton[role="primary"]:pressed, QPushButton:checked:pressed {{
-        background: {accent_pressed}; border-color: {accent_pressed};
+    QPushButton[role="primary"]:pressed {{
+        background: {strong_pressed}; border-color: {strong_pressed};
+    }}
+    QPushButton:checked {{
+        background: {SELECTED_FILL}; border-color: {SELECTED_FILL}; color: {HOVER};
+    }}
+    QPushButton:checked:hover {{
+        background: {selected_hover}; border-color: {selected_hover};
+    }}
+    QPushButton:checked:pressed {{
+        background: {selected_pressed}; border-color: {selected_pressed};
     }}
     QPushButton[role="destructive"] {{
-        background: {RED_TINT}; border-color: {RED_TINT}; color: {RED_DARK};
+        background: {SURFACE}; border-color: {RED}; color: {RED_DARK};
     }}
-    QPushButton[role="destructive"]:hover {{
-        background: {red_tint_hover}; border-color: {red_tint_hover};
-    }}
-    QPushButton[role="destructive"]:pressed {{
-        background: {red_tint_pressed}; border-color: {red_tint_pressed};
-    }}
+    QPushButton[role="destructive"]:hover {{ background: {RED_TINT}; }}
+    QPushButton[role="destructive"]:pressed {{ background: {red_tint_pressed}; }}
     QPushButton[role="destructive_primary"] {{
-        background: {RED}; border-color: {RED}; color: white;
+        background: {RED_DARK}; border-color: {RED_DARK}; color: white;
     }}
     QPushButton[role="destructive_primary"]:hover {{
         background: {red_hover}; border-color: {red_hover};
@@ -1253,7 +1301,7 @@ def _button_stylesheet() -> str:
     QPushButton[role="destructive"]:disabled,
     QPushButton[role="destructive_primary"]:disabled, QPushButton[dirty="true"]:disabled,
     QPushButton:checked:disabled {{
-        background: {BG}; border-color: {DIVIDER}; color: {PLACEHOLDER};
+        background: {BG}; border-color: {DIVIDER}; color: {DISABLED_INK};
     }}
     """
     _BUTTON_STYLE_CACHE = (_FLUENT_SCALE, style)
@@ -1339,6 +1387,9 @@ class FluentButton(QtWidgets.QPushButton):
 
     def paintEvent(self, event) -> None:  # noqa: N802 - Qt naming
         super().paintEvent(event)
+        if (self.isChecked() and self.isEnabled() and not self._dirty
+                and self.role() in ("standard", "primary")):
+            _paint_selected_edge(self)
         _paint_keyboard_focus(self)
 
 
@@ -1459,6 +1510,23 @@ class FluentLineEdit(QtWidgets.QLineEdit):
 
     def contextMenuEvent(self, event) -> None:  # noqa: N802 - Qt naming
         _apply_fluent_context_menu(self, event)
+
+    def set_placeholder_is_information(self, information: bool = True) -> None:
+        """Draw the placeholder as INFORMATION (PLACEHOLDER_INFO, 4.9:1) or
+        as a prompt (the text ink at half strength, Qt's own 2.9:1).
+
+        A placeholder that says what a blank field DOES -- "full sensor",
+        "camera's current" -- or that nothing is chosen yet is something
+        the operator must read; one that only prompts ("File name") may
+        stay faint.
+        """
+
+        colour = QtGui.QColor(PLACEHOLDER_INFO if information else TEXT)
+        if not information:
+            colour.setAlpha(128)
+        palette = self.palette()
+        palette.setColor(QtGui.QPalette.PlaceholderText, colour)
+        self.setPalette(palette)
 
     def set_display_elide(self, mode) -> None:
         """Elide what does not fit (``QtCore.Qt.ElideMiddle``, ...) while the
@@ -2704,7 +2772,7 @@ QAbstractItemView {{
     border: none;
     padding: {gap}px;
     color: {TEXT};
-    selection-background-color: {ACCENT_TINT};
+    selection-background-color: {SELECTED_FILL};
     selection-color: {HOVER};
     font: {fluent_font_size()}pt "{FONT}";
     outline: none;
@@ -2720,8 +2788,8 @@ QAbstractItemView::item:hover {{
     color: {TEXT};
 }}
 QAbstractItemView::item:selected {{
-    background-color: {ACCENT_TINT};
-    border-color: {SELECTION_EDGE};
+    background-color: {SELECTED_FILL};
+    border-color: {SELECTED_EDGE};
     color: {HOVER};
 }}
 QAbstractItemView::corner {{
@@ -3158,7 +3226,7 @@ class FluentComboBox(QtWidgets.QAbstractButton):
         form, and an open combo filled with tint.  The field now says its
         states the way an edit does -- the accent edge under the pointer or
         while it is open -- and only a cycle choice whose wheel is ACTIVE
-        wears the selection's tint, because that is a state it holds.
+        wears the selection's look, because that is a state it holds.
         """
 
         del event
@@ -3173,9 +3241,12 @@ class FluentComboBox(QtWidgets.QAbstractButton):
             or (self._line_edit is not None and self._line_edit.hasFocus())
             or self.underMouse()
         )
-        fill = ACCENT_TINT if current else SURFACE if enabled else BG
-        edge = SELECTION_EDGE if current and not engaged else ACCENT if engaged else PLACEHOLDER
-        painter.setPen(QtGui.QPen(QtGui.QColor(edge), 1.0))
+        fill = SELECTED_FILL if current else SURFACE if enabled else BG
+        edge = SELECTED_EDGE if current and not engaged else ACCENT if engaged else PLACEHOLDER
+        width = SELECTED_EDGE_PX if current and not engaged else 1.0
+        if width != 1.0:
+            outer = QtCore.QRectF(self.rect()).adjusted(width / 2, width / 2, -width / 2, -width / 2)
+        painter.setPen(QtGui.QPen(QtGui.QColor(edge), width))
         painter.setBrush(QtGui.QColor(fill))
         painter.drawRoundedRect(outer, radius, radius)
 
@@ -6748,9 +6819,11 @@ class _SelectionGridModel(QtCore.QAbstractTableModel):
 class _SelectionGridDelegate(QtWidgets.QStyledItemDelegate):
     """A cell is a small card: blank until chosen, named once it is.
 
-    A DERIVED cell -- reached by a rule rather than marked -- is a dashed,
-    lightly tinted card that still says its name; a WARNING cell is edged in
-    red, chosen or not.
+    A chosen cell wears the selection's look (SELECTED_FILL, the
+    SELECTED_EDGE stroke, HOVER ink); a DERIVED cell -- reached by a rule
+    rather than marked -- is a lighter DERIVED_FILL card with a dashed
+    one-pixel edge that still says its name in DERIVED_INK; a WARNING cell
+    is edged in red, chosen or not.
     """
 
     def paint(self, painter, option, index) -> None:
@@ -6764,21 +6837,24 @@ class _SelectionGridDelegate(QtWidgets.QStyledItemDelegate):
         rect = QtCore.QRectF(option.rect).adjusted(inset, inset, -inset, -inset)
         painter.save()
         painter.setRenderHint(QtGui.QPainter.Antialiasing)
-        edge = (RED if state == "warning" else SELECTION_EDGE if selected or derived
+        edge = (RED if state == "warning" else SELECTED_EDGE if selected or derived
                 else ACCENT if hovered else DIVIDER)
-        pen = QtGui.QPen(QtGui.QColor(edge), scaled_px(1, minimum=1))
+        pen = QtGui.QPen(
+            QtGui.QColor(edge),
+            SELECTED_EDGE_PX if selected else float(scaled_px(1, minimum=1)),
+        )
         if derived and not hovered:
             pen.setStyle(QtCore.Qt.DashLine)
         painter.setPen(pen)
-        painter.setBrush(
-            QtGui.QColor(ACCENT_TINT) if selected
-            else _mixed(SURFACE, ACCENT_TINT, 0.55) if derived
-            else QtGui.QColor(SURFACE)
-        )
+        painter.setBrush(QtGui.QColor(
+            SELECTED_FILL if selected else DERIVED_FILL if derived else SURFACE
+        ))
         painter.drawRoundedRect(rect, _radius(), _radius())
         if selected or hovered or state:
-            ink = (QtGui.QColor(RED_DARK) if state == "warning" else QtGui.QColor(HOVER) if selected
-                   else _mixed(HOVER, SURFACE, 0.45) if derived else QtGui.QColor(PLACEHOLDER))
+            ink = QtGui.QColor(
+                RED_DARK if state == "warning" else HOVER if selected
+                else DERIVED_INK if derived else PLACEHOLDER
+            )
             painter.setPen(ink)
             painter.drawText(rect, QtCore.Qt.AlignCenter, str(index.data() or ""))
         painter.restore()
@@ -7061,6 +7137,17 @@ class FluentSelectionGrid(QtWidgets.QTableView):
         return self.sizeHint()
 
 
+class _SegmentButton(QtWidgets.QPushButton):
+    """One choice of a FluentSegmentedButtons; the current one is closed by
+    the selection's edge, which a sheet cannot draw at its width."""
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        super().paintEvent(event)
+        if self.property("current") and self.isEnabled():
+            _paint_selected_edge(self)
+        _paint_keyboard_focus(self)
+
+
 class FluentSegmentedButtons(QtWidgets.QWidget):
     """One of a few named choices, the current one marked like a selection.
 
@@ -7077,13 +7164,14 @@ class FluentSegmentedButtons(QtWidgets.QWidget):
         layout.setSpacing(scaled_px(6, minimum=4))
         self._buttons: dict[object, QtWidgets.QPushButton] = {}
         for value, label in choices:
-            button = QtWidgets.QPushButton(label, self)
+            button = _SegmentButton(label, self)
             button.setCursor(QtCore.Qt.PointingHandCursor)
             button.setProperty("current", False)
             button.clicked.connect(lambda _checked=False, value=value: self.activated.emit(value))
             layout.addWidget(button)
             self._buttons[value] = button
         tint_hover = _mixed(BUTTON_TINT, ACCENT, 0.25).name()
+        selected_hover, _selected_pressed = _selected_steps()
         self.setStyleSheet(
             f"""
             QPushButton {{
@@ -7096,12 +7184,15 @@ class FluentSegmentedButtons(QtWidgets.QWidget):
             }}
             QPushButton:hover {{ background: {tint_hover}; border-color: {tint_hover}; }}
             QPushButton[current="true"] {{
-                background: {ACCENT};
-                border-color: {ACCENT};
-                color: {TEXT};
+                background: {SELECTED_FILL};
+                border-color: {SELECTED_FILL};
+                color: {HOVER};
+            }}
+            QPushButton[current="true"]:hover {{
+                background: {selected_hover}; border-color: {selected_hover};
             }}
             QPushButton:disabled {{
-                background: {BG}; border-color: {DIVIDER}; color: {PLACEHOLDER};
+                background: {BG}; border-color: {DIVIDER}; color: {DISABLED_INK};
             }}
             """
         )

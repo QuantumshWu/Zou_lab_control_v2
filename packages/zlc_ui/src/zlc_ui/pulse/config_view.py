@@ -61,6 +61,7 @@ class PulseConfigView(QtWidgets.QWidget):
         self.path_text = FluentLineEdit("")
         self.path_text.setReadOnly(True)
         self.path_text.setPlaceholderText("No value file selected")
+        self.path_text.set_placeholder_is_information(True)
         file_layout.addWidget(self.path_text)
         self.file_status = ElidedLabel("Save the Config file before using its values.")
         file_layout.addWidget(self.file_status)

@@ -12,20 +12,45 @@ ACCENT = "#77AADD"
 #: and a table cell painted with it hides the very number the click
 #: was asking to see.
 ACCENT_TINT = "#E4EFF9"
-#: The edge of a selected card: the accent brought halfway to the resting
+#: The edge of a selected Period card or table cell: the accent brought halfway to the resting
 #: divider.  The fill (ACCENT_TINT) is what says "selected"; the edge only
 #: closes the shape.  A full-strength 2 px accent border read as an outline
 #: drawn around a card, not as the card being picked.
 SELECTION_EDGE = "#ACC4DD"
 #: The face of a standard command: the accent a step past ACCENT_TINT.
-#: ACCENT_TINT is the selection wash and sat 1.17:1 on a white card --
+#: ACCENT_TINT is the hover wash and sat 1.17:1 on a white card --
 #: a button there read as a selected cell, not a thing to press.  Dark-blue
 #: (HOVER) ink on it reads 7.8:1.
 BUTTON_TINT = "#D6E6F5"
+#: The face of a surface's ONE main command (Start, Add Panel): the accent's
+#: own hue, deep enough to carry white ink at 5.2:1.  ACCENT itself carried
+#: white at 2.45:1 and dark ink on it read as one more tonal button.
+ACCENT_STRONG = "#2F6FB0"
+#: What every "this is the one chosen" state wears -- a toggle chip that is
+#: on, the current segmented choice, a chosen grid card, the picked row of a
+#: popup list: a fill a step past BUTTON_TINT (HOVER ink 6.9:1) closed by an
+#: accent edge SELECTED_EDGE_PX wide (3.4:1 on a white card, 3.1:1 on the
+#: grey page).  A chip that was on wore primary's fill, so "on" and "the main
+#: command" were the same pixels; a tint alone was a shade from a resting
+#: tonal button.
+SELECTED_FILL = "#C5DAF0"
+SELECTED_EDGE = "#5A8FC7"
+SELECTED_EDGE_PX = 1.5
+#: A grid card reached by a rule rather than chosen: lighter than a chosen
+#: card, its edge dashed and one pixel, its name in DERIVED_INK (4.8:1).
+DERIVED_FILL = "#F0F6FC"
+DERIVED_INK = "#4A6F94"
 HOVER = "#004578"
 BG = "#F3F3F3"
 TEXT = "#323130"
 PLACEHOLDER = "#A19F9D"
+#: The label of a command that cannot be pressed now: still readable
+#: (3.2:1 on the BG face) where PLACEHOLDER read 2.4:1.
+DISABLED_INK = "#8A8886"
+#: A placeholder that is INFORMATION, not a prompt -- what a blank field
+#: does ("full sensor", "camera's current") or that nothing is chosen
+#: ("No value file selected"): 4.9:1, still lighter than a typed value.
+PLACEHOLDER_INFO = "#73716F"
 DIVIDER = "#E1DFDD"
 GREEN = "#7FC2AD"
 RED = "#CD7380"
@@ -101,6 +126,16 @@ WINDOW_SCREEN_FRACTION = 0.90
 
 __all__ = [
     "ACCENT",
+    "ACCENT_STRONG",
+    "ACCENT_TINT",
+    "BUTTON_TINT",
+    "DERIVED_FILL",
+    "DERIVED_INK",
+    "DISABLED_INK",
+    "PLACEHOLDER_INFO",
+    "SELECTED_EDGE",
+    "SELECTED_EDGE_PX",
+    "SELECTED_FILL",
     "SELECTION_EDGE",
     "API_VIOLET",
     "API_VIOLET_DARK",

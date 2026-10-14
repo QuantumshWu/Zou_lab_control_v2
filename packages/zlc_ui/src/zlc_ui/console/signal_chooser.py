@@ -21,7 +21,8 @@ from zlc_ui.fluent import (
     GREY,
     HOVER,
     RADIUS,
-    SELECTION_EDGE,
+    SELECTED_EDGE,
+    SELECTED_FILL,
     FluentButton,
     FluentCardDialog,
     FluentLabel,
@@ -61,8 +62,8 @@ class SignalChooser(FluentCardDialog):
             f"QListWidget::item {{ padding: {scaled_px(6, minimum=4)}px; "
             f"border: 1px solid transparent; border-radius: {scaled_px(RADIUS)}px; }} "
             f"QListWidget::item:hover {{ background: {ACCENT_TINT}; }} "
-            f"QListWidget::item:selected {{ background: {ACCENT_TINT}; "
-            f"border-color: {SELECTION_EDGE}; color: {HOVER}; }}"
+            f"QListWidget::item:selected {{ background: {SELECTED_FILL}; "
+            f"border-color: {SELECTED_EDGE}; color: {HOVER}; }}"
         )
         self._rows = tuple(rows)
         producer = None

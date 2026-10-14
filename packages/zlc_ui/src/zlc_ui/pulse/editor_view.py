@@ -17,7 +17,7 @@ from zlc_ui.fluent import (
     fluent_message,
     FluentFrame,
     FluentLabel,
-    FluentLineEdit,
+    FluentReadoutEdit,
     FluentStatusDot,
     FluentTabWidget,
     fluent_widget_stylesheet,
@@ -66,8 +66,10 @@ class PulseEditorView(QtWidgets.QWidget):
         self.title_label = FluentLabel("PulseGUI - Untitled*")
         self.title_label.setMinimumWidth(scaled_px(260, minimum=180))
         self.title_label.setAlignment(QtCore.Qt.AlignVCenter | QtCore.Qt.AlignLeft)
-        self.summary_label = FluentLineEdit("")
-        self.summary_label.setEnabled(False)
+        # What the editor holds -- its file, its period count, a config
+        # error -- is a readout to read and copy, not a disabled input: the
+        # disabled edit drew it at 2.4:1.
+        self.summary_label = FluentReadoutEdit("")
         self.clear_button = FluentButton("Clear All", role="destructive")
         self.clear_button.clicked.connect(self.clear_all_requested)
         header_layout.addWidget(self.status_dot)
