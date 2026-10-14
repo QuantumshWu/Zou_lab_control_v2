@@ -21,7 +21,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from zlc_atom.nodes import DatasetInputSpec
+from zlc_atom.nodes import DatasetInputSpec, frame_claim_entries
 from zlc_durable import strict_json_loads, write_readable_json
 from zlc_runtime import split_signal_key, stable_signal_key
 
@@ -123,7 +123,9 @@ class LogicLayoutEntry:
     values: Mapping[str, Any]
     source_signal: str
     device_keys: Mapping[str, str]
-    artifact_inputs: Mapping[str, str]
+    #: A path per artifact input; a frame-claims input's list of
+    #: ``{"path", "frames"}`` entries.
+    artifact_inputs: Mapping[str, Any]
     #: Whether Start opens this node's declared preview.  Part of the board an
     #: operator arranged, like the panels themselves -- not of the measurement.
     auto_preview: bool = True
@@ -152,7 +154,7 @@ class LogicLayoutEntry:
             "values": _authoring_tree(self.values),
             "source_signal": self.source_signal,
             "device_keys": dict(self.device_keys),
-            "artifact_inputs": dict(self.artifact_inputs),
+            "artifact_inputs": _authoring_tree(self.artifact_inputs),
             "auto_preview": self.auto_preview,
         }
 
@@ -310,17 +312,18 @@ def resolve_layout(
                 )
             selected[name] = key
         artifact_specs = artifact_input_specs(descriptor)
-        artifacts = {spec.name: entry.artifact_inputs.get(spec.name, "") for spec in artifact_specs}
-        # A per-frame artifact keeps each frame's own path it was saved with.
+        artifacts: dict[str, Any] = {}
         for spec in artifact_specs:
-            if spec.per_frame:
-                artifacts.update({
-                    str(key): path
-                    for key, path in entry.artifact_inputs.items()
-                    if str(key).startswith(f"{spec.name}[")
-                })
-        if any(not isinstance(path, str) for path in artifacts.values()):
-            raise LayoutError(f"{entry.node_id}: artifact input paths must be strings")
+            value = entry.artifact_inputs.get(spec.name, () if spec.frame_claims else "")
+            if spec.frame_claims:
+                try:
+                    artifacts[spec.name] = frame_claim_entries(value)
+                except ValueError as error:
+                    raise LayoutError(f"{entry.node_id}: {spec.name}: {error}") from error
+            elif isinstance(value, str):
+                artifacts[spec.name] = value
+            else:
+                raise LayoutError(f"{entry.node_id}: artifact input {spec.name!r} must be a path")
         bindings.append(
             LogicBinding(
                 entry.node_id,

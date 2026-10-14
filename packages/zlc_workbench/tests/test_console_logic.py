@@ -1230,15 +1230,14 @@ def test_a_processor_adds_with_an_unresolved_source_and_no_modal(
 
     assert node_id == "occupancy"
     assert presenter.logic[node_id].draft.source_signal == ""
-    assert presenter.logic[node_id].draft.artifact_inputs == {"calibration_path": ""}
+    assert presenter.logic[node_id].draft.artifact_inputs == {"calibrations": ()}
     assert presenter.logic[node_id].draft.values == {"model_kind": "default"}
-    assert presenter.view.logic_editors[node_id]["artifact_form_spec"].keys == (
-        "calibration_path",
-    )
-    artifact_field = presenter.view.logic_editors[node_id][
-        "artifact_form_spec"
-    ].fields[0]
-    assert artifact_field.base_dir == str(presenter.session.workspace.data)
+    # Calibrations are rows of files and frames, edited by Occupancy's own
+    # editor rather than the path form.
+    assert presenter.view.logic_editors[node_id]["artifact_form_spec"].keys == ()
+    claims = presenter.view.logic_editors[node_id]["artifact_claims"]["calibrations"]
+    assert claims["base_dir"] == str(presenter.session.workspace.data)
+    assert claims["entries"] == () and claims["reads"] is None
     assert presenter.view.logic_editors[node_id]["source_required"] is True
     assert presenter.view.logic_editors[node_id]["source_options"] == ()
     # With no source, Start is disabled before the click and refused at it.
@@ -1256,14 +1255,11 @@ def test_a_processor_adds_with_an_unresolved_source_and_no_modal(
 
     presenter.view.logic_draft_changed.emit(
         node_id,
-        {"artifact_inputs": {"calibration_path": "manually-picked.json"}},
+        {"artifact_inputs": {"calibrations": [{"path": "manually-picked.json", "frames": ["rest"]}]}},
     )
-    assert presenter.logic[node_id].draft.artifact_inputs == {
-        "calibration_path": "manually-picked.json"
-    }
-    assert presenter.logic_editor_projection(node_id)["artifact_values"] == {
-        "calibration_path": "manually-picked.json"
-    }
+    picked = ({"path": "manually-picked.json", "frames": ("rest",)},)
+    assert presenter.logic[node_id].draft.artifact_inputs == {"calibrations": picked}
+    assert presenter.logic_editor_projection(node_id)["artifact_claims"]["calibrations"]["entries"] == picked
     derived_id = presenter.add_logic("derive")
     projection = presenter.logic_editor_projection(derived_id)
     assert projection["source_bundle"] is True
@@ -1281,63 +1277,42 @@ def test_a_processor_adds_with_an_unresolved_source_and_no_modal(
     assert stable_signal_key(node_id, "counts") not in projection["source_options"]
 
 
-def test_an_occupancy_offers_a_calibration_per_frame_of_its_camera_source(presenter) -> None:
-    """The per-frame pickers count the frames the camera's draft says a
-    cycle has -- before anything is published -- and a frame's own path is
-    kept in the draft beside the shared one.  The rows ARE the cycle's
-    frames: a frame the cycle loses takes its path with it, a frame it
-    gains starts empty, and Start sees the same draft the editor shows."""
+def test_an_occupancys_frame_claims_survive_its_camera_changing_frame_count(presenter) -> None:
+    """The camera's draft says how many frames a cycle has -- before anything
+    is published -- and the claims are resolved against it without ever being
+    rewritten: Last follows the count, a frame number keeps its place, and a
+    number the cycle no longer carries is named, not deleted.  The same
+    claims are valid again once the count that suits them returns."""
 
     camera_id = presenter.add_logic("camera_measurement", values={"frames_per_cycle": 3})
     node_id = presenter.add_logic("occupancy")
-    assert presenter.view.logic_editors[node_id]["artifact_form_spec"].keys == ("calibration_path",)
+    assert presenter.view.logic_editors[node_id]["source_frames"] is None
     presenter.view.logic_draft_changed.emit(
         node_id, {"source_signal": stable_signal_key(camera_id, "frames")}
     )
-    keys = presenter.view.logic_editors[node_id]["artifact_form_spec"].keys
-    assert keys == (
-        "calibration_path", "calibration_path[1]", "calibration_path[2]", "calibration_path[3]",
-    ), keys
-    presenter.view.logic_draft_changed.emit(
-        node_id, {"artifact_inputs": {"calibration_path[3]": "readout.json"}}
+    assert presenter.view.logic_editors[node_id]["source_frames"] == ("0", "1", "2")
+    claims = (
+        {"path": "load.json", "frames": (2,)},
+        {"path": "readout.json", "frames": ("last",)},
+        {"path": "rest.json", "frames": ("rest",)},
     )
-    assert presenter.logic[node_id].draft.artifact_inputs == {
-        "calibration_path": "", "calibration_path[3]": "readout.json",
-    }
-    projection = presenter.logic_editor_projection(node_id)
-    # The form refuses any other key set than its own: every row has a value.
-    assert projection["artifact_values"] == {
-        "calibration_path": "", "calibration_path[1]": "", "calibration_path[2]": "",
-        "calibration_path[3]": "readout.json",
-    }
-    assert set(projection["artifact_values"]) == set(projection["artifact_form_spec"].keys)
-    # The camera drops to two frames: frame 3's row stays, because it names
-    # a path the operator has to be able to see and clear.
-    # The OPEN editor, not a fresh projection: the camera's edit has to
-    # reach the occupancy editor on screen, which reads the camera's draft.
-    # Frame 3 is gone, and its path with it -- not hidden behind a row that
-    # is no longer offered, where it would refuse the next Start.
+    presenter.view.logic_draft_changed.emit(node_id, {"artifact_inputs": {"calibrations": claims}})
+    editor = presenter.view.logic_editors[node_id]["artifact_claims"]["calibrations"]
+    assert editor["problems"] == ("frame 2 is read by both load.json (2) and readout.json (last)",)
     presenter.view.logic_draft_changed.emit(camera_id, {"values": {"frames_per_cycle": 2}})
-    editor = presenter.view.logic_editors[node_id]
-    assert editor["artifact_form_spec"].keys == (
-        "calibration_path", "calibration_path[1]", "calibration_path[2]",
-    ), editor["artifact_form_spec"].keys
-    assert presenter.logic[node_id].draft.artifact_inputs == {"calibration_path": ""}
-    presenter.view.logic_draft_changed.emit(camera_id, {"values": {"frames_per_cycle": 4}})
-    editor = presenter.view.logic_editors[node_id]
-    assert editor["artifact_form_spec"].keys == (
-        "calibration_path", "calibration_path[1]", "calibration_path[2]",
-        "calibration_path[3]", "calibration_path[4]",
-    ), editor["artifact_form_spec"].keys
-    assert editor["artifact_values"]["calibration_path[3]"] == ""
-    # A single-frame cycle offers no per-frame rows, so no per-frame path stands.
-    presenter.view.logic_draft_changed.emit(
-        node_id, {"artifact_inputs": {"calibration_path[2]": "readout.json"}}
+    editor = presenter.view.logic_editors[node_id]["artifact_claims"]["calibrations"]
+    assert editor["problems"] == ("load.json names frame 2, but the source carries 2 frames (0-1)",)
+    assert editor["reads"] == ((), (1,), (0,))
+    assert presenter.logic[node_id].draft.artifact_inputs == {"calibrations": claims}, (
+        "a frame count never edits the draft"
     )
-    presenter.view.logic_draft_changed.emit(camera_id, {"values": {"frames_per_cycle": 1}})
-    editor = presenter.view.logic_editors[node_id]
-    assert editor["artifact_form_spec"].keys == ("calibration_path",)
-    assert presenter.logic[node_id].draft.artifact_inputs == {"calibration_path": ""}
+    issues = presenter.logic_editor_projection(node_id)["issues"]
+    assert "load.json names frame 2, but the source carries 2 frames (0-1)" in issues
+    presenter.view.logic_draft_changed.emit(camera_id, {"values": {"frames_per_cycle": 4}})
+    editor = presenter.view.logic_editors[node_id]["artifact_claims"]["calibrations"]
+    assert editor["problems"] == ()
+    assert editor["reads"] == ((2,), (3,), (0, 1))
+    assert presenter.logic[node_id].draft.artifact_inputs == {"calibrations": claims}
 
 
 def test_a_producers_new_output_reaches_every_open_editors_sources(presenter) -> None:
@@ -1511,13 +1486,13 @@ def test_missing_explicit_artifact_path_fails_start_and_keeps_the_draft(
     node_id = presenter.add_logic(
         "occupancy",
         source_signal=camera.signal_key("frames"),
-        artifact_inputs={"calibration_path": str(missing)},
+        artifact_inputs={"calibrations": [{"path": str(missing), "frames": ["rest"]}]},
     )
 
     assert presenter.start_logic(node_id) is False
     assert presenter.logic[node_id].host is None
     assert presenter.logic[node_id].draft.artifact_inputs == {
-        "calibration_path": str(missing)
+        "calibrations": ({"path": str(missing), "frames": ("rest",)},)
     }
     assert "missing-calibration.json" in presenter.logic[node_id].draft_error
 

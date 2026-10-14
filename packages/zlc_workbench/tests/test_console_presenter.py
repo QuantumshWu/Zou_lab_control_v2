@@ -2819,7 +2819,7 @@ def test_committed_selection_outputs_enter_the_real_occupancy_input(
     assert presenter.update_logic_draft(
         consumer_id,
         source_signal=roi_signal,
-        artifact_inputs={"calibration_path": str(artifact)},
+        artifact_inputs={"calibrations": [{"path": str(artifact), "frames": ["rest"]}]},
     )
     assert presenter.start_logic(consumer_id)
     _settle_panel_hosts(
@@ -3536,7 +3536,7 @@ def test_a_board_can_be_written_down_and_put_back(presenter, session, tmp_path) 
     occupancy_id = presenter.add_logic(
         "occupancy",
         source_signal=f"@logic/{logic_id}/frames",
-        artifact_inputs={"calibration_path": str(tmp_path / "chosen.json")},
+        artifact_inputs={"calibrations": [{"path": str(tmp_path / "chosen.json"), "frames": ["rest"]}]},
     )
     assert presenter.logic[logic_id].host is None
 
@@ -3588,7 +3588,7 @@ def test_a_board_can_be_written_down_and_put_back(presenter, session, tmp_path) 
             "source_signal": f"@logic/{logic_id}/frames",
             "device_keys": {},
             "artifact_inputs": {
-                "calibration_path": str(tmp_path / "chosen.json")
+                "calibrations": [{"path": str(tmp_path / "chosen.json"), "frames": ["rest"]}]
             },
             "auto_preview": False,
         }
@@ -3638,7 +3638,7 @@ def test_a_board_can_be_written_down_and_put_back(presenter, session, tmp_path) 
     assert restored_logic.draft.values["exposure_seconds"] == 0.037
     assert restored_logic.draft.device_keys == {"camera": "camera"}
     assert presenter.logic[occupancy_id].draft.artifact_inputs == {
-        "calibration_path": str(tmp_path / "chosen.json")
+        "calibrations": ({"path": str(tmp_path / "chosen.json"), "frames": ("rest",)},)
     }
     assert restored_logic.auto_preview is True
     assert presenter.logic[occupancy_id].auto_preview is False
@@ -4046,7 +4046,7 @@ def test_a_loaded_board_reads_its_panels_derived_signals_by_their_fresh_ids(
     occupancy_id = presenter.add_logic(
         "occupancy",
         source_signal=roi,
-        artifact_inputs={"calibration_path": str(tmp_path / "chosen.json")},
+        artifact_inputs={"calibrations": [{"path": str(tmp_path / "chosen.json"), "frames": ["rest"]}]},
         open_editor=False,
     )
     document = presenter.layout()
@@ -4106,7 +4106,7 @@ def test_a_board_names_its_panels_and_a_load_respells_every_reference_to_them() 
                 "values": {"model_kind": "default"},
                 "source_signal": stable_signal_key("panel-9", "counts"),
                 "device_keys": {},
-                "artifact_inputs": {"calibration_path": "chosen.json"},
+                "artifact_inputs": {"calibrations": [{"path": "chosen.json", "frames": ["rest"]}]},
                 "auto_preview": True,
             }
         ],
@@ -4149,7 +4149,9 @@ def test_a_board_names_its_panels_and_a_load_respells_every_reference_to_them() 
     restored_logic = restored.logic[0]
     assert dict(restored_logic.draft.values) == restored_logic.descriptor.authoring_schema.draft_values()
     assert restored_logic.draft.device_keys == {}
-    assert restored_logic.draft.artifact_inputs == {"calibration_path": "chosen.json"}
+    assert restored_logic.draft.artifact_inputs == {
+        "calibrations": ({"path": "chosen.json", "frames": ("rest",)},)
+    }
     assert restored_logic.auto_preview is True
     saved["size"] = "1x1"
     with pytest.raises(LayoutError, match="unknown panel preset"):
@@ -4980,7 +4982,7 @@ def test_a_derive_publishes_the_counts_of_the_occupied_sites(
     occupancy_id = presenter.add_logic(
         "occupancy",
         node_id="occupancy",
-        artifact_inputs={"calibration_path": str(calibration_path)},
+        artifact_inputs={"calibrations": [{"path": str(calibration_path), "frames": ["rest"]}]},
         source_signal=camera_node.signal_key("frames"),
         open_editor=False,
     )
@@ -5082,7 +5084,7 @@ def test_a_facet_grid_panel_of_frames_carries_the_occupancy_overlay(
     occupancy_id = presenter.add_logic(
         "occupancy",
         node_id="occupancy",
-        artifact_inputs={"calibration_path": str(calibration_path)},
+        artifact_inputs={"calibrations": [{"path": str(calibration_path), "frames": ["rest"]}]},
         source_signal=frames_signal,
         open_editor=False,
     )
@@ -5109,7 +5111,7 @@ def test_a_facet_grid_panel_of_frames_carries_the_occupancy_overlay(
     other_id = presenter.add_logic(
         "occupancy",
         node_id="other-occupancy",
-        artifact_inputs={"calibration_path": str(calibration_path)},
+        artifact_inputs={"calibrations": [{"path": str(calibration_path), "frames": ["rest"]}]},
         source_signal=other_camera.signal_key("frames"),
         open_editor=False,
     )
@@ -5229,7 +5231,7 @@ def test_a_facet_grid_panel_of_frames_carries_the_occupancy_overlay(
     )
     live_occupancy = presenter.add_logic(
         "occupancy", node_id="live-occupancy",
-        artifact_inputs={"calibration_path": str(calibration_path)},
+        artifact_inputs={"calibrations": [{"path": str(calibration_path), "frames": ["rest"]}]},
         source_signal=frames_signal, open_editor=False,
     )
     assert presenter.start_logic(live_occupancy)
@@ -6293,7 +6295,7 @@ def test_a_following_processor_survives_its_camera_stop_and_restart(
     assert presenter.update_logic_draft(
         occupancy_id,
         source_signal=live_signal,
-        artifact_inputs={"calibration_path": str(artifact)},
+        artifact_inputs={"calibrations": [{"path": str(artifact), "frames": ["rest"]}]},
     )
 
     # The source does not exist yet: Start is accepted as an intent.

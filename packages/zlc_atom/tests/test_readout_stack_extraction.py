@@ -17,7 +17,7 @@ from zlc_atom.nodes.calibration import (
 )
 from zlc_atom.nodes.calibration.calibration import extract_psf_window
 from zlc_atom.nodes.camera.measurement import frames_snapshot
-from zlc_atom.nodes.occupancy.processor import OccupancyProcessor
+from zlc_atom.nodes.occupancy.processor import CalibrationReading, OccupancyProcessor
 
 
 def _reference_box(frame: np.ndarray, centers: np.ndarray, radius: int) -> np.ndarray:
@@ -139,7 +139,9 @@ def test_a_calibration_reads_a_stack_as_it_reads_each_frame_and_occupancy_uses_i
         (tuple(CameraFrameRecord(frame, k) for k, frame in enumerate(frames)),),
         producer="camera", generation="g", revision=1, value_unit="count",
     )
-    result = OccupancyProcessor(calibration, calibration_by_frame={3: strict}).process(cycle)
+    result = OccupancyProcessor((
+        CalibrationReading(calibration, ("rest",)), CalibrationReading(strict, (2,)),
+    )).process(cycle)
     counts = np.asarray(result.counts).reshape(6, 9)
     for index, frame in enumerate(frames):
         expected = (strict if index == 2 else calibration).signals(frame)

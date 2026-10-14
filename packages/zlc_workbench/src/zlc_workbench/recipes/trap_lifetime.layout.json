@@ -25,7 +25,7 @@
       "values": {"model_kind": "default"},
       "source_signal": "@logic/camera_measurement/frames",
       "device_keys": {},
-      "artifact_inputs": {"calibration_path": ""},
+      "artifact_inputs": {"calibrations": [{"path": "", "frames": ["rest"]}]},
       "auto_preview": false
     },
     {

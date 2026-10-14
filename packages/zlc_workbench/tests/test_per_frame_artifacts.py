@@ -1,4 +1,4 @@
-"""A per-frame artifact through finalization, build arguments, the form and a saved layout."""
+"""Frame-claims artifacts through finalization, build arguments, the form and a saved layout."""
 
 from __future__ import annotations
 
@@ -8,10 +8,8 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from zlc_atom.authoring import AuthoringSchema
-from zlc_atom.nodes import ArtifactInputSpec, LogicNodeDescriptor, NodeKind
+from zlc_atom.nodes import ArtifactInputSpec, FrameClaim
 from zlc_atom.nodes.calibration import (
-    CALIBRATION_ARTIFACT_CODEC,
     FrameContract,
     ReadoutModel,
     ReadoutModelKind,
@@ -21,7 +19,7 @@ from zlc_atom.nodes.calibration import (
 from zlc_atom.nodes.occupancy.logic_node import LOGIC_NODE as OCCUPANCY_NODE
 from zlc_runtime import SignalDataPlane
 from zlc_workbench.authoring_form import project_artifact_inputs
-from zlc_workbench.console_layout import LayoutDocument, LogicLayoutEntry, resolve_layout
+from zlc_workbench.console_layout import LayoutDocument, LayoutError, LogicLayoutEntry, resolve_layout
 from zlc_workbench.logic import LogicCatalog, LogicDraft, build_arguments, finalize_logic_draft
 
 
@@ -47,102 +45,91 @@ def _saved(workspace, name: str) -> Path:
     return path
 
 
-def test_finalization_decodes_each_file_once_and_builds_the_frame_mapping(workspace) -> None:
-    shared, strict = _saved(workspace, "shared.json"), _saved(workspace, "strict.json")
+def _finalize(workspace, plane, claims, **kwargs):
+    draft = LogicDraft({"model_kind": "default"}, "camera/frames", {}, {"calibrations": claims})
+    return finalize_logic_draft(
+        OCCUPANCY_NODE, draft,
+        installation=SimpleNamespace(devices={}), signal_plane=plane, workspace=workspace, **kwargs,
+    )
+
+
+def test_finalization_resolves_each_file_and_hands_the_claims_to_the_build(workspace) -> None:
+    load, readout = _saved(workspace, "load.json"), _saved(workspace, "readout.json")
     plane = SignalDataPlane()
     try:
-        draft = LogicDraft(
-            {"model_kind": "default"},
-            "camera/frames",
-            {},
-            {
-                "calibration_path": str(shared),
-                "calibration_path[2]": "strict.json",          # relative to the data folder
-                "calibration_path[3]": str(shared),            # the shared file again
-            },
-        )
-        finalization = finalize_logic_draft(
-            OCCUPANCY_NODE, draft,
-            installation=SimpleNamespace(devices={}), signal_plane=plane, workspace=workspace,
-        )
-        assert set(finalization.artifacts) == {
-            "calibration_path", "calibration_path[2]", "calibration_path[3]",
-        }
-        assert finalization.artifacts["calibration_path[3]"] is finalization.artifacts["calibration_path"], (
-            "one decode per file, however many frames name it"
-        )
-        assert finalization.artifact_paths["calibration_path[2]"] == str(strict.resolve())
+        finalization = _finalize(workspace, plane, (
+            {"path": str(load), "frames": [0]},
+            {"path": "readout.json", "frames": ["rest"]},     # relative to the data folder
+        ))
+        assert finalization.can_start, finalization.issues
+        claims = finalization.artifacts["calibrations"]
+        assert [claim.value.path for claim in claims] == [load.resolve(), readout.resolve()]
+        assert [claim.frames for claim in claims] == [(0,), ("rest",)]
         arguments = build_arguments(OCCUPANCY_NODE, signal_plane=plane, finalization=finalization)
-        assert arguments["calibration"] is finalization.artifacts["calibration_path"]
-        assert set(arguments["calibration_by_frame"]) == {2, 3}
-        assert arguments["calibration_by_frame"][2] is finalization.artifacts["calibration_path[2]"]
+        assert arguments["calibrations"] is claims
+        assert all(isinstance(claim, FrameClaim) for claim in claims)
+        # A file decoded once is taken from the last answer again.
+        again = _finalize(workspace, plane, (
+            {"path": str(load), "frames": [0]}, {"path": str(readout), "frames": ["rest"]},
+        ), previous=finalization)
+        assert again.artifacts["calibrations"][0].value is claims[0].value
     finally:
         plane.close()
 
 
-def test_a_frame_key_on_an_artifact_that_is_not_per_frame_is_refused(workspace) -> None:
-    plain = LogicNodeDescriptor(
-        "plain_consumer",
-        NodeKind.TASK,
-        AuthoringSchema(()),
-        description="Consume a single saved calibration artifact, not per-frame overrides.",
-        node_previews=(),
-        input_specs=(
-            ArtifactInputSpec(
-                "calibration_path", "Calibration artifact", CALIBRATION_ARTIFACT_CODEC,
-                argument_name="calibration",
-            ),
-        ),
-        build=lambda **arguments: arguments,
-    )
-    assert "calibration_by_frame" not in plain.build_argument_names
-    shared = _saved(workspace, "shared.json")
+def test_claims_are_refused_by_name_and_against_a_known_frame_count(workspace) -> None:
+    load, readout = _saved(workspace, "load.json"), _saved(workspace, "readout.json")
     plane = SignalDataPlane()
     try:
-        draft = LogicDraft({}, "", {}, {
-            "calibration_path": str(shared), "calibration_path[2]": str(shared),
-        })
-        finalization = finalize_logic_draft(
-            plain, draft,
-            installation=SimpleNamespace(devices={}), signal_plane=plane, workspace=workspace,
+        assert "occupancy needs calibrations: add one" in _finalize(workspace, plane, ()).issues
+        twice = _finalize(workspace, plane, (
+            {"path": str(load), "frames": ["rest"]}, {"path": str(load), "frames": [0]},
+        ))
+        assert "load.json is listed twice: give it every frame it reads in one row" in twice.issues
+        both = _finalize(workspace, plane, (
+            {"path": str(load), "frames": ["rest"]}, {"path": str(readout), "frames": ["rest"]},
+        ))
+        assert "'rest' is claimed by both load.json and readout.json" in both.issues
+        claims = ({"path": str(load), "frames": [2]}, {"path": str(readout), "frames": ["rest"]})
+        assert _finalize(workspace, plane, claims).can_start, "no count known: nothing to check yet"
+        assert _finalize(workspace, plane, claims, source_frames=2).issues == (
+            "load.json names frame 2, but the source carries 2 frames (0-1)",
         )
-        assert any("calibration_path[2]" in issue for issue in finalization.issues), finalization.issues
-        assert set(finalization.artifacts) == {"calibration_path"}
+        assert _finalize(workspace, plane, claims, source_frames=3).can_start
+        empty_row = _finalize(workspace, plane, ({"path": "", "frames": ["rest"]},))
+        assert "Calibrations row 1 has no file yet" in empty_row.issues
+        shape = _finalize(workspace, plane, "load.json")
+        assert any("frame claims must be a list" in issue for issue in shape.issues)
     finally:
         plane.close()
 
 
-def test_per_frame_pickers_follow_the_source_cycle() -> None:
+def test_the_path_form_leaves_frame_claims_to_their_editor() -> None:
     (spec,) = [s for s in OCCUPANCY_NODE.input_specs if isinstance(s, ArtifactInputSpec)]
-    assert spec.per_frame
-    three = project_artifact_inputs((spec,), base_dir="d", frames_per_cycle=3)
-    assert three.keys == (
-        "calibration_path", "calibration_path[1]", "calibration_path[2]", "calibration_path[3]",
-    )
-    assert [field.required for field in three.fields] == [True, False, False, False]
-    assert three.fields[0].label == "Calibration artifact (every frame)"
-    assert three.fields[2].label == "Calibration artifact · frame 2"
-    assert all(field.base_dir == "d" for field in three.fields)
-    # One frame, or none known yet: only the plain picker.
-    for frames in (0, 1):
-        assert project_artifact_inputs((spec,), base_dir="d", frames_per_cycle=frames).keys == (
-            "calibration_path",
-        )
-        assert project_artifact_inputs((spec,), base_dir="d", frames_per_cycle=frames).fields[0].label == (
-            "Calibration artifact"
-        )
+    assert spec.frame_claims
+    assert project_artifact_inputs((spec,), base_dir="d").keys == ()
 
 
-def test_a_saved_layout_keeps_each_frames_artifact() -> None:
+def test_a_saved_layout_keeps_the_claims_as_written() -> None:
+    claims = ({"path": "load.json", "frames": [0]}, {"path": "readout.json", "frames": ["last", "rest"]})
     entry = LogicLayoutEntry(
-        "occupancy", "occupancy", {"model_kind": "default"}, "", {},
-        {"calibration_path": "shared.json", "calibration_path[2]": "strict.json"},
+        "occupancy", "occupancy", {"model_kind": "default"}, "", {}, {"calibrations": claims},
     )
-    document = LayoutDocument.from_tree(LayoutDocument((), (entry,), ()).to_tree())
+    tree = LayoutDocument((), (entry,), ()).to_tree()
+    assert tree["logic"][0]["artifact_inputs"]["calibrations"][1]["frames"] == ["last", "rest"]
+    document = LayoutDocument.from_tree(tree)
     resolved = resolve_layout(
         document, catalog=LogicCatalog(), installation=SimpleNamespace(devices={}), panel_ids=(),
     )
     (binding,) = resolved.logic
-    assert binding.draft.artifact_inputs == {
-        "calibration_path": "shared.json", "calibration_path[2]": "strict.json",
-    }
+    assert binding.draft.artifact_inputs == {"calibrations": (
+        {"path": "load.json", "frames": (0,)}, {"path": "readout.json", "frames": ("last", "rest")},
+    )}
+    broken = LogicLayoutEntry(
+        "occupancy", "occupancy", {}, "", {}, {"calibrations": [{"path": "a.json", "frames": ["first"]}]},
+    )
+    with pytest.raises(LayoutError, match="not a frame"):
+        resolve_layout(
+            LayoutDocument((), (broken,), ()), catalog=LogicCatalog(),
+            installation=SimpleNamespace(devices={}), panel_ids=(),
+        )

@@ -230,19 +230,19 @@ def test_pair_matrix_selects_like_a_table_and_writes_the_draft() -> None:
     form = LOGIC_NODE.ui_contributions[0]()
     drafts = []
     form.draft_changed.connect(drafts.append)
-    schema = _occupied_snapshot(np.zeros((1, 4, 2), dtype=bool)).block.schema
+    frames = ("0", "1", "2", "3")
     values = FRAME_SURVIVAL_SCHEMA.draft_values()
 
     def project(**changes):
         values.update(changes)
-        form.update_projection({"form_values": dict(values), "source_schema": schema})
+        form.update_projection({"form_values": dict(values), "source_frames": frames})
         app.processEvents()
 
     def marked():
         return sorted((index.row(), index.column() + 1) for index in form.table.selectedIndexes())
 
     try:
-        form.update_projection({"form_values": dict(values), "source_schema": None})
+        form.update_projection({"form_values": dict(values), "source_frames": None})
         assert not form.table.isEnabled() and "Waiting" in form.note.text()
         project()
         assert marked() == list(_forward_pairs(4)) and "6 of 6" in form.summary.text()

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -63,6 +63,9 @@ class ArtifactCodec:
     file_filter: str
     suffixes: tuple[str, ...]
     decode: Callable[[Path], object]
+    #: One line saying what a decoded file is, for whoever picks among
+    #: several of them ("20 ms · 35 sites").
+    describe: Callable[[object], str] | None = None
 
     def __post_init__(self) -> None:
         contract_id = str(self.contract_id).strip()
@@ -78,6 +81,8 @@ class ArtifactCodec:
             raise ValueError("artifact codec suffixes must be unique")
         if not callable(self.decode):
             raise TypeError("artifact codec decode must be callable")
+        if self.describe is not None and not callable(self.describe):
+            raise TypeError("artifact codec describe must be callable")
         object.__setattr__(self, "contract_id", contract_id)
         object.__setattr__(self, "file_filter", file_filter)
         object.__setattr__(self, "suffixes", suffixes)
@@ -102,13 +107,13 @@ class ArtifactInputSpec:
     codec: ArtifactCodec
     required: bool = True
     argument_name: str = ""
-    #: The run may take one of these PER FRAME of its Dataset input's cycle,
-    #: beside the plain path every frame falls back to: an occupancy reads a
-    #: load frame and a readout frame with calibrations trained on each.  The
-    #: draft keys a frame's own path ``"<name>[<frame>]"`` (frames counted
-    #: from 1, as the operator sees them) and the build receives them as
-    #: ``<argument_name>_by_frame``, a mapping from that frame number.
-    per_frame: bool = False
+    #: The run takes SEVERAL of these, each claiming frames of its Dataset
+    #: input's cycle (:mod:`.frames`): an occupancy reads a load frame and a
+    #: readout frame with calibrations trained on each.  The draft value is
+    #: then a list of ``{"path": ..., "frames": [...]}`` entries
+    #: (:func:`frame_claim_entries`) and the build receives a tuple of
+    #: :class:`~.frames.FrameClaim` whose values are the resolved artifacts.
+    frame_claims: bool = False
 
     def __post_init__(self) -> None:
         name = str(self.name).strip()
@@ -123,42 +128,33 @@ class ArtifactInputSpec:
         object.__setattr__(self, "name", name)
         object.__setattr__(self, "label", label)
         object.__setattr__(self, "argument_name", argument_name)
-        object.__setattr__(self, "per_frame", bool(self.per_frame))
+        object.__setattr__(self, "frame_claims", bool(self.frame_claims))
 
     @property
     def contract_id(self) -> str:
         return self.codec.contract_id
 
-    @property
-    def frame_argument_name(self) -> str:
-        """The build argument carrying the per-frame artifacts, by frame number."""
 
-        return f"{self.argument_name}_by_frame"
+def frame_claim_entries(raw: object) -> tuple[dict[str, object], ...]:
+    """A frame-claims draft value in its one shape: ``({"path", "frames"}, ...)``.
 
-
-def artifact_input_key(name: str, frame: int) -> str:
-    """The draft key of one frame's artifact: ``"<name>[<frame>]"``, frames from 1."""
-
-    number = int(frame)
-    if number < 1:
-        raise ValueError("artifact frames are counted from 1")
-    return f"{str(name).strip()}[{number}]"
-
-
-def split_artifact_input_key(key: str) -> tuple[str, int | None]:
-    """A draft key back into ``(artifact name, frame number)``; a plain key has no frame.
-
-    A bracketed key that is not a frame number from 1 is refused: a key
-    either is an artifact's own name or names one of its frames.
+    Paths are kept as written (an empty one is a row still to be given its
+    file); frames are put in their canonical order.  Whether the claims fit
+    together, and fit a cycle, is :mod:`.frames`' question, not this one.
     """
 
-    text = str(key).strip()
-    if not text.endswith("]") or "[" not in text:
-        return text, None
-    name, _bracket, rest = text[:-1].rpartition("[")
-    if not name or not rest.isdigit() or int(rest) < 1:
-        raise ValueError(f"artifact input key {text!r} does not name a frame from 1")
-    return name, int(rest)
+    from .frames import canonical_frames
+
+    if isinstance(raw, (str, bytes, Mapping)) or not isinstance(raw, Sequence):
+        raise ValueError("frame claims must be a list of {path, frames} entries")
+    entries = []
+    for item in raw:
+        if not isinstance(item, Mapping) or set(item) != {"path", "frames"}:
+            raise ValueError("each frame claim needs exactly path and frames")
+        if not isinstance(item["path"], str):
+            raise ValueError("a frame claim's path must be text")
+        entries.append({"path": item["path"].strip(), "frames": canonical_frames(item["frames"])})
+    return tuple(entries)
 
 
 @dataclass(frozen=True)
@@ -658,11 +654,6 @@ class LogicNodeDescriptor:
                 value.argument_name
                 for value in inputs
                 if isinstance(value, ArtifactInputSpec)
-            ),
-            *(
-                value.frame_argument_name
-                for value in inputs
-                if isinstance(value, ArtifactInputSpec) and value.per_frame
             ),
             *(value.argument_name for value in workspace_resources),
             *(("source_signal",) if dataset_inputs else ()),

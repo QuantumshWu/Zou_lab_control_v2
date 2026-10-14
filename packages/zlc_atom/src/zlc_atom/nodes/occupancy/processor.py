@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
@@ -30,7 +30,8 @@ from zlc_plot import (
     image_point_overlay_geometry,
 )
 
-from zlc_atom.nodes.calibration import ReadoutModel, ReadoutModelKind, TrapCalibration
+from zlc_atom.nodes._framework.frames import REST, assign_frames, canonical_frames, check_claims
+from zlc_atom.nodes.calibration import ReadoutModelKind, TrapCalibration
 from zlc_atom.nodes.calibration.calibration import classify_threshold, reads_photoelectrons
 
 
@@ -84,75 +85,126 @@ class OccupancyResult:
         return self.artifacts["frame_judged"].block.values
 
 
+@dataclass(frozen=True)
+class CalibrationReading:
+    """One calibration and the frames of every cycle it reads.
+
+    ``frames`` are claims (:mod:`zlc_atom.nodes._framework.frames`): frame
+    numbers from 0, ``"last"`` and ``"rest"``.  ``path`` is the file it was
+    read from, for the run record and for naming it in a refusal.
+    """
+
+    calibration: TrapCalibration
+    frames: tuple[int | str, ...] = (REST,)
+    path: Path | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "frames", canonical_frames(self.frames))
+        if self.path is not None:
+            object.__setattr__(self, "path", Path(self.path).expanduser().resolve())
+
+
 class OccupancyProcessor:
     """Evaluate the calibrated readout once per camera frame.
 
-    Every frame of a cycle reads the SAME sites; a frame may read them with
-    a calibration of its own -- a load frame and a readout frame taken under
-    different exposures, each with the thresholds and kernels trained on
-    frames like it -- and every frame not given one reads the shared one.
-    Frames are numbered from 1, the way the operator sees them.
+    Every frame of a cycle reads the SAME sites, with the calibration that
+    claims it: a load frame and a readout frame taken under different
+    exposures are each read with the thresholds and kernels trained on frames
+    like them.  Which calibration reads which frame is resolved against the
+    frames that actually arrive, so "last" and "rest" follow a cycle that
+    gains or loses a frame, and a claim the cycle cannot honour refuses the
+    run by name.  One calibration on its own reads every frame.
     """
 
     def __init__(
         self,
-        calibration: TrapCalibration,
+        calibrations: TrapCalibration | Sequence[CalibrationReading],
         *,
-        calibration_by_frame: Mapping[int, TrapCalibration] | None = None,
-        calibration_path: str | Path | None = None,
-        calibration_paths_by_frame: Mapping[int, str | Path] | None = None,
         source_signal: str | None = None,
         model_kind: ReadoutModelKind | None = None,
     ) -> None:
-        _require_calibration(calibration, "calibration")
-        self.calibration = calibration
-        #: The model kind every frame reads with, resolved once.
-        self._model_kind = calibration.select_model(model_kind).kind
-        by_frame: dict[int, TrapCalibration] = {}
-        for frame, candidate in dict(calibration_by_frame or {}).items():
-            number = int(frame)
-            if number < 1:
-                raise ValueError("calibration frames are counted from 1")
-            _require_calibration(candidate, f"frame {number} calibration")
-            if tuple(candidate.site_map.site_ids) != tuple(calibration.site_map.site_ids):
-                raise ValueError(
-                    f"frame {number}'s calibration names different sites "
-                    f"({candidate.n_sites}) from the shared one ({calibration.n_sites}): "
-                    "occupancy reads one set of sites in every frame"
-                )
-            try:
-                candidate.select_model(self._model_kind)
-            except KeyError:
-                raise ValueError(
-                    f"frame {number}'s calibration has no {self._model_kind.value} readout model"
-                ) from None
-            by_frame[number] = candidate
-        self.calibration_by_frame: Mapping[int, TrapCalibration] = MappingProxyType(by_frame)
-        #: Every calibration as placed against the crop the RUN is taking,
-        #: once a run record says what that crop is; key 0 is the shared one.
-        #: Until then each is read on the crop it was measured on.
-        self._placed: dict[int, TrapCalibration] = {0: calibration, **by_frame}
-        self.calibration_path = (
-            None
-            if calibration_path is None
-            else Path(calibration_path).expanduser().resolve()
+        readings = (
+            (CalibrationReading(calibrations),)
+            if isinstance(calibrations, TrapCalibration)
+            else tuple(calibrations)
         )
-        self.calibration_paths_by_frame: Mapping[int, Path] = MappingProxyType({
-            int(frame): Path(path).expanduser().resolve()
-            for frame, path in dict(calibration_paths_by_frame or {}).items()
-        })
+        if not readings:
+            raise ValueError("occupancy needs at least one calibration")
+        if any(not isinstance(reading, CalibrationReading) for reading in readings):
+            raise TypeError("occupancy calibrations must be CalibrationReading")
+        self.readings = readings
+        #: How a refusal names each calibration: its file, when it has one.
+        self._names = tuple(
+            reading.path.name if reading.path is not None
+            else "the calibration" if len(readings) == 1
+            else f"calibration {index + 1}"
+            for index, reading in enumerate(readings)
+        )
+        paths = [reading.path for reading in readings if reading.path is not None]
+        repeated = sorted({path.name for path in paths if paths.count(path) > 1})
+        if repeated:
+            raise ValueError(f"{repeated[0]} is listed twice: give it every frame it reads in one row")
+        check_claims(tuple(reading.frames for reading in readings), self._names)
+        first = readings[0].calibration
+        for name, reading in zip(self._names, readings):
+            _require_calibration(reading.calibration, name)
+            if tuple(reading.calibration.site_map.site_ids) != tuple(first.site_map.site_ids):
+                raise ValueError(
+                    f"{name} names different sites ({reading.calibration.n_sites}) from "
+                    f"{self._names[0]} ({first.n_sites}): occupancy reads one set of "
+                    "sites in every frame"
+                )
+        #: The model kind every frame reads with, resolved once.
+        if model_kind is None:
+            defaults = {
+                name: reading.calibration.default_model_kind
+                for name, reading in zip(self._names, readings)
+            }
+            if len(set(defaults.values())) > 1:
+                raise ValueError(
+                    "these calibrations default to different readout models ("
+                    + ", ".join(f"{name}: {kind.value}" for name, kind in defaults.items())
+                    + "); choose one Readout model for all of them"
+                )
+            self._model_kind = next(iter(defaults.values()))
+        else:
+            for name, reading in zip(self._names, readings):
+                try:
+                    reading.calibration.select_model(model_kind)
+                except KeyError:
+                    raise ValueError(
+                        f"{name} has no {model_kind.value} readout model"
+                    ) from None
+            self._model_kind = first.select_model(model_kind).kind
+        #: Every calibration as placed against the crop the RUN is taking,
+        #: once the frames say what that crop is; until then each is read on
+        #: the crop it was measured on.
+        self.placed: tuple[TrapCalibration, ...] = tuple(
+            reading.calibration for reading in readings
+        )
+        #: Which calibration reads each frame, per frame count seen.
+        self._entries: dict[int, tuple[int, ...]] = {}
         self.source_signal = None if source_signal is None else str(source_signal).strip()
 
-    def readout_for(self, frame: int) -> TrapCalibration:
-        """The calibration frame ``frame`` (from 1) reads with; the shared one when it names none."""
-
-        return self._placed.get(frame, self._placed[0])
-
     @property
-    def model(self) -> ReadoutModel:
-        """The shared calibration's model of the kind every frame reads with."""
+    def model_kind(self) -> ReadoutModelKind:
+        """The readout model every frame reads with."""
 
-        return self.readout.select_model(self._model_kind)
+        return self._model_kind
+
+    def entries_for(self, count: int) -> tuple[int, ...]:
+        """Which calibration (by index) reads each frame of a ``count``-frame cycle."""
+
+        entries = self._entries.get(count)
+        if entries is None:
+            entries = assign_frames(
+                tuple(reading.frames for reading in self.readings),
+                count,
+                self._names,
+                what="calibration",
+            )
+            self._entries[count] = entries
+        return entries
 
     def _validate_images(self, snapshot: OwnedSnapshot) -> None:
         """Validate image cells; Repeat/Point axes pass through unchanged."""
@@ -164,18 +216,13 @@ class OccupancyProcessor:
                 "occupancy frames must declare exactly SPATIAL_Y, SPATIAL_X cell axes"
             )
         observed = tuple(int(axis.size) for axis in axes)
-        expected = self.readout.frame_contract.image_shape
-        if observed != expected:
-            raise ValueError(
-                f"frame shape {observed} differs from the crop this readout "
-                f"is placed against {expected}"
-            )
-
-    @property
-    def readout(self) -> TrapCalibration:
-        """The shared calibration as it applies to the frames actually arriving."""
-
-        return self._placed[0]
+        for name, placed in zip(self._names, self.placed):
+            expected = placed.frame_contract.image_shape
+            if observed != expected:
+                raise ValueError(
+                    f"frame shape {observed} differs from the crop {name} "
+                    f"is placed against {expected}"
+                )
 
     def _place_against_the_frames(self, source: SignalValue) -> None:
         """Place every calibration on the crop these frames cover, in their unit.
@@ -191,7 +238,7 @@ class OccupancyProcessor:
         thing the frames cannot, the shape of the whole sensor.
         """
 
-        self._placed = {0: self.calibration, **self.calibration_by_frame}
+        self.placed = tuple(reading.calibration for reading in self.readings)
         schema = source.snapshot.block.schema
         self._refuse_a_different_unit(schema.value_schema.value_unit)
         snapshots = source.run_record.get("device_snapshots")
@@ -199,12 +246,11 @@ class OccupancyProcessor:
         sensor = camera.get("sensor_shape_yx") if isinstance(camera, Mapping) else None
         if sensor is not None:
             sensor = tuple(int(item) for item in sensor)
-            for frame, placed in self._placed.items():
+            for name, placed in zip(self._names, self.placed):
                 expected = placed.frame_contract.sensor_shape
                 if expected is not None and sensor != expected:
-                    which = "calibration" if frame == 0 else f"frame {frame}'s calibration"
                     raise ValueError(
-                        f"camera sensor shape {sensor} differs from {which} {expected}"
+                        f"camera sensor shape {sensor} differs from {name}'s {expected}"
                     )
 
         # A run may crop the sensor differently from the calibration: where a
@@ -224,7 +270,7 @@ class OccupancyProcessor:
             int(axis.coordinate_at(1)) - int(axis.coordinate_at(0))
             if axis.size > 1
             # One pixel has no step to say otherwise.
-            else int(self.calibration.frame_contract.binning_yx[index])
+            else int(self.placed[0].frame_contract.binning_yx[index])
             for index, axis in enumerate(axes)
         )
         image_shape = tuple(int(axis.size) for axis in axes)
@@ -233,10 +279,9 @@ class OccupancyProcessor:
             image_shape[1] * binning[1], image_shape[0] * binning[0],
         )
         # Every calibration is read against the same crop.
-        self._placed = {
-            frame: placed.rebased(roi, binning, image_shape)
-            for frame, placed in self._placed.items()
-        }
+        self.placed = tuple(
+            placed.rebased(roi, binning, image_shape) for placed in self.placed
+        )
 
     def _refuse_a_different_unit(self, value_unit: str | None) -> None:
         """A threshold is a number of somethings; the somethings must match.
@@ -252,14 +297,13 @@ class OccupancyProcessor:
 
         got = value_unit in (None, "1")
         names = {True: "photoelectrons", False: "counts"}
-        # Every calibration a frame is read with, not only the shared one: a
-        # frame given its own is classified by ITS thresholds.
-        for frame, calibration in ((0, self.calibration), *self.calibration_by_frame.items()):
-            wanted = reads_photoelectrons(calibration)
+        # Every calibration a frame is read with: each frame is classified by
+        # the thresholds of the one that claims it.
+        for name, reading in zip(self._names, self.readings):
+            wanted = reads_photoelectrons(reading.calibration)
             if wanted is not None and wanted != got:
-                which = "the calibration" if frame == 0 else f"frame {frame}'s calibration"
                 raise ValueError(
-                    f"these frames are in {names[got]} and {which} was "
+                    f"these frames are in {names[got]} and {name} was "
                     f"trained in {names[wanted]}; its thresholds do not apply"
                 )
 
@@ -271,7 +315,8 @@ class OccupancyProcessor:
         self,
         source: DatasetSchema,
     ) -> dict[str, DatasetSchema]:
-        site_axis = self.readout.site_map.site_axis
+        # Every calibration names the same sites, so any one names the axis.
+        site_axis = self.placed[0].site_map.site_axis
 
         site_domain = DomainSpec((site_axis.size,), (site_axis,))
 
@@ -322,12 +367,14 @@ class OccupancyProcessor:
         self._validate_images(frames)
         images = np.asarray(frames.block.values)
         repeats, points = images.shape[:2]
-        n_sites = self.readout.n_sites
+        n_sites = self.placed[0].n_sites
         flat = images.reshape((repeats * points, *images.shape[2:]))
-        # Which frame of its cycle each cell is.  The Point axis with the
-        # readout-event role counts a cycle's frames, whatever else the
-        # Point domain carries beside it (a scan's own axes, say).
-        frame_of_cell = self._frame_numbers(frames.block.schema, repeats, points)
+        # Which frame of its cycle each cell is, and so which calibration
+        # reads it.  The Point axis with the readout-event role counts a
+        # cycle's frames, whatever else the Point domain carries beside it
+        # (a scan's own axes, say).
+        frame_of_cell, count = self._frame_positions(frames.block.schema, repeats, points)
+        entry_of_cell = np.asarray(self.entries_for(count))[frame_of_cell]
         # Judged on the axes validity may vary on -- a whole frame, unless the
         # source names components -- not broadcast over every pixel first.
         judged = dataset_validity_storage(frames.block.validity, frames.block.schema)
@@ -346,12 +393,9 @@ class OccupancyProcessor:
             # One read per calibration over every cell it reads, not one
             # per cell: a 42-frame cycle is 42 windows gathered at once.
             valid_cells = np.flatnonzero(cell_valid)
-            own_frames = tuple(self.calibration_by_frame)
-            frame_of_valid = frame_of_cell[valid_cells]
-            for frame, readout in self._placed.items():
-                selected = valid_cells[
-                    ~np.isin(frame_of_valid, own_frames) if frame == 0 else frame_of_valid == frame
-                ]
+            entry_of_valid = entry_of_cell[valid_cells]
+            for entry, readout in enumerate(self.placed):
+                selected = valid_cells[entry_of_valid == entry]
                 if selected.size:
                     # The readout gathers a few pixels round each site; the
                     # whole stack is handed over as it is when this
@@ -363,7 +407,7 @@ class OccupancyProcessor:
                     )
         # Every frame judges its sites by the thresholds and the usable set
         # of the calibration IT reads with: one row of each per cell.
-        site_usable, thresholds = self._verdict_tables(frame_of_cell)
+        site_usable, thresholds = self._verdict_tables(entry_of_cell)
         # A verdict needs a number to read.  Where the readout produced none
         # -- a frame with NaN in the box, a sum beyond single precision --
         # there is no count and no verdict, and the site is INVALID for this
@@ -388,55 +432,43 @@ class OccupancyProcessor:
         }
         return OccupancyResult(artifacts)
 
-    def _frame_numbers(self, schema: DatasetSchema, repeats: int, points: int) -> np.ndarray:
-        """The frame number (from 1) of every cell of the flattened event.
-
-        Zero everywhere when the source has no frame axis: then only the
-        shared calibration applies.
-        """
-
-        axes = schema.point_domain.axes
-        position = next(
-            (index for index, axis in enumerate(axes) if axis.role == READOUT_EVENT),
+    @staticmethod
+    def _frame_axis(schema: DatasetSchema):
+        return next(
+            (axis for axis in schema.point_domain.axes if axis.role == READOUT_EVENT),
             None,
         )
-        if position is None:
-            if self.calibration_by_frame:
-                raise ValueError(
-                    "these frames have no frame axis to read per-frame calibrations against"
-                )
-            return np.zeros(repeats * points, dtype=int)
-        frames = int(axes[position].size)
-        beyond = sorted(frame for frame in self.calibration_by_frame if frame > frames)
-        if beyond:
-            raise ValueError(
-                f"frame {beyond[0]} has its own calibration but a cycle has only "
-                f"{frames} frame(s)"
-            )
+
+    def _frame_positions(
+        self, schema: DatasetSchema, repeats: int, points: int
+    ) -> tuple[np.ndarray, int]:
+        """The frame (from 0) of every cell of the flattened event, and the cycle's frame count.
+
+        A source without a frame axis is one frame per cycle, frame 0.
+        """
+
+        axis = self._frame_axis(schema)
+        if axis is None:
+            return np.zeros(repeats * points, dtype=int), 1
         # Read off the domain's own codes: a Point domain is a MAPPED one, not
         # a dense grid in declaration order.  A scan declares the frame axis
         # first and lays it innermost, and names a repeated value once, so
-        # unravelling the axis sizes numbered a scan's frames 1,1,2,2,3,3 --
+        # unravelling the axis sizes numbered a scan's frames 0,0,1,1,2,2 --
         # or ran out of bounds.
-        codes = np.asarray(schema.point_domain.codes(axes[position].axis_id))
-        return np.tile(codes, repeats) + 1
+        codes = np.asarray(schema.point_domain.codes(axis.axis_id))
+        return np.tile(codes, repeats), int(axis.size)
 
-    def _verdict_tables(self, frame_of_cell: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """Per cell: the usable sites and the thresholds of the calibration its frame reads with."""
+    def _verdict_tables(self, entry_of_cell: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Per cell: the usable sites and the thresholds of the calibration reading it."""
 
-        frames = (0, *self.calibration_by_frame)
         usable, thresholds = [], []
-        for frame in frames:
-            readout = self.readout_for(frame)
+        for readout in self.placed:
             model = readout.select_model(self._model_kind)
             usable.append(
                 readout.site_map.valid_sites & model.usable_sites & np.isfinite(model.thresholds)
             )
             thresholds.append(np.asarray(model.thresholds, dtype=float))
-        row = np.zeros(frame_of_cell.shape[0], dtype=int)
-        for position, frame in enumerate(frames[1:], start=1):
-            row[frame_of_cell == frame] = position
-        return np.stack(usable)[row], np.stack(thresholds)[row]
+        return np.stack(usable)[entry_of_cell], np.stack(thresholds)[entry_of_cell]
 
     def _live_outputs(
         self,
@@ -484,31 +516,35 @@ class OccupancyProcessor:
 
     def describe_run(self, inputs: Mapping[str, SignalValue]) -> dict[str, object]:
         source = next(iter(inputs.values()))
+        axis = self._frame_axis(source.canonical_schema or source.snapshot.block.schema)
+        entries = self.entries_for(1 if axis is None else int(axis.size))
+        # The overlay draws the sites where the calibration reading the
+        # first frame places them.
+        overlay = self.placed[entries[0]].site_map
         return {
             IMAGE_POINT_OVERLAY_GEOMETRY_RECORD: image_point_overlay_geometry(
                 source.snapshot,
-                self.readout.site_map.centers_xy,
-                self.readout.site_map.site_ids,
-                status_axis=self.readout.site_map.site_axis,
-                labels=tuple(str(index) for index in range(1, self.readout.site_map.n_sites + 1)),
+                overlay.centers_xy,
+                overlay.site_ids,
+                status_axis=overlay.site_axis,
+                labels=tuple(str(index) for index in range(1, overlay.n_sites + 1)),
                 coordinates_are_indices=True,
             ),
             "parameters": {
                 "frames_signal": self.source_signal or source.name,
-                "calibration_path": None if self.calibration_path is None else str(self.calibration_path),
-                # Only when a frame read with its own: the record says what
-                # the run used, and a run without one is recorded as before.
-                **(
+                # What was asked for beside what it came to: the claims
+                # follow the frame count, so the record says both.
+                "calibrations": [
                     {
-                        "calibration_paths_by_frame": {
-                            str(frame): str(path)
-                            for frame, path in sorted(self.calibration_paths_by_frame.items())
-                        }
+                        "path": None if reading.path is None else str(reading.path),
+                        "frames": list(reading.frames),
+                        "read_frames": [
+                            frame for frame, entry in enumerate(entries) if entry == index
+                        ],
                     }
-                    if self.calibration_paths_by_frame
-                    else {}
-                ),
-                "model_kind": self.model.kind.value,
+                    for index, reading in enumerate(self.readings)
+                ],
+                "model_kind": self._model_kind.value,
             },
         }
 
@@ -532,6 +568,7 @@ class OccupancyProcessor:
 
 __all__ = [
     "OCCUPANCY_OUTPUTS",
+    "CalibrationReading",
     "OccupancyProcessor",
     "OccupancyResult",
 ]

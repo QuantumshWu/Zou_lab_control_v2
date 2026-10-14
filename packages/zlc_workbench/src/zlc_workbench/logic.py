@@ -52,7 +52,9 @@ class LogicDraft:
     values: dict[str, Any] = field(default_factory=dict)
     source_signal: str = ""
     device_keys: dict[str, str] = field(default_factory=dict)
-    artifact_inputs: dict[str, str] = field(default_factory=dict)
+    #: A path per artifact input; a frame-claims input holds its list of
+    #: ``{"path", "frames"}`` entries instead.
+    artifact_inputs: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -63,7 +65,9 @@ class LogicDraftFinalization:
     source_signal: str
     device_keys: Mapping[str, str]
     devices: Mapping[str, object]
-    artifact_paths: Mapping[str, str]
+    #: The resolved artifact per input.  A frame-claims input's is a tuple of
+    #: ``FrameClaim``, one per row, whose value is None where the row's file
+    #: did not resolve -- and then an issue says why.
     artifacts: Mapping[str, object]
     resources: Mapping[str, object]
     #: ``{field name: why not}`` for settings this draft's bound devices
@@ -89,7 +93,6 @@ class LogicDraftFinalization:
             "values",
             "device_keys",
             "devices",
-            "artifact_paths",
             "artifacts",
             "resources",
             "field_availability",
@@ -196,7 +199,14 @@ def task_input_summary(
     artifacts = {
         spec.name: {
             "contract_id": str(spec.contract_id),
-            "path": str(finalization.artifacts[spec.name].path),
+            **(
+                {"claims": [
+                    {"path": str(claim.value.path), "frames": list(claim.frames)}
+                    for claim in finalization.artifacts[spec.name]
+                ]}
+                if spec.frame_claims
+                else {"path": str(finalization.artifacts[spec.name].path)}
+            ),
         }
         for spec in artifact_input_specs(descriptor)
         if spec.name in finalization.artifacts
@@ -320,6 +330,7 @@ def finalize_logic_draft(
     source_options: Sequence[str] = (),
     acquisition_options: Sequence[str] = (),
     previous: LogicDraftFinalization | None = None,
+    source_frames: int | None = None,
 ) -> LogicDraftFinalization:
     """Resolve every Start admission fact without building or acquiring a run.
 
@@ -329,9 +340,12 @@ def finalize_logic_draft(
     none; a keystroke in an unrelated field re-decoded an SLM-sized context
     and every calibration the row names, and quietly picked up whatever had
     changed on disk.
+
+    ``source_frames`` is how many frames a cycle of the source carries, when
+    that is known: frame claims are then checked against it as well.
     """
 
-    from zlc_atom.nodes import ResolvedArtifact, split_artifact_input_key
+    from zlc_atom.nodes import ResolvedArtifact
 
     if not isinstance(draft, LogicDraft):
         raise TypeError("finalize_logic_draft needs LogicDraft")
@@ -484,87 +498,130 @@ def finalize_logic_draft(
 
     offered_artifacts = dict(draft.artifact_inputs)
     artifact_specs = artifact_input_specs(descriptor)
-    specs_by_name = {spec.name: spec for spec in artifact_specs}
-    # A per-frame artifact is offered under "<name>[<frame>]" beside its
-    # plain path; anything else offered is a key this node did not declare.
-    frame_keys: dict[str, list[tuple[int, str]]] = {spec.name: [] for spec in artifact_specs}
-    unknown_artifacts: list[str] = []
-    for key in offered_artifacts:
-        try:
-            name, frame = split_artifact_input_key(key)
-        except ValueError:
-            unknown_artifacts.append(str(key))
-            continue
-        spec = specs_by_name.get(name)
-        if spec is None or (frame is not None and not spec.per_frame):
-            unknown_artifacts.append(str(key))
-        elif frame is not None:
-            frame_keys[name].append((frame, key))
+    unknown_artifacts = sorted(
+        str(key) for key in offered_artifacts
+        if key not in {spec.name for spec in artifact_specs}
+    )
     if unknown_artifacts:
         issues.append(
-            f"{descriptor.api_name} has no artifact inputs "
-            f"{sorted(unknown_artifacts)!r}"
+            f"{descriptor.api_name} has no artifact inputs {unknown_artifacts!r}"
         )
-    artifact_paths: dict[str, str] = {}
-    artifacts: dict[str, ResolvedArtifact] = {}
+    artifacts: dict[str, object] = {}
     data_root = Path(getattr(workspace, "data", Path.cwd())).resolve()
-    # One decode per file AND contract: several frames naming the same
-    # calibration read it once, and the processor then holds one object for
-    # all of them; the same path offered to an input of another contract is
-    # decoded (and suffix-checked) by that contract's own codec.
-    decoded: dict[tuple[str, Path], ResolvedArtifact] = (
-        {}
-        if previous is None
-        else {
-            (item.contract_id, Path(item.path)): item
-            for item in previous.artifacts.values()
-        }
-    )
+    # One decode per file AND contract: a file the last answer decoded is
+    # taken from it again, several rows naming one file read it once, and
+    # the same path offered to an input of another contract is decoded (and
+    # suffix-checked) by that contract's own codec.
+    decoded: dict[tuple[str, Path], ResolvedArtifact] = {}
+    for held in () if previous is None else previous.artifacts.values():
+        for item in (claim.value for claim in held) if isinstance(held, tuple) else (held,):
+            if item is not None:
+                decoded[(item.contract_id, Path(item.path))] = item
+
+    def resolve(spec: Any, text: str) -> ResolvedArtifact | None:
+        selected_path = Path(text).expanduser()
+        if not selected_path.is_absolute():
+            selected_path = data_root / selected_path
+        selected_path = selected_path.resolve()
+        cache_key = (spec.codec.contract_id, selected_path)
+        resolved = decoded.get(cache_key)
+        if resolved is None:
+            try:
+                resolved = spec.codec.resolve(selected_path)
+            except Exception as error:
+                issues.append(f"{spec.contract_id} artifact “{text}” is invalid: {error}")
+                return None
+            decoded[cache_key] = resolved
+        return resolved
+
     for spec in artifact_specs:
-        for frame, key in ((None, spec.name), *sorted(frame_keys[spec.name])):
-            raw = offered_artifacts.get(key, "")
-            if not isinstance(raw, str):
-                issues.append(f"artifact input {key!r} must be a path string")
-                continue
-            text = raw.strip()
-            if not text:
-                # Only the plain path can be owed: a frame that names none
-                # reads the plain one.
-                if frame is None and spec.required:
-                    issues.append(
-                        f"{descriptor.api_name} needs artifact input {spec.name}"
-                    )
-                continue
-            selected_path = Path(text).expanduser()
-            if not selected_path.is_absolute():
-                selected_path = data_root / selected_path
-            selected_path = selected_path.resolve()
-            cache_key = (spec.codec.contract_id, selected_path)
-            resolved = decoded.get(cache_key)
-            if resolved is None:
-                try:
-                    resolved = spec.codec.resolve(selected_path)
-                except Exception as error:
-                    issues.append(
-                        f"{spec.contract_id} artifact {text!r} is invalid: {error}"
-                    )
-                    continue
-                decoded[cache_key] = resolved
-            artifact_paths[key] = str(resolved.path)
-            artifacts[key] = resolved
+        if spec.frame_claims:
+            claims = _resolve_frame_claims(
+                descriptor, spec, offered_artifacts.get(spec.name, ()),
+                resolve, source_frames, issues,
+            )
+            if claims is not None:
+                artifacts[spec.name] = claims
+            continue
+        raw = offered_artifacts.get(spec.name, "")
+        if not isinstance(raw, str):
+            issues.append(f"artifact input {spec.name!r} must be a path string")
+            continue
+        text = raw.strip()
+        if not text:
+            if spec.required:
+                issues.append(f"{descriptor.api_name} needs artifact input {spec.name}")
+            continue
+        resolved = resolve(spec, text)
+        if resolved is not None:
+            artifacts[spec.name] = resolved
 
     return LogicDraftFinalization(
         dict(values),
         source,
         selected_devices,
         devices,
-        artifact_paths,
         artifacts,
         resources,
         field_availability,
         tuple(dict.fromkeys(str(issue) for issue in issues if str(issue))),
         source_absent=source_absent,
         defaulted=defaulted,
+    )
+
+
+def _resolve_frame_claims(
+    descriptor: Any,
+    spec: Any,
+    raw: object,
+    resolve: Callable[[Any, str], Any],
+    source_frames: int | None,
+    issues: list[str],
+) -> tuple | None:
+    """A frame-claims input's rows, each with its file resolved where it could be.
+
+    The claims are checked as far as what is known allows: among themselves
+    always, against the source's cycle once its frame count is known.  The
+    processor makes the same check against the frames that actually arrive.
+    None only when the value is not rows of claims at all, or has none.
+    """
+
+    from zlc_atom.nodes import FrameClaim, check_claims, frame_claim_entries, frame_problems
+
+    try:
+        entries = frame_claim_entries(raw)
+    except ValueError as error:
+        issues.append(f"{spec.label}: {error}")
+        return None
+    if not entries:
+        if spec.required:
+            issues.append(f"{descriptor.api_name} needs {spec.label.lower()}: add one")
+        return None
+    names = tuple(
+        Path(entry["path"]).name or f"row {index + 1}"
+        for index, entry in enumerate(entries)
+    )
+    resolved_rows = []
+    for name, entry in zip(names, entries):
+        if entry["path"]:
+            resolved_rows.append(resolve(spec, entry["path"]))
+        else:
+            issues.append(f"{spec.label} {name} has no file yet")
+            resolved_rows.append(None)
+    paths = [Path(row.path) for row in resolved_rows if row is not None]
+    repeated = sorted({path.name for path in paths if paths.count(path) > 1})
+    if repeated:
+        issues.append(f"{repeated[0]} is listed twice: give it every frame it reads in one row")
+    frames = tuple(entry["frames"] for entry in entries)
+    try:
+        check_claims(frames, names)
+    except ValueError as error:
+        issues.append(str(error))
+    else:
+        if source_frames is not None:
+            issues.extend(frame_problems(frames, source_frames, names, what="file"))
+    return tuple(
+        FrameClaim(row, entry["frames"]) for row, entry in zip(resolved_rows, entries)
     )
 
 
@@ -708,15 +765,6 @@ def build_arguments(
         resolved = finalization.artifacts.get(spec.name)
         if resolved is not None:
             available[spec.argument_name] = resolved
-        if spec.per_frame:
-            from zlc_atom.nodes import split_artifact_input_key
-
-            by_frame: dict[int, Any] = {}
-            for key, value in finalization.artifacts.items():
-                name, frame = split_artifact_input_key(key)
-                if name == spec.name and frame is not None:
-                    by_frame[frame] = value
-            available[spec.frame_argument_name] = by_frame
     for spec in descriptor.workspace_resources:
         resolved = finalization.resources.get(spec.field_name)
         if resolved is not None:

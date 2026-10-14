@@ -880,7 +880,8 @@ def start_server(flow, *, host="127.0.0.1", port: int, token: str, allow_control
                              expected_generation: str | None = None) -> dict[str, object]:
             """Use the normal experiment action. Consult lab_catalog only for unknown fields. logic.add: api_name, optional values,
             source_signal, device_keys, artifact_inputs. Node edits: node_id plus values,
-            source_signal, device_keys, artifact_inputs. Start/Stop: node_id. Panel add: kind; update: panel_id,patch.
+            source_signal, device_keys, artifact_inputs (a path per input; a frame_claims input such as
+            Occupancy's calibrations takes [{path, frames}] rows). Start/Stop: node_id. Panel add: kind; update: panel_id,patch.
             view.monitor/view.logic take empty arguments and navigate directly, without pixel clicks.
             layout.save/load take path (workspace JSON); load restores stopped drafts. Loading over active Logic
             requires explicit stop_running=true; poll state.layout_pending until the replacement completes.

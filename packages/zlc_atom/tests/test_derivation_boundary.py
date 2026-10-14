@@ -41,6 +41,7 @@ from zlc_atom.nodes.camera.measurement import (
 )
 from zlc_atom.devices.camera.contract import CameraFrameRecord, CameraWorkingPoint
 from zlc_atom.nodes.occupancy.logic_node import LOGIC_NODE as OCCUPANCY_LOGIC_NODE
+from zlc_atom.nodes import FrameClaim
 from zlc_atom.nodes.occupancy.processor import OCCUPANCY_OUTPUTS, OccupancyProcessor
 from zlc_plot import (
     IMAGE_POINT_OVERLAY_GEOMETRY_RECORD,
@@ -459,11 +460,11 @@ def test_hosting_a_processor_on_a_finished_signal_derives_once(bench, tmp_path: 
     site_ids = ("site_0000",)
     calibration_path = calibration.save(tmp_path / "calibration.json")
     processor = OCCUPANCY_LOGIC_NODE.instantiate(
-        calibration=CALIBRATION_ARTIFACT_CODEC.resolve(calibration_path),
+        calibrations=(FrameClaim(CALIBRATION_ARTIFACT_CODEC.resolve(calibration_path), ("rest",)),),
         source_signal=source_name,
     )
     assert isinstance(processor, OccupancyProcessor)
-    assert processor.calibration_path == calibration_path.resolve()
+    assert processor.readings[0].path == calibration_path.resolve()
     different_nonstructural_context = TrapCalibration(
         calibration.site_map,
         calibration.models,
@@ -482,7 +483,7 @@ def test_hosting_a_processor_on_a_finished_signal_derives_once(bench, tmp_path: 
         tmp_path / "different-context.json"
     )
     different_context_processor = OCCUPANCY_LOGIC_NODE.instantiate(
-        calibration=CALIBRATION_ARTIFACT_CODEC.resolve(different_context_path),
+        calibrations=(FrameClaim(CALIBRATION_ARTIFACT_CODEC.resolve(different_context_path), ("rest",)),),
         source_signal=source_name,
     )
     different_outputs = different_context_processor.evaluate(source)
@@ -507,17 +508,15 @@ def test_hosting_a_processor_on_a_finished_signal_derives_once(bench, tmp_path: 
     )
     shifted_path = shifted.save(tmp_path / "shifted.json")
     shifted_processor = OCCUPANCY_LOGIC_NODE.instantiate(
-        calibration=CALIBRATION_ARTIFACT_CODEC.resolve(shifted_path),
+        calibrations=(FrameClaim(CALIBRATION_ARTIFACT_CODEC.resolve(shifted_path), ("rest",)),),
         source_signal=source_name,
     )
     shifted_outputs = shifted_processor.evaluate(source)
     assert shifted_outputs["counts"].snapshot.block.values.shape == (1, windows, 1)
-    assert shifted_processor.readout.site_map.centers_xy[0][0] == (
+    assert shifted_processor.placed[0].site_map.centers_xy[0][0] == (
         calibration.site_map.centers_xy[0][0] + 1
     )
-    assert shifted_processor.model is shifted_processor.readout.select_model(
-        ReadoutModelKind.BOX
-    )
+    assert shifted_processor.model_kind is ReadoutModelKind.BOX
 
     # The bench case: a run that takes a SMALLER crop than the calibration was
     # measured on.  The frame shape then differs too, and checking it before
@@ -539,15 +538,15 @@ def test_hosting_a_processor_on_a_finished_signal_derives_once(bench, tmp_path: 
     )
     wider_path = wider.save(tmp_path / "wider.json")
     wider_processor = OCCUPANCY_LOGIC_NODE.instantiate(
-        calibration=CALIBRATION_ARTIFACT_CODEC.resolve(wider_path),
+        calibrations=(FrameClaim(CALIBRATION_ARTIFACT_CODEC.resolve(wider_path), ("rest",)),),
         source_signal=source_name,
     )
     wider_outputs = wider_processor.evaluate(source)
     assert wider_outputs["counts"].snapshot.block.values.shape == (1, windows, 1)
-    assert wider_processor.readout.frame_contract.image_shape == (height, width)
+    assert wider_processor.placed[0].frame_contract.image_shape == (height, width)
     # Same origin, so the sites do not move; what changes is how much of the
     # sensor the run is looking at, and the readout now knows it.
-    assert wider_processor.readout.site_map.centers_xy[0][0] == (
+    assert wider_processor.placed[0].site_map.centers_xy[0][0] == (
         calibration.site_map.centers_xy[0][0]
     )
 
@@ -568,7 +567,7 @@ def test_hosting_a_processor_on_a_finished_signal_derives_once(bench, tmp_path: 
     )
     uncovered_path = uncovered.save(tmp_path / "uncovered.json")
     uncovered_processor = OCCUPANCY_LOGIC_NODE.instantiate(
-        calibration=CALIBRATION_ARTIFACT_CODEC.resolve(uncovered_path),
+        calibrations=(FrameClaim(CALIBRATION_ARTIFACT_CODEC.resolve(uncovered_path), ("rest",)),),
         source_signal=source_name,
     )
     with pytest.raises(ValueError, match="does not cover"):
@@ -660,7 +659,11 @@ def test_hosting_a_processor_on_a_finished_signal_derives_once(bench, tmp_path: 
             IMAGE_POINT_OVERLAY_GEOMETRY_RECORD: expected_geometry,
             "parameters": {
                 "frames_signal": source_name,
-                "calibration_path": str(calibration_path.resolve()),
+                # The run record is frozen: its lists are tuples.
+                "calibrations": ({
+                    "path": str(calibration_path.resolve()), "frames": ("rest",),
+                    "read_frames": tuple(range(source.snapshot.block.schema.point_domain.size)),
+                },),
                 "model_kind": "box",
             },
         }

@@ -105,7 +105,7 @@ def test_guard_c_header_saves_and_single_panel_save_have_distinct_semantics(
             occupancy_id = presenter.add_logic(
                 "occupancy",
                 node_id="occupancy",
-                artifact_inputs={"calibration_path": str(calibration_path)},
+                artifact_inputs={"calibrations": [{"path": str(calibration_path), "frames": ["rest"]}]},
                 source_signal=frames_signal,
                 open_editor=False,
             )
@@ -196,7 +196,7 @@ def test_guard_c_header_saves_and_single_panel_save_have_distinct_semantics(
             assert recipe["spec"]["kind"] == "image"
             assert recipe["fit"] == {"model": "anisotropic_gaussian_center"}
             assert sections["source"]["overlay_signal"] == status_signal
-            assert "calibration_path" not in sections["source"]
+            assert "calibrations" not in sections["source"]
             # The rings themselves are IN the archive: geometry once, beside
             # the typed status Dataset view it projects.  No flattened
             # repeat/point status table is a second truth.
@@ -214,9 +214,9 @@ def test_guard_c_header_saves_and_single_panel_save_have_distinct_semantics(
             assert records["camera_measurement"]["device_snapshots"]["camera"][
                 "exposure_seconds"
             ] == pytest.approx(0.02)
-            assert records["occupancy"]["parameters"]["calibration_path"] == str(
-                calibration_path.resolve()
-            )
+            assert [item["path"] for item in records["occupancy"]["parameters"]["calibrations"]] == [
+                str(calibration_path.resolve())
+            ]
             description = describe_archive(info, arrays)
             device = next(iter(dict(dict(description.tabs)["Devices"]).values()))
             assert device["snapshots"][0]["snapshot"][

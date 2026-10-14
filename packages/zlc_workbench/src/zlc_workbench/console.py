@@ -124,6 +124,14 @@ __all__ = ["ConsolePresenter", "PanelBinding", "PanelState", "control_capabiliti
 
 
 _UNCHANGED = object()
+#: How frame claims are written, said once for every reader of the catalog.
+FRAME_CLAIMS_RULE = (
+    "frames are frame numbers from 0, 'last' and 'rest' (every frame no other entry "
+    "names); each frame is read by exactly one entry; at most one entry takes 'rest' "
+    "and one 'last'; one file per entry. One entry with ['rest'] reads every frame. "
+    "Claims are kept as written when the frame count changes; one the new count "
+    "cannot honour is reported, never dropped."
+)
 _PANEL_UPDATE_FIELDS = (
     "signal", "kind", "cell_kind", "size", "interval_ms", "title",
     "semantic", "display", "fit", "overlay_signal",
@@ -140,7 +148,7 @@ def control_capabilities(
     before an apparatus exists, not a second AI-specific capability registry.
     """
 
-    from .authoring_form import project_artifact_inputs, project_logic_schema
+    from .authoring_form import project_logic_schema
     from zlc_plot._kinds import HANDLERS
     from zlc_plot.fit import builtin_fit_models
     from zlc_plot.specs import Reduction
@@ -167,9 +175,6 @@ def control_capabilities(
         }
         if api_name is not None:
             artifact_specs = artifact_input_specs(descriptor)
-            artifact_form = project_artifact_inputs(
-                artifact_specs, base_dir=str(workspace.data),
-            )
             row.update({
                 "fields": _control_plain(descriptor.authoring_schema.fields),
                 "form_spec": _control_plain(project_logic_schema(
@@ -178,10 +183,13 @@ def control_capabilities(
                 "artifact_inputs": [
                     {"name": spec.name, "label": spec.label,
                      "contract_id": spec.contract_id, "required": spec.required,
-                     "per_frame": spec.per_frame, "relative_to": field.base_dir,
-                     "file_filter": field.file_filter,
-                     "path_rule": "relative to this directory, or absolute; do not prepend the directory twice"}
-                    for spec, field in zip(artifact_specs, artifact_form.fields, strict=True)
+                     "relative_to": str(workspace.data),
+                     "file_filter": str(spec.codec.file_filter),
+                     "path_rule": "relative to this directory, or absolute; do not prepend the directory twice",
+                     **({"frame_claims": True,
+                         "value": "list of {path, frames}, one entry per file",
+                         "frames_rule": FRAME_CLAIMS_RULE} if spec.frame_claims else {})}
+                    for spec in artifact_specs
                 ],
                 "device_requirements": _control_plain(descriptor.device_requirements),
                 "workspace_resources": [
@@ -224,6 +232,81 @@ def control_capabilities(
             "save": "Save figure writes a native zlc.figure NPZ plus preview image; FigureViewer reopens its typed data, plot recipe and lineage.",
         }
     return result
+
+
+def _artifact_draft_value(value: object) -> object:
+    """An artifact input as a draft holds it: a path's text, or frame claims.
+
+    Claims are kept in their canonical shape when they have one, so an
+    editor echoing them back is no change; a malformed value is kept as
+    given and finalization says what is wrong with it.
+    """
+
+    from zlc_atom.nodes import frame_claim_entries
+
+    if isinstance(value, str):
+        return value
+    try:
+        return frame_claim_entries(value)
+    except ValueError:
+        return value
+
+
+def _claims_projection(
+    spec: Any,
+    raw: object,
+    finalization: Any,
+    source_frames: tuple[str, ...] | None,
+    base_dir: str,
+) -> dict[str, Any]:
+    """One frame-claims input for its editor and for lab_catalog(node_id); all plain."""
+
+    from zlc_atom.nodes import check_claims, frame_claim_entries, frame_problems, reach_frames
+
+    try:
+        entries = frame_claim_entries(raw)
+    except ValueError as error:
+        return {"label": spec.label, "entries": (), "base_dir": base_dir,
+                "file_filter": str(spec.codec.file_filter), "files": (),
+                "reads": None, "problems": (str(error),)}
+    names = tuple(
+        Path(entry["path"]).name or f"row {index + 1}" for index, entry in enumerate(entries)
+    )
+    frames = tuple(entry["frames"] for entry in entries)
+    claims = finalization.artifacts.get(spec.name)
+    reads = None
+    problems: tuple[str, ...] = ()
+    try:
+        check_claims(frames, names)
+    except ValueError as error:
+        problems = (str(error),)
+    if entries and source_frames is not None:
+        if not problems:
+            problems = frame_problems(frames, len(source_frames), names, what="file")
+        reach = reach_frames(frames, len(source_frames))
+        reads = tuple(reach.frames_of(entry) for entry in range(len(entries)))
+    describe = spec.codec.describe
+    resolved = (
+        tuple(claim.value for claim in claims)
+        if claims is not None and len(claims) == len(entries)
+        else (None,) * len(entries)
+    )
+    return {
+        "label": spec.label,
+        "entries": entries,
+        "base_dir": base_dir,
+        "file_filter": str(spec.codec.file_filter),
+        # What each row's file is, None where it did not resolve.
+        "files": tuple(
+            None if item is None else {
+                "path": str(item.path),
+                "summary": "" if describe is None else str(describe(item.value)),
+            }
+            for item in resolved
+        ),
+        "reads": reads,
+        "problems": problems,
+    }
 
 
 def _refused_expression(binding: "PanelBinding") -> str:
@@ -7989,7 +8072,7 @@ class ConsolePresenter:
         values: Mapping[str, Any] | None = None,
         source_signal: str = "",
         device_keys: Mapping[str, str] | None = None,
-        artifact_inputs: Mapping[str, str] | None = None,
+        artifact_inputs: Mapping[str, Any] | None = None,
         open_editor: bool = True,
     ) -> str:
         """Create one stopped row draft; Start is the first build boundary."""
@@ -8036,7 +8119,7 @@ class ConsolePresenter:
             )
             return ""
         selected_artifacts.update(
-            {str(name): str(path) for name, path in supplied_artifacts.items()}
+            {str(name): _artifact_draft_value(value) for name, value in supplied_artifacts.items()}
         )
         kind = str(getattr(descriptor.kind, "value", descriptor.kind))
         self.view.add_logic_row(
@@ -8111,14 +8194,16 @@ class ConsolePresenter:
         draft's files are read again rather than kept from the last answer.
         """
 
-        self._reconcile_frame_artifacts(binding)
         if source_options is None:
             source_options = self._source_options(
                 binding.descriptor, binding.node_id
             )
         acquisition_options = self._acquisition_options(binding.node_id)
-        key = self._logic_finalization_key(
-            binding, source_options, acquisition_options
+        frames = self._source_frames_for(binding)
+        source_frames = None if frames is None else len(frames)
+        key = (
+            *self._logic_finalization_key(binding, source_options, acquisition_options),
+            source_frames,
         )
         if force or binding.finalization is None or binding.finalization_key != key:
             binding.finalization = finalize_logic_draft(
@@ -8130,6 +8215,7 @@ class ConsolePresenter:
                 source_options=source_options,
                 acquisition_options=acquisition_options,
                 previous=None if force else binding.finalization,
+                source_frames=source_frames,
             )
             binding.finalization_key = key
         return binding.finalization
@@ -8167,8 +8253,8 @@ class ConsolePresenter:
         artifact_form_spec = project_artifact_inputs(
             artifact_specs,
             base_dir=artifact_base_dir,
-            frames_per_cycle=self._frames_per_cycle_for(binding),
         )
+        source_frames = self._source_frames_for(binding)
         state, status = self._logic_state(binding, finalization)
         resource_fields = {
             spec.field_name for spec in binding.descriptor.workspace_resources
@@ -8276,6 +8362,20 @@ class ConsolePresenter:
                 key: str(binding.draft.artifact_inputs.get(key, ""))
                 for key in artifact_form_spec.keys
             },
+            # Frame-claims inputs are edited by the node's own editor, never
+            # the path form: the entries as written, how the source's frames
+            # read them, and the files they resolved to.
+            "artifact_claims": {
+                spec.name: _claims_projection(
+                    spec, binding.draft.artifact_inputs.get(spec.name, ()),
+                    finalization, source_frames, artifact_base_dir,
+                )
+                for spec in artifact_specs
+                if spec.frame_claims
+            },
+            # Labels of the frames one cycle of the source carries, from 0;
+            # None while nothing says.
+            "source_frames": source_frames,
             "artifact_results": self._artifact_results(binding),
             # Beside Start, in both places an operator can press it.  One
             # preference, projected twice; neither widget keeps a default --
@@ -8348,7 +8448,7 @@ class ConsolePresenter:
         normalized: bool = False,
         source_signal: object = _UNCHANGED,
         device_keys: Mapping[str, str] | None = None,
-        artifact_inputs: Mapping[str, str] | None = None,
+        artifact_inputs: Mapping[str, Any] | None = None,
     ) -> bool:
         """Patch the draft; passive display normalization is not a manual edit."""
 
@@ -8380,8 +8480,10 @@ class ConsolePresenter:
             }
         if artifact_inputs is not None:
             artifact_inputs = {
-                str(name): str(path) for name, path in artifact_inputs.items()
-                if binding.draft.artifact_inputs.get(str(name), _UNCHANGED) != str(path)
+                str(name): _artifact_draft_value(value)
+                for name, value in artifact_inputs.items()
+                if binding.draft.artifact_inputs.get(str(name), _UNCHANGED)
+                != _artifact_draft_value(value)
             }
         if not values and source_signal is _UNCHANGED and not device_keys and not artifact_inputs:
             return True
@@ -8399,9 +8501,7 @@ class ConsolePresenter:
                 {str(name): str(key) for name, key in device_keys.items()}
             )
         if artifact_inputs is not None:
-            binding.draft.artifact_inputs.update(
-                {str(name): str(path) for name, path in artifact_inputs.items()}
-            )
+            binding.draft.artifact_inputs.update(artifact_inputs)
         binding.draft_error = ""
         binding.draft_revision += 1
         # The last finalization stays as the source of files it already
@@ -9602,22 +9702,22 @@ class ConsolePresenter:
             self._artifact_completion_order += 1
             binding.artifact_completion_order = self._artifact_completion_order
 
-    def _frames_per_cycle_for(self, binding: LogicBinding) -> int:
-        """How many frames one cycle of this node's source carries.
+    def _source_frames_for(self, binding: LogicBinding) -> tuple[str, ...] | None:
+        """The labels of the frames one cycle of this node's source carries.
 
-        Asked of the source's PRODUCER first: its draft says so before it has
-        published anything, so a frame's own calibration can be chosen while
-        the camera is still being set up.  A source without a producer draft
-        (a replayed or derived signal) answers from the plane's latest
-        publication -- the Point axis with the readout-event role counts a
-        cycle's frames.  Zero when there is no frame axis to speak of.
+        Asked of the source's PRODUCER first: its draft says how many before
+        it has published anything, so frames can be given their calibrations
+        while the camera is still being set up.  Otherwise the plane says --
+        the declared signal, then its latest publication -- through the Point
+        axis with the readout-event role.  A source without one carries one
+        frame; None while there is no source or nothing says yet.
         """
 
         from zlc_data import READOUT_EVENT
 
         source = str(binding.draft.source_signal).strip()
         if not source:
-            return 0
+            return None
         parts = split_signal_key(source)
         producer = None if parts is None else self.logic.get(parts[0])
         if (
@@ -9625,63 +9725,31 @@ class ConsolePresenter:
             and "frames_per_cycle" in producer.descriptor.authoring_schema.field_names
         ):
             try:
-                return max(0, int(producer.draft.values.get("frames_per_cycle") or 0))
+                count = int(producer.draft.values.get("frames_per_cycle") or 0)
             except (TypeError, ValueError):
-                return 0
-        publication = self.session.signal_plane.latest_publication(source)
-        if publication is None:
-            return 0
-        value = publication.value(source)
-        if value is None:
-            return 0
-        schema = value.canonical_schema or value.snapshot.block.schema
+                return None
+            return tuple(str(frame) for frame in range(count)) if count > 0 else None
+        description = self._signal_projection()[1].get(source)
+        schema = None if description is None else description.schema
+        if schema is None:
+            publication = self.session.signal_plane.latest_publication(source)
+            value = None if publication is None else publication.value(source)
+            if value is None:
+                return None
+            schema = value.canonical_schema or value.snapshot.block.schema
         for axis in schema.point_domain.axes:
             if axis.role == READOUT_EVENT:
-                return int(axis.size)
-        return 0
+                return tuple(
+                    coordinate if isinstance(coordinate, str) else f"{coordinate:g}"
+                    for coordinate in (axis.coordinate_at(code) for code in range(axis.size))
+                )
+        return ("0",)
 
-    def _reconcile_frame_artifacts(self, binding: LogicBinding) -> None:
-        """Keep the draft's per-frame artifact paths to the frames its source's cycle has.
+    def _default_artifact_inputs(self, descriptor: object) -> dict[str, Any]:
+        """Freeze the latest observed matching artifact into a new row draft.
 
-        A frame's own path means something only while that frame exists.
-        So a path for a frame the cycle no longer has is DROPPED, not hidden:
-        hidden, it would refuse the run ("frame 3 has its own calibration
-        but a cycle has only 2 frames") from behind a row nobody can see.
-        A frame the cycle gains starts with no path of its own.  With a
-        single frame there are no per-frame rows at all, so no per-frame
-        path stands; with the cycle unknown (no source yet) nothing is
-        judged.  Every finalization passes through here, so Start and the
-        editor see the same draft.
+        A frame-claims input starts with that file reading every frame.
         """
-
-        from zlc_atom.nodes import split_artifact_input_key
-
-        if not any(
-            getattr(spec, "per_frame", False)
-            for spec in artifact_input_specs(binding.descriptor)
-        ):
-            return
-        frames = self._frames_per_cycle_for(binding)
-        if frames <= 0:
-            return
-        offered = frames if frames > 1 else 0
-        stale = []
-        for key in binding.draft.artifact_inputs:
-            try:
-                _name, frame = split_artifact_input_key(key)
-            except ValueError:
-                continue
-            if frame is not None and frame > offered:
-                stale.append(key)
-        if not stale:
-            return
-        for key in stale:
-            binding.draft.artifact_inputs.pop(key)
-        binding.draft_revision += 1
-        binding.finalization_key = ()
-
-    def _default_artifact_inputs(self, descriptor: object) -> dict[str, str]:
-        """Freeze the latest observed matching artifact into a new row draft."""
 
         available: dict[str, tuple[int, str]] = {}
         for binding in self.logic.values():
@@ -9694,10 +9762,15 @@ class ConsolePresenter:
                 candidate = (binding.artifact_completion_order, str(row["path"]))
                 if candidate[0] >= available.get(contract, (-1, ""))[0]:
                     available[contract] = candidate
-        return {
-            spec.name: available.get(str(spec.contract_id), (-1, ""))[1]
-            for spec in artifact_input_specs(descriptor)
-        }
+        drafted: dict[str, Any] = {}
+        for spec in artifact_input_specs(descriptor):
+            latest = available.get(str(spec.contract_id), (-1, ""))[1]
+            drafted[spec.name] = (
+                (({"path": latest, "frames": ("rest",)},) if latest else ())
+                if spec.frame_claims
+                else latest
+            )
+        return drafted
 
     def _free_logic_id(self, api_name: str) -> str:
         if api_name not in self.logic:

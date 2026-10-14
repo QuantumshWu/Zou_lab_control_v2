@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Sequence
 
 from zlc_atom.authoring import AuthoringField, AuthoringSchema
 from zlc_atom.nodes._framework.descriptor import (
@@ -12,6 +12,7 @@ from zlc_atom.nodes._framework.descriptor import (
     NodeKind,
     ResolvedArtifact,
 )
+from zlc_atom.nodes._framework.frames import FrameClaim
 from zlc_atom.nodes.calibration import (
     CALIBRATION_ARTIFACT_CODEC,
     DEFAULT_READOUT_MODEL_CHOICE,
@@ -20,7 +21,7 @@ from zlc_atom.nodes.calibration import (
     readout_model_kind_from_choice,
 )
 
-from .processor import OCCUPANCY_OUTPUTS, OccupancyProcessor
+from .processor import OCCUPANCY_OUTPUTS, CalibrationReading, OccupancyProcessor
 
 
 OCCUPANCY_SCHEMA = AuthoringSchema(
@@ -36,40 +37,39 @@ OCCUPANCY_SCHEMA = AuthoringSchema(
 )
 
 
-def _resolved_calibration(artifact: object, what: str) -> ResolvedArtifact:
+def _reading(claim: object) -> CalibrationReading:
+    artifact = getattr(claim, "value", None)
     if (
-        not isinstance(artifact, ResolvedArtifact)
+        not isinstance(claim, FrameClaim)
+        or not isinstance(artifact, ResolvedArtifact)
         or artifact.contract_id != CALIBRATION_ARTIFACT_CODEC.contract_id
         or not isinstance(artifact.value, TrapCalibration)
     ):
-        raise TypeError(f"{what} must be a resolved calibration artifact")
-    return artifact
+        raise TypeError("occupancy calibrations must claim frames with resolved calibration artifacts")
+    return CalibrationReading(artifact.value, claim.frames, artifact.path)
 
 
 def _build(
     *,
-    calibration: ResolvedArtifact,
-    calibration_by_frame: Mapping[int, ResolvedArtifact] | None = None,
+    calibrations: Sequence[FrameClaim],
     source_signal: str,
     **values: object,
 ) -> OccupancyProcessor:
     authored = OCCUPANCY_SCHEMA.project_values(values)
-    shared = _resolved_calibration(calibration, "calibration")
-    by_frame = {
-        int(frame): _resolved_calibration(artifact, f"frame {frame} calibration")
-        for frame, artifact in dict(calibration_by_frame or {}).items()
-    }
     selected_source = str(source_signal).strip()
     if not selected_source:
         raise ValueError("source_signal must be non-empty")
     return OccupancyProcessor(
-        shared.value,
-        calibration_by_frame={frame: artifact.value for frame, artifact in by_frame.items()},
-        calibration_path=shared.path,
-        calibration_paths_by_frame={frame: artifact.path for frame, artifact in by_frame.items()},
+        tuple(_reading(claim) for claim in calibrations),
         source_signal=selected_source,
         model_kind=readout_model_kind_from_choice(authored["model_kind"]),
     )
+
+
+def _editor_factory(parent=None):
+    from .editor import CalibrationsEditor
+
+    return CalibrationsEditor(parent)
 
 
 LOGIC_NODE = LogicNodeDescriptor(
@@ -77,24 +77,27 @@ LOGIC_NODE = LogicNodeDescriptor(
     NodeKind.PROCESSOR,
     OCCUPANCY_SCHEMA,
     description=(
-        "Read camera image data using a saved Calibration and publish per-site counts, "
+        "Read camera image data using saved Calibrations and publish per-site counts, "
         "occupied verdicts and frame_judged diagnostics while preserving frame and scan "
-        "axes. Use occupied for loading-rate plots, camera overlays or Frame Survival; "
-        "the processor follows the source and resumes when compatible data returns."
+        "axes. Each calibration claims the frames it reads: frame numbers from 0, "
+        "'last' and 'rest' (every frame no other calibration names); one calibration "
+        "with ['rest'] reads every frame. Use occupied for loading-rate plots, camera "
+        "overlays or Frame Survival; the processor follows the source and resumes when "
+        "compatible data returns."
     ),
     input_specs=(
         DatasetInputSpec("frames", None, "exact"),
-        # Every frame reads with the calibration named here unless a frame
-        # is given its own: a load frame and a readout frame taken under
+        # Each calibration claims the frames it reads -- frame numbers from
+        # 0, last, rest -- so a load frame and a readout frame taken under
         # different exposures are read with calibrations trained on each.
         ArtifactInputSpec(
-            "calibration_path",
-            "Calibration artifact",
+            "calibrations",
+            "Calibrations",
             CALIBRATION_ARTIFACT_CODEC,
-            argument_name="calibration",
-            per_frame=True,
+            frame_claims=True,
         ),
     ),
+    ui_contributions=(_editor_factory,),
     outputs=OCCUPANCY_OUTPUTS,
     build=_build,
 )

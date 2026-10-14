@@ -2091,7 +2091,7 @@ async def client():
                 semantic["fate:point:scan.duration:gap_1"] = "x"
                 recipe = await call("lab_run_recipe", {"name":"trap_lifetime", "parameters":{
                     "camera":"camera", "sequencer":"sequencer", "pulse_path":"imaging_test.json",
-                    "calibration_path":"calibration.json", "frames_per_cycle":3, "start_frame":0,
+                    "calibrations":[{"path":"calibration.json", "frames":["rest"]}], "frames_per_cycle":3, "start_frame":0,
                     "end_frame":2, "repeats":1, "shots_per_point":2,
                     "fit_fixed":{"amplitude":1., "offset":0.},
                     "panel_semantic":semantic,

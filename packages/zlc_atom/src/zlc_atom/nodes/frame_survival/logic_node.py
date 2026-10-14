@@ -54,7 +54,6 @@ def _build(*, source_signal: str, **values: object) -> FrameSurvivalProcessor:
 
 def _editor_factory(parent=None):
     from PyQt5 import QtCore, QtWidgets
-    from zlc_data import READOUT_EVENT
     from zlc_ui.fluent import (
         FluentLabel, FluentSegmentedButtons, FluentSelectionGrid, muted_note_label,
     )
@@ -112,13 +111,9 @@ def _editor_factory(parent=None):
 
         def update_projection(self, projection):
             values = projection["form_values"]
-            schema = projection.get("source_schema")
-            axes = () if schema is None else tuple(
-                axis for axis in schema.point_domain.axes if axis.role == READOUT_EVENT)
-            axis = axes[0] if len(axes) == 1 and axes[0].size >= 2 else None
-            frames = None if axis is None else tuple(
-                value if isinstance(value, str) else f"{value:g}"
-                for value in (axis.coordinate_at(code) for code in range(axis.size)))
+            # The console's one answer to "which frames does the source carry".
+            frames = projection.get("source_frames")
+            frames = None if frames is None or len(frames) < 2 else tuple(frames)
             if frames != self._frames:
                 self._frames = frames
                 count = 0 if frames is None else len(frames)

@@ -118,8 +118,18 @@ remain requires_human and cannot be answered by the scientific review tool.
 
 ## processing
 
-Occupancy reads Camera frames plus the chosen Calibration and publishes counts,
-occupied and judgement validity. Frame Survival consumes occupied, not counts.
+Occupancy reads Camera frames plus the chosen Calibrations and publishes counts,
+occupied and judgement validity. Its `calibrations` artifact input is a list of
+rows, each a Calibration file and the frames it reads: frame numbers from 0,
+`last`, and `rest` (every frame no other row names). One row with `["rest"]`
+reads every frame; frames taken at another exposure get their own row, e.g.
+`lab_action('logic.update', {'node_id': OCC, 'artifact_inputs': {'calibrations':
+[{'path': LOAD, 'frames': [0]}, {'path': READOUT, 'frames': ['rest']}]}})`.
+Each frame is read by exactly one row; a collision, a frame nobody reads or a
+number the source does not carry is reported by name, never resolved silently,
+and the rows are never rewritten when the frame count changes.
+`lab_catalog(node_id=OCC).node.artifact_claims.calibrations` returns the rows,
+the frames each actually reads (`reads`) and any `problems`. Frame Survival consumes occupied, not counts.
 It publishes the later occupancy verdict with validity equal to earlier occupied
 AND both frames judgeable. Mean over trials is therefore conditional survival;
 the site axis remains available for per-site analysis. Its `selection` field
@@ -276,7 +286,8 @@ lab_recipes(name='trap_lifetime')
 SEMANTIC['fate:point:scan.' + FIELD_ID] = 'x'
 lab_run_recipe(name='trap_lifetime', parameters={
   'camera': CAMERA_ID, 'sequencer': SEQUENCER_ID,
-  'pulse_path': VERIFIED_PULSE_PATH, 'calibration_path': COMPATIBLE_CALIBRATION_PATH,
+  'pulse_path': VERIFIED_PULSE_PATH,
+  'calibrations': [{'path': COMPATIBLE_CALIBRATION_PATH, 'frames': ['rest']}],
   'scan_plan': SCAN_PLAN_JSON, 'panel_semantic': SEMANTIC,
   'repeats': CHOSEN_SWEEPS, 'shots_per_point': CHOSEN_SHOTS,
   'frames_per_cycle': ALL_TRIGGER_FRAMES, 'start_frame': EARLIER_FRAME,

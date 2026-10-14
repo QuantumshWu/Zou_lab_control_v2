@@ -20,10 +20,10 @@
       "required": true,
       "description": "Pulse filename relative to workspace/pulses, or an absolute path. Use a user-verified lifetime Pulse with the selected imaging frames and a hold-time Scan/API field."
     },
-    "calibration_path": {
-      "path": ["logic", 1, "artifact_inputs", "calibration_path"],
+    "calibrations": {
+      "path": ["logic", 1, "artifact_inputs", "calibrations"],
       "required": true,
-      "description": "Existing Calibration JSON relative to workspace/data, or an absolute path. It must match the camera/readout; this recipe does not recalibrate."
+      "description": "Occupancy's Calibration rows, each an existing Calibration JSON (relative to workspace/data, or absolute) and the frames it reads: [{\"path\":\"calibration.json\",\"frames\":[\"rest\"]}] reads every frame with one file; give frames trained at another exposure their own row, e.g. [{\"path\":\"load.json\",\"frames\":[0]},{\"path\":\"readout.json\",\"frames\":[\"rest\"]}]. Frames are numbers from 0, 'last' and 'rest'; each frame is read by exactly one row. They must match the camera/readout; this recipe does not recalibrate."
     },
     "scan_plan": {
       "path": ["logic", 3, "values", "plan"],

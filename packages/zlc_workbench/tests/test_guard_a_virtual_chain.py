@@ -358,7 +358,9 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
             LogicDraft(
                 source_signal=frames_signal,
                 artifact_inputs={
-                    "calibration_path": str(first_calibration.artifact_path),
+                    "calibrations": [
+                        {"path": str(first_calibration.artifact_path), "frames": ["rest"]},
+                    ],
                 },
             ),
             installation=installation,
@@ -372,17 +374,11 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
             signal_plane=plane,
             finalization=occupancy_finalization,
         )
-        assert set(occupancy_arguments) == {
-            "calibration",
-            "calibration_by_frame",
-            "source_signal",
-            "model_kind",
-        }
-        assert not occupancy_arguments["calibration_by_frame"], "one shared calibration"
-        assert isinstance(occupancy_arguments["calibration"], ResolvedArtifact)
-        assert occupancy_arguments["calibration"].path == (
-            first_calibration.artifact_path.resolve()
-        )
+        assert set(occupancy_arguments) == {"calibrations", "source_signal", "model_kind"}
+        (claim,) = occupancy_arguments["calibrations"]
+        assert claim.frames == ("rest",), "one calibration reads every frame"
+        assert isinstance(claim.value, ResolvedArtifact)
+        assert claim.value.path == first_calibration.artifact_path.resolve()
         assert occupancy_arguments["model_kind"] == "default"
         assert occupancy_arguments["source_signal"] == frames_signal
         occupancy_node = occupancy_descriptor.instantiate(**occupancy_arguments)
@@ -444,7 +440,10 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
         )
         assert occupancy_publication.run_record["parameters"] == {
             "frames_signal": frames_signal,
-            "calibration_path": str(first_calibration.artifact_path),
+            "calibrations": ({
+                "path": str(first_calibration.artifact_path), "frames": ("rest",),
+                "read_frames": (0,),
+            },),
             # The calibration's own default, which is the matched filter.
             "model_kind": "psf",
         }

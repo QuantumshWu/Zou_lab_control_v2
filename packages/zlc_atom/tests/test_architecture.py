@@ -21,6 +21,7 @@ from zlc_atom.install import create_installation
 from zlc_atom.nodes import (
     ArtifactInputSpec,
     DatasetInputSpec,
+    FrameClaim,
     NodeKind,
     discover_logic_nodes,
 )
@@ -643,13 +644,13 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
         calibration_input = descriptors["occupancy"].input_specs[1]
         assert isinstance(calibration_input, ArtifactInputSpec)
         occupancy_node = descriptors["occupancy"].instantiate(
-            calibration=calibration_input.codec.resolve(calibration_path),
+            calibrations=(FrameClaim(calibration_input.codec.resolve(calibration_path), ("rest",)),),
             source_signal=camera_node.signal_key("frames"),
             model_kind="uniform_psf",
         )
         assert not hasattr(occupancy_node, "signal_plane")
-        assert occupancy_node.calibration_path == calibration_path.resolve()
-        assert occupancy_node.model.kind is ReadoutModelKind.UNIFORM_PSF
+        assert occupancy_node.readings[0].path == calibration_path.resolve()
+        assert occupancy_node.model_kind is ReadoutModelKind.UNIFORM_PSF
         occupancy_result = occupancy_node.process(
             camera_cycle_snapshot([(record,) for record in task_result.capture.short]),
         )
@@ -715,7 +716,8 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
         assert descriptors["occupancy"].input_specs[0].name == "frames"
         assert descriptors["occupancy"].input_specs[0].contract_id is None
         assert isinstance(descriptors["occupancy"].input_specs[1], ArtifactInputSpec)
-        assert descriptors["occupancy"].input_specs[1].name == "calibration_path"
+        assert descriptors["occupancy"].input_specs[1].name == "calibrations"
+        assert descriptors["occupancy"].input_specs[1].frame_claims
         assert descriptors["occupancy"].input_specs[1].contract_id == (
             "calibration.readout"
         )

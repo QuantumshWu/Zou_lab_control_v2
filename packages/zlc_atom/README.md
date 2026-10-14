@@ -302,8 +302,13 @@ record carry that effective truth: raw values retain the camera's `count` unit,
 photoelectron values are dimensionless, and live preview, saved samples,
 replay and downstream processors all use the same choice.
 
-`OccupancyProcessor` consumes an explicit frames signal plus the typed saved
-calibration and selects `default`, `box`, `psf`, or `uniform_psf` readout.
+`OccupancyProcessor` consumes an explicit frames signal plus typed saved
+calibrations, each claiming the frames of a cycle it reads (frame numbers
+from 0, `last`, `rest`; one calibration alone reads every frame), and selects
+`default`, `box`, `psf`, or `uniform_psf` readout.  Which calibration reads
+which frame is resolved against the frames that arrive, so `last` and `rest`
+follow a cycle that gains or loses a frame and any collision is refused by
+name.
 It publishes three same-publication Dataset siblings: per-site numeric
 `counts` in the source frame's effective unit; per-site boolean `occupied`,
 whose component validity is the sole truth for whether each site was readable;
@@ -472,7 +477,7 @@ The supported product path discovers eight logic descriptors: `calibration`,
 `seamless_scan`, `slm_feedback`, and `waveform_measurement`. They are
 hosted through the real runtime plane: virtual Calibration writes a plain
 workspace JSON, Camera Measurement publishes finite or `Repeat = 0` infinite
-frames, Occupancy consumes the frames key plus JSON path, and the processors
+frames, Occupancy consumes the frames key plus its calibration rows, and the processors
 downstream of it (`derive`, `frame_survival`) consume Occupancy's own outputs. Camera Measurement retains its per-row Auto preview:
 the cycle's `frames` signal uses `facet_grid`, with one or many readout-event
 rows as authored; switching Auto preview off only prevents the panel from

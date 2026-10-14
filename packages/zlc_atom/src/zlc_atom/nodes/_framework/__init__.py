@@ -4,8 +4,7 @@ from .descriptor import (
     ArtifactCodec,
     ArtifactOutputSpec,
     ArtifactInputSpec,
-    artifact_input_key,
-    split_artifact_input_key,
+    frame_claim_entries,
     DatasetInputSpec,
     DeviceRequirement,
     LogicNodeDescriptor,
@@ -18,13 +17,26 @@ from .descriptor import (
     WorkspaceResourceSpec,
 )
 from .discovery import discover_logic_nodes
+from .frames import (
+    FrameClaim,
+    assign_frames,
+    check_claims,
+    describe_frames,
+    frame_problems,
+    reach_frames,
+)
 
 __all__ = [
     "ArtifactCodec",
     "ArtifactOutputSpec",
     "ArtifactInputSpec",
-    "artifact_input_key",
-    "split_artifact_input_key",
+    "frame_claim_entries",
+    "FrameClaim",
+    "assign_frames",
+    "check_claims",
+    "describe_frames",
+    "frame_problems",
+    "reach_frames",
     "DatasetInputSpec",
     "DeviceRequirement",
     "LogicNodeDescriptor",
