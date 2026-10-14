@@ -2870,8 +2870,14 @@ class FluentSettingRow(QtWidgets.QWidget):
     weight ONLY -- never by indentation.  Labels are TEXT: grey read as disabled beside a
     required field, and grey is what a HINT wears.  Share ONE column width
     per form via :func:`setting_label_width` so the rows align.  Do NOT use a ``QFormLayout`` (its
-    labels render dark + auto-width = a different style) and do NOT use a bare ``FluentLabel`` as a
-    row/section label using the shared ``[QLabel | widget]`` row template."""
+    labels render dark + auto-width = a different style), and do NOT build a row by hand from a
+    label and a control.
+
+    ``label`` is the row's words, or the label widget a host keeps to change or annotate later.
+    THE row-label widget is :class:`FluentLabel` (or :class:`ElidedLabel` for words that may not
+    fit): both paint their one line on the line the field beside them puts its text on.  A plain
+    ``QLabel`` centres its line box Qt's way and reads a device pixel under the field's text.
+    Any other widget -- a switch that names the row -- is laid in the label column as given."""
 
     def __init__(
         self,
