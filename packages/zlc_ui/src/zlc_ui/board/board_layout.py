@@ -229,6 +229,27 @@ def _along_row(cfg, resolved, pending, board_w: int, gap: int) -> dict[int, int]
     return moved
 
 
+def _left_room(cfg, resolved, pending, metrics: BoardMetrics) -> int | None:
+    """The column just left of the resolved cards ``cfg`` covers, when its row
+    has the room there -- no other card stands in it -- else None.
+
+    It is the room the carried card left behind in the row: the card that
+    stood where the carried one is put takes the carried one's place, a
+    swap, rather than being pushed down a row with that room left empty.
+    It passes only the cards it covers, the ones it is making way for.
+    """
+
+    gap = metrics.gap
+    covered = [p for p in resolved if _overlaps_with_gap(_aabb(cfg), [p], metrics)]
+    x = min(p.col for p in covered) - gap - cfg.width
+    if x < gap:
+        return None
+    others = [p for p in (*resolved, *pending) if p is not cfg]
+    if _overlaps_with_gap((x, cfg.row, x + cfg.width, cfg.row + cfg.height), others, metrics):
+        return None
+    return x
+
+
 def pack(
     order: Sequence,
     metrics: BoardMetrics,
@@ -249,8 +270,10 @@ def pack(
        operator put it.
     2. Every other card, in the reading order of where it starts, makes way for
        the cards already resolved: back to its ``home`` when that is clear;
-       else along its row, if the row has room for it and every card it
-       pushes; else straight DOWN in its own column.  A card a narrower board
+       else along its row -- rightward, if the row has room for it and every
+       card it pushes, or else leftward into room the row has just before the
+       cards it covers (the room the carried card left: a swap); else
+       straight DOWN in its own column.  A card a narrower board
        squeezed onto another does the same.
     3. Every card falls north-west (:func:`gravity_slot`) -- the others
        first, around the dropped one, then all of them -- with EVERY other
@@ -304,6 +327,10 @@ def pack(
                 if shift is not None:
                     for card in (cfg, *pending):
                         card.col = shift.get(id(card), card.col)
+                else:
+                    left = _left_room(cfg, resolved, pending, metrics)
+                    if left is not None:
+                        cfg.col = left
         cfg.row = _below(cfg.col, cfg.row, cfg.width, cfg.height, [_aabb(p) for p in resolved], gap)
         resolved.append(cfg)
     others = [cfg for cfg in order if cfg is not dropped]

@@ -201,6 +201,24 @@ def _hold(rng, c):
     return rng.choice(((14, STRIP), (c.width - 110, STRIP), (c.width // 2, c.height // 2)))
 
 
+def test_a_card_let_go_on_its_row_neighbour_swaps_with_it() -> None:
+    """Carried onto the card beside it in a full row, the two trade places:
+    the one in the way takes the room the carried card left in that row --
+    it is not pushed down a row with a hole left beside it.  Holds for a row
+    of one size and for a 4x4 beside a 2x2."""
+
+    for left_size, right_size, board_w in (("2x2", "2x2", 1104), ("2x2", "4x4", 1400), ("4x4", "2x2", 1400)):
+        board = _tiled(("2x2", "2x2", left_size, right_size), board_w)
+        carried, neighbour = board[2], board[3]
+        assert carried.row == neighbour.row, places(board)
+        slot = (neighbour.col + neighbour.width - carried.width if carried.width < neighbour.width else neighbour.col,
+                neighbour.row)
+        after, _over = _drop(board, carried, slot, board_w)
+        assert after[3].row == carried.row, (left_size, right_size, places(after))
+        assert after[3].col < after[2].col, (left_size, right_size, places(after))
+        assert max(c.row + c.height for c in after) == max(c.row + c.height for c in board), places(after)
+
+
 def test_putting_a_card_back_changes_nothing() -> None:
     """Drawn exactly where it stood, held anywhere, a card is put back there
     and every other card is where it was -- on random mixed boards, after
