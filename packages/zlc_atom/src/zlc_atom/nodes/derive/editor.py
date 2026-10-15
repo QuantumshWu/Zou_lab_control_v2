@@ -15,7 +15,10 @@ each -- and the operand column is the page's control column: the bundle
 combo's text, the Inputs' names, every operand, result and problem read
 down one x.  Fixed sets (an operator kind, the statistics) are segmented
 strips; whatever comes from the data (members, variables, axes and
-domains, labels, ``over``) is a combo, several values a checkable one.  A
+domains, labels, ``over``) is a combo, several values a checkable one --
+a pick's values led by All (no pick), ``first`` and ``last`` (its ends,
+whatever its length, spelled as the draft, the collapsed box and its
+tooltip spell them).  A
 problem stands under the line it is about, as one sentence
 (``show_problem``); a parked helper's in muted ink, because it blocks
 nothing.  A line's two wide commands -- the statistic strip with its
@@ -33,16 +36,18 @@ from html import escape
 
 from PyQt5 import QtCore, QtGui, QtWidgets, sip
 
+from zlc_runtime import stable_signal_key
 from zlc_ui.fluent import (
-    AXIS_GROUP_COLORS, FONT, MUTED_INK, RED_DARK, FluentButton, FluentColumnLine, FluentColumnSet,
+    AXIS_GROUP_COLORS, FluentButton, FluentColumnLine, FluentColumnSet,
     FluentComboBox, FluentFrame, FluentLabel, FluentLineEdit, FluentSegmentedButtons, FluentSwitch, card_pad,
-    error_note_label, field_text_inset, fluent_font_size, hold_place, muted_note_label, retire_widget, row_gap,
-    scaled_px, section_gap, show_problem, signals_blocked,
+    error_note_label, field_text_inset, hold_place, muted_note_label, retire_widget, row_gap,
+    scaled_px, section_gap, set_status_ink, show_problem, signals_blocked, status_cue,
 )
 from zlc_ui.fluent.column_set import section_header
+from zlc_workbench.topology import signal_text
 
 from zlc_atom.authoring import AuthoringField, AuthoringSchema
-from zlc_atom.nodes._framework.frames import FRAME_AXIS_NAME
+from zlc_atom.nodes._framework.frames import FIRST, LAST
 
 from .expression import (
     CATEGORIES, DOMAINS, NO_PUBLISHED, OPERATORS, STATISTICS, TERM_DEFAULTS, VARIABLE_COLUMNS, axis_groups,
@@ -60,6 +65,13 @@ _EMPTY = ("No variables yet. A variable picks values of an input, combines them 
 #: The operand combo's constants.  A member or variable name never starts
 #: with "#", so no name reads like these keys.
 _NUMBER, _TRUE, _FALSE = "#number", "#true", "#false"
+#: "No pick": the axis combo's first row, and a pick's first value.
+_ALL = ""
+#: What a pick's values list starts with: All, then the axis' ends, written
+#: in the draft as Occupancy's frame claims write a cycle's -- and in the
+#: list as in the draft: the collapsed box and its tooltip read the ticked
+#: keys, so one pick is spelled one way in one control.
+_ENDS = (("All", _ALL), (FIRST, FIRST), (LAST, LAST))
 _CONSTANTS = {_NUMBER: "Number", _TRUE: "true", _FALSE: "false"}
 _COLOURS = dict(zip(DOMAINS, AXIS_GROUP_COLORS))
 #: The most labels one labels list offers; a longer axis says how many it has.
@@ -101,15 +113,6 @@ def _visible(widget: QtWidgets.QWidget, shown: bool, hold: bool = True) -> None:
         widget.setSizePolicy(policy)
     if widget.isHidden() == shown:
         widget.setVisible(shown)
-
-
-def _ink(label: QtWidgets.QLabel, colour: str) -> None:
-    """A problem's ink: red when it blocks, muted when it does not."""
-
-    if label.property("ink") != colour:
-        label.setProperty("ink", colour)
-        label.setStyleSheet(
-            f'color: {colour}; background: transparent; border: none; font: {fluent_font_size()}pt "{FONT}";')
 
 
 def _alive(widget: QtWidgets.QWidget) -> bool:
@@ -169,19 +172,23 @@ def _fill(combo: FluentComboBox, items, current=None) -> None:
 
 
 @functools.lru_cache(maxsize=64)
-def _label_items(keys: tuple, alternates: tuple) -> tuple:
-    """A pick's choices as list rows, each with its alternate coordinates'
-    (``1 · time 0.1 s``), at most ``_LABEL_LIMIT`` of them.  Kept: a long
-    axis is offered again on every projection."""
+def _label_items(at: str, keys: tuple | None, alternates: tuple) -> tuple:
+    """A pick's choices as list rows: All, first and last, then under the
+    axis' (domain's) name -- which keeps the collapsed text from reading a
+    run across the ends -- its values, each with its alternate
+    coordinates' (``1 · time 0.1 s``), at most ``_LABEL_LIMIT`` of them;
+    none while nothing says them.  Kept: a long axis is offered again on
+    every projection."""
 
+    keys = keys or ()
     items = tuple(
         _item(key + "".join(f" · {name} {labels[index]}" + (f" {unit}" if unit else "")
                             for name, unit, labels in alternates), key)
         for index, key in enumerate(keys[:_LABEL_LIMIT])
     )
     if len(keys) > _LABEL_LIMIT:
-        items += ((f"{_LABEL_LIMIT} of {len(keys)} shown", None, False, MUTED_INK, False),)
-    return items
+        items += ((f"{_LABEL_LIMIT} of {len(keys)} shown", None, False, status_cue("idle")[1], False),)
+    return (*(_item(text, key) for text, key in _ENDS), _header(at), *items)
 
 
 def _alternates(schema, at: str) -> tuple:
@@ -442,7 +449,7 @@ class _VariableCard(FluentFrame):
         # "over" goes under the strip when the page is too narrow for both.
         line.place("operand", box, to="publish", fill=True)
         line.stand_on_first_row()
-        remove = _remove_button(self, "Remove the statistic")
+        remove = _remove_button(self, "Remove this statistic")
         remove.clicked.connect(self._close_statistic)
         line.place("remove", remove)
         return {"block": block, "error": error, "strip": strip, "reduce": reduce, "word": word, "over": over,
@@ -540,7 +547,7 @@ class _VariableCard(FluentFrame):
         labels to pick; the pick is written once they are picked, so the
         card, its readers and the page say nothing in between.  The axis
         the line already picks opens its labels again."""
-        axis = ui["axis"].currentData() or ""
+        axis = ui["axis"].currentData() or _ALL
         if not axis:
             ui["pending"] = None
             self._term_edit(ui, at="", labels=())
@@ -563,9 +570,14 @@ class _VariableCard(FluentFrame):
             self._term_edit(ui, at=at, labels=())
 
     def _labels_edited(self, ui, values: tuple) -> None:
+        """The values ticked; All among them is no pick, as the axis
+        combo's All is."""
         if ui not in self.terms_ui:
             return
-        if ui["pending"] is not None:
+        if _ALL in values:
+            ui["pending"] = None
+            self._term_edit(ui, at="", labels=())
+        elif ui["pending"] is not None:
             at, ui["pending"] = ui["pending"], None
             self._term_edit(ui, at=at, labels=values)
         else:
@@ -647,7 +659,8 @@ class _VariableCard(FluentFrame):
         if schema is not None and head["at"] and pick_values(schema, head["at"]) is not None:
             if kind != "where":
                 pending = head["at"]
-            elif all(label in pick_values(schema, head["at"]) for label in head["labels"]):
+            elif all(label in (FIRST, LAST) or label in pick_values(schema, head["at"])
+                     for label in head["labels"]):
                 # The mask at the value's own pick.
                 term.update(at=head["at"], labels=tuple(head["labels"]))
         self.row["terms"].append(term)
@@ -689,7 +702,7 @@ class _VariableCard(FluentFrame):
         publish = self.head["publish"]
         with signals_blocked(publish):
             publish.setChecked(bool(row["publish"]))
-        _set_tip(publish, f"Published as @logic/{context['node']}/{row['name']}" if row["publish"]
+        _set_tip(publish, f"Published as {context['signal_text'](row['name'])}" if row["publish"]
                  else "Internal: other variables read it; nothing publishes it")
         for ui, term, info in zip(self.terms_ui, terms, infos):
             self._show_term(ui, term, info)
@@ -711,7 +724,8 @@ class _VariableCard(FluentFrame):
             stage, detail, muted = None, "", False
         said = self._line_of(stage)
         for ui in (*self.terms_ui, self.statistic):
-            _ink(ui["error"], MUTED_INK if muted else RED_DARK)
+            # Red when it blocks; a parked helper's in the idle ink of a note.
+            set_status_ink(ui["error"], "idle" if muted else "error")
             show_problem(ui["error"], detail if ui is said else "")
         self.problem = str(error) if error is not None and not muted else ""
         # A parked helper's problem blocks nothing; its result says why.
@@ -738,14 +752,9 @@ class _VariableCard(FluentFrame):
         schema_of = context["schema_of"]
         kind = ui["kind"]
         if kind is not None:
-            strip = ui["strip"]
-            strip.set_current(term["op"] or None)
-            if kind == "comparison":
-                # Booleans compare only with = and ≠; one the draft holds
-                # stays marked, and the line's problem says why.
-                boolean_left = info["left"] is not None and _boolean(info["left"])
-                for op in (">", "<", ">=", "<="):
-                    strip.button(op).setEnabled(not boolean_left or op == term["op"])
+            # Every comparison takes two booleans (false < true); the
+            # operand list offers a boolean only booleans to compare with.
+            ui["strip"].set_current(term["op"] or None)
         operand = ui["operand"]
         _fill(operand, self._operands(kind, term, info), _operand_key(term))
         _set_tip(operand, term["of"])
@@ -754,8 +763,10 @@ class _VariableCard(FluentFrame):
         at = ui["pending"] or term["at"]
         schema = schema_of(term["of"]) if term["of"] else None
         groups = axis_groups(schema) if schema is not None else ()
-        # Before the source publishes, the frame axis its draft declares is
-        # the one pick offered, with the labels this operand keeps of it.
+        # Before the source publishes, the readout-event axis its draft
+        # declares -- by the name it gives it -- is the one pick offered,
+        # with the labels this operand keeps of it.
+        frame_axis = context["frame_axis"]
         frames = context["frames_of"](term["of"]) if term["of"] and schema is None else None
         picks = bool(term["of"]) and (bool(groups) or bool(frames) or bool(at))
         _visible(ui["at"], picks, hold=not number)
@@ -765,7 +776,7 @@ class _VariableCard(FluentFrame):
         _visible(ui["unit"], number, hold=False)
         if picks:
             changing = context["changing"]
-            items = [_item("All", "")]
+            items = [_item("All", _ALL)]
             for word, _domain, axes in groups:
                 # An axis each publication carries its own part of is never
                 # a pick; a domain is one when every axis of it may be.
@@ -777,7 +788,7 @@ class _VariableCard(FluentFrame):
                 items.extend(_item(f"    {axis.name}", axis.name) for axis in free)
             if frames:
                 items.extend((_header(DOMAINS[1], _COLOURS[DOMAINS[1]]),
-                              _item(f"    {FRAME_AXIS_NAME}", FRAME_AXIS_NAME)))
+                              _item(f"    {frame_axis}", frame_axis)))
             if at and not any(data == at and enabled for _t, data, _b, _c, enabled in items):
                 items.append(_item(at, at))
             _fill(ui["axis"], items, at)
@@ -785,10 +796,10 @@ class _VariableCard(FluentFrame):
             if schema is not None:
                 keys, alternates = pick_values(schema, at), _alternates(schema, at)
             else:
-                keys, alternates = (frames if frames and at == FRAME_AXIS_NAME else None), ()
-            offered = _label_items(keys, alternates) if keys is not None else ()
+                keys, alternates = (frames if frames and at == frame_axis else None), ()
+            offered = _label_items(at, keys, alternates)
             shown = () if ui["pending"] is not None else tuple(term["labels"])
-            known = set(keys or ())
+            known = {*(keys or ()), FIRST, LAST}
             extra = tuple(_item(label, label) for label in shown if label not in known)
             _fill(ui["labels"], offered + extra if extra else offered)
             ui["labels"].set_checked_data(shown)
@@ -911,13 +922,19 @@ class DeriveEditor(QtWidgets.QWidget):
         self._members: tuple[str, ...] = ()
         #: Each member's typing schema, None until it publishes.
         self._inputs: dict[str, object] = {}
-        #: The frame labels the source's draft says every member carries
-        #: (``source_frames``); None while nothing says, and for one frame,
-        #: which may as well be no frame axis: there is no pick to offer.
+        #: The readout-event labels the source's draft says every member
+        #: carries (``source_frames``) and that axis' name, as the source
+        #: names it (``source_frame_axis``); None while nothing says, and
+        #: for one frame, which may as well be no axis: there is no pick to
+        #: offer.
         self._frames: tuple[str, ...] | None = None
+        self._frame_axis: str | None = None
         #: The axes no pick may name (``changing_axes``), over every member.
         self._changing: dict[object, tuple[str, ...]] = {}
         self._node = ""
+        #: What the operator calls this node: a published variable's
+        #: signal is read as ``<name>/<variable>``.
+        self._node_name = ""
         self._failure: tuple[str, str, str] | None = None
         self._draft_problem = ""
         #: The columns every line of every card shares.  The "=", the lead
@@ -1135,10 +1152,12 @@ class DeriveEditor(QtWidgets.QWidget):
         values = projection.get("form_values") or {}
         bundle = tuple(projection.get("input_bundle") or ())
         self._node = str(projection.get("node_id") or "")
+        self._node_name = str(projection.get("name") or self._node)
         self._members = tuple(str(name) for name, _schema, _snapshot in bundle)
         self._inputs = {str(name): schema for name, schema, _snapshot in bundle}
         frames = projection.get("source_frames")
         self._frames = None if frames is None or len(frames) < 2 else tuple(frames)
+        self._frame_axis = None if self._frames is None else projection.get("source_frame_axis")
         self._changing = {}
         for _name, schema, snapshot in bundle:
             if schema is not None and snapshot is not None:
@@ -1173,7 +1192,7 @@ class DeriveEditor(QtWidgets.QWidget):
         # Untyped, each name's frames as the source's draft says them.
         drafted = {}
         if not typed and self._frames is not None:
-            for row, frames in zip(rows, frames_kept(rows, FRAME_AXIS_NAME, self._frames, members)):
+            for row, frames in zip(rows, frames_kept(rows, self._frame_axis, self._frames, members)):
                 drafted.setdefault(row["name"], frames)
 
         def frames_of(name):
@@ -1206,7 +1225,8 @@ class DeriveEditor(QtWidgets.QWidget):
                 failure = self._failure
                 card.show_row(row, answer, {
                     "members": members, "variables": variables, "names": (*members, *variables),
-                    "schema_of": schema_of, "frames_of": frames_of, "typed": typed, "node": self._node,
+                    "schema_of": schema_of, "frames_of": frames_of, "frame_axis": self._frame_axis,
+                    "typed": typed, "signal_text": self._published_text,
                     "changing": self._changing,
                     "failure": failure[1:] if failure is not None and failure[0] == row["name"] else None,
                 })
@@ -1215,6 +1235,12 @@ class DeriveEditor(QtWidgets.QWidget):
             self._order_focus()
         finally:
             self._loading = False
+
+    def _published_text(self, variable: str) -> str:
+        """What a person calls the signal ``variable`` publishes, as every
+        status and picker calls it (:func:`signal_text`)."""
+
+        return signal_text(stable_signal_key(self._node, variable), {self._node: self._node_name})
 
     def _order_focus(self) -> None:
         """Tab walks the page as it reads: Add variable, then each card

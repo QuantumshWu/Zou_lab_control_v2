@@ -119,8 +119,8 @@ def _build(*, source_signal: str, **values: object) -> FrameSurvivalProcessor:
 def _editor_factory(parent=None):
     from PyQt5 import QtCore, QtWidgets
     from zlc_ui.fluent import (
-        FONT, ORANGE_DARK, FluentSegmentedButtons, FluentSelectionGrid, error_note_label, fluent_font_size,
-        muted_note_label, row_gap, show_note, show_problem,
+        FluentSegmentedButtons, FluentSelectionGrid, error_note_label, muted_note_label, row_gap,
+        set_status_ink, show_note, show_problem,
     )
     from zlc_ui.fluent.column_set import section_header
     from zlc_ui.status import sentence
@@ -203,10 +203,9 @@ def _editor_factory(parent=None):
             layout.addWidget(self.table, 0, QtCore.Qt.AlignLeft)
             self.error = error_note_label()
             layout.addWidget(self.error)
-            # The error line's shape in the amber of a note: said, not refused.
+            # The error line's shape in the warning ink: said, not refused.
             self.note = error_note_label()
-            self.note.setStyleSheet(
-                f'color: {ORANGE_DARK}; background: transparent; border: none; font: {fluent_font_size()}pt "{FONT}";')
+            set_status_ink(self.note, "warning")
             layout.addWidget(self.note)
             self.parked = muted_note_label("")
             self.parked.setWordWrap(True)

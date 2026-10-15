@@ -10,7 +10,6 @@ from zlc_atom.nodes._framework.descriptor import (
     LogicNodeDescriptor,
     NodeKind,
 )
-from zlc_atom.nodes._framework.frames import FRAME_AXIS_NAME
 from zlc_runtime import DatasetOutputDeclaration, split_signal_key
 
 from .expression import (
@@ -73,28 +72,28 @@ def _draft_outputs(
 
 
 def _describe_output_frames(values: Mapping[str, object], output_name: str,
-                            source_frames: tuple[str, ...] | None) -> tuple[str, ...] | None:
-    """A published variable's frame labels before any data: typing's own
-    rules on the frame axis (:func:`frames_kept`), every member carrying
-    the source's frames; one frame when the variable keeps no frame axis;
-    None when the source or the draft cannot say.
+                            source: tuple[str | None, tuple[str, ...]] | None,
+                            ) -> tuple[str | None, tuple[str, ...]] | None:
+    """A published variable's readout-event axis before any data: typing's
+    own rules on the axis the source names (:func:`frames_kept`), every
+    member carrying the source's labels -- the camera's ``frame``, Frame
+    Survival's ``pair``, whatever it is called; no axis, one frame, when
+    the variable keeps none; None when the source or the draft cannot say.
 
-    The console answers one set of frames for the whole bundle, and only
-    when every member carries the same.  A single label is one frame or no
-    frame axis at all -- the answer does not say which -- so the members
-    are read as carrying none: a pick or statistic on the frame axis cannot
-    be told, and every other formula keeps one frame.
+    The console answers one axis for the whole bundle, and only when every
+    member carries the same.  The source names the axis, so one frame is
+    told apart from none: ``("frame", ("0",))`` is a frame axis of one
+    label every member carries, ``(None, ("0",))`` members without one, so
+    every variable keeps one frame -- whether they have an axis a pick or
+    statistic names is then their schemas' to say, as for any axis but the
+    source's.
 
-    Only labels are told, so two things are taken as given.  The frames are
-    those of the axis named :data:`FRAME_AXIS_NAME`, as the camera, the
-    Calibration task and Occupancy publish it; a readout-event axis named
-    otherwise -- Frame Survival's ``pair`` -- is not recognised when a pick
-    or statistic names it.  And a name no variable has is read as a
-    member's, so a name nothing has, or a variable named like a member, is
-    refused by typing once the members publish and by Start, not here.
+    A name no variable has is read as a member's, so a name nothing has, or
+    a variable named like a member, is refused by typing once the members
+    publish and by Start, not here.
     """
 
-    if source_frames is None:
+    if source is None:
         return None
     try:
         rows = _ROWS.draft_values({"variables": values.get("variables", ())})["variables"]
@@ -102,10 +101,11 @@ def _describe_output_frames(values: Mapping[str, object], output_name: str,
         return None
     if output_name not in published(rows):
         return None
-    carried = tuple(source_frames) if len(source_frames) > 1 else ()
-    kept = frames_kept(rows, FRAME_AXIS_NAME, carried, None)
+    name, labels = source
+    carried = tuple(labels) if name is not None else ()
+    kept = frames_kept(rows, name, carried, None)
     frames = next(kept[position] for position, row in enumerate(rows) if row["name"] == output_name)
-    return None if frames is None else frames or ("0",)
+    return None if frames is None else (name, frames) if frames else (None, ("0",))
 
 
 def _admit_source(values: Mapping[str, object], publication: object) -> tuple[str, ...]:
@@ -184,10 +184,12 @@ LOGIC_NODE = LogicNodeDescriptor(
         "publish (default true; false keeps a helper internal: other variables read it, nothing "
         "publishes it); terms, the formula, one row per line; optional statistic + over. A term names "
         "of (an input member or any other variable, no cycles), or gives number, or boolean "
-        "\"true\"/\"false\" (only after == or !=). at with labels (a list) picks coordinates of of: at is "
-        "an axis name (any domain) and labels are that axis' labels from the catalog, or at is a domain "
+        "\"true\"/\"false\" (only after a comparison). at with labels (a list) picks coordinates of of: "
+        "at is an axis name (any domain) and labels are that axis' labels from the catalog, or at is a domain "
         "with two or more axes (Repeat, Point, Cell) and labels are its rows written \"detuning 2 · power "
-        "1\"; one label drops the axis (the domain's axes), several keep those coordinates. A pick never "
+        "1\"; \"first\" and \"last\" are its first and last coordinate (row) whatever its length, resolved "
+        "each evaluation, never a fixed label. One label drops the axis (the domain's axes), several keep "
+        "those coordinates (one two of them name, once). A pick never "
         "names an axis each publication carries its own part of (a finite run's shots and scan points, a "
         "monitor's shots): reduce those, or plot them. Every term after the first has op: arithmetic + - "
         "* /, comparison == != > < >= <=, logic and, or, \"and not\", mask where, \"where not\". "
@@ -195,9 +197,10 @@ LOGIC_NODE = LogicNodeDescriptor(
         "right within a level; no parentheses (put a group in an internal variable). statistic sum mean "
         "count min max std any all reduces the over axis names (a list, any domains). Booleans: sum is "
         "the number true, mean the fraction true, count the valid samples; booleans never mix with "
-        "numbers. An operand whose axes are a subset of the other's repeats along the rest. Only "
-        "published variables become signals; an unpublished variable no published one reads is not "
-        "evaluated and never blocks Start. Example: "
+        "numbers, and two booleans take every comparison, false < true (occupied at frame 0 > occupied "
+        "at frame 2: loaded at 0 and empty at 2). An operand whose axes are a subset of the other's "
+        "repeats along the rest. Only published variables become signals; an unpublished variable no "
+        "published one reads is not evaluated and never blocks Start. Example: "
         "[{\"name\":\"same\",\"publish\":false,\"terms\":[{\"of\":\"occupied\",\"at\":\"frame\","
         "\"labels\":[\"0\"]},{\"op\":\"==\",\"of\":\"occupied\",\"at\":\"frame\",\"labels\":[\"2\"]}]},"
         "{\"name\":\"kept\",\"terms\":[{\"of\":\"counts\"},{\"op\":\"where\",\"of\":\"same\"}]}]. "

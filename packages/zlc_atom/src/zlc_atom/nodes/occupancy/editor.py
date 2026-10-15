@@ -48,9 +48,9 @@ from __future__ import annotations
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 from zlc_ui.fluent import (
-    FONT, ORANGE_DARK, FluentButton, FluentLabel, FluentSegmentedButtons, FluentSelectionGrid,
+    FONT, FluentButton, FluentLabel, FluentSegmentedButtons, FluentSelectionGrid,
     error_note_label, fluent_font_size, fluent_open_path, muted_note_label, retire_widget, row_gap, scaled_px,
-    setting_label_width, show_problem,
+    set_status_ink, setting_label_width, show_problem,
 )
 from zlc_ui.fluent.column_set import section_header
 
@@ -225,7 +225,7 @@ class CalibrationsEditor(QtWidgets.QWidget):
                     readers = reach.readers[frame]
                     mine = next((how for reader, how in readers if reader == row), None)
                     if len(readers) > 1 and mine is not None:
-                        states[(row, column)] = "warning"
+                        states[(row, column)] = "error"
                         tips[(row, column)] = "read by " + " and ".join(
                             f"{names[reader]} ({how})" for reader, how in readers)
                     elif not readers:
@@ -399,12 +399,10 @@ def _show_sentences(block: QtWidgets.QWidget, labels: list, texts, make) -> None
 
 
 def _note_label() -> QtWidgets.QLabel:
-    """A note line: the error line's shape in the amber of a note -- said, not refused."""
+    """A note line: the error line's shape in the warning ink -- said, not refused."""
 
     label = error_note_label()
-    label.setStyleSheet(
-        f'color: {ORANGE_DARK}; background: transparent; border: none; font: {fluent_font_size()}pt "{FONT}";'
-    )
+    set_status_ink(label, "warning")
     return label
 
 

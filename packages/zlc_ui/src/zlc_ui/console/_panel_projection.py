@@ -221,8 +221,12 @@ def parameter_edit_values(
             pass
     return {owner: edited}
 
-def signal_form_runtime(groups_for) -> FormRuntimeContext:
-    """Project producer groups into the existing keyed tree-choice form seam."""
+def signal_form_runtime(groups_for, texts_for) -> FormRuntimeContext:
+    """Project producer groups into the existing keyed tree-choice form seam.
+
+    ``texts_for()`` is ``{signal key: what a person calls it}``, as the
+    presenter spells a signal everywhere else: the closed picker reads it.
+    """
 
     def entries(field: str):
         for producer, leaves in tuple(groups_for(str(field)) or ()):
@@ -252,6 +256,7 @@ def signal_form_runtime(groups_for) -> FormRuntimeContext:
         choice_names=names,
         choice_sources=sources,
         choice_labels=labels,
+        choice_texts=texts_for,
     )
 
 

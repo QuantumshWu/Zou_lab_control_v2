@@ -2855,15 +2855,21 @@ class ConsolePresenter:
         """Tell one card which currently published signals it may show."""
 
         binding = self.panels[panel_id]
+        groups = self.signal_groups(panel_id)
+        overlay_groups = self.overlay_signal_groups(
+            binding.state.signal,
+            self._overlay_basis(binding, binding.state.signal),
+        )
         self.view.set_panel_signal_choices(
             panel_id,
-            self.signal_groups(panel_id),
+            groups,
             current=binding.state.signal,
-            overlay_groups=self.overlay_signal_groups(
-                binding.state.signal,
-                self._overlay_basis(binding, binding.state.signal),
-            ),
+            overlay_groups=overlay_groups,
             overlay_current=binding.state.overlay_signal,
+            texts=self._signal_texts(
+                groups, overlay_groups,
+                extra=(binding.state.signal, binding.state.overlay_signal),
+            ),
         )
 
     def _overlay_basis(self, binding: PanelBinding, signal: str) -> object | None:
@@ -3066,13 +3072,19 @@ class ConsolePresenter:
             overlays_by_panel = dict(overlay_offers)
             for panel_id, groups in offers:
                 binding = self.panels.get(panel_id)
+                current = binding.state.signal if binding is not None else ""
+                overlay_groups = overlays_by_panel.get(panel_id, ())
+                overlay_current = (
+                    binding.state.overlay_signal if binding is not None else ""
+                )
                 self.view.set_panel_signal_choices(
                     panel_id,
                     groups,
-                    current=binding.state.signal if binding is not None else "",
-                    overlay_groups=overlays_by_panel.get(panel_id, ()),
-                    overlay_current=(
-                        binding.state.overlay_signal if binding is not None else ""
+                    current=current,
+                    overlay_groups=overlay_groups,
+                    overlay_current=overlay_current,
+                    texts=self._signal_texts(
+                        groups, overlay_groups, extra=(current, overlay_current)
                     ),
                 )
             self._offered_groups = offers
@@ -4712,6 +4724,10 @@ class ConsolePresenter:
         frozen = binding.frozen_data
         producer_node_id = self._direct_producer_node_id(binding.state.signal)
         signal_options = self.signal_groups(binding.panel_id)
+        overlay_options = self.overlay_signal_groups(
+            binding.state.signal,
+            self._overlay_basis(binding, binding.state.signal),
+        )
         if frozen is not None:
             # Edit describes the snapshot it holds -- the one Save writes --
             # not what the live signal has grown into since it was frozen.
@@ -4735,9 +4751,12 @@ class ConsolePresenter:
             # admission, so it offers what that admission judges on
             # (_overlay_basis) -- not the freeze: Edit's picture never draws
             # a changed overlay anyway.
-            "overlay_signal_options": self.overlay_signal_groups(
-                binding.state.signal,
-                self._overlay_basis(binding, binding.state.signal),
+            "overlay_signal_options": overlay_options,
+            # What a person calls each offered signal (and the one shown):
+            # the closed pickers read it, as every status names it.
+            "signal_texts": self._signal_texts(
+                signal_options, overlay_options,
+                extra=(binding.state.signal, binding.state.overlay_signal),
             ),
             "frozen_signal": None if frozen is None else frozen.signal,
             # How the frozen signal reads to a person; the key above is what
@@ -7939,6 +7958,19 @@ class ConsolePresenter:
 
         return signal_text(str(key), self.logic_names() if names is None else names)
 
+    def _signal_texts(self, *groups: Any, extra: Sequence[str] = ()) -> dict[str, str]:
+        """``{key: what a person calls it}`` for every signal ``groups`` offer
+        (``(heading, ((label, key), ...))``) and the ``extra`` keys a picker
+        shows: what a closed picker reads, spelled as every status, caption
+        and row spells the same signal."""
+
+        names = self.logic_names()
+        keys = (
+            *(key for group in groups for _heading, leaves in group for _label, key in leaves),
+            *extra,
+        )
+        return {str(key): signal_text(str(key), names) for key in keys if key}
+
     def _panel_name(
         self, binding: PanelBinding, names: Mapping[str, str] | None = None
     ) -> str:
@@ -8648,7 +8680,7 @@ class ConsolePresenter:
             )
         acquisition_options = self._acquisition_options(binding.node_id)
         frames = self._source_frames_for(binding, draft=subject)
-        source_frames = None if frames is None else len(frames)
+        source_frames = None if frames is None else len(frames[1])
 
         def answer() -> LogicDraftFinalization:
             return finalize_logic_draft(
@@ -8708,7 +8740,7 @@ class ConsolePresenter:
             artifact_specs,
             base_dir=artifact_base_dir,
         )
-        source_frames = self._source_frames_for(binding)
+        frame_axis, source_frames = self._source_frames_for(binding) or (None, None)
         state, status = self._logic_state(binding, finalization)
         resource_fields = {
             spec.field_name for spec in binding.descriptor.workspace_resources
@@ -8750,7 +8782,7 @@ class ConsolePresenter:
         acquisition_enabled = bool(binding.descriptor.acquisition_input and
             binding.descriptor.authoring_schema.is_enabled(
                 binding.descriptor.acquisition_input, binding.draft.values))
-        source_options, source_labels, source_groups = self._source_choices(
+        source_options, source_labels, source_groups, source_texts = self._source_choices(
             binding.descriptor, binding.node_id, compatible
         )
         source_description = self._signal_projection()[1].get(binding.draft.source_signal)
@@ -8770,13 +8802,10 @@ class ConsolePresenter:
                     for name, value in publication.signals.items()
                 )
             elif selected_source:
-                parts = split_signal_key(selected_source)
-                producer = None if parts is None else self.logic.get(parts[0])
-                names = (
-                    tuple(output.name for output in self._logic_outputs(producer))
-                    if producer is not None else (signal_output_name(selected_source),)
+                input_bundle = tuple(
+                    (signal_output_name(key), None, None)
+                    for key in self._bundle_order(selected_source) or (selected_source,)
                 )
-                input_bundle = tuple((name, None, None) for name in names)
         return {
             "node_id": binding.node_id,
             # What the operator calls the node, and why their last rename was
@@ -8818,9 +8847,11 @@ class ConsolePresenter:
                 for spec in artifact_specs
                 if spec.frame_claims
             },
-            # Labels of the frames one cycle of the source carries, from 0;
-            # None while nothing says.
+            # Labels of the frames one cycle of the source carries, from 0,
+            # and the name of the axis that carries them (None for one frame
+            # no axis carries); None while nothing says.
             "source_frames": source_frames,
+            "source_frame_axis": frame_axis,
             "artifact_results": self._artifact_results(binding),
             # Beside Start, in both places an operator can press it.  One
             # preference, projected twice; neither widget keeps a default --
@@ -8835,6 +8866,7 @@ class ConsolePresenter:
             "source_options": source_options,
             "source_labels": source_labels,
             "source_groups": source_groups,
+            "source_texts": source_texts,
             "input_bundle": input_bundle,
             "device_keys": dict(binding.draft.device_keys),
             "device_options": options,
@@ -9465,10 +9497,13 @@ class ConsolePresenter:
         finalization of this row in the same turn, when it has one.
 
         The state is a word of the row's vocabulary -- idle, draft, running,
-        error -- and a draft whose issues refuse a Start is ``draft``, never
-        ``idle``.  The node's Edit page is told the same word, so the row
-        and the page draw one status one way: a draft drawn grey on one and
-        amber on the other was two looks for one status.
+        warning, error -- and a draft whose issues refuse a Start is
+        ``draft``, never ``idle``.  A run whose Restart was refused is
+        ``warning``: it goes on, but not with what the operator asked for,
+        which needs their attention and is not a failure.  The node's Edit
+        page is told the same word, so the row and the page draw one status
+        one way: a draft drawn grey on one and amber on the other was two
+        looks for one status.
         """
 
         def draft_issues() -> tuple[str, ...]:
@@ -9533,9 +9568,6 @@ class ConsolePresenter:
                     state, status = "draft", f"Draft: {issues[0]}"
                 else:
                     state, status = "idle", self._observation_status(observed)
-            warnings = tuple(getattr(observed, "warnings", ()))
-            if warnings:
-                status = f"{status}; warning: {'; '.join(warnings)}"
         if binding.pending is not None:
             waiting = ", ".join(
                 sorted(self.logic_name(label) for label in binding.pending.waiting_for)
@@ -9568,7 +9600,7 @@ class ConsolePresenter:
             # draft on the page is for the next one.
             status = f"{status} · edited"
         if refused:
-            status = f"{status}; Restart refused: {refused}"
+            state, status = "warning", f"{status}; Restart refused: {refused}"
         return state, str(status)
 
     def _show_logic(
@@ -9724,24 +9756,42 @@ class ConsolePresenter:
                         compatible.discard(key)
         return tuple(sorted(compatible))
 
+    def _bundle_order(self, signal: str) -> tuple[str, ...]:
+        """The keys of the bundle ``signal`` belongs to, in the order a
+        node reading the whole bundle lists its members: its latest
+        publication's, else its producer's declared outputs; () while
+        neither says (a producer that is no Logic node and has not
+        published)."""
+
+        publication = self.session.signal_plane.latest_publication(signal)
+        if publication is not None:
+            return tuple(publication.signals)
+        parts = split_signal_key(signal)
+        producer = None if parts is None else self.logic.get(parts[0])
+        if producer is None:
+            return ()
+        return tuple(stable_signal_key(producer.node_id, output.name) for output in self._logic_outputs(producer))
+
     def _source_choices(
         self,
         descriptor: Any,
         consumer_node_id: str,
         options: tuple[str, ...],
-    ) -> tuple[tuple[str, ...], dict[str, str], dict[str, str]]:
-        """The compatible sources' labels and groups, from ONE read.
+    ) -> tuple[tuple[str, ...], dict[str, str], dict[str, str], dict[str, str]]:
+        """The compatible sources' labels, groups and texts, from ONE read.
 
         A Logic editor open beside a running scan re-projects on every 100 ms
-        beat, so the three answers come from one read of the plane's
-        projection.  ``options`` is the compatible set the caller already
-        walked.
+        beat, so the answers come from one read of the plane's projection.
+        ``options`` is the compatible set the caller already walked.
 
-        A source is named by its producer (the group) and its output name,
-        the same words before and after it publishes: the closed combo reads
-        ``occupancy · occupied`` whether or not a shape is known yet.  The
-        shape is the editor's to show where it matters (Derive's inputs,
-        Occupancy's frame count, Frame Survival's grid).
+        A source is filed under its producer (the group) and listed by its
+        output name, the same words before and after it publishes; the
+        closed combo reads it as every status, caption and row reads the
+        same signal (:func:`signal_text`, ``Occupancy 1/occupied``), whether
+        or not a shape is known yet.  A bundle reads as its members in the
+        order Derive's Inputs list them, the first spelled as a status
+        spells it (``Occupancy 1/counts, occupied, frame_judged``).  The shape is the editor's to show where it matters
+        (Derive's inputs, Occupancy's frame count, Frame Survival's grid).
         """
 
         descriptions, _by_name, projected, _families = self._signal_projection()
@@ -9777,10 +9827,15 @@ class ConsolePresenter:
             bundled: dict[str, str] = {}
             for members in bundles.values():
                 anchor = selected if selected in members else members[0]
-                names = ", ".join(signal_output_name(key) for key in members)
-                heading = producer_text(groups.get(anchor, anchor), node_names)
-                bundled[anchor] = f"{heading} · {names}"
-            return tuple(bundled), bundled, {}
+                # Keyed by the member the draft names, written in the order
+                # Derive's Inputs list the members under it.
+                order = self._bundle_order(anchor)
+                listed = sorted(members, key=lambda key: order.index(key) if key in order else len(order))
+                bundled[anchor] = ", ".join((
+                    signal_text(listed[0], node_names),
+                    *(signal_output_name(key) for key in listed[1:]),
+                ))
+            return tuple(bundled), bundled, {}, {}
         # The draft's own source when nothing offers it any more (its node
         # renamed an output, or went): still filed under what its producer
         # is called, and named by its output, never as a bare key.
@@ -9793,7 +9848,7 @@ class ConsolePresenter:
         # only the heading a person reads is the producer's name.
         return options, labels, {
             key: producer_text(owner, node_names) for key, owner in groups.items()
-        }
+        }, {key: signal_text(key, node_names) for key in (*options, *groups)}
 
     def _build_logic_candidate(
         self,
@@ -10337,8 +10392,10 @@ class ConsolePresenter:
         *,
         draft: LogicDraft | None = None,
         _visited=frozenset(),
-    ) -> tuple[str, ...] | None:
-        """The labels of the frames one cycle of this node's source carries.
+    ) -> tuple[str | None, tuple[str, ...]] | None:
+        """``(name, labels)`` of the readout-event axis -- the frames one
+        cycle of this node's source carries -- by the name the source gives
+        it (None for one frame no axis carries).
 
         Each signal is asked of its PRODUCER first: its explicit pure
         metadata callback can preserve or describe upstream draft frames,
@@ -10347,7 +10404,7 @@ class ConsolePresenter:
         so what a producer already published still answers while its draft
         is being edited.  A node reading a whole bundle (``select_bundle``)
         reads every member, not only the one its source names: the answer is
-        the members' frames when every member carries the same, None when
+        the members' axis when every member carries the same, None when
         they differ -- one answer cannot say which member carries which.
         None while there is no source or nothing says yet.
         ``draft`` names the source: the node's draft's when omitted.
@@ -10379,17 +10436,18 @@ class ConsolePresenter:
         )
         answers = set()
         for signal in signals:
-            frames = None if describe is None else describe(
+            told = None if describe is None else describe(
                 producer.draft.values, split_signal_key(signal)[1], upstream
             )
-            answers.add(self._plane_frames(signal) if frames is None else frames)
+            answers.add(self._plane_frames(signal) if told is None else told)
         return answers.pop() if len(answers) == 1 else None
 
-    def _plane_frames(self, signal: str) -> tuple[str, ...] | None:
-        """One signal's frame labels as the plane holds them: the declared
-        signal, then its latest publication, through the Point axis with
-        the readout-event role.  A signal without one carries one frame;
-        None while the plane has no schema for it."""
+    def _plane_frames(self, signal: str) -> tuple[str | None, tuple[str, ...]] | None:
+        """``(name, labels)`` of one signal's readout-event Point axis as the
+        plane holds it -- the declared signal, then its latest publication
+        -- labelled as every pick reads an axis (``AxisSpec.labels()``).  A
+        signal without one carries one frame, ``(None, ("0",))``; None
+        while the plane has no schema for it."""
 
         from zlc_data import READOUT_EVENT
 
@@ -10403,11 +10461,8 @@ class ConsolePresenter:
             schema = value.canonical_schema or value.snapshot.block.schema
         for axis in schema.point_domain.axes:
             if axis.role == READOUT_EVENT:
-                return tuple(
-                    coordinate if isinstance(coordinate, str) else f"{coordinate:g}"
-                    for coordinate in (axis.coordinate_at(code) for code in range(axis.size))
-                )
-        return ("0",)
+                return axis.name, axis.labels()
+        return None, ("0",)
 
     def _default_artifact_inputs(self, descriptor: object) -> dict[str, Any]:
         """Freeze the latest observed matching artifact into a new row draft.

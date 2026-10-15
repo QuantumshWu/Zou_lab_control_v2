@@ -406,11 +406,17 @@ class LogicNodeDescriptor:
         ]
         | None
     ) = None
-    #: Pure authoring projection for one output's readout-event labels.
-    #: None means unknown, not permission to invent or publish data. The
-    #: optional source labels come from the same upstream draft contract.
+    #: Pure authoring projection for one output's readout-event axis:
+    #: ``(name, labels)`` -- the axis' name, None for an output that
+    #: carries none (one frame, ``("0",)``), and its labels.  None means
+    #: unknown, not permission to invent or publish data.  The source's
+    #: own ``(name, labels)``, when it says, comes from the same upstream
+    #: draft contract or from what the source already published.
     describe_output_frames: (
-        Callable[[Mapping[str, object], str, tuple[str, ...] | None], tuple[str, ...] | None]
+        Callable[
+            [Mapping[str, object], str, tuple[str | None, tuple[str, ...]] | None],
+            tuple[str | None, tuple[str, ...]] | None,
+        ]
         | None
     ) = None
     device_requirements: tuple[DeviceRequirement, ...] = ()

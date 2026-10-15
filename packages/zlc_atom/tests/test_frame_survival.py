@@ -142,6 +142,24 @@ def test_pair_axis_carries_one_label_per_pair() -> None:
     assert labelled.block.schema.point_domain.axes[0].coordinate_labels == (
         "before→after",
     )
+    # An axis that declares its own labels -- another Frame Survival's
+    # pairs, read through a Derive -- names each frame by them, as the
+    # editor's grid and every pick read that axis, not by its coordinate.
+    paired = replace(
+        source,
+        point_domain=DomainSpec(
+            (2,),
+            (replace(source.point_domain.axes[0], coordinate_labels=("0→1", "0→2")),),
+            ((0, 1),),
+        ),
+    )
+    assert paired.point_domain.axes[0].labels() == ("0→1", "0→2")
+    chained = FrameSurvivalProcessor(producer="fs")._pair(
+        owned_snapshot_from_arrays(paired, np.zeros((1, 2, 2), dtype=bool), 0)
+    )
+    assert chained.block.schema.point_domain.axes[0].coordinate_labels == (
+        "0→1→0→2",
+    )
     from zlc_atom.nodes.scan.dataset import scan_dataset_schema
 
     value_schema = labelled.block.schema.value_schema
@@ -411,6 +429,7 @@ def test_pair_matrix_selects_like_a_table_and_writes_the_draft() -> None:
         drafts.clear()
         project(selection="custom", custom_pairs=({"start": "0", "end": "1"}, {"start": "2", "end": "5"}))
         assert marked() == [(0, 1)] and form.note.text() == "kept, not in this source: 2→5." and drafts == []
+        assert form.note.property("status_word") == "warning", "said in the warning ink, not refused"
         # The strip always marks one choice: a list with pairs is Selected.
         assert derived() == [] and form.presets.current() == "custom"
         # A look at a rule keeps Selected's list: picked again, it comes back.

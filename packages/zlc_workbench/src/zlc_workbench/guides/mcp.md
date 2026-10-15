@@ -202,7 +202,8 @@ stop Start, and a run fails only when none of its selected pairs is in the sourc
 The operator keeps parked and absent pairs on purpose: never delete one to make
 Start work. Camera draft changes update Occupancy, Derive and Frame Survival
 editors before new data arrives -- Derive passes on the frames each published
-variable keeps, one frame when it picks or reduces the frame axis away -- and
+variable keeps, one frame when it picks or reduces the frame axis away; over
+Frame Survival that axis is `pair`, and Derive is told so -- and
 runtime data still follows the actual acquired source schema. A node whose draft
 cannot say (a formula being edited) answers with the frames it last published.
 A Derive reads its source's whole bundle, so its source frames are known only
@@ -218,13 +219,18 @@ then send `values.variables`, one row per variable: `name`, `terms` (the
 formula, one row per line, in order), optional `statistic` + `over`, and
 `"publish": false` for an internal helper that other variables read and
 nothing publishes. A term is `of` (a member or any other variable, no
-cycles), or `number`, or `boolean` (`"true"`/`"false"`, only after `==` or
-`!=`); a pick is `at` plus `labels` (always a list): `at` = an axis name of
-`of`, in any domain, and `labels` its labels; or `at` = a domain with two or
-more axes (`Repeat`, `Point`, `Cell`) and `labels` its rows, each written as
+cycles), or `number`, or `boolean` (`"true"`/`"false"`, only after a
+comparison); a pick is `at` plus `labels` (always a list): `at` = an axis
+name of `of`, in any domain, and `labels` its labels; or `at` = a domain with
+two or more axes (`Repeat`, `Point`, `Cell`) and `labels` its rows, each written as
 its axes' names and labels joined by ` · ` (`"detuning 2 · power 1"`, `"y 3 ·
-x 5"`). One label drops the axis (the domain's axes), several keep those
-coordinates; a Cell domain's rows must fill a grid. A pick never names an axis
+x 5"`). `"first"` and `"last"` are the axis' (domain's) first and last
+coordinate (row) as long as it is when evaluated -- the words Occupancy's frame
+claims and Frame Survival's ends use -- so a pick written with `"last"` follows
+a frame count where `"2"` would not; mix them with labels freely. One label
+drops the axis (the domain's axes), several keep those coordinates (a
+coordinate two of them name, as First and Last of a one-frame axis, once); a
+Cell domain's rows must fill a grid. A pick never names an axis
 each publication carries its own part of -- a finite run's shots and scan
 points, a monitor's shots: the catalog's labels of those are the run's, and a
 live publication carries one -- so reduce over it with a statistic or plot it
@@ -236,8 +242,11 @@ a level; no parentheses -- put a group in an internal variable. `over` lists
 axis names of any domain; at the end of a finite run Derive reads the run's
 Dataset, so `over` a repeat axis is a shot average without error bars -- use a
 plot panel's Reduce for those. Booleans: `sum` is the number true, `mean` the
-fraction true, `count` the valid samples; booleans never mix with numbers. An
-operand whose axes are all on the other side repeats along the rest. Names
+fraction true, `count` the valid samples; booleans never mix with numbers.
+Two booleans take all six comparisons, ordered `false < true` as NumPy orders
+them: occupied at frame 0 `>` occupied at frame 11 is "loaded at 0 and empty
+at 11" (the same as `and not`). An operand whose axes are all on the other
+side repeats along the rest. Names
 are letters, digits and `_`, not starting with a digit, and never an input's
 name.
 
@@ -250,7 +259,8 @@ name.
 | brightened | `{"terms":[{"of":"counts","at":"frame","labels":["2"]},{"op":"-","of":"counts","at":"frame","labels":["0"]},{"op":">","number":30},{"op":"and","of":"occupied","at":"frame","labels":["0"]}]}` |
 | window | `{"terms":[{"of":"counts","at":"frame","labels":["1"]},{"op":">","number":10},{"op":"and","of":"counts","at":"frame","labels":["1"]},{"op":"<","number":50},{"op":"and","of":"occupied","at":"frame","labels":["1"]}]}` |
 | rise | `{"terms":[{"of":"counts","at":"frame","labels":["1","2"]},{"op":"-","of":"counts","at":"frame","labels":["0"]}]}` (keeps frames 1 and 2) |
-| lost | `{"terms":[{"of":"occupied","at":"frame","labels":["0"]},{"op":"and not","of":"occupied","at":"frame","labels":["2"]}],"statistic":"sum","over":["Site"]}` |
+| ends | `{"terms":[{"of":"occupied","at":"frame","labels":["first","last"]}]}` (keeps the first and the last frame, whatever the cycle's length) |
+| lost | `{"terms":[{"of":"occupied","at":"frame","labels":["0"]},{"op":">","of":"occupied","at":"frame","labels":["2"]}],"statistic":"sum","over":["Site"]}` (atoms loaded at frame 0 and gone at frame 2, per shot) |
 | empty0 | `{"terms":[{"of":"occupied","at":"frame","labels":["0"]},{"op":"==","boolean":"false"}]}` |
 | level + norm | `{"name":"level","publish":false,"terms":[{"of":"counts","at":"frame","labels":["1"]},{"op":"where","of":"occupied","at":"frame","labels":["1"]}],"statistic":"mean","over":["Site"]}` then `{"name":"norm","terms":[{"of":"counts","at":"frame","labels":["1"]},{"op":"/","of":"level"}]}` |
 | corner + corner_full | `{"name":"corner","publish":false,"terms":[{"of":"occupied","at":"Site","labels":["1","2","3","7","8","9"]}]}` then `{"name":"corner_full","terms":[{"of":"corner","at":"frame","labels":["1"]}],"statistic":"all","over":["Site"]}` |
