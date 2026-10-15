@@ -19,6 +19,7 @@ from ._framework.descriptor import (
 from ._framework.discovery import discover_logic_nodes
 from ._framework.frames import (
     FrameClaim,
+    absent_notes,
     assign_frames,
     check_claims,
     claim_names,
@@ -35,6 +36,7 @@ __all__ = [
     "ArtifactInputSpec",
     "frame_claim_entries",
     "FrameClaim",
+    "absent_notes",
     "assign_frames",
     "check_claims",
     "claim_names",

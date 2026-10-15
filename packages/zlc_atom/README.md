@@ -308,8 +308,9 @@ positive numbers for the middle frames between them, `rest`; one calibration
 alone reads every frame), and selects `default`, `box`, `psf`, or `uniform_psf`
 readout.  Which calibration reads which frame is resolved against the frames
 that arrive, so `first`, `last` and `rest` follow a cycle that gains or loses a
-frame, a middle number the shorter cycle no longer has is reported absent (it
-never becomes the last frame), and any collision is refused by name.  A calibration claiming no frame
+frame, a middle number the shorter cycle no longer has is kept and noted absent
+(it reads nothing, never becomes the last frame and stops no run), and any
+collision or unread frame is refused by name.  A calibration claiming no frame
 is parked: kept in the run record, never read and never checked against the
 calibrations that are; only a list in which none reads is refused.
 It publishes three same-publication Dataset siblings: per-site numeric

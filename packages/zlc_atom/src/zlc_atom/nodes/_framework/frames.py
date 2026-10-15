@@ -18,16 +18,17 @@ nothing and is checked against nothing (:func:`parked_entries`) -- a file
 the operator keeps at hand is not a file they must use.  Only an assignment
 in which every entry is parked is refused.
 
-So a cycle that gains or loses a frame keeps meaning what was authored: the
+A cycle that gains or loses a frame keeps meaning what was authored: the
 ends follow the cycle, a middle number keeps its position, and a middle
-number the shorter cycle no longer has between its ends becomes ABSENT -- it
-never takes over the last frame.  A frame is read by exactly one entry.  Only
-"rest" ranks below anything else: every other collision -- two entries
-reaching one frame ("first" and "last" in a one-frame cycle), a middle number
-the source does not carry, a frame nobody reads -- is refused with the
-entries named, never settled silently.  One entry reaching a frame two ways
-is one reader.  Nothing here ever edits what was authored: the same claims
-are valid again once the frame count that suited them returns.
+number the shorter cycle no longer has between its ends is ABSENT -- it
+never takes over the last frame, reads nothing in this cycle and is noted
+(:func:`absent_notes`), not refused.  A frame is read by exactly one entry.
+Only "rest" ranks below anything else: every other collision -- two entries
+reaching one frame ("first" and "last" in a one-frame cycle), a frame nobody
+reads -- is refused with the entries named, never settled silently.  One
+entry reaching a frame two ways is one reader.  Nothing here ever edits what
+was authored: an absent number reads its frame again once a frame count that
+has it returns.
 """
 
 from __future__ import annotations
@@ -302,22 +303,18 @@ def frame_problems(
     *,
     what: str = "entry",
 ) -> tuple[str, ...]:
-    """Why ``count`` frames cannot be read this way, in operator words."""
+    """Why ``count`` frames cannot be read this way, in operator words.
+
+    A frame two entries reach, and a frame nobody reads.  An absent middle
+    number is not one: it is :func:`absent_notes`'.
+    """
 
     reach = reach_frames(frames_by_entry, count)
-    span = "only frame 0" if count == 1 else f"0-{count - 1}"
     problems = [
-        f"{names[entry]} names middle frame {number}, but the source carries "
-        f"{count} frame{'s' if count != 1 else ''} ({span}); a numbered middle "
-        "frame never stands for the first or the last"
-        for entry, number in reach.absent
+        f"frame {frame} is read by both "
+        + " and ".join(f"{names[entry]} ({how})" for entry, how in readers)
+        for frame, readers in enumerate(reach.readers) if len(readers) > 1
     ]
-    for frame, readers in enumerate(reach.readers):
-        if len(readers) > 1:
-            problems.append(
-                f"frame {frame} is read by both "
-                + " and ".join(f"{names[entry]} ({how})" for entry, how in readers)
-            )
     unread = [frame for frame, readers in enumerate(reach.readers) if not readers]
     if unread:
         frames = ", ".join(str(frame) for frame in unread)
@@ -329,6 +326,22 @@ def frame_problems(
     return tuple(problems)
 
 
+def absent_notes(
+    frames_by_entry: Sequence[Sequence[FrameToken]],
+    count: int,
+    names: Sequence[str],
+) -> tuple[str, ...]:
+    """Each claimed middle number a ``count``-frame cycle does not have between
+    its ends: kept as written and reading nothing now, so it is said, not refused."""
+
+    span = "only frame 0" if count == 1 else f"frames 0-{count - 1}"
+    return tuple(
+        f"{names[entry]}'s middle frame {number} is not in this source ({span}); "
+        "it is kept for a cycle that has it"
+        for entry, number in reach_frames(frames_by_entry, count).absent
+    )
+
+
 def assign_frames(
     frames_by_entry: Sequence[Sequence[FrameToken]],
     count: int,
@@ -336,7 +349,11 @@ def assign_frames(
     *,
     what: str = "entry",
 ) -> tuple[int, ...]:
-    """The one entry each of ``count`` frames is read by, or every reason why not."""
+    """The one entry each of ``count`` frames is read by, or every reason why not.
+
+    An absent middle number does not stop it: that entry reads the frames it
+    still reaches, and its absent number reads nothing.
+    """
 
     problems = frame_problems(frames_by_entry, count, names, what=what)
     if problems:
@@ -353,6 +370,7 @@ __all__ = [
     "FrameToken",
     "LAST",
     "REST",
+    "absent_notes",
     "assign_frames",
     "canonical_frames",
     "check_claims",

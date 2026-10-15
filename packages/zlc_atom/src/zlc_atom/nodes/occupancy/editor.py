@@ -8,10 +8,11 @@ columns and no numbered column repeats them; the numbered columns are the
 MIDDLE frames, which keep their number.  "Rest" takes whatever no file
 names.  A frame reached through Rest shows as a dashed card in its file's
 row (on First or Last when it is an end); a frame nobody reads is an empty
-red card in every row, and one two files reach, or a middle number the
-source no longer has between its ends, is a red card with the reason
-below.  Nothing here changes a claim because the frame count changed: what
-was authored stays until the operator edits it.
+red card in every row, and one two files reach is a red card with the
+reason below.  A middle number the source no longer has between its ends
+is kept, an amber card with an amber note below: it reads nothing in this
+cycle and stops nothing.  Nothing here changes a claim because the frame
+count changed: what was authored stays until the operator edits it.
 
 A file with no frame is PARKED, not wrong: kept in the list, read for
 nothing and checked against nothing, its name muted and counted in the
@@ -23,9 +24,9 @@ other control and one row pitch from the next: what the file is (its
 exposure, sites and model, or why it cannot be read) is in the name's
 tooltip with its path.  The readout model -- which model each file is read
 with, set once -- is a segmented choice under the files it applies to: the
-four models are this node's closed set.  The problems stand under that
-choice and above the section's hint, one sentence each, so the files and
-the model keep their place whether a problem is there or not.
+four models are this node's closed set.  The problems, then the notes,
+stand under that choice and above the section's hint, one sentence each,
+so the files and the model keep their place whether one is there or not.
 
 The section opens like every editor's section: its title, then at the right
 end its summary and "Add calibration…".  The file names stand in the
@@ -47,6 +48,7 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 
 from zlc_ui.fluent import (
     FONT,
+    ORANGE_DARK,
     TEXT,
     FluentButton,
     FluentLabel,
@@ -126,8 +128,12 @@ class CalibrationsEditor(QtWidgets.QWidget):
         # the model they are read with -- so a problem coming or going
         # moves nothing above it.  One red block per problem, half a row
         # gap apart: a problem that wraps is still told from the next one.
+        # The notes -- what is kept but reads nothing in this cycle -- stand
+        # under the problems in amber, the same way: said, never refused.
         self.problems, self._problem_labels = _blocks(self), []
+        self.notes, self._note_labels = _blocks(self), []
         layout.addWidget(self.problems)
+        layout.addWidget(self.notes)
         # The section's hint is its last line, under everything it explains.
         self.hint = muted_note_label(_HINT)
         self.hint.setWordWrap(True)
@@ -180,10 +186,10 @@ class CalibrationsEditor(QtWidgets.QWidget):
         self._filter = str(claims["file_filter"])
         frames = projection.get("source_frames")
         self.model.set_current(projection["form_values"]["model_kind"])
-        self._drawn = (frames, claims["files"], claims["problems"])
+        self._drawn = (frames, claims["files"], claims["problems"], claims["notes"])
         self._draw(*self._drawn)
 
-    def _draw(self, frames, files, problems) -> None:
+    def _draw(self, frames, files, problems, notes) -> None:
         entries = self._entries
         count = None if frames is None else len(frames)
         # A file with no frame is kept and not read: muted, never red.
@@ -194,8 +200,8 @@ class CalibrationsEditor(QtWidgets.QWidget):
         # The numbered columns are the middle frames; the ends are First and Last.
         middle = () if count is None else tuple(range(1, count - 1))
         # A middle number the source does not carry between its ends keeps a
-        # column of its own, so the claim stays visible -- and one click away
-        # from being removed.
+        # column of its own, so the claim stays visible -- kept for a cycle
+        # that has it, and one click away from being removed.
         ghosts = tuple(number for number in claimed if number not in middle)
         self._columns = (*(token for token, _label in _NAMED), _GAP, *middle, *ghosts)
         ends = {FIRST: 0, LAST: None if count is None else count - 1}
@@ -221,11 +227,10 @@ class CalibrationsEditor(QtWidgets.QWidget):
                 if isinstance(token, int) and token not in middle:
                     if token not in entry["frames"]:
                         continue
-                    states[(row, column)] = "warning"
-                    tips[(row, column)] = (
-                        f"middle frame {token} is not in this source; click to drop the claim"
-                        if count is not None else f"frame {token}"
-                    )
+                    if count is not None:
+                        states[(row, column)] = "kept"
+                        tips[(row, column)] = (
+                            f"kept: middle frame {token} is not in this source; click to drop it")
                 elif frame is not None and reach is not None:
                     readers = reach.readers[frame]
                     mine = next((how for reader, how in readers if reader == row), None)
@@ -285,6 +290,7 @@ class CalibrationsEditor(QtWidgets.QWidget):
         else:
             self.summary.setText(f"{count} {frames_word} · each read once{not_read}")
         _show_sentences(self.problems, self._problem_labels, problems, error_note_label)
+        _show_sentences(self.notes, self._note_labels, notes, _note_label)
 
     # ---------------------------------------------------------------- editing
 
@@ -400,6 +406,16 @@ def _show_sentences(block: QtWidgets.QWidget, labels: list, texts, make) -> None
     for label, text in zip(labels, texts):
         show_problem(label, text)
     block.setVisible(bool(texts))
+
+
+def _note_label() -> QtWidgets.QLabel:
+    """A note line: the error line's shape in the amber of a note -- said, not refused."""
+
+    label = error_note_label()
+    label.setStyleSheet(
+        f'color: {ORANGE_DARK}; background: transparent; border: none; font: {fluent_font_size()}pt "{FONT}";'
+    )
+    return label
 
 
 def _fitted(name: str, width: int | None) -> str:

@@ -92,10 +92,8 @@ def test_claims_are_refused_by_name_and_against_a_known_frame_count(workspace) -
         assert "'rest' is claimed by both load and readout" in both.issues
         claims = ({"path": str(load), "frames": [2]}, {"path": str(readout), "frames": ["rest"]})
         assert _finalize(workspace, plane, claims).can_start, "no count known: nothing to check yet"
-        assert _finalize(workspace, plane, claims, source_frames=2).issues == (
-            "load names middle frame 2, but the source carries 2 frames (0-1); "
-            "a numbered middle frame never stands for the first or the last",
-        )
+        # Two frames have no middle frame 2: the claim is kept, and stops nothing.
+        assert _finalize(workspace, plane, claims, source_frames=2).can_start
         assert _finalize(workspace, plane, claims, source_frames=4).can_start
         empty_row = _finalize(workspace, plane, ({"path": "", "frames": ["rest"]},))
         assert "Calibrations row 1 has no file yet" in empty_row.issues
