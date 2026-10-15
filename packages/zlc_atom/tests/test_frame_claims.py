@@ -155,3 +155,13 @@ def test_a_row_is_named_by_its_run_folder_and_told_apart_by_the_day() -> None:
     ))
     assert names == ("2026_10_13/load_cal", "2026_10_14/load_cal", "readout_cal", "background_5ms", "row 5")
     assert "calibration" not in names
+
+    # Two runs that kept the task's own folder name, and files saved before
+    # runs had a final folder: each is told apart by its day, never by a
+    # folder that repeats the name or by the data root.
+    assert claim_names((
+        {"path": "C:/ws/data/2026_09_01/calibration/final/calibration.json", "frames": ("first",)},
+        {"path": "C:/ws/data/2026_09_02/calibration/final/calibration.json", "frames": ("last",)},
+        {"path": "C:/ws/data/2026_08_16/calibration/calibration.json", "frames": (1,)},
+        {"path": "C:/ws/data/2026_08_08/calibration.json", "frames": ("rest",)},
+    )) == ("2026_09_01/calibration", "2026_09_02/calibration", "2026_08_16/calibration", "2026_08_08/calibration")
