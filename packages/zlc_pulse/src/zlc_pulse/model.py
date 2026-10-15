@@ -632,6 +632,16 @@ class PulseComponent:
                 raise ValueError(f"{name} source ids must be unique")
             object.__setattr__(self, name, mapping)
 
+    @property
+    def from_file(self) -> bool:
+        """Whether this instance plays a Subpulse file: Config, with a file chosen.
+
+        A Config instance with no file yet plays its embedded default, the
+        way a Config field with no Config name plays its own value.
+        """
+
+        return self.source == BINDING_CONFIG and bool(self.config_path)
+
 
 @dataclass(frozen=True, init=False)
 class PulseSequence:

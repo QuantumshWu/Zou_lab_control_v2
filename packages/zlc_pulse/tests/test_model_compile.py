@@ -869,6 +869,10 @@ def test_component_and_non_executable_subpulse_files_roundtrip(tmp_path) -> None
     write_subpulse(path, api_fragment)
     defaults = insert_subpulse(insert_subpulse(None, api_fragment), api_fragment)
     first, second = defaults.components
+    unchosen = resolve_subpulse_sources(replace(
+        set_subpulse_source(defaults, first.component_id, "config", ""), config_enabled=True))
+    assert unchosen.periods == defaults.periods
+    assert (unchosen.components[0].source, unchosen.components[0].config_path) == ("default", "")
     referenced = set_subpulse_source(defaults, first.component_id, "config", path.name)
     assert resolve_subpulse_sources(referenced, base_directory=tmp_path) is referenced
     assert referenced.periods == defaults.periods

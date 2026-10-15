@@ -80,6 +80,9 @@ Port catalog and Delay / Scan; Collapse is only an expanded Subpulse's command.
 `set_component_document` identifies the selected Subpulse independently of
 `context_id`, the actual embedded-default owner (empty when editing a file).
 Config source edits the chosen file even when the global Config switch is off.
+A Config source with no file chosen yet plays its embedded default: its status
+reads No file — plays Default, it is not a Config error, and its periods stay
+editable on the timeline as a Default Subpulse's do.
 Changing that global switch never replaces the selection or the file draft.
 Browsing or editing the file path does not change the main-card source choice.
 Save Pulse writes embedded defaults; Save writes the selected file. Only applied

@@ -72,7 +72,7 @@ class PulseEditorState:
         )
         fields = tuple(tuple(pair) for pair in self.scan_fields)
         if self.scan_rows and not fields and self.sequence is not None and not any(
-            component.source == "config" for component in self.sequence.components
+            component.from_file for component in self.sequence.components
         ):
             fields = tuple((binding.field_id, binding.unit) for binding in self.sequence.scan_bindings)
         object.__setattr__(self, "scan_fields", fields)

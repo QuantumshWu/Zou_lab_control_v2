@@ -1561,6 +1561,17 @@ def test_default_config_mode_projects_file_subpulse_without_replacing_defaults(s
     try:
         assert not presenter.sequence.config_enabled
         assert presenter.load_config_values(str(values))
+        # Config chosen before any file: the Subpulse plays its embedded
+        # default, the Pulse previews and runs, and its contents stay editable.
+        view.component_action_requested.emit("source", (component.component_id, "config", ""))
+        view.config_mode_committed.emit(True)
+        assert not view.config_error
+        assert view.subpulse_sources[0][4] == "No file — plays Default"
+        assert not view.schedule_view.schedule.periods[0].readonly
+        executed, _rows, _repeats = presenter._execution_request()
+        assert (executed.components[0].source, executed.components[0].config_path) == ("default", "")
+        assert executed.period_by_id[first.period_id].duration == first.duration
+        view.config_mode_committed.emit(False)
         view.component_action_requested.emit("source", (component.component_id, "config", str(path)))
         authored = presenter.sequence
         assert view.schedule_view.schedule.periods[0].duration.text == str(first.duration)

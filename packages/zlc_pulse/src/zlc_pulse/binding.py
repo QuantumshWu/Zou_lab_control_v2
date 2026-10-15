@@ -401,7 +401,10 @@ def resolve_subpulse_sources(
 
     The returned components contain their actual resolved bodies. Their source is
     Default so passing the result through preparation again cannot reread a file;
-    config_path retains the exact file used in the execution document.
+    config_path retains the exact file used in the execution document.  A Config
+    instance with no file chosen yet plays its embedded default, and its empty
+    config_path says so in the execution document; a file that was chosen but
+    cannot be read is refused by name.
     """
     from .codec import read_subpulse
 
@@ -412,8 +415,12 @@ def resolve_subpulse_sources(
     for component in sequence.components:
         if component.source != "config":
             continue
-        if not component.config_path:
-            raise ValueError(f"Subpulse {component.name!r} has no Config file; choose a Subpulse file")
+        if not component.from_file:
+            resolved = replace(resolved, components=tuple(
+                replace(item, source="default") if item.component_id == component.component_id else item
+                for item in resolved.components
+            ))
+            continue
         path = Path(component.config_path).expanduser()
         if not path.is_absolute():
             path = Path(base_directory or Path.cwd()) / path

@@ -161,7 +161,7 @@ def _bracket_vms(
                 ),
             ),
             readonly=bool(sequence.config_enabled and any(
-                c.source == "config" and b.bracket_id in resolved.bracket_ids
+                c.from_file and b.bracket_id in resolved.bracket_ids
                 for c in (authored_sequence or sequence).components
                 for resolved in sequence.components if resolved.component_id == c.component_id
             )),
@@ -518,7 +518,7 @@ def project_period(
     default_period = authored.period_by_id.get(period.period_id, period)
     owner = sequence.component_for_period(period.period_id)
     readonly = bool(sequence.config_enabled and owner is not None and any(
-        c.component_id == owner.component_id and c.source == "config" for c in authored.components
+        c.component_id == owner.component_id and c.from_file for c in authored.components
     ))
     return PeriodVM(
         period_id=period.period_id,
@@ -706,8 +706,8 @@ def project_schedule(
                 bracket_ids=tuple(bracket.bracket_id for bracket in fragment.brackets),
                 source=original.source,
                 config_path=original.config_path,
-                config_active=bool(sequence.config_enabled and original.source == "config" and not config_error),
-                error=config_error if original.source == "config" else "",
+                config_active=bool(sequence.config_enabled and original.from_file and not config_error),
+                error=config_error if original.from_file else "",
             )
             for component in sequence.components
             for original in (next((c for c in (authored_sequence or sequence).components
@@ -1460,7 +1460,7 @@ class PulseEditorPresenter:
                 "config.mode": "enabled: boolean; choose Default or Config for this Pulse",
                 "config.refresh": "no arguments; refresh saved numeric Config and Subpulse sources",
                 "subpulse.select": "component_id: select its embedded default or referenced file for editing; empty selects the retained independent file draft; discard_changes=true permits replacing unsaved file content",
-                "subpulse.source": "component_id, source (default/config), optional path (empty clears, omitted keeps reference); assigning a path does not change source; discard_changes=true permits replacing unsaved selected file content",
+                "subpulse.source": "component_id, source (default/config), optional path (empty clears, omitted keeps reference); Config with no file plays the embedded default; assigning a path does not change source; discard_changes=true permits replacing unsaved selected file content",
                 "subpulse.open_source": "component_id; open its referenced file for editing; discard_changes=true permits replacing unsaved file content",
                 "subpulse.new": "create an independent draft; discard_changes=true permits replacing unsaved file content",
                 "subpulse.open": "path: explicit Subpulse JSON file; discard_changes=true permits replacing unsaved file content",
@@ -1523,7 +1523,7 @@ class PulseEditorPresenter:
         result["components"] = [
             {"component_id": c.component_id, "name": c.name, "source": c.source, "path": c.config_path,
              "period_ids": list(c.period_ids), "bracket_ids": list(c.bracket_ids),
-             "effective_read_only": bool(sequence.config_enabled and c.source == "config")}
+             "effective_read_only": bool(sequence.config_enabled and c.from_file)}
             for c in components
         ]
         context = self._component_context
@@ -1777,7 +1777,7 @@ class PulseEditorPresenter:
                 if action in {"remove_items", "insert_period", "insert_spacer", "reorder_items", "bracket_add"}:
                     order = _sequence_item_order(self.sequence)
                     for component in self.sequence.components:
-                        if component.source != "config":
+                        if not component.from_file:
                             continue
                         members = {("period", key) for key in component.period_ids}
                         members.update(("bracket", bracket_post_key(key, side))
@@ -1808,7 +1808,7 @@ class PulseEditorPresenter:
                         component = self.sequence.component_for_field(PulseFieldRef("bracket_count", bracket_id=str(period_id)))
                     else:
                         component = self.sequence.component_for_period(str(period_id))
-                    if component is not None and component.source == "config":
+                    if component is not None and component.from_file:
                         raise ValueError("This Subpulse comes from a file. Open its source, or switch to Default to edit the embedded content.")
                 if action in {"duration", "analog", "delay", "bracket"}:
                     reference = (PulseFieldRef("delay", port=str(args[0])) if action == "delay" else
@@ -1842,7 +1842,7 @@ class PulseEditorPresenter:
         self.view.set_subpulse_sources(
             tuple((c.component_id, c.name, c.source, c.config_path,
                    "Default" if c.source != "config" else
-                   "Choose a file" if not c.config_path else
+                   "No file — plays Default" if not c.config_path else
                    "Config off" if not enabled else
                    "Not applied — Config error" if self._config_error else "Applied")
                   for c in (() if sequence is None else sequence.components)),
@@ -2126,7 +2126,7 @@ class PulseEditorPresenter:
 
     def _edit_component_contents(self, context: str, action: str, args: tuple, *, present: bool = True) -> bool:
         if context and self.sequence is not None and self.sequence.config_enabled and any(
-            c.component_id == context and c.source == "config" for c in self.sequence.components
+            c.component_id == context and c.from_file for c in self.sequence.components
         ):
             self._warn("This Subpulse comes from a file. Open the source file to edit it.", present=present)
             return False
@@ -2585,7 +2585,7 @@ class PulseEditorPresenter:
         owners = {}
         defaults = {}
         for component in self.sequence.components:
-            if component.source != "config":
+            if not component.from_file:
                 continue
             shown = next((c for c in self._shown.components if c.component_id == component.component_id), None)
             if shown is None:
@@ -2865,7 +2865,7 @@ class PulseEditorPresenter:
 
     def _set_port_everywhere(self, port_key: str, *, high: bool) -> None:
         if self.sequence is not None and self.sequence.config_enabled and (
-            any(c.source == "config" for c in self.sequence.components) or
+            any(c.from_file for c in self.sequence.components) or
             any(b.kind == "dac" and b.field_ref.port == port_key and b.config_key in self._active_config_values()
                 for b in self.sequence.config_bindings)
         ):
@@ -3560,7 +3560,7 @@ class PulseEditorPresenter:
                 if execution.config_enabled:
                     recorded = {item.component_id: item for item in adopted.components}
                     for component in execution.components:
-                        if component.source != "config":
+                        if not component.from_file:
                             continue
                         prior = recorded.get(component.component_id)
                         if (prior is None or prior.source != "default" or not prior.config_path
