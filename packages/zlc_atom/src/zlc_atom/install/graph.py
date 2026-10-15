@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 import threading
 from typing import Any, Mapping
 
@@ -279,7 +279,13 @@ def _world_from_apparatus(
     descriptors: Mapping[str, DeviceTypeDescriptor],
     simulation: Mapping[str, Any],
 ) -> object:
-    """Build one shared world from the installation's root simulation truth."""
+    """Build one shared world from the installation's root simulation truth.
+
+    Without a virtual device nothing uses a world, and the simulation
+    settings are left unread: bring-up replaces virtual devices with real
+    ones one at a time, and settings the last replacement left behind harm
+    no real device.  The apparatus file keeps them as written.
+    """
 
     from zlc_atom.devices.simulation import SimulationWorld, SimulationWorldConfig
 
@@ -290,8 +296,6 @@ def _world_from_apparatus(
         if descriptor.world_config is not None
     }
     if not resolvers:
-        if simulation:
-            raise ValueError("installation simulation requires a virtual device")
         return None
     if len(resolvers) != 1:
         raise ValueError("one installation cannot have different world owners")
@@ -520,11 +524,15 @@ class InstallationBlueprint:
     The ordered specs, the catalog they were checked against and the
     resolved world, all decided before any device opens.
     ``preflight_installation`` is the function that produces one.
+    ``unbuildable`` are the devices whose type this machine cannot build,
+    each with the reason: they are not opened, and the installation reports
+    them as that device's failure while every other device opens.
     """
 
     specs: tuple[DeviceSpec, ...]
     catalog: DeviceCatalogSnapshot
     world: object | None
+    unbuildable: Mapping[str, BaseException] = field(default_factory=dict)
 
 
 def preflight_installation(
@@ -561,16 +569,35 @@ def preflight_installation(
     if duplicates:
         raise ValueError(f"duplicate device key(s): {sorted(duplicates)}")
     by_type = {value.type_id: value for value in snapshot.available}
-    unknown = {spec.type_id for spec in normalized} - set(by_type)
-    if unknown:
-        raise KeyError(f"unknown device types: {sorted(unknown)}")
+    # A device whose type this machine cannot build is one device's failure,
+    # as an incomplete device is: the operator keeps its card (a driver this
+    # PC lacks, an apparatus written on another bench) and every other
+    # device still opens.  The reason is the family's import error, which
+    # names the missing driver; a type no family declares any more has none.
+    buildable: list[DeviceSpec] = []
+    unbuildable: dict[str, BaseException] = {}
+    for spec in normalized:
+        if spec.type_id in by_type:
+            buildable.append(spec)
+            continue
+        family, _, name = spec.type_id.partition(".")
+        missing = tuple(item for item in snapshot.unavailable if item.family == family)
+        reasons = tuple(
+            item.reason for item in missing if name.startswith(item.device)
+        ) or tuple(item.reason for item in missing)
+        unbuildable[spec.key] = RuntimeError(
+            f"device type {spec.type_id} is not available on this machine"
+            + (f" ({'; '.join(reasons)})" if reasons else "")
+        )
     if world is None:
-        resolved_world = _world_from_apparatus(normalized, by_type, frozen_simulation)
+        resolved_world = _world_from_apparatus(tuple(buildable), by_type, frozen_simulation)
     elif simulation_supplied:
         raise ValueError("pass an explicit world or simulation config, not both")
     else:
         resolved_world = world
-    return InstallationBlueprint(normalized, snapshot, resolved_world)
+    return InstallationBlueprint(
+        tuple(buildable), snapshot, resolved_world, unbuildable
+    )
 
 
 def _raise_composition_failure(
@@ -625,7 +652,7 @@ def create_installation(
         for descriptor in blueprint.catalog.available
     }
     installed: dict[str, InstalledLeaf] = {}
-    failures: dict[str, BaseException] = {}
+    failures: dict[str, BaseException] = dict(blueprint.unbuildable)
     # ONE context, and no factory is shown a sibling, because instruments in
     # an apparatus do not compose: that is what makes opening them ALL at
     # once safe, and why Init costs the slowest device rather than the sum

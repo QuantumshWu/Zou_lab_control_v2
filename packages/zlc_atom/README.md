@@ -245,7 +245,11 @@ unavailable type rather than a broken bench. Logic leaves follow the same
 pattern with a `logic_node.py` exporting `LOGIC_NODE`.
 Factories must return declared capability instances; startup failures are
 reported per leaf in `Installation.failures`, while independent leaves remain
-usable and close in reverse order.
+usable and close in reverse order. A device whose type this machine cannot
+build -- its family did not import, or no family declares the type any more --
+is one of those failures, with the family's import error as its reason; it
+does not stop the others. Simulation settings with no virtual device to read
+them are left unread rather than refused.
 
 ## Execution layers
 

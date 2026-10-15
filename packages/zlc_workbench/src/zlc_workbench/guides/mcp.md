@@ -24,6 +24,10 @@ nodes. `lab_devices(action='load', path=...)` loads the requested apparatus JSON
 `lab_initialize()` submits Init. Wait for `lab_state.session_open=true` using
 `lab_wait_for`, then inspect `device_operation_pending`, `device_failures` and
 device identities. Init alone does not prepare optical traps.
+A device whose type this machine cannot build appears in `device_failures`
+with the reason; the others open normally. The operator may keep such a card
+(and simulation settings no virtual device reads) on purpose: do not delete
+them from the apparatus to make Init look clean.
 
 For SLM work, open the chosen device with `lab_device_action(action='open',
 device_id=...)`, inspect `lab_editor_catalog` and load the specified Science

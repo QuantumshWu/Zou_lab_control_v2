@@ -161,18 +161,66 @@ def test_virtual_world_boundary_preserves_independent_physical_leaf(tmp_path):
     assert events == ["close:physical"]
 
 
-def test_invalid_target_is_rejected_before_any_live_device_closes(tmp_path):
+def test_simulation_settings_without_a_virtual_device_are_kept_unused(tmp_path):
+    """Bring-up swaps the last virtual device for a real one; nothing breaks.
+
+    The simulation settings it leaves behind are read by no device, so
+    neither Init nor Apply refuses over them, and the live declaration
+    keeps them as written for the next virtual device or Save.
+    """
+
     events: list[str] = []
     catalog = _catalog(events)
-    initial = InstallationConfig((_device("base"),))
-    session = ExperimentSession.from_config(tmp_path, initial, catalog=catalog)
+    leftover = InstallationConfig((_device("base"),), simulation={"seed": 2})
+    session = ExperimentSession.from_config(tmp_path, leftover, catalog=catalog)
+    assert session.installation.world is None
+    assert session.failures == {}
+    assert session.installation_config.simulation == {"seed": 2}
     original = session.installation.device("base")
-    invalid = InstallationConfig(initial.devices, simulation={"seed": 2})
 
-    with pytest.raises(ValueError, match="simulation requires a virtual device"):
-        session.plan_device_reconcile(invalid)
-
+    edited = InstallationConfig(leftover.devices, simulation={"seed": 3})
+    plan = session.plan_device_reconcile(edited)
+    assert not plan.world_changed and plan.retained_keys == ("base",)
+    session.reconcile_devices(plan)
     assert session.installation.device("base") is original
+    assert session.installation_config.simulation == {"seed": 3}
+    assert events == []
+    session.close()
+
+
+def test_a_card_this_machine_cannot_build_fails_alone(tmp_path):
+    """A kept Unavailable card is that device's failure, not the bench's.
+
+    Its family did not import here (or its type is gone): Init and Apply
+    open every other device and name the card with the reason.
+    """
+
+    from zlc_atom.install import UnavailableDeviceTypes
+
+    events: list[str] = []
+    available = _catalog(events)
+    catalog = DeviceCatalogSnapshot(
+        available.available,
+        (UnavailableDeviceTypes(
+            "zlc_atom.devices.rf.retired.device_types", "ImportError: no vendor DLL"
+        ),),
+    )
+    retired = DeviceInstanceConfig("rf", "rf", "rf.retired", {"channel": 1})
+    config = InstallationConfig((_device("base"), retired))
+    session = ExperimentSession.from_config(tmp_path, config, catalog=catalog)
+    assert set(session.installation.devices) == {"base"}
+    reason = str(session.failures["rf"])
+    assert "rf.retired is not available on this machine" in reason
+    assert "no vendor DLL" in reason
+    original = session.installation.device("base")
+
+    renamed = InstallationConfig(
+        (_device("base", role="renamed"), retired, _device("other"))
+    )
+    session.reconcile_devices(session.plan_device_reconcile(renamed))
+    assert session.installation.device("base") is original
+    assert set(session.installation.devices) == {"base", "other"}
+    assert set(session.failures) == {"rf"}
     assert events == []
     session.close()
 

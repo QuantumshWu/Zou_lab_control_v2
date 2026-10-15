@@ -944,6 +944,42 @@ def test_projection_refresh_failure_retries_without_running_hardware_again(tmp_p
     assert view.lifecycle[0] == "Shut down devices"
 
 
+def test_a_kept_unavailable_card_and_unused_simulation_do_not_hold_the_bench(
+    tmp_path,
+) -> None:
+    """Parked apparatus content is said on the line and blocks nothing.
+
+    A card whose type this machine cannot build is named with its reason,
+    and no Apply can open it, so the button still offers Shut down.
+    Simulation settings no virtual device reads are kept and said.
+    """
+
+    session = _session(
+        {"rf": object()},
+        failures={"retired": RuntimeError("device type rf.retired is not available on this machine")},
+    )
+    view = _ManagerView()
+    apparatus = _apparatus(("rf", "rf", "rf.virtual", {}))
+    manager = DeviceManagerPresenter(
+        view,
+        tmp_path / "apparatus.json",
+        initial_config=InstallationConfig(
+            (*apparatus.devices, DeviceInstanceConfig("retired", "retired", "rf.retired", {})),
+            simulation={"seed": 4},
+        ),
+        initialize_session=lambda _candidate: session,
+    )
+
+    assert manager.toggle_lifecycle() is True
+    severity, line = view.status[-1][0], view.status[-1][1]
+    assert "1 device initialized: rf · 1 failed -- retired: RuntimeError" in line
+    assert "rf.retired is not available on this machine" in line
+    assert line.endswith("simulation settings kept, unused (no virtual device)")
+    assert severity == "warning"
+    assert view.lifecycle[0] == "Shut down devices"
+    assert manager.snapshot(details=True)["simulation"] == {"seed": 4}
+
+
 def test_a_loaded_card_forwards_control_to_the_session_window_owner(tmp_path) -> None:
     """DeviceManager emits identity; it neither embeds controls nor tunes hardware."""
 

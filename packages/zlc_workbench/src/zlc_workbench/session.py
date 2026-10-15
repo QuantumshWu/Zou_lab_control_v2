@@ -95,7 +95,12 @@ def _same_device_setup(descriptors: Mapping[str, Any], left: object, right: obje
 
     if left.type_id != right.type_id:
         return False
-    schema = descriptors[left.type_id].authoring_schema
+    descriptor = descriptors.get(left.type_id)
+    if descriptor is None:
+        # A type this machine cannot build has no schema to project, and
+        # never opened: its declaration is compared as written.
+        return left.parameters == right.parameters
+    schema = descriptor.authoring_schema
     return _same_json_value(
         schema.project_values(left.parameters),
         schema.project_values(right.parameters),
@@ -630,8 +635,8 @@ class ExperimentSession:
             # Independent physical devices retain their exact object across a
             # virtual-world edit.
             for key, item in {**current_by_key, **wanted_by_key}.items():
-                descriptor = descriptors[item.type_id]
-                if descriptor.world_config is not None:
+                descriptor = descriptors.get(item.type_id)
+                if descriptor is not None and descriptor.world_config is not None:
                     affected.add(key)
         for key in all_keys:
             before = current_by_key.get(key)
