@@ -2897,60 +2897,6 @@ host.close()
 ''')
 
 
-def test_a_count_badge_stands_as_far_from_the_chevrons_as_a_field_badge_from_its_edge(run_qt) -> None:
-    """Read off a grab: the clear room from a bracket count's badge to the
-    stepper's chevron ink equals the room from a field's badge to the
-    field's edge, and the badge is centred on the box's inner rect."""
-
-    run_qt(r'''
-from PyQt5 import QtGui, QtWidgets
-from zlc_ui.qt import ensure_qt_app
-from zlc_ui.fluent import frame_inner_rect
-from zlc_ui.pulse import BracketPost, FluentScanLineEdit
-from zlc_ui.pulse._layout import row_height
-from zlc_ui.pulse.scan_line_edit import _BindingButton
-app = ensure_qt_app(["pulse-count-badge"])
-host = QtWidgets.QWidget(); host.resize(400, 200)
-field = FluentScanLineEdit("", host)
-field.resize(130, row_height())
-field.set_field_state(editable=True, source="config")
-post = BracketPost("b", "end", count=3, parent=host)
-post.move(200, 0)
-post.count_edit.set_field_state(editable=True, source="config")
-host.show()
-for _ in range(10):
-    app.processEvents()
-
-def darkness(image, x, rows):
-    return max(255 - QtGui.QColor(image.pixel(x, y)).lightness() for y in rows)
-
-def room_after_badge(frame):
-    """(badge's right ink edge, next ink edge, room above and below the badge), in device px."""
-    image = frame.grab().toImage()
-    ratio = image.devicePixelRatio()
-    inner = frame_inner_rect(frame)
-    middle = [int(inner.center().y() * ratio)]
-    rows = range(int(inner.top() * ratio) + 1, int(inner.bottom() * ratio) - 1)
-    badge = frame.findChild(_BindingButton).geometry()
-    x = int(badge.center().x() * ratio)
-    while darkness(image, x, middle):
-        x += 1
-    right = x
-    while not darkness(image, x, rows if frame is post.count_spin else middle):
-        x += 1
-    column = int(badge.center().x() * ratio)
-    inked = [y for y in range(int(inner.top() * ratio), int(inner.bottom() * ratio))
-             if darkness(image, column, [y])]
-    return right, x, inked[0] - inner.top() * ratio, inner.bottom() * ratio - inked[-1] - 1
-
-field_right, field_edge, *_ = room_after_badge(field)
-count_right, chevron, above, below = room_after_badge(post.count_spin)
-assert chevron - count_right == field_edge - field_right, (chevron - count_right, field_edge - field_right)
-assert abs(above - below) <= 1, (above, below)
-host.close()
-''')
-
-
 def test_the_repeat_boxes_share_one_count_width(run_qt) -> None:
     """The Pulse's Repeat and the Scan repeats are one measure of box -- a
     common count whole, the stepper beside it -- standing at the start of

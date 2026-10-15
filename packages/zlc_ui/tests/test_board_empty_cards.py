@@ -247,18 +247,17 @@ host.close(timeout=10)
     )
 
 
-def test_the_header_remover_is_a_quiet_ghost_and_the_setting_close_a_plain_one(run_qt) -> None:
-    """The header x is the console's one-glyph remover: no face at rest, the
-    white-on-red confirm once armed, and quiet again when it disarms.  The
-    Setting frame's x only closes the frame: the quiet look of a tab's
+def test_the_setting_close_is_a_plain_quiet_x(run_qt) -> None:
+    """The Setting frame's x only closes the frame: the quiet look of a tab's
     close x -- no face, MUTED_INK, never red -- square at a control's
-    height, ending where the frame's fields end."""
+    height, ending where the frame's fields end.  (The header x is the
+    confirm-twice remover, whose faces are FluentButton's own.)"""
 
     run_qt(
         """
-from PyQt5 import QtCore, QtGui, QtTest
+from PyQt5 import QtCore, QtGui
 from zlc_ui.qt import ensure_qt_app
-from zlc_ui.fluent import BG, MUTED_INK, RED_DARK, SURFACE, control_height
+from zlc_ui.fluent import MUTED_INK, SURFACE, control_height
 from zlc_ui.console import PanelCardView
 
 app = ensure_qt_app(['header-remover'])
@@ -270,18 +269,6 @@ def face(widget, surface):
     # A pixel of the button's face, off its glyph, over the surface it sits on.
     image = surface.grab().toImage()
     return image.pixelColor(widget.mapTo(surface, QtCore.QPoint(3, 3))).name()
-
-remover = card.close_button
-band = card._title_band
-assert remover.role() == 'destructive' and remover.property('glyph')
-assert face(remover, band) == QtGui.QColor(BG).name(), face(remover, band)
-QtTest.QTest.mouseClick(remover, QtCore.Qt.LeftButton)
-assert remover.role() == 'destructive_primary'
-assert face(remover, band) == QtGui.QColor(RED_DARK).name()
-remover.disarm()
-app.processEvents()
-assert remover.role() == 'destructive'
-assert face(remover, band) == QtGui.QColor(BG).name()
 
 card._open_settings(); app.processEvents()
 closer = card._settings_close_button

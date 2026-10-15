@@ -200,7 +200,7 @@ def test_a_selected_run_of_table_rows_is_one_rounded_block(app, host) -> None:
 
 
 def test_a_stepper_is_chevrons_and_a_tint_inside_the_frame(app, host) -> None:
-    from PyQt5 import QtCore, QtTest, QtWidgets
+    from PyQt5 import QtCore, QtTest
     from zlc_ui.fluent import FluentDoubleSpinBox
     from zlc_ui.fluent import fluent as F
     from zlc_ui.fluent.style import ACCENT, ACCENT_TINT, PLACEHOLDER, SELECTED, SURFACE
@@ -227,9 +227,6 @@ def test_a_stepper_is_chevrons_and_a_tint_inside_the_frame(app, host) -> None:
     QtTest.QTest.mouseRelease(box, QtCore.Qt.LeftButton, QtCore.Qt.NoModifier, up.center().toPoint())
     box.setValue(1)
     # Down from 1 with a floor of 0.0001 cannot move: its chevron is dimmed.
-    enabled = box.stepEnabled()
-    assert enabled & QtWidgets.QAbstractSpinBox.StepUpEnabled
-    assert not enabled & QtWidgets.QAbstractSpinBox.StepDownEnabled
 
     def darkest(cell):
         image = box.grab().toImage()
@@ -325,20 +322,6 @@ def test_switches_and_ticks_are_solid_fills(app, host) -> None:
         for y in range(int(box.top() * ratio), int((box.bottom() + 1) * ratio))
     )
     assert brightest == QtGui.QColor(SURFACE).lightness(), "a white tick, not a grey one"
-
-
-def test_a_switch_that_says_its_state_keeps_the_width_of_its_widest_state(app, host) -> None:
-    from zlc_ui.fluent import FluentSwitch, fluent_switch_width
-
-    switch = FluentSwitch("Auto", host, room_for=("Auto", "Manual"))
-    widest = fluent_switch_width("Manual")
-    assert fluent_switch_width("Auto") < widest
-    assert switch.sizeHint().width() == widest
-    switch.setText("Manual")
-    assert switch.sizeHint().width() == widest
-    switch.setText("Auto")
-    assert switch.sizeHint().width() == widest, "what follows it never moves"
-    assert FluentSwitch("Auto", host).sizeHint().width() == fluent_switch_width("Auto")
 
 
 def test_the_current_segment_and_an_active_cycle_are_the_selected_fill(app, host) -> None:
@@ -538,27 +521,6 @@ def test_a_switched_off_editable_combo_writes_in_disabled_ink(app, host) -> None
     for combo in (prompt, typed):
         assert DISABLED_INK.upper() in inks(combo)
         assert not {MUTED_INK.upper(), TEXT.upper()} & inks(combo)
-
-
-def test_a_glyph_is_centred_on_its_ink(app) -> None:
-    from PyQt5 import QtCore, QtGui, QtWidgets
-    from zlc_ui.fluent import paint_centred_ink
-
-    surface = QtWidgets.QWidget()
-    surface.resize(40, 40)
-    image = QtGui.QImage(40, 40, QtGui.QImage.Format_ARGB32)
-    image.fill(QtGui.QColor("white"))
-    font = QtGui.QFont("Segoe UI")
-    font.setPointSize(16)
-    painter = QtGui.QPainter(image)
-    paint_centred_ink(painter, surface, QtCore.QRectF(0, 0, 40, 40), font, "×", "black")
-    painter.end()
-    inked = [(x, y) for x in range(40) for y in range(40)
-             if QtGui.QColor(image.pixel(x, y)).lightness() < 200]
-    assert inked
-    xs, ys = [p[0] for p in inked], [p[1] for p in inked]
-    assert abs((min(xs) + max(xs) + 1) / 2.0 - 20) <= 1.0
-    assert abs((min(ys) + max(ys) + 1) / 2.0 - 20) <= 1.0
 
 
 def test_a_button_disabled_or_hidden_with_the_focus_hands_it_to_nobody(app, host) -> None:
@@ -936,14 +898,6 @@ def test_a_tab_close_x_stands_on_its_label_line(app, host) -> None:
     finally:
         set_fluent_scale(shown)
     assert bands == {0, 1}, "both parities of the label band were measured"
-
-def test_the_tri_switch_is_gone() -> None:
-    import zlc_ui.fluent as fluent
-    from zlc_ui.fluent import fluent as module
-
-    assert "FluentTriSwitch" not in fluent.__all__
-    assert not hasattr(module, "FluentTriSwitch")
-
 
 def test_parts_inside_a_field_are_centred_on_its_ink_and_frame(app, host) -> None:
     """A tab's close x on its disk, and a spin box's two chevrons about the

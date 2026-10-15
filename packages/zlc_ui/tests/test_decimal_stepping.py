@@ -42,20 +42,6 @@ def test_a_notch_off_the_grid_goes_to_the_next_grid_point(box) -> None:
     assert _step(box, -1) == "0.2"
 
 
-def test_a_step_stops_at_the_last_grid_point_inside_the_bound(box) -> None:
-    """Down from 0.1 in steps of 0.1 with a floor of 0.001 is still 0.1."""
-
-    box.setRange(0.001, 1.0)
-    box.setSingleStep(0.1)
-    box.setValue(0.2)
-    assert _step(box, -1) == "0.1"
-    assert _step(box, -1) == "0.1", "the floor is off the grid; a step never lands on it"
-    assert _step(box, 1) == "0.2", "and the way back up is the way down"
-    box.setValue(0.95)
-    assert _step(box, 1) == "1"
-    assert _step(box, 1) == "1"
-
-
 def _directions(box) -> tuple[bool, bool]:
     from PyQt5 import QtWidgets
 
@@ -66,56 +52,42 @@ def _directions(box) -> tuple[bool, bool]:
     )
 
 
-def test_a_physical_floor_off_the_grid_is_never_stepped_onto(box) -> None:
-    """A floor of 0.0001 with the default step of 1 -- an exposure, a
-    duration of one tick: a notch down from 1 or from 0.1 stays put, and the
-    down chevron says so.  A step that clamped to the bound turned 1 s into
-    0.0001 s on one turn of the wheel."""
-
-    box.setRange(0.0001, 100.0)
-    for start in ("1", "0.1"):
-        box.setValue(float(start))
-        assert _step(box, -1) == start, f"down from {start}"
-        assert _step(box, -3) == start
-        assert _directions(box) == (True, False), start
-    box.setValue(0.1)
-    assert _step(box, 1) == "1", "up goes to the next grid point"
-    box.setRange(0.5, 100.0)
-    box.setValue(5)
-    assert _step(box, -10) == "1", "a long notch stops at the last grid point inside"
-
-
-def test_a_value_on_an_off_grid_bound_steps_only_inward(box) -> None:
-    """Typed onto the floor itself, the value has no grid point below it in
-    range: down does not move it -- and never jumps UP to the first grid
-    point, which turned an exposure of 0.02 s into 1 s on a notch DOWN."""
-
-    box.setRange(0.0001, 100.0)
-    box.lineEdit().setText("0.0001")
+# A notch stops at the last grid point inside the owner's bounds and never
+# lands on a bound off the grid, so down-then-up returns where it started;
+# where no grid point lies that way it does not move, and that chevron is
+# dimmed.  Clamping to the bound turned 1 s into 0.0001 s on one notch.
+@pytest.mark.parametrize("bounds, step, units, typed, notches, shown, directions", [
+    ((0.001, 1.0), 0.1, None, "0.2", (-1, -1, 1), ("0.1", "0.1", "0.2"), (True, True)),
+    ((0.001, 1.0), 0.1, None, "0.95", (1, 1), ("1", "1"), (False, True)),
+    # A floor of 0.0001 and the default step of 1: an exposure, one tick.
+    ((0.0001, 100.0), None, None, "1", (-1, -3), ("1", "1"), (True, False)),
+    ((0.0001, 100.0), None, None, "0.1", (-1, -3, 1), ("0.1", "0.1", "1"), (True, False)),
+    ((0.5, 100.0), None, None, "5", (-10,), ("1",), (True, False)),
+    # On the floor itself a notch down never goes UP to the first grid point.
+    ((0.0001, 100.0), None, None, "0.0001", (-1, 1), ("0.0001", "1"), (True, False)),
+    ((1e-9, sys.float_info.max), None, None, "0.02", (-1,), ("0.02",), (True, False)),
+    ((0.001, 0.5), None, None, "0.2", (-1, 1), ("0.2", "0.2"), (False, False)),
+    # On screen in another unit, the grid is that unit's.
+    ((1e-6, 10.0), None, ("s", "ms"), "3", (-1, -1, -1), ("2", "1", "1"), (True, False)),
+    # Unbounded; and a floor on the grid is a grid point.
+    (None, None, None, "0.1", (-1, -1, -1), ("0", "-1", "-2"), (True, True)),
+    ((0.0, 100.0), None, None, "0.1", (-1, -1), ("0", "0"), (True, False)),
+    ((0.0, 100.0), None, None, "100", (), (), (False, True)),
+])
+def test_a_notch_stays_on_the_grid_inside_the_bounds(
+    box, bounds, step, units, typed, notches, shown, directions
+) -> None:
+    if bounds is not None:
+        box.setRange(*bounds, unit=None if units is None else units[0])
+    if units is not None:
+        box.setShownUnit(units[1])
+    if step is not None:
+        box.setSingleStep(step)
+    box.lineEdit().setText(typed)
     box.interpretText()
-    assert box.text() == "0.0001"
-    assert _step(box, -1) == "0.0001"
-    assert _directions(box) == (True, False)
-    assert _step(box, 1) == "1"
-    exposure = type(box)()
-    exposure.setRange(1e-9, sys.float_info.max, value=0.02, unit="s")
-    assert _step(exposure, -1) == "0.02", "a notch down never increases the value"
-
-
-def test_a_range_with_no_grid_point_does_not_move(box) -> None:
-    box.setRange(0.001, 0.5)
-    box.setValue(0.2)
-    assert _step(box, -1) == "0.2"
-    assert _step(box, 1) == "0.2"
-    assert _directions(box) == (False, False)
-
-
-def test_a_notch_on_screen_in_another_unit_stops_inside_too(box) -> None:
-    box.setRange(1e-6, 10.0, value=0.003, unit="s")
-    box.setShownUnit("ms")
-    assert box.text() == "3"
-    assert [_step(box, -1) for _ in range(3)] == ["2", "1", "1"]
-    assert box.decimalValue() == Decimal("0.001")
+    assert box.text() == typed
+    assert [_step(box, notch) for notch in notches] == list(shown)
+    assert _directions(box) == directions
 
 
 def test_the_wheel_obeys_the_same_rule(box) -> None:
@@ -146,19 +118,6 @@ def test_the_wheel_obeys_the_same_rule(box) -> None:
         assert box.text() == "2", "down twice stays at 1, up once is 2"
     finally:
         window.close()
-
-
-def test_an_unbounded_box_and_a_grid_floor_step_as_before(box) -> None:
-    box.setValue(0.1)
-    assert [_step(box, -1) for _ in range(3)] == ["0", "-1", "-2"]
-    bounded = type(box)()
-    bounded.setRange(0.0, 100.0)
-    bounded.setValue(0.1)
-    assert _step(bounded, -1) == "0", "a floor on the grid is a grid point"
-    assert _step(bounded, -1) == "0"
-    assert _directions(bounded) == (True, False)
-    bounded.setValue(100)
-    assert _directions(bounded) == (False, True)
 
 
 def test_a_typed_number_is_clamped_to_the_owners_bound(box) -> None:
