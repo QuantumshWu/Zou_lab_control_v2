@@ -382,9 +382,6 @@ class _DataEditorView(QtWidgets.QWidget):
         # board's first card is under those -- switching tabs moves nothing.
         self._page = _EDITOR_PAGES[0][0]
         self.page_choice = FluentSegmentedButtons(_EDITOR_PAGES)
-        # A control high, as the board's commands are, at every scale: at
-        # the smallest its faces' own hint made the track taller.
-        self.page_choice.setFixedHeight(control_height())
         outer.addWidget(self.page_choice, 0, QtCore.Qt.AlignLeft)
         outer.addSpacing(pad)
         self.editor_scroll = FluentScrollArea(self)

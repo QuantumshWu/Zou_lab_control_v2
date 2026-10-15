@@ -9132,7 +9132,10 @@ class FluentSegmentedButtons(QtWidgets.QWidget):
             button = QtWidgets.QPushButton(label, self)
             button.setCursor(QtCore.Qt.PointingHandCursor)
             button.setFocusPolicy(QtCore.Qt.TabFocus)
-            button.setMinimumHeight(control_height() - 2 * rim)
+            # A control high at every scale: a face's own hint (its font's
+            # line) made the track taller than the fields beside it at the
+            # smallest scale.
+            button.setFixedHeight(control_height() - 2 * rim)
             button.setMinimumWidth(fluent_text_width(metrics, str(label)) + 2 * pad + 2)
             button.setProperty("current", False)
             button.clicked.connect(lambda _checked=False, value=value: self.activated.emit(value))
