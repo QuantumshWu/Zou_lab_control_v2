@@ -430,7 +430,7 @@ def test_a_blank_choice_reads_as_a_placeholder(app, host) -> None:
     tree.resize(200, tree.sizeHint().height())
     keyed = FluentComboBox(host)
     keyed.move(0, 120)
-    keyed.addItem("Subpulse file", "")
+    keyed.addItem("Independent file", "")
     keyed.resize(200, keyed.sizeHint().height())
     _shown(app, host, flat, tree, keyed)
 

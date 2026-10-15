@@ -2530,7 +2530,10 @@ assert page.scope_label.text().startswith("Config source")
 assert page.source_status.isVisible(), "beside the file's scope, Default says the file is not in use"
 from PyQt5 import QtWidgets
 row_labels = [label.text() for label in page.config_file_row.findChildren(QtWidgets.QLabel)]
-assert "Subpulse file" in row_labels, "the file is named as the selector and placeholder name it"
+assert "Subpulse file" in row_labels, "the file is named as the placeholder names it"
+choices = [page.context_combo.itemText(index) for index in range(page.context_combo.count())]
+assert choices[0] == "Independent file" and "Subpulse file" not in choices, (
+    "the no-Pulse choice is named by what it edits, not by the row under it")
 page.close()
 ''')
 

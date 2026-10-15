@@ -164,7 +164,9 @@ class PulseComponentView(QtWidgets.QWidget):
 
     def _set_context_choices(self) -> None:
         contexts = tuple((key, name) for key, name, _source, _path, _status in self._sources) or self._contexts
-        choices = (("", "Subpulse file"),) + tuple((key, label) for key, label in contexts if key)
+        # The no-Pulse choice is named by what it edits, not "Subpulse file":
+        # that is the row under it naming a Pulse Subpulse's source file.
+        choices = (("", "Independent file"),) + tuple((key, label) for key, label in contexts if key)
         with signals_blocked(self.context_combo):
             existing = tuple((self.context_combo.itemData(index), self.context_combo.itemText(index))
                              for index in range(self.context_combo.count()))
@@ -281,7 +283,7 @@ class PulseComponentView(QtWidgets.QWidget):
         self.scope_label.setText(
             "Default in Pulse — Save Pulse keeps these edits."
             if instance else "Config source — Save writes this Subpulse file."
-            if self._selected_id else "Subpulse file — Save writes this independent file."
+            if self._selected_id else "Independent file — Save writes this file."
         )
         self.path_label.setVisible(schedule is not None and not self._selected_id)
         self.scope_label.setVisible(schedule is not None)

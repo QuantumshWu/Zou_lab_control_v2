@@ -3579,8 +3579,8 @@ class FluentComboBox(QtWidgets.QAbstractButton):
         It carries the empty key like any other keyed row, and while it is
         current the collapsed box paints its words as an empty field paints
         its placeholder, in MUTED_INK: a missing input must not look like a
-        value someone picked.  A row whose empty key IS a choice ("Subpulse
-        file") is an ordinary ``addItem``.
+        value someone picked.  A row whose empty key IS a choice
+        ("Independent file") is an ordinary ``addItem``.
         """
 
         self.addItem(text, "")
