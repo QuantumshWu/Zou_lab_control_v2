@@ -254,8 +254,12 @@ def test_switches_and_ticks_are_solid_fills(app, host) -> None:
     assert abs((min(ys) + max(ys) + 1 / ratio) / 2.0 - centre.y()) <= 1.0
 
     # Disabled (a read-only card), ticked and unticked still read apart: the
-    # unticked box is DIVIDER, the ticked one DISABLED_INK with the white tick.
-    from zlc_ui.fluent.style import DISABLED_INK, SURFACE
+    # unticked box keeps NEUTRAL_FILL, the ticked one is DISABLED_INK with
+    # the white tick.  With no edge, the unticked fill must read on every
+    # face a read-only box sits on -- a white card, the BG page, the
+    # ACCENT_TINT body of a selected or expanded block -- and the ticked
+    # fill must stay clearly darker than it.
+    from zlc_ui.fluent.style import ACCENT_TINT, BG, DISABLED_INK, SURFACE
     off_box = FluentCheckBox("Read-only off", host)
     off_box.move(160, 80)
     on_box = FluentCheckBox("Read-only on", host)
@@ -265,9 +269,25 @@ def test_switches_and_ticks_are_solid_fills(app, host) -> None:
         check.setEnabled(False)
     _shown(app, host, off_box, on_box)
     box = off_box._indicator_rect()
-    assert _at(off_box, box.center().x(), box.top() + 1) == DIVIDER.upper()
+    unticked_fill = _at(off_box, box.center().x(), box.top() + 1)
+    assert unticked_fill == NEUTRAL_FILL.upper()
     box = on_box._indicator_rect()
-    assert _at(on_box, box.center().x(), box.top() + 1) == DISABLED_INK.upper()
+    ticked_fill = _at(on_box, box.center().x(), box.top() + 1)
+    assert ticked_fill == DISABLED_INK.upper()
+
+    def luminance(colour: str) -> float:
+        channels = [int(colour[i:i + 2], 16) / 255.0 for i in (1, 3, 5)]
+        linear = [c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4 for c in channels]
+        return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+
+    def contrast(a: str, b: str) -> float:
+        high, low = sorted((luminance(a), luminance(b)), reverse=True)
+        return (high + 0.05) / (low + 0.05)
+
+    for face in (SURFACE, BG, ACCENT_TINT):
+        assert contrast(unticked_fill, face) >= 1.4, (face, contrast(unticked_fill, face))
+    assert contrast(unticked_fill, DIVIDER) > 1.2, "not the DIVIDER grey that vanished"
+    assert contrast(ticked_fill, unticked_fill) >= 1.8, contrast(ticked_fill, unticked_fill)
     image = on_box.grab().toImage()
     ratio = image.devicePixelRatio() or 1.0
     brightest = max(

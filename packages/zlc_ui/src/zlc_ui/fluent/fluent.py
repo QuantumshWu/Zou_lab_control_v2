@@ -7395,10 +7395,15 @@ class FluentCheckBox(QtWidgets.QCheckBox):
     fill whose edge is that fill, never an outline: unticked it is
     NEUTRAL_FILL, dark enough to read on a white card and on the BG face of
     a Spacer card; ticked it is ACCENT with a white tick.  Under the pointer
-    the fill steps one shade toward blue.  Disabled, unticked it is DIVIDER
-    and ticked it is DISABLED_INK with the same white tick (3.5:1, and 2.9:1
-    against the unticked box), so a read-only card still says which boxes
-    are on.  The tick is centred on the box's device-pixel centre.
+    the fill steps one shade toward blue.  Disabled, the label is
+    DISABLED_INK, an unticked box stays NEUTRAL_FILL and a ticked one is
+    DISABLED_INK with the same white tick.  The box has no edge to carry it,
+    so its fill must read on every face a read-only box sits on -- 1.7:1 on
+    a white card, 1.5:1 on BG and on the ACCENT_TINT body of a selected or
+    expanded block, where DIVIDER was 1.1:1 and the unticked boxes vanished
+    -- and the ticked fill stays 2.1:1 darker than it (3.5:1 on white), so
+    a read-only card still says which boxes are on.  The tick is centred on
+    the box's device-pixel centre.
     """
 
     def __init__(self, text: str = "", parent=None):
@@ -7425,7 +7430,7 @@ class FluentCheckBox(QtWidgets.QCheckBox):
             QCheckBox::indicator:checked {{ border-color: {ACCENT}; background: {ACCENT}; }}
             QCheckBox::indicator:checked:hover {{ border-color: {ACCENT_HOVER}; background: {ACCENT_HOVER}; }}
             QCheckBox:disabled {{ color: {DISABLED_INK}; }}
-            QCheckBox::indicator:disabled {{ border-color: {DIVIDER}; background: {DIVIDER}; }}
+            QCheckBox::indicator:disabled {{ border-color: {NEUTRAL_FILL}; background: {NEUTRAL_FILL}; }}
             QCheckBox::indicator:checked:disabled {{
                 border-color: {DISABLED_INK}; background: {DISABLED_INK};
             }}
