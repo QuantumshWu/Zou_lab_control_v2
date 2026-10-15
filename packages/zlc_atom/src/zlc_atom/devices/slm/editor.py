@@ -20,6 +20,7 @@ from zlc_ui.fluent import (
     FluentSpinBox, FluentSwitch, FluentTabWidget, add_row_switch, fluent_open_path, fluent_save_path,
     open_fluent_window,
 )
+from zlc_ui.status import name_words
 
 from zlc_atom.data import snapshot_from_array
 from .device import SlmAdapter, canonical_phase
@@ -1611,7 +1612,7 @@ class SlmEditorControl(QtCore.QObject):
         saving, name, filters = actions[action]
         start = str(Path(self.session.workspace.data) / name)
         picker = fluent_save_path if saving else fluent_open_path
-        path = picker(self._body, action.replace("_", " ").title(), start, filters)
+        path = picker(self._body, name_words(action), start, filters)
         if path:
             try:
                 self.file_action(action, path)

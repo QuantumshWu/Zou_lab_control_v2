@@ -16,6 +16,7 @@ from zlc_plot import (
     normalize_classifier_threshold_targets,
 )
 from zlc_plot.specs import FACET_FIT_PARAMETER, GRID_CELL_KINDS, limit_pair_for
+from zlc_ui.status import name_words
 from zlc_plot.state import normalize_interaction
 from zlc_plot.semantics import (
     FATE_PREFIX,
@@ -414,7 +415,7 @@ def fit_output_fields(
             # parameter written the way the operator can also type it.
             label = str(
                 getattr(parameter, "symbol", None)
-                or name.replace("_", " ").title()
+                or name_words(name)
             )
             # ONE switch per parameter.  There used to be a second, for a
             # separately published "<name>_err" signal; a parameter now
