@@ -508,3 +508,18 @@ def test_api_parameters_are_host_walked_ports_unless_a_slot_sweeps_them() -> Non
         API_PARAM_FAMILY + "dac:load:da_bias_y",
         API_PARAM_FAMILY + "dac:load:da_bias_z",
     ]
+
+    # An empty bracket loops nothing: its API repeat count is kept but is no
+    # knob to scan, so a plan naming it is refused with what is offered.
+    from zlc_atom.nodes.scan.plan import ScanAxis, ScanPlan, bind_plan
+    from zlc_pulse import PulseBinding, PulseBracket, PulseFieldRef
+
+    first_id = raw.periods[1].period_id
+    waiting = replace(raw, brackets=(PulseBracket("wait", first_id, raw.periods[0].period_id, 2),),
+                      bindings=(*raw.bindings, PulseBinding(
+                          PulseFieldRef("bracket_count", bracket_id="wait"), "count", source="api")))
+    assert "bracket_count:wait" in {binding.field_id for binding in waiting.api_bindings}
+    offered = api_scan_ports_for(waiting)
+    assert [port.port for port in offered] == [port.port for port in ports]
+    with pytest.raises(ValueError, match="offers no scan port named 'api:bracket_count:wait'"):
+        bind_plan(ScanPlan((ScanAxis("api:bracket_count:wait", (1.0, 2.0)),)), offered)

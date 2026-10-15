@@ -123,7 +123,9 @@ both post and period drags emit `reorder_items_requested(item_order)`.
 Add targets the next visual item, not the next period, so both sides of a
 post are distinct gaps. Neither drag mutates local state; the presenter
 commits period order and bracket anchors atomically in the new `ScheduleVM`.
-Empty brackets remain editable; running or saving requires nonempty content.
+An empty bracket (its two posts side by side) is an ordinary draft: it saves,
+reopens and runs, looping nothing, until periods are dragged in; the preview
+draws no loop for it.
 `bracket_committed(bracket_id, start_period_id, end_period_id, count)` moves or
 recounts one bracket; `bracket_add_requested(start_period_id, end_period_id,
 count)` asks for a new one (the presenter names it). Removing is one

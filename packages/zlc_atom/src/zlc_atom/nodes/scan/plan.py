@@ -32,7 +32,9 @@ import numpy as np
 from zlc_data.units import DEFAULT_UNITS, VoltageIntoLoad, format_quantity
 from zlc_durable import strict_json_loads
 from zlc_pulse import (
+    FIELD_BRACKET_COUNT,
     apply_api_values,
+    PulseFieldRef,
     PulseSequence,
     api_parameter_columns_for,
     scan_columns_for,
@@ -269,11 +271,20 @@ def api_scan_ports_for(sequence: PulseSequence) -> tuple[ScanPort, ...]:
     if not isinstance(sequence, PulseSequence):
         raise TypeError("sequence must be PulseSequence")
     slots = {column.name for column in scan_columns_for(sequence)}
+    # An empty bracket loops nothing, so walking its repeat count would play
+    # the same pulse at every point: it is no knob to scan, though it stays
+    # an API parameter the pulse can be handed.
+    resolved = resolve_subpulse_sources(sequence)
+    empty = {
+        PulseFieldRef(FIELD_BRACKET_COUNT, bracket_id=bracket.bracket_id).key
+        for bracket, (start, end) in zip(resolved.brackets, resolved.bracket_bounds, strict=True)
+        if start == end
+    }
     return _ports_from_columns(
         tuple(
             column
             for column in api_parameter_columns_for(sequence)
-            if column.name not in slots
+            if column.name not in slots and column.name not in empty
         ),
         family=API_PARAM_FAMILY,
     )

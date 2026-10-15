@@ -34,7 +34,7 @@ from zlc_workbench.pulse_editor import (
     replace_sequence,
     timeline_of,
 )
-from zlc_workbench.pulse_state import PulseEditorState, state_to_tree
+from zlc_workbench.pulse_state import PulseEditorState, read_pulse, state_to_tree
 
 from pulse_fixtures import PULSE_NAME, ordinary_imaging_sequence, write_ordinary_pulse
 
@@ -749,7 +749,7 @@ def test_inserting_a_period_copies_its_neighbour(presenter) -> None:
     assert presenter.sequence.brackets == (PulseBracket("bracket1", ids[3], ids[0], 3),)
     assert presenter.sequence.bracket_bounds == ((1, 1),)
     presenter.insert_period(("bracket", "bracket1:end"))
-    presenter.sequence.require_nonempty_brackets()
+    assert presenter.sequence.loops
     bracket, = presenter.sequence.brackets
     assert bracket.start_period_id == bracket.end_period_id
     assert not presenter.view.warnings
@@ -3536,8 +3536,7 @@ def test_a_bracket_repeats_at_least_the_domains_minimum(sequence, tmp_path) -> N
     view = _EditorView()
     presenter = PulseEditorPresenter(view, sequence, sequencer=board)
     target = tmp_path / "empty.json"
-    asked = []
-    view.ask_save_path = lambda *args: (asked.append(args), str(target))[1]
+    view.ask_save_path = lambda *args: str(target)
     ids = tuple(period.period_id for period in sequence.periods)
     try:
         for start, end, gap in ((ids[0], None, 0), (ids[1], ids[0], 1), (None, ids[-1], len(ids))):
@@ -3552,26 +3551,19 @@ def test_a_bracket_repeats_at_least_the_domains_minimum(sequence, tmp_path) -> N
             order = view.schedule_view.schedule.item_order
             assert order.index(("bracket", "b:end")) == order.index(("bracket", "b:start")) + 1
             assert view.warnings == [], "ordinary empty-bracket editing raised a modal warning"
-            with pytest.raises(ValueError) as refusal:
-                current.require_nonempty_brackets()
-            message = str(refusal.value)
+            # A placeholder waiting for periods: it plays (as nothing), saves
+            # and reopens as written, and the preview draws no loop for it.
             board.events.clear()
-            baseline, path = presenter._saved_state, presenter.path
-            assert presenter.fire() is False
-            view.fire_requested.emit()
-            assert presenter.save_pulse() == ""
-            presenter.save_preview_image()
-            assert view.warnings == [message] * 4
-            assert board.events == [] and asked == [] and not target.exists()
-            assert presenter.sequence is current and presenter._saved_state is baseline and presenter.path == path
-            with pytest.raises(ValueError, match="is empty"):
-                timeline_of(current)
-            view.warnings.clear()
+            assert presenter.fire() is True and "load" in board.events
+            assert board._applied.program.loops == ()
+            presenter.stop()
+            assert presenter.save_pulse() == str(target)
+            assert read_pulse(target).sequence.brackets == presenter.sequence.brackets == current.brackets
+            assert [marker.series for marker in timeline_of(current).loop_markers] == [None]
+            assert view.warnings == []
             presenter.insert_period(("bracket", "b:end"))
-            presenter.sequence.require_nonempty_brackets()
             assert presenter.compile()[1].loops[0][2] == 5
             assert presenter.sequence.run_repeats == sequence.run_repeats
-        assert presenter.save_pulse() == str(target) and target.exists()
     finally:
         presenter.close()
 
@@ -5061,20 +5053,21 @@ def test_control_inspects_edits_and_compiles_loaded_config_without_firing(sequen
 
         path = str(tmp_path / "control-pulse.json")
         assert presenter.control_action("save", {"path": path})["accepted"]
+        played = presenter.control_state()["authored"]["duration_seconds"]
         assert presenter.control_action("bracket_add", {
             "start": sequence.periods[1].period_id, "end": sequence.periods[0].period_id, "count": 1,
         })["accepted"]
-        assert "empty" in presenter.control_state(details=True)["document_error"]
+        # An empty bracket is a draft like any other: it is a document, it
+        # times and it compiles, looping nothing.
+        assert presenter.control_state(details=True)["document"] == state_to_tree(presenter.state)
         assert not presenter.control_state()["validation"]["matches_editor_revision"]
-        assert presenter.control_state()["authored"]["duration_seconds"] is None
-        assert "empty" in presenter.control_catalog()["state"]["authored"]["timing_error"]
+        assert presenter.control_state()["authored"]["duration_seconds"] == played
         assert presenter.control_action("validate", {})["accepted"]
         worker.deliver_until(lambda: not presenter.control_state()["pending"])
-        assert presenter.control_state()["validation"]["valid"] is False
-        assert "empty" in presenter.control_state()["validation"]["error"]
+        assert presenter.control_state()["validation"]["valid"] is True
         refused = presenter.control_action("open", {"path": path})
         assert not refused["accepted"] and "discard_changes" in refused["error"]
-        assert presenter.sequence.brackets, "refused Open must retain the invalid draft"
+        assert presenter.sequence.brackets, "refused Open must retain the draft"
         assert presenter.control_action("open", {"path": path, "discard_changes": True})["accepted"]
         assert not presenter.sequence.brackets and not presenter.dirty
         assert presenter.control_action("open", {"path": path})["accepted"]

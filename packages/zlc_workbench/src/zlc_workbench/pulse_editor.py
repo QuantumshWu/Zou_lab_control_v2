@@ -952,7 +952,6 @@ def timeline_of(sequence: PulseSequence, *, include_off: bool = False) -> Any:
     other way is a drawing of something else.
     """
 
-    sequence.require_nonempty_brackets()
     from zlc_plot import (
         PulseAnalogTrace,
         PulseBlock,
@@ -1054,10 +1053,14 @@ def timeline_of(sequence: PulseSequence, *, include_off: bool = False) -> Any:
     # Innermost first.  The renderer stacks loops by what they contain, so the
     # order only decides between two loops over exactly the same span (a
     # whole-pulse bracket inside the Run loop); the model keeps its brackets
-    # outermost first, so this reverses them.
+    # outermost first, so this reverses them.  An empty bracket loops
+    # nothing, so it has no span here; its two posts stand side by side on
+    # the Edit page, where it waits to be filled.
     for series, (bracket, (first, stop_gap)) in reversed(
         tuple(enumerate(zip(sequence.brackets, sequence.bracket_bounds)))
     ):
+        if stop_gap == first:
+            continue
         last = stop_gap - 1
         stop = starts[last] + _nanoseconds(
             sequence.periods[last].duration, sequence.periods[last].unit
@@ -1450,7 +1453,7 @@ class PulseEditorPresenter:
                 "run_repeats": "repeats: complete Pulse runs per point; 0 means infinite",
                 "scan_repeats": "repeats: complete scan-table sweeps; 0 means infinite; independent of run_repeats (the Delay / Scan Repeats box)",
                 "bracket": "bracket_id, start, end, count: inclusive stable period IDs and positive repeat count",
-                "bracket_add": "start, end, count: inclusive stable period IDs; new bracket ID is returned in state",
+                "bracket_add": "start, end, count: inclusive stable period IDs; new bracket ID is returned in state; start one past end (or start/end null at an edge) makes an empty bracket, which saves and runs looping nothing until periods are put inside it -- keep it, do not delete it to make the pulse valid",
                 "bracket_remove": "bracket_id: explicitly remove this bracket",
                 "period_add": "before_item: optional [period|bracket, item_id], null appends",
                 "spacer_add": "before_item: optional [period|bracket, item_id], null appends",
@@ -1555,16 +1558,11 @@ class PulseEditorPresenter:
             "error": self._config_error,
         }
         if sequence is not None:
-            duration, timing_error = None, None
-            try:
-                sequence.require_nonempty_brackets()
-                duration = sequence.played_nanoseconds() * 1e-9
-            except ValueError as error:
-                timing_error = str(error)
+            duration = sequence.played_nanoseconds() * 1e-9
             result["authored"] = {
                 "name": sequence.name, "time_step_ns": sequence.time_step_ns,
                 "timing_scope": "authored defaults, one complete Pulse including brackets; excludes Run/Scan repeats and Config overrides",
-                "duration_seconds": duration, "timing_error": timing_error,
+                "duration_seconds": duration,
                 "periods": [{"period_id": p.period_id, "name": p.name, "kind": p.kind,
                              "duration": p.duration, "unit": p.unit} for p in sequence.periods],
                 "brackets": [asdict(b) for b in sequence.brackets],
@@ -1572,17 +1570,13 @@ class PulseEditorPresenter:
             if not sequence.config_enabled:
                 result["effective"].update(
                     scope="embedded defaults; external Config and Subpulse sources are disabled",
-                    available=timing_error is None, error=timing_error,
-                    total_text=None if duration is None else _readable(duration * 1e9),
+                    available=True, error=None, total_text=_readable(duration * 1e9),
                 )
         if details:
             from zlc_pulse import subpulse_to_tree
             for target, draft in ((subpulse, fragment), (subpulse["file_draft"], self._subpulse_draft)):
                 if draft is not None:
-                    try:
-                        target["document"] = subpulse_to_tree(draft)
-                    except ValueError as error:
-                        target["document_error"] = str(error)
+                    target["document"] = subpulse_to_tree(draft)
             shown = self._shown
             if sequence is not None and not sequence.config_enabled:
                 shown = project_schedule(sequence, revision=self.revision, pins=self.pins)
@@ -1593,13 +1587,7 @@ class PulseEditorPresenter:
             result["config"]["active_values"] = dict(self._active_config_values())
             result["config"]["scope"] = "loaded values; unsaved Config draft is not active; Fire rereads the active file"
             if sequence is not None:
-                try:
-                    result["document"] = state_to_tree(self._state)
-                except ValueError as error:
-                    # Empty brackets are legal edits, but deliberately not a
-                    # serializable/executable pulse. Keep their real anchors
-                    # visible above rather than erasing them to make a file.
-                    result["document_error"] = str(error)
+                result["document"] = state_to_tree(self._state)
         elif validation is not None:
             result["validation"] = {k: v for k, v in validation.items()
                                     if k not in {"document", "program", "config_values", "scan_rows"}}
@@ -2990,7 +2978,6 @@ class PulseEditorPresenter:
         sequence = sequence if sequence is not None else self.sequence
         if sequence is None:
             raise RuntimeError("no pulse is open, so there is nothing to compile")
-        sequence.require_nonempty_brackets()
         geometry, clock_hz = self._compiler_target()
         sequencer = self.sequencer
         if sequencer is not None:
@@ -3793,8 +3780,6 @@ class PulseEditorPresenter:
         board facts and last_warning; never retry an uncertain Fire.
         """
         self.last_warning = ""
-        if not self._check_bracket(present=present):
-            return False
         if self._run_device_work is None:
             return self.fire(present=present)
         if not self._device_available(present=present):
@@ -4038,8 +4023,6 @@ class PulseEditorPresenter:
         invariant lives with the device that owns it.
         """
 
-        if not self._check_bracket(present=present):
-            return False
         if self.sequence is None:
             self._warn("No pulse is open", present=present)
             return False
@@ -4660,8 +4643,6 @@ class PulseEditorPresenter:
     def save_pulse(self, path: str | None = None, *, present: bool = True) -> str:
         """Write what is on screen as a ``zlc.pulse`` JSON document."""
 
-        if not self._check_bracket(present=present):
-            return ""
         if self.sequence is None:
             self._warn("There is no pulse to save", present=present)
             return ""
@@ -5777,7 +5758,7 @@ class PulseEditorPresenter:
         preview rather than a second drawing of the same pulse.
         """
 
-        if not self._check_bracket() or self._preview_close_requested:
+        if self._preview_close_requested:
             return
         if self._preview_host is None:
             self._warn("There is no preview to save")
@@ -6016,15 +5997,6 @@ class PulseEditorPresenter:
         except Exception as error:
             self._warn(str(error))
             return None
-
-    def _check_bracket(self, *, present: bool = True) -> bool:
-        try:
-            if self.sequence is not None:
-                self.sequence.require_nonempty_brackets()
-        except ValueError as error:
-            self._warn(str(error), present=present)
-            return False
-        return True
 
     def _warn(self, text: str, *, present: bool = True) -> None:
         self.last_warning = str(text)

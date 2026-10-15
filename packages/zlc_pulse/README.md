@@ -30,8 +30,10 @@ disjoint or one lies inside the other, and the board plays them as nested
 loops (`loop_depth` levels deep, `max_loops` per Pulse, both geometry
 constants). Each count is at least one -- a count of one plays the range once,
 exactly as if unbracketed, so a loop can be debugged without deleting it -- and
-compiles only to the program's loop table. Even a bracket spanning the whole Pulse does not become or alter
-`run_repeats`. The sequence's authored `run_repeats` defaults to `0`; a task
+compiles only to the program's loop table. A bracket with no period inside it
+is a placeholder: it saves and reopens as written, compiles to no loop and
+takes none of `max_loops`; a Scan plan is not offered its repeat count. Even a
+bracket spanning the whole Pulse does not become or alter `run_repeats`. The sequence's authored `run_repeats` defaults to `0`; a task
 may explicitly override it for one execution without changing the saved Pulse.
 
 Each physical field has one default value and at most one `PulseBinding`.

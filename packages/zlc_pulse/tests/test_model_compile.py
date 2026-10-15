@@ -269,26 +269,17 @@ def test_pulse_tree_uses_only_brackets_and_run_repeats() -> None:
     assert not hasattr(authored, "repeat") and not hasattr(authored, "bracket")
     assert sequence_from_tree(tree) == authored
 
+    # An empty bracket is a placeholder waiting for periods: it saves and
+    # reopens as written, and compiles to no loop, so the board never sees it
+    # and it takes none of the board's loops.
     for start, end, gap in (("p0", None, 0), ("p1", "p0", 1), (None, "p2", 3)):
-        empty = replace(authored, brackets=(PulseBracket("loop", start, end, 3),))
-        assert empty.bracket_bounds == ((gap, gap),)
-        raw = {**tree, "brackets": [
-            {"bracket_id": "loop", "start_period_id": start, "end_period_id": end, "count": 3},
-        ]}
-        messages = []
-        for operation in (
-            empty.require_nonempty_brackets,
-            lambda: compile_sequence(empty, StreamerParams(max_rows=8, bank_size=2), 50e6),
-            lambda: sequence_to_tree(empty),
-            lambda: sequence_from_tree(raw),
-        ):
-            try:
-                operation()
-            except ValueError as error:
-                messages.append(str(error))
-            else:
-                raise AssertionError("empty authoring bracket escaped the execution/save boundary")
-        assert len(set(messages)) == 1 and "Bracket loop is empty" in messages[0]
+        empty = replace(authored, brackets=(PulseBracket("wait", start, end, 3),))
+        assert empty.bracket_bounds == ((gap, gap),) and empty.loops == ()
+        assert sequence_from_tree(sequence_to_tree(empty)) == empty
+        assert compile_sequence(empty, StreamerParams(max_rows=8, bank_size=2), 50e6).loops == ()
+    beside = replace(authored, brackets=(*authored.brackets, PulseBracket("wait", "p1", "p0", 2)))
+    one_loop = StreamerParams(max_rows=8, bank_size=2, max_loops=1, loop_depth=1)
+    assert compile_sequence(beside, one_loop, 50e6).loops == ((0, 2, 3),)
     with np.testing.assert_raises_regex(ValueError, "end precedes"):
         replace(authored, brackets=(PulseBracket("loop", "p2", "p0", 3),))
 

@@ -866,9 +866,9 @@ class PulseSequence:
 
         One period is one row, so a bracket over the period gaps
         ``start..end`` loops rows ``start..end-1``.  An EMPTY bracket loops
-        nothing and is not in the table; whether it may stand at all is
-        ``require_nonempty_brackets``'s question, asked before any compile,
-        save or export.
+        nothing and is not in the table: it is a placeholder the editor
+        keeps, saves and reopens until periods are put inside it, and the
+        board never sees it.
         """
 
         return tuple(
@@ -893,14 +893,6 @@ class PulseSequence:
             for period in self.periods
         )
         return float(frame_ticks(durations, self.loops))
-
-    def require_nonempty_brackets(self) -> None:
-        for bracket, (start, end) in zip(self.brackets, self._bracket_bounds, strict=True):
-            if start == end:
-                raise ValueError(
-                    f"Bracket {bracket.bracket_id} is empty. Put a period inside it or "
-                    "remove the bracket before running or saving."
-                )
 
     @property
     def scan_bindings(self) -> tuple[PulseBinding, ...]:
