@@ -633,8 +633,9 @@ def _resolve_frame_claims(
         else:
             issues.append(f"{spec.label} {name} has no file yet")
             resolved_rows.append(None)
-    paths = [Path(row.path) for row in resolved_rows if row is not None]
-    repeated = sorted({path.stem for path in paths if paths.count(path) > 1})
+    paths = [None if row is None else Path(row.path) for row in resolved_rows]
+    repeated = sorted({name for name, path in zip(names, paths)
+                       if path is not None and paths.count(path) > 1})
     if repeated:
         issues.append(f"{repeated[0]} is listed twice: give it every frame it reads in one row")
     frames = tuple(entry["frames"] for entry in entries)
