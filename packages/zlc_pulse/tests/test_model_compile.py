@@ -564,8 +564,14 @@ def test_scan_and_value_source_share_one_physical_field_declaration() -> None:
         assert sequence_from_tree(sequence_to_tree(combined)) == combined
         with np.testing.assert_raises_regex(ValueError, "one binding"):
             replace(base, bindings=(binding, replace(binding, scan=False)))
-    with np.testing.assert_raises(ValueError):
-        PulseBinding(duration, "ns", source="api", config_key="shared")
+    # A non-Config binding may keep its Config name; nothing applies it.
+    kept = replace(base, config_enabled=True, bindings=(
+        PulseBinding(duration, "ns", source="api", config_key="shared"),
+        PulseBinding(PulseFieldRef("duration", "p1"), "ns", config_key="shared"),
+    ))
+    assert kept.config_bindings == ()
+    assert apply_config_values(kept, {"shared": (0.08, "us")})[0].periods == kept.periods
+    assert sequence_from_tree(sequence_to_tree(kept)) == kept
     with np.testing.assert_raises(ValueError):
         PulseBinding(PulseFieldRef("delay", port="d0"), "ns", scan=True)
     for old_member in ("slots", "api_parameters", "config_parameters"):

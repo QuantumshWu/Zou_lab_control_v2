@@ -334,11 +334,13 @@ class FluentScanLineEdit(FluentLineEdit):
             if tuple(combo.itemText(index) for index in range(combo.count())) != self._config_names:
                 combo.clear()
                 combo.addItems(self._config_names)
-            combo.setCurrentIndex(combo.findText(config_key) if named else -1)
-            combo.setEditText((config_key if draft is None else draft) if named else "")
+            # Under Default or API a kept name still shows, disabled: it is
+            # the name Config switches back to, and it is not applied.
+            combo.setCurrentIndex(combo.findText(config_key))
+            combo.setEditText(config_key if draft is None else draft)
             combo.lineEdit().setModified(draft is not None)
             combo.setEnabled(named and binding_editable)
-        self.config_name.setToolTip(config_key if named else "")
+        self.config_name.setToolTip(config_key)
         if not source_text:
             if named:
                 source_text = (

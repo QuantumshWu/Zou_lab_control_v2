@@ -3729,7 +3729,20 @@ def test_field_identity_survives_binding_changes_and_renaming(sequence) -> None:
         presenter.set_config_binding(original, "shared_time")
         assert presenter.sequence.bindings[0].field_id == original
         assert presenter.sequence.bindings[0].config_key == "shared_time"
+        # Default keeps the Config name, unread and listed muted, and Config
+        # finds it again; clearing the kept name lets the binding go.
         presenter.set_binding("duration", period, None, False, "default")
+        kept, = presenter.sequence.bindings
+        assert (kept.source, kept.config_key) == ("default", "shared_time")
+        assert not presenter.sequence.config_bindings
+        page = view.config_page
+        assert page.parked == (original,) and page.bindings[0][2] == "shared_time"
+        assert page.bindings[0][5] == "Default (Config name kept)"
+        presenter.set_binding("duration", period, None, False, "config")
+        assert presenter.sequence.config_bindings[0].config_key == "shared_time"
+        assert view.config_page.parked == ()
+        presenter.set_binding("duration", period, None, False, "default")
+        presenter.set_config_binding(original, "")
         assert presenter.sequence.bindings == ()
         presenter.set_binding("duration", period, None, True, "default")
         assert presenter.sequence.bindings[0].field_id == original

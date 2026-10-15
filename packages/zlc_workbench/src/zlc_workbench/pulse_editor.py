@@ -801,6 +801,8 @@ def _binding_field_state(
             status = "The saved Config supplies this value. Edit it on the Value Config page."
     elif binding.source == "api":
         status = "An API caller may override it; otherwise the Pulse default is used."
+    elif binding.config_key:
+        status = "Using the Pulse default; the Config name is kept for switching back."
     else:
         status = "Using the Pulse default."
     return dict(**state, scan=binding.scan, source=binding.source, config_active=active,
@@ -1443,8 +1445,8 @@ class PulseEditorPresenter:
                 "digital": "period_id, port_key, high: boolean TTL state",
                 "analog": "period_id, port_key, mode, value: signed DAC code; hold removes the step",
                 "delay": "port_key, value, unit: output delay; zero removes it",
-                "binding": "field_kind (duration, analog, delay or bracket_count), period_id/port_key as applicable, bracket_id for bracket_count, scan (bool), source (default, api or config); bracket_count uses count units and cannot Scan",
-                "config_binding": "field_id, key: assign an existing Config-source binding to a Config name",
+                "binding": "field_kind (duration, analog, delay or bracket_count), period_id/port_key as applicable, bracket_id for bracket_count, scan (bool), source (default, api or config); bracket_count uses count units and cannot Scan; leaving Config keeps the field's Config name (shown with source default/api, not applied) for switching back",
+                "config_binding": "field_id, key: assign a Config-source binding to a Config name, or rename a kept name; an empty key on a plain Default field discards its kept name",
                 "run_repeats": "repeats: complete Pulse runs per point; 0 means infinite",
                 "scan_repeats": "repeats: complete scan-table sweeps; 0 means infinite; independent of run_repeats (the Delay / Scan Repeats box)",
                 "bracket": "bracket_id, start, end, count: inclusive stable period IDs and positive repeat count",
@@ -2398,15 +2400,23 @@ class PulseEditorPresenter:
         scan_active = self._scan_armed()
         bindings = []
         binding_groups = []
+        parked = []
         if self.sequence is not None:
-            for b in self.sequence.config_bindings:
+            for b in self.sequence.bindings:
+                # A Default or API field that kept its Config name is listed
+                # too, muted: the name is there to switch back to, not applied.
+                if b.source != "config":
+                    if not b.config_key:
+                        continue
+                    parked.append(b.field_id)
                 default = pulse_field_value(self.sequence, b.field_ref, b.unit)
-                effective = active.get(b.config_key) if b.config_key else None
+                effective = active.get(b.config_key) if b.config_key and b.source == "config" else None
                 component = self.sequence.component_for_field(b.field_ref)
                 bindings.append((
                     b.field_id, _grouped_label(self.sequence, b.field_ref, component), b.config_key,
                     _bound_text(default, b.unit, b.unit),
                     "" if effective is None else _bound_text(*effective, b.unit),
+                    f"{'API' if b.source == 'api' else 'Default'} (Config name kept)" if b.source != "config" else
                     "Config off" if not self.sequence.config_enabled else
                     "Not applied — Config error" if self._config_error else
                     "Scan table" if b.scan and scan_active else
@@ -2423,6 +2433,7 @@ class PulseEditorPresenter:
             active_path=self._active_config_path(),
             busy=self._device_busy or self._stop_busy,
             binding_groups=tuple(binding_groups),
+            parked=tuple(parked),
         ))
 
     def set_config_binding(self, field_id: str, key: str) -> None:
@@ -6322,14 +6333,17 @@ def _sequence_edited(sequence: PulseSequence, action: str, args: tuple) -> Pulse
             bracket_id=str(period_id) if kind == "bracket_count" else None,
         )
         current = next((b for b in sequence.bindings if b.field_ref == reference), None)
+        # The Config name stays with the field whatever its source: switched
+        # to Default (to edit the default) or API, it is kept, unread, and
+        # switching back to Config finds it again.
         binding = PulseBinding(
             reference, current.unit if current else sequence.field_unit(reference),
             scan=scan, source=source,
-            config_key=current.config_key if current and source == "config" else "",
+            config_key=current.config_key if current else "",
         )
         bindings = tuple(binding if b.field_ref == reference else b
                          for b in sequence.bindings
-                         if b.field_ref != reference or scan or source != "default")
+                         if b.field_ref != reference or scan or source != "default" or binding.config_key)
         if current is None and (scan or source != "default"):
             bindings += (binding,)
         periods = sequence.periods
@@ -6347,10 +6361,14 @@ def _sequence_edited(sequence: PulseSequence, action: str, args: tuple) -> Pulse
         key = str(key).strip()
         if key:
             key = config_parameter_key(key)
-        if not any(b.field_id == field_id for b in sequence.config_bindings):
+        current = next((b for b in sequence.bindings if b.field_id == field_id), None)
+        if current is None or not (current.source == "config" or current.config_key):
             raise ValueError("the field is not a Config parameter")
+        # Clearing a kept name from a field that is otherwise plain Default
+        # leaves nothing for its binding to say.
         return replace(sequence, bindings=tuple(
             replace(b, config_key=key) if b.field_id == field_id else b for b in sequence.bindings
+            if b.field_id != field_id or key or b.scan or b.source != "default"
         ))
     if action == "delay":
         port, value, unit = args

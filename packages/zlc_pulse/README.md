@@ -44,7 +44,9 @@ source. An explicit scan point overrides the base source for that execution.
 Scan and API are addressed by stable physical field identity internally and by
 readable paths such as `MOT.duration` in authoring. They have no user-assigned
 numbers or aliases. A Config binding instead references a named entry shared
-across Pulses; multiple fields can reference the same name.
+across Pulses; multiple fields can reference the same name. A Default or API
+binding may keep the Config name it had; it is read only while the source is
+Config, so switching back finds it again.
 
 Config files contain only `format: zlc.pulse.config_values` and `values`:
 each name maps to a numeric `value` and `unit`. Unassigned or missing entries

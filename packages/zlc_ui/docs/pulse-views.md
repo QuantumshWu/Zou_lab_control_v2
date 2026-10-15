@@ -42,7 +42,11 @@ returns the accepted `FieldVM`. The popup also edits the field's Config referenc
 through `config_key_committed`; names come from `FieldVM.config_names`, and
 `FieldVM.field_id` carries the domain-owned field identity. It shows the editable
 default and current effective source together. Config values and files are still
-edited and saved separately on Value Config.
+edited and saved separately on Value Config. A field switched from Config to
+Default or API keeps its Config name: the popup shows it disabled, Value Config
+lists the field muted as `Default (Config name kept)` (`ConfigPageRecord.parked`),
+nothing applies it, and choosing Config again uses it. Clearing the kept name on
+Value Config lets the binding go.
 S/A/C badges contain no numeric identity; Scan defaults remain editable.
 
 For a DAC channel, `PortRowVM.kind == "dac"` plus a

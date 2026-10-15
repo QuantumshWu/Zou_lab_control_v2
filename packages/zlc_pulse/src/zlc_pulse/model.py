@@ -405,7 +405,12 @@ def config_parameter_key(value: object) -> str:
 
 @dataclass(frozen=True)
 class PulseBinding:
-    """One field's independent scan capability and default/API/Config source."""
+    """One field's independent scan capability and default/API/Config source.
+
+    ``config_key`` is read only while the source is Config.  A Default or
+    API binding may keep the name it had -- switched to Default to edit the
+    default, it switches back to the same name -- and nothing applies it.
+    """
 
     field_ref: PulseFieldRef
     unit: str
@@ -431,8 +436,6 @@ class PulseBinding:
         key = _text(self.config_key, "Config key", empty=True)
         if key:
             config_parameter_key(key)
-        if self.source != BINDING_CONFIG and key:
-            raise ValueError("only Config bindings may name a Config key")
         object.__setattr__(self, "unit", unit)
 
     @property
