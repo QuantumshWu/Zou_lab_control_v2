@@ -142,7 +142,7 @@ dispatch. Each entry has `tool`, `arguments`, and optionally `expect` for exact
 top-level result fields. It stops on errors, refusals or unmet expectations;
 earlier effects remain, so never replay an entire partially completed list.
 Use `lab_wait_for` to observe a caller-specified JSON path/value through an
-existing read-only tool, or `lab_wait` for an exact Logic generation. There is
+existing operator read-only tool, or `lab_wait` for an exact Logic generation. There is
 no built-in Load/Init/SLM procedure or inferred physical readiness in these tools.
 Do not batch steps needing new scientific interpretation or human decisions.
 
@@ -158,6 +158,9 @@ These are operator instructions, not hidden automatic device operations. MCP ins
 reduce unnecessary model turns but cannot control the AI client's reasoning
 budget or guarantee that a model follows every instruction.
 
+Developer profile only (`--tools developer`); the default operator profile hides
+these reflection tools and refuses them, also inside `lab_batch`:
+
 - `lab_handles` discovers the current application owners and opened Controls.
   `lab_api(handle)` lists their public methods and actual GUI intents;
   `lab_api(handle, method)` reads that method's real signature and documentation.
@@ -172,9 +175,10 @@ budget or guarantee that a model follows every instruction.
 - `lab_intent` is a fallback for existing public GUI Handle signals, discovered
   from the actual handle rather than another command registry. It can open
   normal dialogs, so prefer public methods accepting explicit paths/values.
-  A missing shortcut is not a missing application capability: use these APIs
-  first, or the real GUI when necessary. The following tools are convenient
-  shortcuts, not an exhaustive permission or feature list.
+  A missing shortcut is not a missing application capability: operators start
+  with `lab_guide`/`lab_catalog` and the native tools below, or the real GUI
+  when necessary; developers may also use these APIs. The following tools are
+  convenient shortcuts, not an exhaustive permission or feature list.
 
 - `lab_state`: one compact overview of current nodes, signals, panels, errors
   and readiness. Use `node_id`/`panel_id` for focused follow-ups,

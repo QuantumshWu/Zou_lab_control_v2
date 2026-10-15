@@ -260,8 +260,8 @@ def start_server(flow, *, host="127.0.0.1", port: int, token: str, allow_control
     @tool(annotations=read)
     async def lab_guide(topic: str = "overview") -> dict[str, object]:
         """Learn native capabilities and workflows without reading source or initializing devices.
-        Start with overview; topics: setup, acquisition, pulse, slm, processing, scan, plot, fit,
-        files, recipes, lifetime, errors. node:<api_name> reads that installed node's purpose/schema.
+        Start with overview; topics: setup, acquisition, pulse, slm, calibration, processing, scan, plot,
+        fit, files, recipes, lifetime, errors. node:<api_name> reads that installed node's purpose/schema.
         This is read-only help; it does not initialize, fire, fit or save anything.
         """
         if topic.startswith("node:"):
@@ -692,7 +692,7 @@ def start_server(flow, *, host="127.0.0.1", port: int, token: str, allow_control
             """Fallback: emit an existing public GUI Handle intent on the Qt owner, as the human UI does.
             Discover actual signals/signatures through lab_api. This can open ordinary dialogs; prefer lab_call
             with explicit path/value arguments. It is not arbitrary QWidget manipulation or Python execution.
-            Use lab_close for closing/Shutdown so confirmation questions and choices return to the AI.
+            Use lab_close for closing and Shut down devices so confirmation questions and choices return to the AI.
             Dispatch is not successful completion: inspect owner state/errors or the actual UI afterward.
             """
             def emit():
@@ -732,7 +732,7 @@ def start_server(flow, *, host="127.0.0.1", port: int, token: str, allow_control
                            layout_path: str | None = None) -> dict[str, object]:
             """Save a native Panel Figure (image plus NPZ), optionally also its reusable Layout.
             path is a workspace .png/.pdf/.svg destination. Saves the existing Frozen snapshot, exactly
-            like Edit→Save. refresh=True explicitly freezes current data first; false never silently
+            like Edit panel → Save figure. refresh=True explicitly freezes current data first; false never silently
             replaces an existing frozen view. To save the latest accepted results, use refresh=True;
             this updates the save snapshot, not a workaround to restart live fitting.
             Submission is asynchronous: read panel.saving and owner
@@ -896,7 +896,10 @@ def start_server(flow, *, host="127.0.0.1", port: int, token: str, allow_control
             """Use the normal experiment action. Consult lab_catalog only for unknown fields. logic.add: api_name, optional values,
             source_signal, device_keys, artifact_inputs. Node edits: node_id plus values,
             source_signal, device_keys, artifact_inputs (a path per input; a frame_claims input such as
-            Occupancy's calibrations takes [{path, frames}] rows). Start/Stop: node_id. Panel add: kind; update: panel_id,patch.
+            Occupancy's calibrations takes [{path, frames}] rows). Start/Stop: node_id. logic.start on a running,
+            following or queued node is the GUI Restart: it retires the current generation; take the new
+            generation from the reply. Draft issues name fields by their on-screen labels; map them back through
+            lab_catalog(node_id).node.source_label and form_spec. Panel add: kind; update: panel_id,patch.
             view.monitor/view.logic take empty arguments and navigate directly, without pixel clicks.
             layout.save/load take path (workspace JSON); load restores stopped drafts. Loading over active Logic
             requires explicit stop_running=true; poll state.layout_pending until the replacement completes.

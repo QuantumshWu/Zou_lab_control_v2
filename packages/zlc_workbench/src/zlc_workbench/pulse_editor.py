@@ -1446,7 +1446,7 @@ class PulseEditorPresenter:
                 "binding": "field_kind (duration, analog, delay or bracket_count), period_id/port_key as applicable, bracket_id for bracket_count, scan (bool), source (default, api or config); bracket_count uses count units and cannot Scan",
                 "config_binding": "field_id, key: assign an existing Config-source binding to a Config name",
                 "run_repeats": "repeats: complete Pulse runs per point; 0 means infinite",
-                "scan_repeats": "repeats: complete scan-table sweeps; 0 means infinite; independent of Run repeats",
+                "scan_repeats": "repeats: complete scan-table sweeps; 0 means infinite; independent of run_repeats (the Delay / Scan Repeats box)",
                 "bracket": "bracket_id, start, end, count: inclusive stable period IDs and positive repeat count",
                 "bracket_add": "start, end, count: inclusive stable period IDs; new bracket ID is returned in state",
                 "bracket_remove": "bracket_id: explicitly remove this bracket",
