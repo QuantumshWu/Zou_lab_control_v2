@@ -11,8 +11,8 @@ from zlc_atom.nodes._framework.descriptor import (
 from zlc_atom.nodes._framework.frames import frame_identity
 
 from .processor import (
-    PAIR_RULES, SURVIVAL_OUTPUTS, FrameSurvivalProcessor, _checked_overrides, _rule_pairs, _selected_pairs,
-    pair_label,
+    PAIR_RULES, SURVIVAL_OUTPUTS, FrameSurvivalProcessor, _checked_overrides, _checked_pairs, _rule_pairs,
+    _selected_pairs, pair_label,
 )
 
 #: What the operator picks: a question that follows the frames the source
@@ -30,30 +30,62 @@ _SELECTIONS = (
     AuthoringChoice("none", "None"),
     AuthoringChoice("custom", "Selected"),
 )
-#: A pair row: under a rule, an exception to it; in Selected's own list, a
-#: pair it publishes (selected) or keeps without publishing (not selected).
-_PAIR_COLUMNS = (
+#: A rule's exception: selected adds the pair to the rule, unselected leaves
+#: it out.  Every row is in use, so every row is checked.
+_OVERRIDE_COLUMNS = (
     AuthoringField("start", "text", "Start frame", "0", required=True),
     AuthoringField("end", "text", "End frame", "last", required=True),
     AuthoringField("selected", "bool", "Selected", True),
 )
+#: A row of Selected's own list: a selected row is published and checked;
+#: one kept unselected is parked -- kept as written, its ends filled in or
+#: not, and never checked, against the rows in use or at all.
+_LIST_COLUMNS = (
+    AuthoringField("start", "text", "Start frame", "0"),
+    AuthoringField("end", "text", "End frame", "last"),
+    AuthoringField("selected", "bool", "Selected", True),
+)
+_OVERRIDES = AuthoringField(
+    "pairs", "rows", "Rule overrides", (), columns=_OVERRIDE_COLUMNS, enabled_when=("selection", PAIR_RULES),
+    description="The rule's exceptions: selected=true adds a pair to it, false leaves one out.")
+_LIST = AuthoringField(
+    "custom_pairs", "rows", "Selected pairs", (), columns=_LIST_COLUMNS, enabled_when=("selection", ("custom",)),
+    description="Selected's own list: selected=true pairs are published; selected=false ones are parked -- "
+                "kept as written, never checked and never published. The list is kept while a rule is "
+                "picked, so Selected comes back to it.")
 
 
-def _rows(rows):
-    """Authored pair rows as checked ``(start, end, selected)``: every row, used or not."""
+def _overrides(rows):
+    """A rule's exceptions as checked ``(start, end, selected)``."""
 
     return _checked_overrides(tuple((row["start"], row["end"], row["selected"]) for row in rows))
 
 
+def _published(rows):
+    """The pairs Selected's list publishes, checked: its selected rows, and only those."""
+
+    for index, row in enumerate(rows, 1):
+        for column in _LIST_COLUMNS[:2]:
+            if row["selected"] and not row[column.name].strip():
+                raise ValueError(f"{_LIST.label} row {index}: {column.label} must be filled in")
+    selected = tuple((row["start"], row["end"]) for row in rows if row["selected"])
+    return _checked_pairs(selected) if selected else ()
+
+
+def _parked(rows):
+    """The pairs Selected's list keeps unselected, as written."""
+
+    return tuple((row["start"], row["end"]) for row in rows if not row["selected"])
+
+
 def _validate(values):
     # Only the list the selection reads is checked: the other one is kept as
-    # it was written (enabled_when), for when its choice is picked again.
+    # it was written (enabled_when), for when its choice is picked again.  Of
+    # Selected's list only the selected rows are: a parked row never stops Start.
     selection = values["selection"]
     if selection in PAIR_RULES:
-        _rows(values["pairs"])
-        return
-    listed = _rows(values["custom_pairs"]) if selection == "custom" else ()
-    if not any(selected for _start, _end, selected in listed):
+        _overrides(values["pairs"])
+    elif selection != "custom" or not _published(values["custom_pairs"]):
         raise ValueError("Pick a rule or select at least one pair.")
 
 
@@ -63,14 +95,8 @@ FRAME_SURVIVAL_SCHEMA = AuthoringSchema((
                                "Consecutive (k→k+1), From first (0→k) or To last (k→last); None asks for "
                                "no pair; Selected publishes its own list. Grid edits override only the changed "
                                "pairs; first/last follow the cycle."),
-    AuthoringField("pairs", "rows", "Rule overrides", (), columns=_PAIR_COLUMNS,
-                   enabled_when=("selection", PAIR_RULES),
-                   description="The rule's exceptions: selected=true adds a pair to it, false leaves one out."),
-    AuthoringField("custom_pairs", "rows", "Selected pairs", (), columns=_PAIR_COLUMNS,
-                   enabled_when=("selection", ("custom",)),
-                   description="Selected's own list: selected=true pairs are published, selected=false ones "
-                               "are kept without being published. It is kept while a rule is picked, so "
-                               "Selected comes back to it."),
+    _OVERRIDES,
+    _LIST,
 ), validator=_validate)
 
 
@@ -82,13 +108,10 @@ def _build(*, source_signal: str, **values: object) -> FrameSurvivalProcessor:
     selection = authored["selection"]
     if selection != "custom":
         return FrameSurvivalProcessor(source_signal=selected_source, pairs=selection,
-                                      pair_overrides=_rows(authored["pairs"]))
-    listed = _rows(authored["custom_pairs"])
-    return FrameSurvivalProcessor(
-        source_signal=selected_source,
-        pairs=tuple((start, end) for start, end, selected in listed if selected),
-        parked_pairs=tuple((start, end) for start, end, selected in listed if not selected),
-    )
+                                      pair_overrides=_overrides(authored["pairs"]))
+    listed = authored["custom_pairs"]
+    return FrameSurvivalProcessor(source_signal=selected_source, pairs=_published(listed),
+                                  parked_pairs=_parked(listed))
 
 
 def _editor_factory(parent=None):
@@ -312,8 +335,9 @@ LOGIC_NODE = LogicNodeDescriptor(
         "all, consecutive (k->k+1), from_first (0->k) and to_last (k->last) follow the "
         "frames the source carries; none asks for no pair (Start waits for a rule or a pair). "
         "Under a rule, pairs rows override it with selected=true/false; custom publishes "
-        "its own custom_pairs list, whose selected=false rows are kept without being "
-        "published, and that list is kept while a rule is picked. Endpoints use text "
+        "its own custom_pairs list, whose selected=false rows are parked: kept as written, "
+        "never checked and never published. That list is kept while a rule is picked. "
+        "Endpoints use text "
         "'0'/'last'; numbered middle frames keep their index when the cycle changes, and "
         "a selected pair whose middle frame the source lacks is kept and left out of the "
         "run, which fails only when no selected pair is left. "

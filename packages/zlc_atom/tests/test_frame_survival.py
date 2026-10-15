@@ -222,18 +222,43 @@ def test_pair_overrides_keep_the_rule_and_last_identity() -> None:
     FRAME_SURVIVAL_SCHEMA.project_values({"selection": "custom", "custom_pairs": rows})
     with pytest.raises(ValueError, match="at least one pair"):
         FRAME_SURVIVAL_SCHEMA.project_values({"selection": "custom", "custom_pairs": ()})
-    # A pair Selected's list keeps unselected is parked: kept and recorded,
-    # never published -- and a list of parked pairs alone publishes nothing.
+    # A pair Selected's list keeps unselected is parked: kept and recorded as
+    # written, never published -- and a list of parked pairs alone publishes nothing.
     parked = {"start": "0", "end": "1", "selected": False}
     built = LOGIC_NODE.build(source_signal="@logic/occupancy/occupied", selection="custom",
                              custom_pairs=(*rows, parked))
-    assert built.pairs == ((0, "last"),) and built.parked_pairs == ((0, 1),)
+    assert built.pairs == ((0, "last"),) and built.parked_pairs == (("0", "1"),)
     three = _occupied_snapshot(np.zeros((1, 3, 2), dtype=bool))
     assert built._pair(three).block.schema.point_domain.axes[0].coordinate_labels == ("0→2",)
     assert built.describe_run({"occupied": SignalValue("occupied", three, None)})[
-        "parameters"]["parked_pairs"] == ((0, 1),)
+        "parameters"]["parked_pairs"] == (("0", "1"),)
     with pytest.raises(ValueError, match="at least one pair"):
         FRAME_SURVIVAL_SCHEMA.project_values({"selection": "custom", "custom_pairs": (parked,)})
+    # A parked row is never checked, against the rows in use or at all: a
+    # duplicate of a selected pair, a reversed pair, a frame that is no frame
+    # and an empty end all leave Start alone and reach the record as written.
+    odd = (("0", "last"), ("2", "1"), ("x", "1"), ("0", ""))
+    values = FRAME_SURVIVAL_SCHEMA.project_values({"selection": "custom", "custom_pairs": (*rows, *(
+        {"start": start, "end": end, "selected": False} for start, end in odd))})
+    built = LOGIC_NODE.build(source_signal="@logic/occupancy/occupied", **values)
+    assert built.pairs == ((0, "last"),) and built.parked_pairs == odd
+    # Every selected row keeps every check.
+    for listed, problem in (
+        ((*rows, {"start": "0", "end": "", "selected": True}), "Selected pairs row 2: End frame must be filled in"),
+        ((*rows, *rows), "must not contain duplicates"),
+        (({"start": "2", "end": "1"},), "require start < end"),
+        (({"start": "x", "end": "1"},), "frame numbers or 'last'"),
+    ):
+        with pytest.raises(ValueError, match=problem):
+            FRAME_SURVIVAL_SCHEMA.project_values({"selection": "custom", "custom_pairs": listed})
+    # "first" is frame 0: it starts a pair and never ends one.
+    built = LOGIC_NODE.build(source_signal="@logic/occupancy/occupied", selection="custom",
+                             custom_pairs=({"start": "first", "end": "1"},))
+    assert built.pairs == ((0, 1),)
+    for end in ("first", "0"):
+        with pytest.raises(ValueError, match="require start < end"):
+            FRAME_SURVIVAL_SCHEMA.project_values({"selection": "custom", "custom_pairs": (
+                {"start": "1", "end": end},)})
     # The list a rule does not read is kept as written, unchecked.
     FRAME_SURVIVAL_SCHEMA.project_values({"selection": "consecutive", "pairs": rows,
                                           "custom_pairs": ({"start": "2", "end": "1"},)})

@@ -146,10 +146,13 @@ first-to-middle pair, including newly added middle frames, but excludes
 first-to-last. `none` asks for no pair. `custom` publishes its own list,
 `custom_pairs`, e.g. `{"selection":"custom","custom_pairs":[{"start":"0",
 "end":"last","selected":true}]}`. A `custom_pairs` row with `"selected":false` is
-parked: kept in the draft, the layout and the run record (`parked_pairs`), never
-published and never in the way of Start. The list stays in the draft while a rule
-is selected, so selecting `custom` again brings it back. Endpoints are text: `0`
-is first, `last` is last, and positive indices name middle frames. A selected pair
+parked: kept as written in the draft, the layout and the run record
+(`parked_pairs`), never checked, never published and never in the way of Start --
+it may repeat a selected pair or have an empty end. Only the selected rows are
+checked (filled-in ends, start before end, no pair twice). The list stays in the
+draft while a rule is selected, so selecting `custom` again brings it back.
+Endpoints are text: `0` (or `first`) is first and only ever starts a pair,
+`last` is last, and positive indices name middle frames. A selected pair
 whose middle frame the source does not carry stays in the draft, is left out of
 this source's pairs and is named in the run record (`absent_pairs`); it does not
 stop Start, and a run fails only when none of its selected pairs is in the source.

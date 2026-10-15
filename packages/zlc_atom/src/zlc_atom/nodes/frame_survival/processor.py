@@ -45,7 +45,7 @@ that trap, and averaging it away is how you never find out.
 from __future__ import annotations
 
 import numpy as np
-from zlc_atom.nodes._framework.frames import LAST, REST, frame_token, resolve_frame
+from zlc_atom.nodes._framework.frames import FIRST, LAST, REST, frame_token, resolve_frame
 from zlc_data import (
     READOUT_EVENT,
     AxisId,
@@ -126,7 +126,11 @@ def _checked_selection(selection) -> str | tuple[tuple[int, int | str], ...]:
 
 
 def _checked_pairs(pairs) -> tuple[tuple[int, int | str], ...]:
-    """Validate authored indices and the last-frame identity, without a count."""
+    """Validate authored indices and the last-frame identity, without a count.
+
+    A start written "first" is frame 0, the one spelling the grid writes;
+    nothing comes before the first frame, so it never ends a pair.
+    """
 
     if not isinstance(pairs, (tuple, list)) or not pairs:
         raise ValueError("frame survival pairs must contain at least one pair")
@@ -140,7 +144,8 @@ def _checked_pairs(pairs) -> tuple[tuple[int, int | str], ...]:
                           for value in pair)
         except ValueError as error:
             raise ValueError("frame survival pair endpoints must be frame numbers or 'last'") from error
-        if start in (LAST, REST) or end == REST or (isinstance(end, int) and start >= end):
+        start = 0 if start == FIRST else start
+        if start in (LAST, REST) or end in (FIRST, REST) or (isinstance(end, int) and start >= end):
             raise ValueError("frame survival pairs require start < end")
         checked.append((start, end))
     if len(set(checked)) != len(checked):
@@ -223,8 +228,8 @@ class FrameSurvivalProcessor:
         self.pair_overrides = _checked_overrides(pair_overrides)
         if not isinstance(self.pairs, str) and self.pair_overrides:
             raise ValueError("explicit frame survival pairs cannot also have rule overrides")
-        # Pairs a Selected list keeps without asking for them: never
-        # published, only recorded with the run.
+        # Pairs a Selected list keeps without asking for them, as written:
+        # never checked, never published, only recorded with the run.
         self.parked_pairs = tuple(parked_pairs)
         # Event and canonical geometry coexist; neither evicts the other's plan.
         self._plans: dict[bool, tuple[DatasetSchema, tuple]] = {}
