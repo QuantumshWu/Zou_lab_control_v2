@@ -3,7 +3,7 @@
 A window used to be handed over as its own widget tree, so a host could reach
 `view.schedule_view.channel_panel` and push a value straight into one panel.
 Nothing stopped it, so it happened, and "which rows exist" quietly became two
-facts kept in two places -- the delay column went on showing rows that Hide Off
+facts kept in two places -- the delay column went on showing rows that Hide off
 had already taken out of the cards.  Whatever the outside can hold, the outside
 will assemble, and then there are two owners of the same picture.
 
@@ -267,7 +267,7 @@ class PulseEditorHandle(QtCore.QObject):
         return self._view.confirm("Unsaved Config", "Discard unsaved Config edits?", "Discard", "Cancel")
 
     def confirm_pulse_discard(self) -> bool:
-        return self._view.confirm("Unsaved pulse", "Discard unsaved pulse edits?", "Discard", "Cancel")
+        return self._view.confirm("Unsaved Pulse", "Discard unsaved Pulse edits?", "Discard", "Cancel")
 
     def set_config_page(self, record: ConfigPageRecord) -> None:
         self._view.config_view.set_page(record)

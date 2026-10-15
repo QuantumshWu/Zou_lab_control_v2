@@ -227,7 +227,7 @@ class PeriodCard(FluentGroupBox):
         self.name_edit = FluentLineEdit("")
         # No label repeats it on the card: the placeholder is the field's
         # only name, so it reads in MUTED_INK, not as a faint prompt.
-        self.name_edit.setPlaceholderText("name")
+        self.name_edit.setPlaceholderText("Name")
         self.name_edit.setFixedWidth(control_width)
         # A spacer is named by the editor, not the operator: the name is
         # shown where every card shows its name and cannot be typed into
@@ -306,6 +306,11 @@ class PeriodCard(FluentGroupBox):
         self.name_edit.setEnabled(self.kind != PERIOD_KIND_SPACER and not period.readonly)
         self._analog_mode_choices = tuple(analog_mode_choices)
         self._reconcile_ports(tuple(ports), period)
+        # Switched off like everything else on a read-only card, not left
+        # live and inert: a box that looks tickable and is not is the one
+        # thing this card must not show.  A ticked box keeps a fill of its
+        # own while switched off (FluentCheckBox), so which outputs the
+        # member drives still reads at a glance.
         for check in self.checks.values():
             check.setEnabled(not period.readonly)
         for key, combo in self.bus_mode_combos.items():
@@ -505,7 +510,7 @@ class PeriodCard(FluentGroupBox):
         except ValueError:
             return
         # Only the accepted projection says what is unchanged. A previous
-        # intent may have been refused, or superseded by Load/Sync/Clear.
+        # intent may have been refused, or superseded by Open/Sync/Clear all.
         try:
             if (mode, value) == (previous_mode, int(float(field.text))):
                 return
@@ -533,25 +538,24 @@ class ChannelNamesPanel(FluentGroupBox):
     starts where their typed text starts.  The labels were centred in a
     fixed 85 px box, so no two started on one x, and the port fields were a
     second, narrower column two pixels in from the Name field.
+
+    The Name is where the schedule is renamed, on every page: the Pulse on
+    Edit, the Subpulse on its own page.  The port labels are the board's,
+    named on Edit; with ``ports_editable`` off they are read here, as
+    readouts in the same column as the totals above them.
     """
 
     document_name_committed = QtCore.pyqtSignal(str)
     port_label_committed = QtCore.pyqtSignal(str, str)
 
-    def __init__(self, parent=None, *, editable: bool = True) -> None:
-        super().__init__("Port Catalog", parent)
-        self._editable = editable
-        if editable:
-            self.name_edit = FluentLineEdit("")
-            self.name_edit.setPlaceholderText("pulse name")
-            self.name_edit.set_placeholder_prompt()
-            self.name_edit.editingFinished.connect(
-                lambda: self.document_name_committed.emit(self.name_edit.text()))
-        else:
-            # Read-only -- a Subpulse's schedule, renamed in its page's own
-            # Name field -- the name is read here like the totals under it,
-            # so the catalog keeps its four lines on every page.
-            self.name_edit = FluentReadoutEdit("")
+    def __init__(self, parent=None, *, ports_editable: bool = True) -> None:
+        super().__init__("Port catalog", parent)
+        self._ports_editable = ports_editable
+        self.name_edit = FluentLineEdit("")
+        self.name_edit.setPlaceholderText("Pulse name")
+        self.name_edit.set_placeholder_prompt()
+        self.name_edit.editingFinished.connect(
+            lambda: self.document_name_committed.emit(self.name_edit.text()))
         # What the pulse adds up to is read, not typed: readouts, not
         # switched-off fields.
         self.total_label = FluentReadoutEdit("")
@@ -598,12 +602,16 @@ class ChannelNamesPanel(FluentGroupBox):
         for port in ports:
             field = existing.pop(port.key, None)
             if field is None:
-                field = FluentLineEdit(port.label)
+                if self._ports_editable:
+                    field = FluentLineEdit(port.label)
+                    field.editingFinished.connect(
+                        lambda key=port.key, edit=field: self.port_label_committed.emit(key, edit.text()))
+                else:
+                    field = FluentReadoutEdit(port.label)
                 # A name longer than the column reads from its head, cut
                 # with an ellipsis like the delay column's labels, rather
                 # than scrolled to its tail where the cursor was left.
                 field.set_display_elide(QtCore.Qt.ElideRight)
-                field.editingFinished.connect(lambda key=port.key, edit=field: self.port_label_committed.emit(key, edit.text()))
                 holder = QtWidgets.QWidget()
                 holder.setStyleSheet("background: transparent;")
                 row = QtWidgets.QHBoxLayout(holder)
@@ -617,8 +625,6 @@ class ChannelNamesPanel(FluentGroupBox):
                 self._row_holders[port.key] = holder
                 self._row_labels[port.key] = endpoint
             field.setText(port.label)
-            field.setReadOnly(not self._editable)
-            field.setEnabled(port.visible and self._editable)
             self._row_holders[port.key].setVisible(bool(port.visible))
             self._rows[port.key] = field
         for key, field in existing.items():
@@ -1505,7 +1511,7 @@ class PulseDragContainer(QtWidgets.QWidget):
     def mouseReleaseEvent(self, event):  # noqa: N802 - Qt name
         """A click on empty strip selects the gap it fell in.
 
-        Without this the signal existed and could never fire, so Add Period
+        Without this the signal existed and could never fire, so Add period
         could only ever append: the operator had no way to say "here".
         """
 
@@ -1739,9 +1745,13 @@ class PulseScheduleView(QtWidgets.QWidget):
         layout = QtWidgets.QVBoxLayout(self)
         # The page owns its edges: every tab's content starts and ends one
         # section gap in from the tab pane.  Embedded in another page, the
-        # host page owns them and this view adds none of its own.
+        # host page owns them and this view adds none of its own.  The
+        # panes stand in the right inset, their vertical bar at the tab's
+        # edge as on every tab whose page scrolls, and the inset is kept
+        # whether or not the bar shows: the strip and the bottom bar under
+        # it end on the content edge, bar or no bar.
         page = 0 if embedded else section_gap()
-        layout.setContentsMargins(page, page, page, page)
+        layout.setContentsMargins(page, page, 0, page)
         layout.setSpacing(section_gap())
         gap = row_gap()
 
@@ -1750,7 +1760,7 @@ class PulseScheduleView(QtWidgets.QWidget):
         # LinkedScrollPanes owns the single vertical bar that appears only
         # while some pane actually overflows.  Nothing here decides how far
         # the operator can reach -- the taller pane's own range does.
-        dataset_frame = LinkedScrollPanes()
+        dataset_frame = LinkedScrollPanes(gutter=page)
 
         self.left_scroll = FluentScrollArea()
         self.left_scroll.setWidgetResizable(True)
@@ -1781,7 +1791,7 @@ class PulseScheduleView(QtWidgets.QWidget):
             left.addWidget(holder)
             return holder
 
-        self.names_panel = ChannelNamesPanel(editable=not embedded)
+        self.names_panel = ChannelNamesPanel(ports_editable=not embedded)
         self.names_panel_holder = hold(self.names_panel)
         self.names_panel_holder.layout().setContentsMargins(0, 0, gap, 0)
         self.channel_panel = ChannelPanel()
@@ -1845,7 +1855,7 @@ class PulseScheduleView(QtWidgets.QWidget):
             "QFrame#zlcPulseButtonBar { background: transparent; border: none; }"
         )
         bar = QtWidgets.QHBoxLayout(self.button_frame)
-        bar.setContentsMargins(0, 0, 0, 0)
+        bar.setContentsMargins(0, 0, page, 0)
         bar.setSpacing(gap)
         # The bar is ONE table of rows read across three cards: row 2 of
         # Control sits beside row 2 of Connection and row 2 of Ports.  So the
@@ -1870,16 +1880,17 @@ class PulseScheduleView(QtWidgets.QWidget):
         # every Stop in the suite wears the one destructive face for it.
         self.stop_button = FluentButton("Stop Pulse", role="destructive")
         self.sync_button = FluentButton("Sync")
-        self.add_button = FluentButton("Add Period")
-        self.spacer_button = FluentButton("Add Spacer")
+        self.add_button = FluentButton("Add period")
+        self.spacer_button = FluentButton("Add spacer")
         self.remove_button = FluentButton("Remove", role="destructive")
-        self.bracket_button = FluentButton("Add Bracket")
+        self.bracket_button = FluentButton("Add bracket")
         # One primary at a time: On Pulse while it would put something new
         # on the board and the document is saved; Save Pulse, with its star,
         # while the file is behind the editor -- On Pulse is then a standard
         # command.
         self.save_button = FluentButton("Save Pulse")
-        self.load_button = FluentButton("Load")
+        # Asks for the file to read: the ellipsis says more comes first.
+        self.load_button = FluentButton("Open…")
         self.collapse_button = FluentButton("Collapse")
         self.group_button = FluentButton("Group Subpulse")
         # Three compact rows: execute; edit the timeline; save and organize.
@@ -1942,10 +1953,11 @@ class PulseScheduleView(QtWidgets.QWidget):
         self.hidden_port_combo = FluentComboBox()
         self.hidden_port_combo.setFixedHeight(control_height)
         self.add_port_button = FluentButton("Add")
-        self.hide_off_button = FluentButton("Hide Off")
-        self.show_all_button = FluentButton("Show All")
+        self.hide_off_button = FluentButton("Hide off")
+        self.hide_off_button.setToolTip("Hide the ports no period drives")
+        self.show_all_button = FluentButton("Show all")
         # How many ports the combo above holds.  How many are shown is the
-        # Port Catalog's Visible line, said there once for the page.
+        # Port catalog's Visible line, said there once for the page.
         self.hidden_count_label = FluentReadoutEdit("")
         for button in (self.add_port_button, self.hide_off_button, self.show_all_button):
             button.setFixedHeight(control_height)
@@ -2121,7 +2133,7 @@ class PulseScheduleView(QtWidgets.QWidget):
         Which ports have rows is ONE fact, and it was written down twice: the
         names column and every period card filter on ``port.visible``, while
         the delay rows arrive as "every output the board can delay" and were
-        handed over whole.  So Hide Off dropped a row from the cards and left
+        handed over whole.  So Hide off dropped a row from the cards and left
         its delay sitting there, lined up with nothing -- the columns are read
         across, and a delay beside the wrong channel is worse than no delay.
 
@@ -2483,7 +2495,7 @@ class PulseScheduleView(QtWidgets.QWidget):
         whenever On Pulse could not run, and the presenter's refresh calls
         both, so every refresh disabled Sync and enabled it again a moment
         later -- and disabling a focused button hands Qt's focus to the next
-        one in the chain, so clicking Sync landed focus on Add Period.
+        one in the chain, so clicking Sync landed focus on Add period.
         """
 
         # Its own answer, not Run's.  Sync READS the board, so what it needs
@@ -2629,7 +2641,7 @@ class PulseScheduleView(QtWidgets.QWidget):
         Computed from the periods this view is holding, not read off a flag on
         the port rows.  Whether a lane is high is edited constantly and the
         port rows are only re-pushed on a STRUCTURAL change, so a flag would be
-        stale for every edit in between -- and "Hide Off" reads exactly it.
+        stale for every edit in between -- and "Hide off" reads exactly it.
         """
 
         driven: set[str] = set()
@@ -2692,7 +2704,7 @@ class PulseScheduleView(QtWidgets.QWidget):
         self.names_panel_holder.setVisible(not visible)
         self.channel_panel_holder.setVisible(not visible)
         self.left_panel_stub_holder.setVisible(visible)
-        self.collapse_button.setText("Show Left" if visible else "Collapse")
+        self.collapse_button.setText("Show left" if visible else "Collapse")
         self._settle_left_pane_width()
 
     def _show_left_panels(self) -> None:

@@ -61,9 +61,9 @@ class PulseEditorView(QtWidgets.QWidget):
         header = FluentFrame(bordered=False)
         header.setFixedHeight(scaled_px(48, minimum=38))
         header_layout = QtWidgets.QHBoxLayout(header)
-        # The status dot stands on the pages' left content edge and Clear
-        # All ends on their right one: the header and every tab below it
-        # are inset by the same section gap.
+        # The status dot stands on the pages' left content edge and Clear all
+        # ends on their right one: the header and every tab below it are
+        # inset by the same section gap.
         header_layout.setContentsMargins(section_gap(), scaled_px(6), section_gap(), scaled_px(6))
         header_layout.setSpacing(row_gap())
         # The status strip's dot and the strip's air after it: the header's
@@ -79,7 +79,7 @@ class PulseEditorView(QtWidgets.QWidget):
         # error -- is a readout to read and copy, not a disabled input: the
         # disabled edit drew it at 2.4:1.
         self.summary_label = FluentReadoutEdit("", flush=True)
-        self.clear_button = FluentButton("Clear All", role="destructive")
+        self.clear_button = FluentButton("Clear all", role="destructive")
         self.clear_button.clicked.connect(self.clear_all_requested)
         named = QtWidgets.QHBoxLayout()
         named.setContentsMargins(0, 0, 0, 0)

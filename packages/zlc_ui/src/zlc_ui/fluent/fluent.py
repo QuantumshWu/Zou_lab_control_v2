@@ -9196,9 +9196,19 @@ class LinkedScrollPanes(QtWidgets.QWidget):
     pane that does not is reachable to its last row, with nobody hand-computing
     a height.  Each pane keeps its own horizontal behaviour: a wide timeline
     still gets its own horizontal scrollbar.
+
+    ``gutter`` is for a group on a page's right edge: the page's inset, which
+    the group then stands in rather than inside.  The bar sits at the group's
+    outer edge -- where a page whose whole body scrolls has its bar
+    (FluentScrollArea) -- and the column is kept whether or not the bar
+    shows, so the panes end on the page's content edge either way.  Without
+    it the bar stands right after the panes, and they take its width back
+    whenever nothing overflows.  A lone scroll area that scrolls both ways (a
+    drawing) gets the same page-edge bar as a group of one, its horizontal
+    bar spanning only its own width.
     """
 
-    def __init__(self, parent: QtWidgets.QWidget | None = None):
+    def __init__(self, parent: QtWidgets.QWidget | None = None, *, gutter: int = 0):
         super().__init__(parent)
         row = QtWidgets.QHBoxLayout(self)
         row.setContentsMargins(0, 0, 0, 0)
@@ -9214,6 +9224,11 @@ class LinkedScrollPanes(QtWidgets.QWidget):
         self._bar.setStyleSheet(fluent_scrollbar_stylesheet("QScrollBar"))
         self._bar.setFixedWidth(fluent_scrollbar_thickness())
         self._bar.valueChanged.connect(self._drive_panes)
+        if gutter:
+            policy = self._bar.sizePolicy()
+            policy.setRetainSizeWhenHidden(True)
+            self._bar.setSizePolicy(policy)
+            row.addSpacing(max(0, int(gutter) - fluent_scrollbar_thickness()))
         self._bar.hide()
         row.addWidget(self._bar)
 
@@ -9233,10 +9248,11 @@ class LinkedScrollPanes(QtWidgets.QWidget):
         # timeline beside a column of twenty-two channels could not be scrolled
         # by pointing at the timeline, which is most of the surface.
         pane.viewport().installEventFilter(self)
+        # The panes first, left to right; the gutter and the shared bar stay
+        # last, so the bar sits against the group's right edge.
+        self._row.insertWidget(len(self._panes), pane, stretch)
         self._panes.append(pane)
         self._padding.append(0)
-        # Keep the shared bar last so it sits against the group's right edge.
-        self._row.insertWidget(self._row.count() - 1, pane, stretch)
         self._reconcile_bar()
 
     @property

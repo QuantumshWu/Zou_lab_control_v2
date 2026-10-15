@@ -680,6 +680,10 @@ def test_inserting_a_spacer_names_it_and_counts_it_apart(presenter) -> None:
     schedule = presenter.view.schedule_view.schedule
     assert schedule.period_count == len(before)
     assert schedule.total_tooltip.endswith(f"{counted(len(before), 'period')} and {counted(1, 'spacer')}")
+    # The window's header counts as the catalog and the card titles do.
+    assert presenter.view.summary.endswith(
+        f"{SUMMARY_SEPARATOR}{counted(len(before), 'period')}{SUMMARY_SEPARATOR}{counted(1, 'spacer')}"
+    ), presenter.view.summary
 
     marks = {mark.name: mark for mark in timeline_of(presenter.sequence).periods}
     assert marks["spacer1"].spacer and not marks[before[0].period_id].spacer
@@ -835,7 +839,7 @@ def test_clear_all_makes_one_safe_blank_without_moving_the_file_baseline(
 
 
 def test_unsaved_pulse_edits_are_asked_about_before_they_go(presenter) -> None:
-    """Close, Load and Clear All each threw the draft away without a word,
+    """Close, Open and Clear all each threw the draft away without a word,
     while the Config tab beside it asked first.  A declined question keeps
     the work; a pulse that matches its file is not asked about at all."""
 
@@ -1892,9 +1896,9 @@ def test_the_editor_opens_with_no_pulse_at_all() -> None:
         assert presenter.sequence is None
         vm = view.schedule_view.schedule
         assert vm.periods == () and vm.ports == ()
-        assert "Load a pulse" in vm.summary_text
-        assert "Load a pulse" in view.summary, "the guidance landed nowhere visible"
-        assert "Load a pulse" in view.preview_view.placeholder
+        assert "Open a pulse" in vm.summary_text
+        assert "Open a pulse" in view.summary, "the guidance landed nowhere visible"
+        assert "Open a pulse" in view.preview_view.placeholder
         assert view.schedule_view.can_run is False, "Run offered with no pulse"
 
         # And it refuses the things that need a pulse, by name.
@@ -1905,7 +1909,7 @@ def test_the_editor_opens_with_no_pulse_at_all() -> None:
 
 
 def test_load_opens_a_pulse_file_rather_than_refusing(sequence, tmp_path) -> None:
-    """Load was wired to the refusal meant for Save.  Loading writes nothing."""
+    """Open was wired to the refusal meant for Save.  Opening writes nothing."""
 
     view = _EditorView()
     view.open_answer = str(write_ordinary_pulse(tmp_path))
@@ -3446,12 +3450,12 @@ def test_hanging_up_retires_what_the_board_had_said_about_itself(sequence) -> No
 def test_hide_off_keeps_what_the_pulse_drives_and_show_all_brings_it_back(sequence) -> None:
     """Two defects behind one pair of buttons.
 
-    "Hide Off" read a PortRowVM.active flag that was hardcoded True, so it hid
+    "Hide off" read a PortRowVM.active flag that was hardcoded True, so it hid
     nothing, ever.  Whether a lane is driven is edited constantly while the
     port rows are only re-pushed on a structural change, so a flag was always
     going to be stale -- the view computes it from the periods it holds.
 
-    Then Hide Off followed by Show All produced two different models under one
+    Then Hide off followed by Show all produced two different models under one
     revision.  The view refuses that, correctly, and the refusal came out of a
     Qt slot: the real window aborted with no traceback at all.
     """
@@ -3497,7 +3501,7 @@ def test_hide_off_keeps_what_the_pulse_drives_and_show_all_brings_it_back(sequen
 
 
 def test_a_bracket_repeats_at_least_the_domains_minimum(sequence, tmp_path) -> None:
-    """Add Bracket silently undid itself.
+    """Add bracket silently undid itself.
 
     The view model carried a default count below the domain's minimum and
     the presenter read such a count as "no repeat", so the button committed

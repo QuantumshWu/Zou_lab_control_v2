@@ -56,13 +56,13 @@ class PulseTargetView(QtWidgets.QWidget):
     def _build_ui(self) -> None:
         # The page's edges and gaps are every tab's; a card's content stands
         # the card pad inside it, where its title is painted.  The cards'
-        # scroll area keeps its bar's gutter at all times, inside the page's
-        # right inset, so the cards end where the header does whether or
-        # not the bar shows.
+        # scroll area stands in the page's right inset, its bar at the tab's
+        # edge as on every tab whose page scrolls, and keeps the bar's
+        # gutter at all times, so the cards end where the header does
+        # whether or not the bar shows.
         layout = QtWidgets.QVBoxLayout(self)
         page = section_gap()
-        gutter = min(page, fluent_scrollbar_thickness())
-        layout.setContentsMargins(page, page, page - gutter, page)
+        layout.setContentsMargins(page, page, 0, page)
         layout.setSpacing(section_gap())
         pad = card_pad()
         header = FluentFrame()
@@ -73,13 +73,13 @@ class PulseTargetView(QtWidgets.QWidget):
         self.status_label = FluentLabel("")
         self.status_label.setWordWrap(True)
         header_layout.addWidget(self.status_label, 1)
-        self.add_digital_button = FluentButton("Add Digital")
+        self.add_digital_button = FluentButton("Add digital")
         self.add_dac_button = FluentButton("Add DAC")
         self.apply_button = FluentButton("Apply target", role="primary")
         for button in (self.add_digital_button, self.add_dac_button, self.apply_button):
             header_layout.addWidget(button)
         header_row = QtWidgets.QHBoxLayout()
-        header_row.setContentsMargins(0, 0, gutter, 0)
+        header_row.setContentsMargins(0, 0, page, 0)
         header_row.addWidget(header)
         layout.addLayout(header_row)
 
@@ -90,7 +90,7 @@ class PulseTargetView(QtWidgets.QWidget):
         self.cards_scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
         self.cards_body = QtWidgets.QWidget()
         self.cards_layout = QtWidgets.QVBoxLayout(self.cards_body)
-        self.cards_layout.setContentsMargins(0, 0, 0, 0)
+        self.cards_layout.setContentsMargins(0, 0, max(0, page - fluent_scrollbar_thickness()), 0)
         self.cards_layout.setSpacing(section_gap())
         self.digital_card = FluentGroupBox("Digital outputs")
         self.digital_layout = QtWidgets.QGridLayout(self.digital_card)
@@ -99,7 +99,7 @@ class PulseTargetView(QtWidgets.QWidget):
         self.digital_layout.setVerticalSpacing(row_gap())
         self.digital_layout.setColumnStretch(0, 1)
         self.digital_layout.setColumnStretch(1, 2)
-        for column, text in enumerate(("signal name", "endpoint", "")):
+        for column, text in enumerate(("Signal name", "Endpoint", "")):
             self.digital_layout.addWidget(self._header_label(text), 0, column)
         self.cards_layout.addWidget(self.digital_card)
         self.dac_card = FluentGroupBox("DAC outputs")
@@ -110,7 +110,7 @@ class PulseTargetView(QtWidgets.QWidget):
         self.dac_layout.setColumnStretch(0, 1)
         self.dac_layout.setColumnStretch(2, 2)
         self.dac_layout.setColumnStretch(3, 1)
-        for column, text in enumerate(("signal name", "width", "data endpoints (bit order)", "latch endpoint", "")):
+        for column, text in enumerate(("Signal name", "Width", "Data endpoints (bit order)", "Latch endpoint", "")):
             self.dac_layout.addWidget(self._header_label(text), 0, column)
         self.cards_layout.addWidget(self.dac_card)
         self.cards_layout.addStretch(1)

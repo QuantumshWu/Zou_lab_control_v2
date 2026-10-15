@@ -64,7 +64,7 @@ class PulseConfigView(QtWidgets.QWidget):
         toolbar.setSpacing(row_gap())
         self._file_buttons = []
         for name, text, role in (
-            ("new", "New file", "standard"), ("load", "Open file", "standard"),
+            ("new", "New file", "standard"), ("load", "Open…", "standard"),
             ("refresh", "Refresh", "standard"), ("save", "Save", "standard"),
             ("save_as", "Save as…", "standard"), ("unload", "Unload", "destructive"),
         ):
@@ -76,13 +76,17 @@ class PulseConfigView(QtWidgets.QWidget):
             toolbar.addWidget(button)
         toolbar.addStretch(1)
         file_layout.addLayout(toolbar)
-        # The chosen file is read, not typed: Load and Save as choose it.
+        # The chosen file is read, not typed: Open and Save as choose it.
         # It stands on its own line under the commands, flush with the
         # status below it -- no field above it to share a text column with.
+        # Both lines are rows, as tall as the commands above them, so the
+        # card keeps one pitch down to the table.
         self.path_text = FluentReadoutEdit("", flush=True)
         self.path_text.setPlaceholderText("No value file selected")
+        self.path_text.setFixedHeight(row_height())
         file_layout.addWidget(self.path_text)
         self.file_status = ElidedLabel("Save the Config file before using its values.")
+        self.file_status.setFixedHeight(row_height())
         file_layout.addWidget(self.file_status)
         self.values_table = FluentTableView()
         self.values_model = QtGui.QStandardItemModel(0, 3, self)

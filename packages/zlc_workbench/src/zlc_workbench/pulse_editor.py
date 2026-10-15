@@ -286,7 +286,7 @@ EMPTY_SCHEDULE = ScheduleVM(
     total_tooltip="",
     period_count=0,
     visible_text="",
-    summary_text="Load a pulse, or Add Period to start one on this board",
+    summary_text="Open a pulse, or add a period to start one on this board",
     ports=(),
     periods=(),
     analog_mode_choices=ANALOG_MODE_ROWS,
@@ -577,15 +577,25 @@ def project_period(
     )
 
 
+def _period_counts(periods: Sequence) -> str:
+    """How many periods a document holds, counted as the cards number them:
+    the periods someone wrote, then the spacers between them only when there
+    are some.  The window's header, a closed Subpulse card and a Sync report
+    all say it this way, so none of them disagrees with the Port catalog."""
+
+    spacers = sum(period.kind == PERIOD_KIND_SPACER for period in periods)
+    parts = [counted(len(periods) - spacers, "period")]
+    if spacers:
+        parts.append(counted(spacers, "spacer"))
+    return SUMMARY_SEPARATOR.join(parts)
+
+
 def _component_summary(fragment: Subpulse) -> str:
     """What a Subpulse holds, on its closed card: its periods, and its
     spacers and brackets only when it has some -- "0 brackets" says
     nothing and takes a second line."""
 
-    spacers = sum(period.kind == PERIOD_KIND_SPACER for period in fragment.periods)
-    parts = [counted(len(fragment.periods) - spacers, "period")]
-    if spacers:
-        parts.append(counted(spacers, "spacer"))
+    parts = [_period_counts(fragment.periods)]
     if fragment.brackets:
         parts.append(counted(len(fragment.brackets), "bracket"))
     return SUMMARY_SEPARATOR.join(parts)
@@ -682,7 +692,7 @@ def project_schedule(
         summary_text=(
             (Path(path).name if path else sequence.name)
             if sequence is not None
-            else "Add Period to start a pulse on this board"
+            else "Add a period to start a pulse on this board"
         ),
         ports=ports,
         periods=periods,
@@ -724,7 +734,7 @@ def project_schedule(
             else "no scan slots"
         ),
         # From the domain, which is what decides that once is not a repeat.
-        # The view model carried 1 for both, so Add Bracket committed a
+        # The view model carried 1 for both, so Add bracket committed a
         # count-1 region -- which set_bracket reads as "no bracket" and the
         # button silently undid itself.  zlc_ui may not import zlc_pulse, so
         # the number is carried across by whoever knows both.
@@ -2194,7 +2204,7 @@ class PulseEditorPresenter:
         view.clear_port_requested.connect(self._guarded(self.clear_port))
         # From the button that raises it.  The schedule page also declared a
         # clear_all_requested that nothing ever emitted, and this listened to
-        # that one -- so the toolbar's Clear All did nothing at all.
+        # that one -- so the toolbar's Clear all did nothing at all.
         view.clear_all_requested.connect(self._guarded(self.clear_all))
         view.page_changed.connect(self._guarded(self.show_page))
         view.binding_committed.connect(self._guarded(self.set_binding))
@@ -2250,14 +2260,15 @@ class PulseEditorPresenter:
         if not self._present_messages:
             self._warn("Use open_pulse(path=..., discard_changes=...) for a machine file request", present=False)
             return False
-        # Asked BEFORE the dialog, as Config's Load asks: choosing a file and
-        # then being told the edits on screen would go wastes the choice.
+        # Asked BEFORE the dialog, as Value Config's Open asks: choosing a
+        # file and then being told the edits on screen would go wastes the
+        # choice.
         if not self._discard_pulse_edits():
             return False
         start = str(Path(self.path).parent if self.path else self.pulses_directory or "")
         chosen = self.view.ask_open_path(
-            "Open pulse", start,
-            "ZLC pulse (*.json);;All files (*)",
+            "Open Pulse", start,
+            "ZLC Pulse (*.json);;All files (*)",
         )
         if not chosen:
             return False
@@ -2347,7 +2358,7 @@ class PulseEditorPresenter:
         """Whether the pulse on screen may be replaced, asked only when it
         differs from its file -- the difference the Save button already shows.
 
-        Close, Load and Clear All each threw the draft away and asked nothing,
+        Close, Open and Clear all each threw the draft away and asked nothing,
         while the Config tab beside it, holding far less work, asked first.
         """
 
@@ -2485,7 +2496,7 @@ class PulseEditorPresenter:
             return False
         directory = self._config_values_directory()
         chosen = path if path is not None else self.view.ask_open_path(
-            "Load Config", self._config_path or str(directory or ""), "Config (*.json)",
+            "Open value file", self._config_path or str(directory or ""), "Config (*.json)",
         )
         if not chosen:
             return False
@@ -2525,7 +2536,7 @@ class PulseEditorPresenter:
                 return False
             directory = self._config_values_directory()
             target = self.view.ask_save_path(
-                "Save Config", target or str((directory or Path.cwd()) / CURRENT_CONFIG_VALUES),
+                "Save value file", target or str((directory or Path.cwd()) / CURRENT_CONFIG_VALUES),
                 "Config (*.json)",
             )
             if not target:
@@ -2808,7 +2819,7 @@ class PulseEditorPresenter:
 
         Which outputs are worth looking at is not the shape of the pulse, and
         the page has a setter that says exactly that -- declared in
-        docs/pulse-views.md and never called, so every Hide Off went through a
+        docs/pulse-views.md and never called, so every Hide off went through a
         whole re-projection instead.  The model this presenter believes is on
         screen is kept in step, or the next full push would not recognise
         itself as different.  The view re-flags its rows; the count it shows
@@ -3591,8 +3602,8 @@ class PulseEditorPresenter:
                     point = None
                 if adopted == point:
                     held = self._held_point
-        # Replacing the draft with another pulse asks first, as Load and
-        # Clear All do -- only then: a board playing this draft keeps it.
+        # Replacing the draft with another pulse asks first, as Open and
+        # Clear all do -- only then: a board playing this draft keeps it.
         if held is None and adopted is not self.sequence and not self._discard_pulse_edits():
             self._adopt_board_state(board_state)
             return False
@@ -3618,7 +3629,7 @@ class PulseEditorPresenter:
             f"the board is holding scan point {held + 1} of this pulse; "
             "the draft and its scan table are kept"
             if held is not None
-            else f"synced from the board{SUMMARY_SEPARATOR}{counted(len(source.periods), 'period')}"
+            else f"synced from the board{SUMMARY_SEPARATOR}{_period_counts(source.periods)}"
             + (f"{SUMMARY_SEPARATOR}{counted(len(wire_rows), 'scan point')}" if wire_rows else "")
         )
         return True
@@ -3636,7 +3647,7 @@ class PulseEditorPresenter:
         source = self._execution_sequence()
         schema = tuple((b.field_id, b.unit) for b in source.scan_bindings)
         if self._state.scan_rows and self._state.scan_fields != schema:
-            raise ValueError("Scan fields or units changed. Generate or load the scan table again.")
+            raise ValueError("Scan fields or units changed. Generate or open the scan table again.")
         scan_armed = bool(self._state.scan_rows) and bool(source.scan_bindings)
         rows = self._prepared_scan(source)[1] if scan_armed else ()
         return source, rows, self._state.scan_repeats if scan_armed else 1
@@ -3651,7 +3662,7 @@ class PulseEditorPresenter:
 
         schema = tuple((b.field_id, b.unit) for b in source.scan_bindings)
         if self._state.scan_rows and self._state.scan_fields != schema:
-            raise ValueError("Scan fields or units changed. Generate or load the scan table again.")
+            raise ValueError("Scan fields or units changed. Generate or open the scan table again.")
 
         geometry, _clock_hz = self._compiler_target()
         return prepare_scan_application(
@@ -4640,8 +4651,8 @@ class PulseEditorPresenter:
             Path(self.pulses_directory or "") / f"{self.sequence.name or 'pulse'}.json"
         )
         chosen = path if path is not None else self.view.ask_save_path(
-            "Save pulse", str(Path(start).with_suffix(".json")),
-            "ZLC pulse (*.json);;All files (*)",
+            "Save Pulse", str(Path(start).with_suffix(".json")),
+            "ZLC Pulse (*.json);;All files (*)",
         )
         if not chosen:
             return ""
@@ -4894,15 +4905,15 @@ class PulseEditorPresenter:
                         else "Physical fields available to Scan and API callers:"
                     )
                     + (
-                        " Run repeats is 0, so On Pulse stays at the first scan "
-                        "point until Stop."
+                        " Repeat on Edit is 0, so On Pulse stays at the first scan "
+                        "point until Stop Pulse."
                         if rows and columns and self.sequence.run_repeats == 0
                         else ""
                     )
                 ),
                 bindings=binding_records,
                 table_text="" if stale or not rows else _scan_table_text(rows, columns),
-                table_note=("Scan fields or units changed. Generate or load the scan table again."
+                table_note=("Scan fields or units changed. Generate or open the scan table again."
                             if stale else "" if rows else
                             "No scan table yet: write a program and press Run."),
                 source_text=self._state.scan_source,
@@ -5075,7 +5086,7 @@ class PulseEditorPresenter:
             self._warn("load_scan_array requires an explicit path", present=False)
             return False
         chosen = path if path is not None else self.view.ask_open_path(
-            "Load scan array", str(Path(self.path).parent if self.path else ""),
+            "Open scan array", str(Path(self.path).parent if self.path else ""),
             "Scan tables (*.npy *.csv *.txt);;All files (*)",
         )
         if not chosen:
@@ -5101,7 +5112,7 @@ class PulseEditorPresenter:
             if error is None:
                 try:
                     if fields != self._scan_fields():
-                        raise ValueError("Scan fields or units changed while loading the table. Load it again.")
+                        raise ValueError("Scan fields or units changed while loading the table. Open it again.")
                     self._take_scan_rows(rows)
                 except Exception as caught:
                     error = caught
@@ -5135,7 +5146,7 @@ class PulseEditorPresenter:
             self._warn("load_scan_program requires an explicit path", present=False)
             return False
         chosen = path if path is not None else self.view.ask_open_path(
-            "Load scan program",
+            "Open scan program",
             str(Path(self.path).parent if self.path else ""),
             "Python source (*.py);;All files (*)",
         )
@@ -5492,7 +5503,7 @@ class PulseEditorPresenter:
         The view refuses two different models under one revision, and it is
         right to: a stale card would otherwise be indistinguishable from a
         fresh one.  Leaving each mutator to remember the bump is how one was
-        missed -- Hide Off then Show All produced two models at the same
+        missed -- Hide off then Show all produced two models at the same
         revision, and the refusal came out of a Qt slot, which aborts the
         process with no traceback.
 
@@ -5542,7 +5553,7 @@ class PulseEditorPresenter:
             )
             self.view.set_title(f"PulseGUI{SUMMARY_SEPARATOR}no pulse")
             self.view.set_summary(self._document_summary())
-            self.view.show_preview_placeholder("Load a pulse to see its timeline")
+            self.view.show_preview_placeholder("Open a pulse to see its timeline")
             self._show_connection(self._connection_status)
             self.refresh_target()
             return
@@ -5572,12 +5583,12 @@ class PulseEditorPresenter:
         """The status line's resting sentence: what the editor holds."""
 
         if self.sequence is not None:
-            count = len(self._shown.periods) if self._shown is not None else len(self.sequence.periods)
-            return f"{self.path or self.sequence.name}{SUMMARY_SEPARATOR}{counted(count, 'period')}"
+            periods = self._shown.periods if self._shown is not None else self.sequence.periods
+            return f"{self.path or self.sequence.name}{SUMMARY_SEPARATOR}{_period_counts(periods)}"
         target = self._current_target()
         if target is None:
             return EMPTY_SCHEDULE.summary_text
-        return f"{counted(len(target.ports), 'port')} on this board{SUMMARY_SEPARATOR}Add Period to start a pulse"
+        return f"{counted(len(target.ports), 'port')} on this board{SUMMARY_SEPARATOR}Add a period to start a pulse"
 
     def _on_include_off(self, _included: bool) -> None:
         """Showing every channel changes how many rows are drawn.
