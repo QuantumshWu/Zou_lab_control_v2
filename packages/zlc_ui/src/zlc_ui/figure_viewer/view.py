@@ -1120,6 +1120,10 @@ class FigureViewerView(QtWidgets.QWidget):
         self.tabs = FluentTabWidget(holder)
         # Every page of this surface starts its content one card pad in.
         self.tabs.set_page_inset(side)
+        # The strip stands over Monitor alone too: editor tabs come and go
+        # beside it, and the board under it -- level with the left pane's
+        # filter -- does not move when the first opens or the last closes.
+        self.tabs.set_lone_bar_visible(True)
         self.tabs.tab_close_requested.connect(self._tab_close_clicked)
         monitor = QtWidgets.QWidget()
         monitor.setStyleSheet("background: white;")

@@ -5286,6 +5286,7 @@ class FluentTabWidget(QtWidgets.QTabWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._page_inset = section_gap()
+        self._lone_bar_visible = False
         self.setTabPosition(QtWidgets.QTabWidget.North)
         self.setTabBar(_FluentTabBar(self))     # content-width pivot tabs; elides to fit, no arrows
         self.tabBar().setExpanding(False)
@@ -5330,6 +5331,12 @@ class FluentTabWidget(QtWidgets.QTabWidget):
         if inset != self._page_inset:
             self._page_inset = inset
             self._apply_sheet()
+            # Re-polished, or a bar shown before its first layout sizes its
+            # first tab by the sheet it was built with, and the underline
+            # starts that sheet's inset in.
+            for widget in (self, self.tabBar()):
+                widget.style().unpolish(widget)
+                widget.style().polish(widget)
 
     def _apply_sheet(self) -> None:
         self.setStyleSheet(
@@ -5370,7 +5377,7 @@ class FluentTabWidget(QtWidgets.QTabWidget):
                 margin: 0px {_tab_margin_h()}px;
                 font: {fluent_font_size()}pt "{FONT}";
             }}
-            QTabBar::tab:first {{ margin-left: {self._page_inset}px; }}
+            QTabBar::tab:first, QTabBar::tab:only-one {{ margin-left: {self._page_inset}px; }}
             QTabBar::tab:selected {{
                 color: {TEXT};
                 border-bottom: {_tab_underline()}px solid {ACCENT};
@@ -5501,8 +5508,20 @@ class FluentTabWidget(QtWidgets.QTabWidget):
         self._show_bar_when_it_chooses()
         self._schedule_overflow_update()
 
+    def set_lone_bar_visible(self, visible: bool) -> None:
+        """Keep the bar over a lone permanent page too.
+
+        For a host whose pages come and go beside that page: its bar is
+        there before the first one opens and after the last one closes, so
+        the page under it never moves, and it lines up with a strip beside
+        it that is always shown."""
+
+        self._lone_bar_visible = bool(visible)
+        self._show_bar_when_it_chooses()
+
     def _show_bar_when_it_chooses(self) -> None:
-        """No bar over one permanent page: a single pivot chooses nothing.
+        """No bar over one permanent page: a single pivot chooses nothing --
+        unless the host keeps it (:meth:`set_lone_bar_visible`).
 
         A lone CLOSABLE page keeps its bar, because the bar carries its
         close button.  Asked at insertion, before a closable tab has its
@@ -5510,7 +5529,11 @@ class FluentTabWidget(QtWidgets.QTabWidget):
         """
 
         bar = self.tabBar()
-        lone = self.count() == 1 and bar.tabButton(0, QtWidgets.QTabBar.RightSide) is None
+        lone = (
+            not self._lone_bar_visible
+            and self.count() == 1
+            and bar.tabButton(0, QtWidgets.QTabBar.RightSide) is None
+        )
         bar.setVisible(not lone)
 
     def add_permanent_tab(self, widget: QtWidgets.QWidget, title: str) -> int:

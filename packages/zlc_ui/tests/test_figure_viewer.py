@@ -610,6 +610,10 @@ label = view.data_combo.parentWidget().layout().itemAt(0).widget()
 assert isinstance(label, FluentLabel) and not isinstance(label, FluentSectionLabel)
 assert box(label, surface)[0] == edge
 assert box(view.new_data_button, surface)[2] == end
+# The strip stands over Monitor alone too: the first editor tab to open
+# moves nothing on the board's page.
+assert bar.isVisible() and view.tabs.count() == 1
+lone_commands, lone_card = box(view.kind_combo, surface), box(view._cards['panel-1'], surface)
 view.open_data_editor('frame', projection, 'Data · frame')
 editor = view._data_editors['frame']
 settle()
@@ -627,6 +631,7 @@ card = view._cards['panel-1']
 assert box(card, surface)[0] == edge
 assert box(card, surface)[1] - box(view.kind_combo, surface)[3] == pad
 board_commands, board_card = box(view.kind_combo, surface), box(card, surface)
+assert (board_commands, board_card) == (lone_commands, lone_card)
 view.tabs.setCurrentWidget(editor); settle()
 for page, cards in (('dataset', (editor.dataset_group, editor.axes_group)),
                     ('data', (editor.data_group,))):
