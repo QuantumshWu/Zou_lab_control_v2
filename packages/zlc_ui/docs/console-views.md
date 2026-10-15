@@ -228,6 +228,12 @@ at the width of its widest word, so nothing beside it moves; Stop follows
 command is disabled except the owning Task's own Stop (`owns_task`), which
 raises the same `stop_requested` as the status strip's "Stop task".
 
+A node's Edit page is three bands and only the middle one scrolls: the
+header (name, kind, status line) above, the rows, and the action bar
+(Remove | Plot, Start, Stop) as the page's foot, on the rows' left and right
+edges.  A newly opened page starts at its first row; after that its bar is
+the operator's, across tab switches.
+
 ## `StatusStrip` (internal)
 
 ```python
@@ -266,8 +272,10 @@ set_summary(text: str) -> None
 The header names the window (`task`) as a label; it is not an input.  Its
 one chooser lists `Plot: <kind>` and `<Layer>: <api_name>` entries -- a node
 by the name its row and Edit tab call it, its layer in words
-(`zlc_ui.status.name_words`).  The handle forwards the board signals and
-drives the rest; nothing outside the window calls these directly.
+(`zlc_ui.status.name_words`).  The command beside it names what it adds
+for the chosen family, `Add panel` or `Add node`, in one slot wide enough
+for either.  The handle forwards the board signals and drives the rest;
+nothing outside the window calls these directly.
 
 The shell is assembled from the reusable views.  There is no mode flag for
 alternative composition; a host can mount the shell wherever it needs it.
