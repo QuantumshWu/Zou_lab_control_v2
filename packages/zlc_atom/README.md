@@ -360,8 +360,11 @@ unit 1`) or the problem under the line it is about; Start refuses a
 published variable that does not type. Before anything publishes, the frames
 each published variable keeps are told from the source's draft frames by the
 same rules on the frame axis alone (`describe_output_frames`), so a Frame
-Survival downstream is edited at once, and the editor offers the frame pick. Statistics across shots with error
-bars, per-site probabilities and fits belong in a plot panel, so
+Survival downstream is edited at once, and the editor offers the frame pick.
+The source's frames are an answer only when every member of the bundle
+carries the same ones -- a Derive reading a Derive whose variables keep
+different frames waits for data -- and one frame offers no pick. Statistics
+across shots with error bars, per-site probabilities and fits belong in a plot panel, so
 Derive owns no history.
 The separate processor
 `frame_survival` asks, for selected forward frame pairs

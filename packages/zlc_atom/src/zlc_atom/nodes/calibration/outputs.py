@@ -27,6 +27,7 @@ from zlc_runtime import (
 
 from zlc_atom.data import snapshot_from_array
 from zlc_atom.devices.camera.contract import CameraFrameRecord
+from zlc_atom.nodes._framework.frames import FRAME_AXIS_NAME
 
 if TYPE_CHECKING:
     from zlc_plot import ImagePointOverlay, PointStatus
@@ -151,7 +152,7 @@ def _frame_point_axis(frames: int) -> AxisSpec:
 
     return AxisSpec(
         AxisId("calibration.capture_preview.frame"),
-        "frame",
+        FRAME_AXIS_NAME,
         READOUT_EVENT,
         int(frames),
         tuple(range(int(frames))),

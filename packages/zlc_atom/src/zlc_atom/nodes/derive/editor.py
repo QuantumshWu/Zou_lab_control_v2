@@ -42,7 +42,7 @@ from zlc_ui.fluent import (
 from zlc_ui.fluent.column_set import section_header
 
 from zlc_atom.authoring import AuthoringField, AuthoringSchema
-from zlc_atom.nodes.camera.measurement import FRAME_AXIS_NAME
+from zlc_atom.nodes._framework.frames import FRAME_AXIS_NAME
 
 from .expression import (
     CATEGORIES, DOMAINS, NO_PUBLISHED, OPERATORS, STATISTICS, TERM_DEFAULTS, VARIABLE_COLUMNS, axis_groups,
@@ -911,8 +911,9 @@ class DeriveEditor(QtWidgets.QWidget):
         self._members: tuple[str, ...] = ()
         #: Each member's typing schema, None until it publishes.
         self._inputs: dict[str, object] = {}
-        #: The frame labels the source's draft says its members carry
-        #: (``source_frames``), None while nothing says.
+        #: The frame labels the source's draft says every member carries
+        #: (``source_frames``); None while nothing says, and for one frame,
+        #: which may as well be no frame axis: there is no pick to offer.
         self._frames: tuple[str, ...] | None = None
         #: The axes no pick may name (``changing_axes``), over every member.
         self._changing: dict[object, tuple[str, ...]] = {}
@@ -1137,7 +1138,7 @@ class DeriveEditor(QtWidgets.QWidget):
         self._members = tuple(str(name) for name, _schema, _snapshot in bundle)
         self._inputs = {str(name): schema for name, schema, _snapshot in bundle}
         frames = projection.get("source_frames")
-        self._frames = None if frames is None else tuple(frames)
+        self._frames = None if frames is None or len(frames) < 2 else tuple(frames)
         self._changing = {}
         for _name, schema, snapshot in bundle:
             if schema is not None and snapshot is not None:
@@ -1172,7 +1173,7 @@ class DeriveEditor(QtWidgets.QWidget):
         # Untyped, each name's frames as the source's draft says them.
         drafted = {}
         if not typed and self._frames is not None:
-            for row, frames in zip(rows, frames_kept(rows, FRAME_AXIS_NAME, self._frames)):
+            for row, frames in zip(rows, frames_kept(rows, FRAME_AXIS_NAME, self._frames, members)):
                 drafted.setdefault(row["name"], frames)
 
         def frames_of(name):

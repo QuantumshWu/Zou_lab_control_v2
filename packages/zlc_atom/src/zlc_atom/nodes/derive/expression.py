@@ -1213,12 +1213,21 @@ def typed_variables(rows: Sequence[Mapping[str, object]],
     return tuple(answers)
 
 
-def frames_kept(rows: Sequence[Mapping[str, object]], axis: str,
-                frames: tuple[str, ...]) -> tuple[tuple[str, ...] | None, ...]:
+def frames_kept(rows: Sequence[Mapping[str, object]], axis: str, frames: tuple[str, ...],
+                members: Sequence[str] | None) -> tuple[tuple[str, ...] | None, ...]:
     """Every variable's labels of the axis named ``axis`` when each input
-    member carries that axis with labels ``frames`` -- what a source's
-    draft says before any data exists: one per variable, in card order,
-    ``()`` when the value carries no such axis, None when it cannot be told.
+    member carries that axis with labels ``frames`` -- ``()`` when the
+    members carry no such axis -- which is what a source's draft says before
+    any data exists: one per variable, in card order, ``()`` when the value
+    carries no such axis, None when it cannot be told.
+
+    ``members`` are the input members' names, read as typing reads them:
+    a name is a member's before it is a variable's, a variable named like a
+    member has a name problem, a name that is neither is refused.  None when
+    the names are not known (``describe_output_frames`` is told only the
+    frames): a name no variable has is then read as a member's, so a name
+    nothing has, or a variable named like a member, is typing's alone to
+    refuse once the members publish.
 
     These are typing's rules on that one axis, over the same precedence
     tree: a member carries ``frames``, a variable its own answer; a pick on
@@ -1228,13 +1237,16 @@ def frames_kept(rows: Sequence[Mapping[str, object]], axis: str,
     or one carries none, a where's mask none or the value's, and the result
     carries them; a statistic over the axis removes it.  None for whatever
     typing refuses on that axis -- a label it lacks, two sides that differ
-    -- and for a problem typing finds first: a name, the formula's shape, a
-    variable read that has one.  What only the members' schemas say (their
-    dtypes, their other axes) is typing's to answer once they publish.
+    -- for a constant beside a logic operator or a where (a number is never
+    a boolean, and has no samples to keep), and for a problem typing finds
+    first: a name, the formula's shape, a variable read that has one.  What
+    only the members' schemas say (their dtypes, their other axes) is
+    typing's to answer once they publish.
     """
     rows = tuple(rows)
-    _edges, order, closing, _live = _structure(rows)
-    names = _name_problems(rows)
+    known = () if members is None else tuple(members)
+    _edges, order, closing, _live = _structure(rows, known)
+    names = _name_problems(rows, known)
     first = {}
     for position, row in enumerate(rows):
         if row["name"]:
@@ -1242,8 +1254,10 @@ def frames_kept(rows: Sequence[Mapping[str, object]], axis: str,
     kept: list[tuple[str, ...] | None] = [None] * len(rows)
 
     def read(name):
-        if name not in first:
+        if name in known or (members is None and name not in first):
             return frames
+        if name not in first:
+            raise ValueError(f"no input or variable named {name!r}")
         if kept[first[name]] is None:
             raise ValueError(f"{name} cannot be told")
         return kept[first[name]]
@@ -1277,8 +1291,10 @@ def frames_kept(rows: Sequence[Mapping[str, object]], axis: str,
             return pick(value, term) if term["at"] else value
         _k, op, left, right = node
         left, right = fold(left, terms), fold(right, terms)
+        if OPERATORS[op][0] in ("where", "logic") and (left is None or right is None):
+            raise ValueError(f"{op} beside a number")
         if OPERATORS[op][0] == "where":
-            if left is None or right is None or (right and right != left):
+            if right and right != left:
                 raise ValueError("the mask does not fit")
             return left
         if left is None and right is None:

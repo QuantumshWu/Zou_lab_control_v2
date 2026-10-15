@@ -150,7 +150,10 @@ draft changes update Occupancy, Derive and Frame Survival editors before new
 data arrives -- Derive passes on the frames each published variable keeps, one
 frame when it picks or reduces the frame axis away -- and runtime data still
 follows the actual acquired source schema. A node whose draft cannot say (a
-formula being edited) answers with the frames it last published.
+formula being edited) answers with the frames it last published. A Derive
+reads its source's whole bundle, so its source frames are known only while
+every member carries the same frames (a Derive over a Derive whose variables
+keep different frames answers once it has published).
 
 Derive is algebra within one evaluation of one producer's bundle: live, each
 publication; at the end of a finite run, the run's Dataset. Read the member

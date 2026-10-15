@@ -9807,36 +9807,62 @@ class ConsolePresenter:
     def _source_frames_for(self, binding: LogicBinding, *, _visited=frozenset()) -> tuple[str, ...] | None:
         """The labels of the frames one cycle of this node's source carries.
 
-        Asked of the source's PRODUCER first: its explicit pure metadata
-        callback can preserve or describe upstream draft frames, without
-        constructing a node or inventing a data schema. When it has none, or
-        its draft cannot say, the plane says -- the declared signal, then its
-        latest publication -- through the Point axis with the readout-event
-        role, so what a producer already published still answers while its
-        draft is being edited.  A source without one carries one frame; None
-        while there is no source or nothing says yet.
+        Each signal is asked of its PRODUCER first: its explicit pure
+        metadata callback can preserve or describe upstream draft frames,
+        without constructing a node or inventing a data schema. When it has
+        none, or its draft cannot say, the plane says (:meth:`_plane_frames`),
+        so what a producer already published still answers while its draft
+        is being edited.  A node reading a whole bundle (``select_bundle``)
+        reads every member, not only the one its source names: the answer is
+        the members' frames when every member carries the same, None when
+        they differ -- one answer cannot say which member carries which.
+        None while there is no source or nothing says yet.
         """
-
-        from zlc_data import READOUT_EVENT
 
         if binding.node_id in _visited:
             return None
-        visited = _visited | {binding.node_id}
         source = str(binding.draft.source_signal).strip()
         if not source:
             return None
         parts = split_signal_key(source)
         producer = None if parts is None else self.logic.get(parts[0])
-        if producer is not None and producer.descriptor.describe_output_frames is not None:
-            upstream = self._source_frames_for(producer, _visited=visited)
-            frames = producer.descriptor.describe_output_frames(producer.draft.values, parts[1], upstream)
-            if frames is not None:
-                return frames
-        description = self._signal_projection()[1].get(source)
+        signals = (source,)
+        specs = dataset_inputs(binding.descriptor, binding.draft.values)
+        if specs and specs[0].select_bundle:
+            if producer is not None:
+                signals = tuple(
+                    stable_signal_key(producer.node_id, output.name)
+                    for output in self._logic_outputs(producer)
+                )
+            else:
+                publication = self.session.signal_plane.latest_publication(source)
+                if publication is not None:
+                    signals = tuple(publication.signals)
+        describe = None if producer is None else producer.descriptor.describe_output_frames
+        upstream = None if describe is None else self._source_frames_for(
+            producer, _visited=_visited | {binding.node_id}
+        )
+        answers = set()
+        for signal in signals:
+            frames = None if describe is None else describe(
+                producer.draft.values, split_signal_key(signal)[1], upstream
+            )
+            answers.add(self._plane_frames(signal) if frames is None else frames)
+        return answers.pop() if len(answers) == 1 else None
+
+    def _plane_frames(self, signal: str) -> tuple[str, ...] | None:
+        """One signal's frame labels as the plane holds them: the declared
+        signal, then its latest publication, through the Point axis with
+        the readout-event role.  A signal without one carries one frame;
+        None while the plane has no schema for it."""
+
+        from zlc_data import READOUT_EVENT
+
+        description = self._signal_projection()[1].get(signal)
         schema = None if description is None else description.schema
         if schema is None:
-            publication = self.session.signal_plane.latest_publication(source)
-            value = None if publication is None else publication.value(source)
+            publication = self.session.signal_plane.latest_publication(signal)
+            value = None if publication is None else publication.value(signal)
             if value is None:
                 return None
             schema = value.canonical_schema or value.snapshot.block.schema

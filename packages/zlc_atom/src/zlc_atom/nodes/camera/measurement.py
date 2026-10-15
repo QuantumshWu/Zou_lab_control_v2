@@ -37,6 +37,7 @@ from zlc_atom.devices.camera.contract import (
 )
 from zlc_atom.devices.camera.photoelectrons import PHOTOELECTRONS
 from zlc_atom.data import cell_axis_id, snapshot_from_array
+from zlc_atom.nodes._framework.frames import FRAME_AXIS_NAME
 
 
 _CAMERA_FRAME_CONTRACT = "camera.frames"
@@ -81,11 +82,6 @@ def describe_camera_frames(values, output_name, source_frames=None):
 #: between a Stop that lands now and one that lands ten seconds from now.
 _CANCEL_RESPONSE_SECONDS = 0.05
 _RECEIVE_BUFFER_MIB = 128
-
-
-#: The name of a cycle's frame axis: what a Derive pick or statistic writes
-#: to name it, before data as after.
-FRAME_AXIS_NAME = "frame"
 
 
 def _frame_point_axis(producer: str, frames: int) -> AxisSpec:
@@ -1248,7 +1244,6 @@ class CameraMeasurementNode:
 
 __all__ = [
     "CAMERA_FRAMES_OUTPUT",
-    "FRAME_AXIS_NAME",
     "describe_camera_frames",
     "frames_snapshot",
     "CameraMeasurementNode",

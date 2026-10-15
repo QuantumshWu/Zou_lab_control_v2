@@ -1392,11 +1392,12 @@ def test_an_occupancys_frame_claims_survive_its_camera_changing_frame_count(pres
 def test_a_frame_survival_after_derive_is_edited_before_anything_starts(presenter, session) -> None:
     """The user's chain with nothing started: a camera's three frames reach
     Frame Survival through Occupancy and Derive's draft (``same`` internal,
-    ``kept`` published), so its pairs are marked at once, and a camera edit
-    re-projects them through Derive.  Derive's own editor offers the frame
-    pick before data.  A variable picking one frame passes one frame, and
-    Frame Survival says why there is no pair.  Once Derive has published,
-    its real frames answer while its draft cannot say."""
+    ``alive`` -- the verdicts where frames 0 and 2 agree -- published), so
+    its pairs are marked at once, and a camera edit re-projects them
+    through Derive.  Derive's own editor offers the frame pick before data.
+    A variable picking one frame passes one frame, and Frame Survival says
+    why there is no pair.  Then the whole chain runs, Frame Survival too;
+    afterwards, while Derive's draft cannot say, what it published answers."""
 
     from PyQt5 import QtCore, QtTest
     from zlc_ui.qt import ensure_qt_app
@@ -1408,15 +1409,15 @@ def test_a_frame_survival_after_derive_is_edited_before_anything_starts(presente
     same = {"name": "same", "publish": False, "terms": (
         {"of": "occupied", "at": "frame", "labels": ("0",)},
         {"op": "==", "of": "occupied", "at": "frame", "labels": ("2",)})}
-    kept = {"name": "kept", "terms": ({"of": "counts"}, {"op": "where", "of": "same"})}
+    alive = {"name": "alive", "terms": ({"of": "occupied"}, {"op": "where", "of": "same"})}
     derive_id = presenter.add_logic(
-        "derive", source_signal=stable_signal_key(occupancy_id, "occupied"), values={"variables": (same, kept)})
-    survival_id = presenter.add_logic("frame_survival", source_signal=stable_signal_key(derive_id, "kept"))
+        "derive", source_signal=stable_signal_key(occupancy_id, "occupied"), values={"variables": (same, alive)})
+    survival_id = presenter.add_logic("frame_survival", source_signal=stable_signal_key(derive_id, "alive"))
     editors = presenter.view.logic_editors
     assert editors[survival_id]["source_frames"] == ("0", "1", "2")
 
     derive = presenter.logic_editor_projection(derive_id)
-    assert derive["source_frames"] == ("0", "1", "2")
+    assert derive["source_frames"] == ("0", "1", "2"), "every occupancy output carries the camera's frames"
     assert derive["input_bundle"] == (("counts", None, None), ("occupied", None, None), ("frame_judged", None, None))
     derive_editor = presenter.logic[derive_id].descriptor.ui_contributions[0]()
     form = presenter.logic[survival_id].descriptor.ui_contributions[0]()
@@ -1463,8 +1464,8 @@ def test_a_frame_survival_after_derive_is_edited_before_anything_starts(presente
         assert form.summary.text() == "All · 4 of 6 pairs"
 
         # One frame picked: one frame passed on, and why there is no pair.
-        one = {"name": "kept", "terms": ({"of": "counts", "at": "frame", "labels": ("1",)},
-                                         {"op": "where", "of": "same"})}
+        one = {"name": "alive", "terms": ({"of": "occupied", "at": "frame", "labels": ("1",)},
+                                          {"op": "where", "of": "same"})}
         presenter.view.logic_draft_changed.emit(derive_id, {"values": {"variables": (same, one)}})
         assert editors[survival_id]["source_frames"] == ("0",)
         show(form, editors[survival_id])
@@ -1473,36 +1474,123 @@ def test_a_frame_survival_after_derive_is_edited_before_anything_starts(presente
         assert presenter.logic[survival_id].draft.values == selection, "a frame count never edits the draft"
         assert all(binding.host is None for binding in presenter.logic.values())
 
-        # Run it.  Afterwards the draft says what it can; where it cannot --
-        # a formula being edited -- what Derive published answers.
+        # Run it, Frame Survival on Derive's verdicts too.  Afterwards the
+        # draft says what it can; where it cannot -- a formula being edited
+        # -- what Derive published answers.
         calibration = presenter.session.workspace.data / "box-calibration.json"
         _box_calibration(("site-0", "site-1"), ((12.0, 10.0), (30.0, 20.0)), (100.0, 100.0), (96, 128)).save(
             calibration)
         presenter.view.logic_draft_changed.emit(occupancy_id, {"artifact_inputs": {"calibrations": (
             {"path": str(calibration), "frames": ("rest",)},)}})
         presenter.view.logic_draft_changed.emit(camera_id, {"values": {"frames_per_cycle": 3}})
-        presenter.view.logic_draft_changed.emit(derive_id, {"values": {"variables": (same, kept)}})
+        presenter.view.logic_draft_changed.emit(derive_id, {"values": {"variables": (same, alive)}})
         session.load_pulse(PULSE_NAME)
         assert presenter.start_logic(camera_id)
         session.fire(shots=1)
-        for node_id in (camera_id, occupancy_id, derive_id):
+        for node_id in (camera_id, occupancy_id, derive_id, survival_id):
             if node_id != camera_id:
                 assert presenter.start_logic(node_id), presenter.view.status[-3:]
             _settle_logic(presenter, node_id)
             assert presenter.logic[node_id].host.observation.error is None, node_id
-        assert session.signal_plane.latest_publication(stable_signal_key(derive_id, "kept")) is not None
+        assert session.signal_plane.latest_publication(stable_signal_key(derive_id, "alive")) is not None
+        assert session.signal_plane.latest_publication(stable_signal_key(survival_id, "survival")) is not None
         presenter.view.logic_draft_changed.emit(camera_id, {"values": {"frames_per_cycle": 4}})
         assert editors[survival_id]["source_frames"] == ("0", "1", "2", "3"), "the draft says"
-        editing = {"name": "kept", "terms": (*kept["terms"], {"op": "+"})}
+        editing = {"name": "alive", "terms": (*alive["terms"], {"op": "+"})}
         presenter.view.logic_draft_changed.emit(derive_id, {"values": {"variables": (same, editing)}})
         binding = presenter.logic[derive_id]
-        assert binding.descriptor.describe_output_frames(binding.draft.values, "kept", ("0", "1", "2", "3")) is None
+        assert binding.descriptor.describe_output_frames(binding.draft.values, "alive", ("0", "1", "2", "3")) is None
         assert editors[survival_id]["source_frames"] == ("0", "1", "2"), "what Derive published"
     finally:
         for widget in (derive_editor, form):
             widget.close()
             widget.deleteLater()
         app.processEvents()
+
+
+def test_a_derive_over_a_derive_says_frames_only_when_its_whole_bundle_agrees(presenter, session) -> None:
+    """A Derive reads its source's whole bundle, not only the member its
+    source names.  When the members carry different frames -- ``alive``
+    the camera's three, ``one`` a picked frame, ``rate`` none -- one answer
+    cannot say them all: before data the second Derive's frames, and the
+    frames of everything it publishes, are unknown whichever member its
+    source names, and its editor offers no frame pick.  A bundle that
+    agrees passes its frames on.  Once the chain has run, each of the
+    second Derive's signals answers from the plane with what it carries."""
+
+    from zlc_data import READOUT_EVENT
+    from zlc_ui.qt import ensure_qt_app
+
+    app = ensure_qt_app(["zlc-derive-frames-test"])
+    camera_id = presenter.add_logic(
+        "camera_measurement", values={"repeat": 1, "frames_per_cycle": 3, "exposure_seconds": 0.005})
+    occupancy_id = presenter.add_logic("occupancy", source_signal=stable_signal_key(camera_id, "frames"))
+    same = {"name": "same", "publish": False, "terms": (
+        {"of": "occupied", "at": "frame", "labels": ("0",)},
+        {"op": "==", "of": "occupied", "at": "frame", "labels": ("2",)})}
+    alive = {"name": "alive", "terms": ({"of": "occupied"}, {"op": "where", "of": "same"})}
+    one = {"name": "one", "terms": ({"of": "occupied", "at": "frame", "labels": ("1",)},)}
+    rate = {"name": "rate", "terms": ({"of": "occupied"},), "statistic": "mean", "over": ("frame",)}
+    first = presenter.add_logic(
+        "derive", source_signal=stable_signal_key(occupancy_id, "occupied"),
+        values={"variables": (same, alive, one, rate)})
+    x = {"name": "x", "terms": ({"of": "one"},)}
+    y = {"name": "y", "terms": ({"of": "alive"},)}
+    second = presenter.add_logic(
+        "derive", source_signal=stable_signal_key(first, "alive"), values={"variables": (x, y)})
+    on_x = presenter.add_logic("frame_survival", source_signal=stable_signal_key(second, "x"))
+    on_y = presenter.add_logic("frame_survival", source_signal=stable_signal_key(second, "y"))
+    editors = presenter.view.logic_editors
+    assert editors[first]["source_frames"] == ("0", "1", "2")
+    for source in ("alive", "rate"):
+        presenter.view.logic_draft_changed.emit(second, {"source_signal": stable_signal_key(first, source)})
+        assert editors[second]["source_frames"] is None, source
+        assert editors[on_x]["source_frames"] is None and editors[on_y]["source_frames"] is None, source
+
+    editor = presenter.logic[second].descriptor.ui_contributions[0]()
+    try:
+        editor.update_projection(presenter.logic_editor_projection(second))
+        app.processEvents()
+        assert [card.head["axis"].isVisibleTo(editor) for card in editor._cards] == [False, False]
+    finally:
+        editor.close()
+        editor.deleteLater()
+        app.processEvents()
+
+    # Only alive published: the bundle agrees, and its frames pass on.
+    parked = tuple({**variable, "publish": False} for variable in (one, rate))
+    presenter.view.logic_draft_changed.emit(first, {"values": {"variables": (same, alive, *parked)}})
+    presenter.view.logic_draft_changed.emit(second, {"values": {"variables": (y,)}})
+    assert editors[second]["source_frames"] == ("0", "1", "2")
+    assert editors[on_y]["source_frames"] == ("0", "1", "2")
+
+    calibration = presenter.session.workspace.data / "box-calibration.json"
+    _box_calibration(("site-0", "site-1"), ((12.0, 10.0), (30.0, 20.0)), (100.0, 100.0), (96, 128)).save(
+        calibration)
+    presenter.view.logic_draft_changed.emit(occupancy_id, {"artifact_inputs": {"calibrations": (
+        {"path": str(calibration), "frames": ("rest",)},)}})
+    presenter.view.logic_draft_changed.emit(first, {"values": {"variables": (same, alive, one, rate)}})
+    presenter.view.logic_draft_changed.emit(second, {"values": {"variables": (x, y)}})
+    assert presenter.logic_editor_projection(on_y)["source_frames"] is None
+    session.load_pulse(PULSE_NAME)
+    assert presenter.start_logic(camera_id)
+    session.fire(shots=1)
+    for node_id in (camera_id, occupancy_id, first, second):
+        if node_id != camera_id:
+            assert presenter.start_logic(node_id), presenter.view.status[-3:]
+        _settle_logic(presenter, node_id)
+        assert presenter.logic[node_id].host.observation.error is None, node_id
+
+    def carried(name):
+        key = stable_signal_key(second, name)
+        value = session.signal_plane.latest_publication(key).value(key)
+        schema = value.canonical_schema or value.snapshot.block.schema
+        return [axis.labels() for axis in schema.point_domain.axes if axis.role == READOUT_EVENT]
+
+    assert carried("x") == [] and carried("y") == [("0", "1", "2")]
+    assert presenter.logic_editor_projection(second)["source_frames"] is None
+    assert presenter.logic_editor_projection(on_x)["source_frames"] == ("0",)
+    assert presenter.logic_editor_projection(on_y)["source_frames"] == ("0", "1", "2")
 
 
 def test_a_producers_new_output_reaches_every_open_editors_sources(presenter) -> None:

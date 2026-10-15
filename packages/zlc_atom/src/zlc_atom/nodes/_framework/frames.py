@@ -35,6 +35,10 @@ FIRST = "first"
 LAST = "last"
 REST = "rest"
 FRAME_NAMES = (FIRST, LAST, REST)
+#: The name of a cycle's frame axis -- the READOUT_EVENT Point axis the
+#: camera and the Calibration task publish, and Occupancy keeps -- and so
+#: what a Derive pick or statistic writes to name it, before data as after.
+FRAME_AXIS_NAME = "frame"
 
 FrameToken = int | str
 
@@ -316,6 +320,7 @@ def assign_frames(
 
 __all__ = [
     "FIRST",
+    "FRAME_AXIS_NAME",
     "FRAME_NAMES",
     "FrameClaim",
     "FrameReach",
