@@ -353,8 +353,9 @@ def finalize_logic_draft(
 ) -> LogicDraftFinalization:
     """Resolve every Start admission fact without building or acquiring a run.
 
-    ``previous`` is this row's last finalization: a file it decoded is taken
-    from it again while the draft still names the same path.  Files are read
+    ``previous`` is this row's last finalization: a file it read is taken
+    from it again, decoded or not, while the draft still names the same
+    path.  Files are read
     at the explicit boundaries -- opening Edit, Refresh, Start -- which pass
     none; a keystroke in an unrelated field re-decoded an SLM-sized context
     and every calibration the row names, and quietly picked up whatever had
@@ -539,15 +540,15 @@ def finalize_logic_draft(
         )
     artifacts: dict[str, object] = {}
     data_root = Path(getattr(workspace, "data", Path.cwd())).resolve()
-    # One decode per file AND contract: a file the last answer decoded is
-    # taken from it again, several rows naming one file read it once, and
-    # the same path offered to an input of another contract is decoded (and
-    # suffix-checked) by that contract's own codec.
+    # One decode per file AND contract: a file the last answer read is taken
+    # from it again -- whether it decoded or not, since only the boundaries
+    # read files and they pass no last answer -- several rows naming one
+    # file read it once, and the same path offered to an input of another
+    # contract is decoded (and suffix-checked) by that contract's own codec.
     decoded: dict[tuple[str, Path], ResolvedArtifact] = {}
     for held in () if previous is None else previous.artifacts.values():
         for item in (claim.value for claim in held) if isinstance(held, tuple) else (held,):
-            # A file that did not decode is tried again: it may be back.
-            if item is not None and not isinstance(item.value, Exception):
+            if item is not None:
                 decoded[(item.contract_id, Path(item.path))] = item
 
     def resolve(spec: Any, text: str) -> ResolvedArtifact:
@@ -565,7 +566,11 @@ def finalize_logic_draft(
             try:
                 resolved = spec.codec.resolve(selected_path)
             except Exception as error:
-                return ResolvedArtifact(selected_path, spec.codec.contract_id, error)
+                # The error, not how it was raised: its traceback holds this
+                # call's frames, and through them the last answer -- every
+                # answer would keep the one before it, and what it read.
+                error.__traceback__ = error.__context__ = error.__cause__ = None
+                resolved = ResolvedArtifact(selected_path, spec.codec.contract_id, error)
             decoded[cache_key] = resolved
         return resolved
 
