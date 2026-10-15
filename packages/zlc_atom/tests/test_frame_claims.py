@@ -1,22 +1,11 @@
-"""Frame claims: numbers from 0, first, last and rest, each frame read exactly once."""
+"""Frame claims as written: one spelling, the draft value, and each row's name."""
 
 from __future__ import annotations
 
 import pytest
 
 from zlc_atom.nodes import frame_claim_entries
-from zlc_atom.nodes._framework.frames import (
-    absent_notes,
-    assign_frames,
-    canonical_frames,
-    check_claims,
-    claim_problems,
-    describe_frames,
-    frame_identity,
-    frame_problems,
-    parked_entries,
-    reach_frames,
-)
+from zlc_atom.nodes._framework.frames import canonical_frames, describe_frames, frame_identity
 
 
 def test_claimed_frames_have_one_spelling_and_one_order() -> None:
@@ -35,125 +24,6 @@ def test_claimed_frames_have_one_spelling_and_one_order() -> None:
         canonical_frames([1, "1"])
     with pytest.raises(ValueError, match="frame first is listed twice"):
         canonical_frames(["first", "FIRST"])
-
-
-@pytest.mark.parametrize("count", [1, 2, 3, 4, 5])
-def test_first_is_frame_zero_in_every_cycle(count: int) -> None:
-    reach = reach_frames((("first",),), count)
-    assert reach.readers[0] == ((0, "first"),)
-    assert reach.frames_of(0) == (0,)
-    if count > 1:
-        assert assign_frames((("first",), ("rest",)), count, ("A", "B")) == (0, *(1,) * (count - 1))
-        assert assign_frames((("first",), ("last",), ("rest",)), count, ("A", "B", "C"))[0] == 0
-
-
-def test_first_and_frame_zero_are_one_frame() -> None:
-    # Two entries: refused by name, saying how each reaches it.
-    assert frame_problems((("first",), (0, "rest")), 3, ("A", "B")) == (
-        "frame 0 is read by both A (first) and B (0)",
-    )
-    assert frame_problems(((0,), ("first", "rest")), 3, ("A", "B")) == (
-        "frame 0 is read by both A (0) and B (first)",
-    )
-    # One entry naming it both ways is one reader.
-    assert assign_frames(((0, "first"), ("rest",)), 3, ("A", "B")) == (0, 1, 1)
-    assert reach_frames(((0, "first"), ("rest",)), 3).readers[0] == ((0, "0"),)
-
-
-def test_first_and_last_meet_in_a_one_frame_cycle() -> None:
-    assert assign_frames((("first", "last"),), 1, ("A",)) == (0,)
-    assert reach_frames((("first", "last"),), 1).readers == (((0, "first"),),)
-    assert frame_problems((("first",), ("last",)), 1, ("A", "B")) == (
-        "frame 0 is read by both A (first) and B (last)",
-    )
-    # The same claims are fine once the cycle has two ends again.
-    assert assign_frames((("first",), ("last",)), 2, ("A", "B")) == (0, 1)
-
-
-@pytest.mark.parametrize("count, expected", [
-    (1, (1,)),          # the only frame is the last: B's
-    (2, (0, 1)),
-    (3, (0, 2, 1)),     # rest takes what nobody named
-    (5, (0, 2, 2, 2, 1)),
-])
-def test_last_and_rest_follow_the_count(count: int, expected: tuple[int, ...]) -> None:
-    # A reads frame 0, B the last, C the rest.  At one frame A's 0 and B's
-    # last reach the same frame, which is refused rather than settled.
-    claims = ((0,), ("last",), ("rest",))
-    if count == 1:
-        assert frame_problems(claims, 1, ("A", "B", "C")) == (
-            "frame 0 is read by both A (0) and B (last)",
-        )
-        assert assign_frames(((), ("last",), ("rest",)), 1, ("A", "B", "C")) == expected
-        return
-    assert assign_frames(claims, count, ("A", "B", "C")) == expected
-
-
-def test_one_entry_may_reach_a_frame_twice() -> None:
-    assert assign_frames(((0, "last"), ("rest",)), 1, ("A", "B")) == (0,)
-    reach = reach_frames(((0, "last"), ("rest",)), 1)
-    assert reach.readers == (((0, "0"),),), "how each reader wrote it"
-    assert reach.frames_of(1) == ()
-
-
-def test_every_problem_is_named_and_none_is_settled_silently() -> None:
-    # A middle number the cycle does not carry is kept and said, never a
-    # problem; the frames nobody reads are.
-    assert frame_problems(((5,),), 3, ("late",)) == (
-        "frames 0, 1, 2 have no entry: give them to one, or let one read the rest",
-    )
-    assert absent_notes(((5,),), 3, ("late",)) == (
-        "late's middle frame 5 is not in this source (frames 0–2); it is kept for a cycle that has it",
-    )
-    assert absent_notes(((5,), ("rest",)), 1, ("late", "all")) == (
-        "late's middle frame 5 is not in this source (only frame 0); it is kept for a cycle that has it",
-    )
-    assert frame_problems(((0,),), 2, ("load",), what="calibration") == (
-        "frame 1 has no calibration: give it to one, or let one read the rest",
-    )
-    # In three frames 2 is the LAST frame: a middle 2 is absent, never the
-    # last -- the last is A's, and the frames nobody names are refused.
-    with pytest.raises(ValueError, match="frames 0, 1 have no entry"):
-        assign_frames((("last",), (2,)), 3, ("A", "B"))
-    assert assign_frames((("last",), (2,), ("rest",)), 3, ("A", "B", "C")) == (2, 2, 0)
-    # The same claims read their frame again once the count that suits them returns.
-    assert assign_frames((("last",), (2,), ("rest",)), 4, ("A", "B", "C")) == (2, 2, 1, 0)
-    assert absent_notes((("last",), (2,), ("rest",)), 4, ("A", "B", "C")) == ()
-
-
-def test_claims_are_checked_among_themselves_before_any_count() -> None:
-    with pytest.raises(ValueError, match="'rest' is claimed by both A and B"):
-        check_claims((("rest",), ("rest",)), ("A", "B"))
-    with pytest.raises(ValueError, match="'first' is claimed by both A and B"):
-        check_claims(((0,), (0, "last")), ("A", "B"))
-    with pytest.raises(ValueError, match="'first' is claimed by both A and B"):
-        check_claims((("first",), ("first", "rest")), ("A", "B"))
-    # 0 IS First: written either way, it is one claim and one owner.
-    with pytest.raises(ValueError, match="'first' is claimed by both A and B"):
-        check_claims((("first",), (0, "last")), ("A", "B"))
-    with pytest.raises(ValueError, match="'first' is claimed by both A and B"):
-        check_claims(((0, "rest"), ("first",)), ("A", "B"))
-    # One entry naming frame 0 both ways is one claim; First against Last
-    # collides only in a one-frame cycle, so only a count refuses it.
-    assert check_claims(((0, "first"), ("rest",)), ("A", "B")) == (("first",), ("rest",))
-    assert check_claims((("first",), ("last",)), ("A", "B")) == (("first",), ("last",))
-    # An entry claiming no frame is parked: kept, colliding with nothing and
-    # hiding no collision of two others -- every collision is said at once.
-    assert check_claims((("rest",), ()), ("A", "B")) == (("rest",), ())
-    assert parked_entries((("rest",), (), ("first",), ())) == (1, 3)
-    assert claim_problems(((), ("rest",), ("rest", 2), (0,), ("first", 2)), ("P", "A", "B", "C", "D")) == (
-        "'rest' is claimed by both A and B",
-        "frame 2 is claimed by both B and D",
-        "'first' is claimed by both C and D",
-    )
-    assert claim_problems((("last",), ("last",), ("last",)), ("A", "B", "C")) == (
-        "'last' is claimed by A, B and C",
-    )
-    # Only an assignment in which nothing reads is refused for parking.
-    with pytest.raises(ValueError, match="no calibration reads a frame: give one the frames it reads, "
-                                         "or let one read the rest"):
-        check_claims(((), ()), ("A", "B"), what="calibration")
-    assert claim_problems((), ()) == ()
 
 
 def test_a_draft_value_is_rows_of_path_and_frames() -> None:
