@@ -373,8 +373,14 @@ evaluated; a helper nothing published reads never blocks Start. The editor
 types each variable against the source's own schemas -- the evaluation's
 rules, no data -- and shows the result (`→ repeat 1 × Site 35 · float32 ·
 unit 1`) or the problem under the line it is about; Start refuses a
-published variable that does not type. Statistics across shots with error
-bars, per-site probabilities and fits belong in a plot panel, so
+published variable that does not type. Before anything publishes, the frames
+each published variable keeps are told from the source's draft frames by the
+same rules on the frame axis alone (`describe_output_frames`), so a Frame
+Survival downstream is edited at once, and the editor offers the frame pick.
+The source's frames are an answer only when every member of the bundle
+carries the same ones -- a Derive reading a Derive whose variables keep
+different frames waits for data -- and one frame offers no pick. Statistics
+across shots with error bars, per-site probabilities and fits belong in a plot panel, so
 Derive owns no history.
 The separate processor
 `frame_survival` asks, for selected forward frame pairs
@@ -399,7 +405,8 @@ become a new endpoint when the count shrinks: a selected pair whose middle frame
 the source does not carry is kept, named in an amber note and in the run record
 (`absent_pairs`), and left out of the published pairs -- the run fails only when
 none of its selected pairs is in the source. The editor follows declared source
-draft frames immediately, while published data uses the actual acquired schema.
+draft frames immediately, through Derive too, while published data uses the
+actual acquired schema; a source of one frame per cycle is said, not awaited.
 The `slm_feedback` Task takes one ordinary camera/readout Calibration and one
 strict Science Context. Calibration has no SLM or Science Context input.
 Feedback registers the Context's frozen spots Target to the measured camera

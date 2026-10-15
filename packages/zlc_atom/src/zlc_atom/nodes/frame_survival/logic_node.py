@@ -297,8 +297,8 @@ def _editor_factory(parent=None):
         def update_projection(self, projection):
             values = projection["form_values"]
             # The console's one answer to "which frames does the source carry".
-            frames = projection.get("source_frames")
-            frames = None if frames is None or len(frames) < 2 else tuple(frames)
+            carried = projection.get("source_frames")
+            frames = None if carried is None or len(carried) < 2 else tuple(carried)
             if frames != self._frames:
                 self._frames = frames
                 count = 0 if frames is None else len(frames)
@@ -325,8 +325,14 @@ def _editor_factory(parent=None):
                 self.table.set_cell_states({})
                 self.table.set_selected(())
                 self._wanted = ()
-                self.summary.setText("Waiting for the source frames" if frames is None
-                                     else self.presets.button(selection).text())
+                # A source of one frame per cycle is known, not awaited: say
+                # why there is no pair to mark.  A list the grid cannot read
+                # keeps the strip's name; the red line under it says why.
+                self.summary.setText(
+                    "Waiting for the source frames" if carried is None
+                    else "One frame per cycle: no pairs" if frames is None
+                    else self.presets.button(selection).text()
+                )
                 show_note(self.note, "")
                 show_note(self.parked, "")
                 return

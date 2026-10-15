@@ -200,9 +200,14 @@ whose middle frame the source does not carry stays in the draft, is left out of
 this source's pairs and is named in the run record (`absent_pairs`); it does not
 stop Start, and a run fails only when none of its selected pairs is in the source.
 The operator keeps parked and absent pairs on purpose: never delete one to make
-Start work. Camera draft changes update Occupancy and Frame Survival editors
-before new data arrives; runtime data still follows the actual acquired source
-schema.
+Start work. Camera draft changes update Occupancy, Derive and Frame Survival
+editors before new data arrives -- Derive passes on the frames each published
+variable keeps, one frame when it picks or reduces the frame axis away -- and
+runtime data still follows the actual acquired source schema. A node whose draft
+cannot say (a formula being edited) answers with the frames it last published.
+A Derive reads its source's whole bundle, so its source frames are known only
+while every member carries the same frames (a Derive over a Derive whose
+variables keep different frames answers once it has published).
 
 Derive is algebra within one evaluation of one producer's bundle: live, each
 publication; at the end of a finite run, the run's Dataset. Read the member

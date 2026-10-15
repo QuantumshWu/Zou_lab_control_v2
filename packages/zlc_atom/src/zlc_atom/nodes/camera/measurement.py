@@ -38,6 +38,7 @@ from zlc_atom.devices.camera.contract import (
 )
 from zlc_atom.devices.camera.photoelectrons import PHOTOELECTRONS
 from zlc_atom.data import cell_axis_id, snapshot_from_array
+from zlc_atom.nodes._framework.frames import FRAME_AXIS_NAME
 
 
 _CAMERA_FRAME_CONTRACT = "camera.frames"
@@ -89,7 +90,7 @@ def _frame_point_axis(producer: str, frames: int) -> AxisSpec:
 
     return AxisSpec(
         AxisId(f"{producer}.frames.frame"),
-        "frame",
+        FRAME_AXIS_NAME,
         READOUT_EVENT,
         int(frames),
         tuple(range(int(frames))),
