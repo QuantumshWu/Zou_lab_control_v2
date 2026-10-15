@@ -575,8 +575,9 @@ class PanelCardView(FluentGroupBox):
 
         A drawn card is carried by its strip: its body is its plot's (a
         gesture with Selectors on, nothing with them off).  An empty card's
-        body is a blank frame, so the whole card carries it -- the drop is
-        the slot under the pointer, wherever on the card it is held.
+        body is a blank frame, so the whole card carries it -- the board
+        drops a card in the row its strip is in, wherever on the card it is
+        held.
         """
 
         return self.rect() if self._surface is None else self.strip_rect()
