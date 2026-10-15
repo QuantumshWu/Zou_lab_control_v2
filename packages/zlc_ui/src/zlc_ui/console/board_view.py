@@ -19,7 +19,7 @@ from .panel_card_view import PanelCardView
 
 
 class ConsoleBoardView(QtWidgets.QWidget):
-    """Cards carried by their grip and put down in the slot under the pointer.
+    """Cards carried by their grip and put down in the slot their strip is in.
 
     A card the operator has put somewhere keeps that place: a drop records
     the slot and the board never writes over it.  Every other card FLOWS: on
@@ -39,8 +39,11 @@ class ConsoleBoardView(QtWidgets.QWidget):
     A drag shows the drop before it happens.  The other cards stand where
     they will stand once the carried card is let go, and the slot it will land
     in is drawn under it as an accent-tint card with a dashed edge.  The slot
-    is the one under the POINTER, chosen on the board as it is without the
-    carried card: that frame does not move while the preview rearranges the
+    is aimed at the POINTER'S column on the line of the carried card's STRIP:
+    the row is the one the card is seen in, wherever it is held, so an empty
+    card carried by a point low in its body lands where the same card carried
+    by its strip at that x would.  It is chosen on the board as it is without
+    the carried card: that frame does not move while the preview rearranges the
     others, so the choice cannot chase its own consequence, and it is the
     board the card is being put back into.  On the board as it stands, with
     the carried card's own hole in it, the last free slot would sit one place
@@ -81,8 +84,8 @@ class ConsoleBoardView(QtWidgets.QWidget):
         #: cards, the board settled without the carried card, and the width
         #: both were settled at.  The slot is chosen in this frame.
         self._frame: tuple[dict[str, tuple[int, int]], tuple[GeomProxy, ...], int] | None = None
-        #: The slot under the pointer, and the rectangle the carried card
-        #: comes to rest in from it -- the one the board draws.
+        #: The slot the carried card is aimed at, and the rectangle it comes
+        #: to rest in from there -- the one the board draws.
         self._drop_slot: tuple[int, int] | None = None
         self._drop_rect: QtCore.QRect | None = None
         #: Where the pointer is, in global coordinates: the board scrolls
@@ -405,8 +408,13 @@ class ConsoleBoardView(QtWidgets.QWidget):
 
         card = self._active_card
         authored, base, board_w = self._frame
+        # The pointer's x on the line of the carried card's strip: the row is
+        # the one the card is seen in, not how low in it the hand holds it.
+        # The card stands where the last move put it (follow_pointer runs
+        # before every drag_moved and every scroll step).
         at = self.mapFromGlobal(self._pointer)
-        slot = slot_under((at.x(), at.y()), self._proxy(card), base, self._metrics, board_w)
+        aim = (at.x(), card.y() + card.strip_rect().center().y())
+        slot = slot_under(aim, self._proxy(card), base, self._metrics, board_w)
         if slot == self._drop_slot:
             return
         self._drop_slot = slot
@@ -482,7 +490,8 @@ class ConsoleBoardView(QtWidgets.QWidget):
             self._scroll_timer.stop()
             return
         # The board moved under a pointer that did not: the card keeps its
-        # hold under the pointer, and the slot under it is a different one.
+        # hold under the pointer, and the slot it is aimed at is a different
+        # one.
         card.follow_pointer(self._pointer)
         self._show_drop()
 

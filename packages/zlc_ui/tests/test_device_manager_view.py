@@ -106,14 +106,18 @@ view.set_device_choices((
     ('Virtual camera', 'camera.virtual', 'camera'),
     ('Hardware camera', 'camera.dcam', 'camera'),
     ('Virtual sequencer', 'sequencer.virtual', 'sequencer'),
+    ('Simulation RF', 'rf.simulation', 'rf'),
+    ('Simulation SLM', 'slm.simulation', 'slm'),
 ))
 view.set_templates((('Virtual', 'virtual'), ('Hardware', 'hardware')))
 view.resize(1100, 700); view.show(); app.processEvents()
 assert view.tabs.tabText(0) == 'Config'
 assert view.heading_label.text() == 'Devices'
 assert view.document_name.text() == 'untitled'
-assert tuple(view.domain_groups) == ('camera', 'sequencer')
-assert tuple(group.title() for group in view.domain_groups.values()) == ('Camera', 'Sequencer')
+assert tuple(view.domain_groups) == ('camera', 'sequencer', 'rf', 'slm')
+# A domain reads as words with its acronym kept, not str.title()'s 'Rf'.
+assert tuple(group.title() for group in view.domain_groups.values()) == (
+    'Camera', 'Sequencer', 'RF', 'SLM')
 assert all(button.text() == 'Add device' for button in view.domain_add_buttons.values())
 assert view.discovered_group.title() == 'Discovered hardware'
 assert view.discover_button.text() == 'Scan hardware'

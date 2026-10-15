@@ -643,8 +643,8 @@ app.processEvents()
 
 
 def test_board_qtest_drop_uses_the_slot_under_the_pointer_and_keeps_every_place_a_drop_authored(run_qt) -> None:
-    """A drop lands in the slot under the pointer, commits the new order, and
-    keeps every place a drop authored.
+    """A card carried by its strip lands in the slot under the pointer,
+    commits the new order, and keeps every place a drop authored.
 
     The board packed every card into the first free slot on the board and
     exempted exactly one -- whichever had been dropped last -- so it could

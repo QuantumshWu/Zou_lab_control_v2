@@ -39,8 +39,8 @@ from .fluent import (
     setting_label_width,
     window_pad,
 )
+from ..status import SUMMARY_SEPARATOR
 from .style import (
-    ACCENT,
     ACCENT_TINT,
     DIVIDER,
     FONT,
@@ -1202,13 +1202,15 @@ class InfoPane(QtWidgets.QWidget):
         for node_id in order:
             node, rect = nodes[node_id], rects[node_id]
             is_device = node["kind"] == "device"
-            outline = ORANGE if is_device else ACCENT if node["root"] else DIVIDER
+            # One edge for every card: a device's orange, a node's divider.
+            # The root -- the node this figure shows -- says so in words on
+            # its badge line; an accent outline read as a selection.
             card_path = QtGui.QPainterPath()
             radius = scaled_px(5, minimum=4)
             card_path.addRoundedRect(rect, radius, radius)
             card = scene.addPath(
                 card_path,
-                QtGui.QPen(QtGui.QColor(outline), scaled_px(2 if node["root"] else 1)),
+                QtGui.QPen(QtGui.QColor(ORANGE if is_device else DIVIDER), scaled_px(1)),
                 QtGui.QBrush(QtGui.QColor(ORANGE_TINT if is_device else SURFACE)),
             )
             card.setToolTip(str(node["tooltip"]))
@@ -1219,8 +1221,15 @@ class InfoPane(QtWidgets.QWidget):
                 card.setCursor(QtCore.Qt.PointingHandCursor)
             inset = scaled_px(10, minimum=8)
             badge_font = QtGui.QFont(FONT, max(6, fluent_font_size() - 4))
-            badge_font.setBold(True)
-            badge = scene.addSimpleText("DEVICE" if is_device else "LOGIC", badge_font)
+            badge_text = "Device" if is_device else "Logic"
+            if node["root"]:
+                badge_text += SUMMARY_SEPARATOR + "this figure"
+            badge = scene.addSimpleText(
+                QtGui.QFontMetrics(badge_font).elidedText(
+                    badge_text, QtCore.Qt.ElideRight, int(rect.width()) - 2 * inset
+                ),
+                badge_font,
+            )
             badge.setAcceptedMouseButtons(QtCore.Qt.NoButton)
             badge.setBrush(QtGui.QColor(ORANGE_DARK if is_device else MUTED_INK))
             badge.setPos(rect.left() + inset, rect.top() + scaled_px(5, minimum=4))

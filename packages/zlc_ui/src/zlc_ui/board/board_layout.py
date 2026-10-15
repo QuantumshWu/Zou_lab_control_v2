@@ -206,17 +206,19 @@ def slot_under(
     metrics: BoardMetrics,
     board_w: int,
 ) -> tuple[int, int]:
-    """The anchor a card carried with the pointer at ``point`` is put at.
+    """The anchor a carried card aimed at ``point`` is put at.
 
     Anchors are the board's own grid lines: the margin and every other card's
     left/right and top/bottom edges (a gap past each far edge).  The slot is
-    the one the POINTER is in -- on each axis the last anchor at or before it
-    -- so where the operator lets go decides, not where on the card they
+    the one ``point`` is in -- on each axis the last anchor at or before it.
+    A board aims at the pointer's x on the line of the carried card's strip.
+    The column is where the operator lets go, not where along the strip they
     happened to hold it: the anchor nearest the card's top-left would send a
     card held far into its strip and let go just inside the second column
-    back to the first.  ``cfg`` only says how wide the carried card is, which
-    decides how far right it can start.  An occupied anchor stays a
-    candidate; choosing it puts the card there and the others make way.
+    back to the first.  The row is the one the card is seen in, not how low
+    in a blank body it is held.  ``cfg`` only says how wide the carried card
+    is, which decides how far right it can start.  An occupied anchor stays
+    a candidate; choosing it puts the card there and the others make way.
     """
 
     gap = metrics.gap

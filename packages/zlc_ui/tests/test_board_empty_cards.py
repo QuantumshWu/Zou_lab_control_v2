@@ -135,12 +135,13 @@ def test_an_empty_card_is_held_and_inserted_like_a_drawn_one(run_qt) -> None:
     """The strip carries every card; an empty card's blank body carries it too.
 
     A drawn card's body is its plot's, so it is held by its strip alone.
-    An empty card's body is a blank frame, nine tenths of the card, and the
-    drop is the slot under the pointer wherever the card is held, so the
+    An empty card's body is a blank frame, nine tenths of the card, so the
     whole card carries it, under the open hand.  Carried by the strip to
     each insert position, an empty card lands exactly as a drawn one
-    carried the same way; carried by its body, in the slot the pointer
-    let go over.
+    carried the same way.  Carried by a point low in its body, it lands
+    where it is seen -- the row its strip is in -- exactly as when held by
+    its strip at the same x: aimed at the pointer, a card held low and
+    shown mostly over a row was previewed and put down a row below it.
     """
 
     run_qt(
@@ -153,7 +154,9 @@ def new_board(kinds):
     board = ConsoleBoardView(window, metrics=BoardMetrics(GAP))
     cards = tuple(new_card(f'panel-{index}', kind == 'drawn') for index, kind in enumerate(kinds))
     w, h = cards[0].width(), cards[0].height()
-    window.resize(2 * w + 3 * GAP, 2 * h + 3 * GAP)
+    # A row of room under the cards, for a card carried by its body below
+    # the last row.
+    window.resize(2 * w + 3 * GAP, 3 * h + 4 * GAP)
     board.setGeometry(window.rect())
     board.set_cards(cards)
     window.show()
@@ -212,20 +215,33 @@ retire(window, cards)
 
 # The same strip gesture to each insert position: the empty card and the
 # drawn card it stands in for end in the same place, in the same order.
+# The empty card held 80 % down its body and shown a third of a card below
+# the slot, its strip still in the slot's row, lands there too: the hand
+# is then in the row below.
 for target in (0, 2, 3):
     outcomes = []
-    for kinds in (('drawn', 'empty', 'drawn', 'empty'), ('empty', 'drawn', 'empty', 'drawn')):
+    for kinds, by_body in (
+        (('drawn', 'empty', 'drawn', 'empty'), False),
+        (('empty', 'drawn', 'empty', 'drawn'), False),
+        (('drawn', 'empty', 'drawn', 'empty'), True),
+    ):
         window, board, cards, events, starts = new_board(kinds)
         mover = cards[1]
-        held = QtCore.QPoint(GAP + 2, mover._title_band.geometry().center().y())
-        carry(board, mover, held, slots[target])
+        if by_body:
+            held = QtCore.QPoint(GAP + 2, mover.height() * 4 // 5)
+            seen = (slots[target][0], slots[target][1] + h // 3)
+            assert seen[1] + held.y() >= slots[target][1] + h + GAP
+        else:
+            held = QtCore.QPoint(GAP + 2, mover._title_band.geometry().center().y())
+            seen = slots[target]
+        carry(board, mover, held, seen)
         assert starts == ['panel-1'], (kinds, target, starts)
-        # The place the drop chose IS the slot the pointer carried it to.
+        # The place the drop chose IS the slot the carried card was shown in.
         assert board._authored['panel-1'] == slots[target], (kinds, target, board._authored)
         assert events, (kinds, target)
         outcomes.append((events[-1], tuple(card.geometry().getRect() for card in cards)))
         retire(window, cards)
-    assert outcomes[0] == outcomes[1], (target, outcomes)
+    assert outcomes[0] == outcomes[1] == outcomes[2], (target, outcomes)
 host.close(timeout=10)
 """
     )
@@ -396,8 +412,8 @@ window.close(); settle()
     )
 
 
-def test_a_carried_card_lands_in_the_slot_under_the_pointer_wherever_it_is_held(run_qt) -> None:
-    """Where the pointer lets go decides the slot, and the board shows it first.
+def test_a_carried_card_lands_in_the_pointers_column_wherever_its_strip_is_held(run_qt) -> None:
+    """Where the pointer lets go decides the column, and the board shows it first.
 
     The slot was the one nearest the card's TOP-LEFT, so the same release
     just inside the second column sent a card held near the left of its

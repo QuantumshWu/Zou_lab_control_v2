@@ -147,10 +147,10 @@ the blank frame its size preset plans, and `set_surface(None)` returns a
 card to that frame.  `handle_rect()` is what carries the card: a drawn
 card's strip (`strip_rect()`) -- its body is its plot's -- and the whole of
 an empty card, whose blank body shows the open hand; the drop is the slot
-under the pointer wherever the card is held.  Setting is as tall as every
-other button and the header `×` is square at that height: the quiet
-one-glyph remover (red only under the pointer), whose first click arms it
-as the white-on-red confirm.  On a card
+in the pointer's column on the row the card's strip is in, wherever the card
+is held.  Setting is as tall as every other button and the header `×` is
+square at that height: the quiet one-glyph remover (red only under the
+pointer), whose first click arms it as the white-on-red confirm.  On a card
 wider than what its viewport shows, the two ride the viewport's right edge
 (`keep_commands_within(right)`), as far in from it as from the card's own
 end, so a panel is edited or removed without scrolling sideways; scrolled
@@ -187,9 +187,10 @@ place; every other card takes the first free slot in board order on every
 pack, so cards tile the width the board has now -- including cards added
 before the window was first laid out -- and everything then settles under
 north-west gravity.  A carried card follows the pointer; meanwhile the other
-cards stand where the drop will leave them and the slot under the pointer
-(chosen on the board without the carried card) is drawn as an accent-tint
-card with a dashed edge.  Near the viewport's top or bottom edge the board
+cards stand where the drop will leave them and the slot -- the pointer's
+column on the row the carried card's strip is in, chosen on the board
+without the carried card -- is drawn as an accent-tint card with a dashed
+edge.  Near the viewport's top or bottom edge the board
 scrolls under the pointer.  On release the card takes that slot and the new
 `panel_id` order is committed.  `text_left()` is where a card's strip text
 starts, from the board's left edge, for a note on an empty board to start
