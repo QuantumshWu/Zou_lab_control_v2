@@ -25,12 +25,15 @@ from zlc_ui.fluent import (
     FluentPathEdit,
     FluentReadoutEdit,
     FluentScrollArea,
+    FluentSectionLabel,
     FluentSegmentedButtons,
     FluentSettingRow,
     FluentSwitch,
     MUTED_INK,
     ORANGE_DARK,
     card_pad,
+    card_title_row,
+    muted_note_label,
     row_gap,
     scaled_px,
     section_gap,
@@ -39,10 +42,8 @@ from zlc_ui.fluent import (
     retire_widget,
     window_pad,
 )
-from zlc_ui.form.qt_form import _form_label_width
 from zlc_ui.form import (
     FluentParameterForm,
-    FormChoice,
     FormFieldProps,
     FormSpec,
 )
@@ -55,13 +56,17 @@ from ._panel_projection import (
     parameter_form_spec,
     parameter_form_values,
     signal_form_runtime,
+    size_form_field,
 )
 from .logic_editor_view import _contribution_label_width
 from .panel_card_view import (
+    PARAMETER_SECTIONS,
     _set_interaction,
     _shows_unrecorded_pick,
+    panel_section,
     relay_surface_errors,
     release_surface_errors,
+    share_label_column,
 )
 
 
@@ -139,51 +144,40 @@ class PanelEditorView(QtWidgets.QWidget):
         body_layout.setSpacing(row_gap())
         pad = card_pad()
 
+        # The page's name as its heading, the panel's fixed kind after it in
+        # muted ink -- the Logic editor's "title (kind)".
         header = FluentFrame(bordered=False)
         header_layout = QtWidgets.QHBoxLayout(header)
         header_layout.setContentsMargins(0, 0, 0, 0)
         header_layout.setSpacing(row_gap())
-        self.title_label = FluentLabel(self.panel_id)
+        self.title_label = FluentSectionLabel(self.panel_id)
         self.kind_label = FluentLabel("")
         self.kind_label.setStyleSheet(
             f"color: {MUTED_INK}; background: transparent; border: none;"
         )
-        header_layout.addWidget(self.title_label, 1)
-        header_layout.addWidget(FluentLabel("Plot kind (fixed):"))
+        self.kind_label.setToolTip("The plot kind is fixed when the panel is added")
+        header_layout.addWidget(self.title_label)
         header_layout.addWidget(self.kind_label)
+        header_layout.addStretch(1)
         body_layout.addWidget(header)
         body_layout.addSpacing(section_gap() - row_gap())
 
-        panel_group = FluentGroupBox("Panel")
-        panel_layout = QtWidgets.QVBoxLayout(panel_group)
-        panel_layout.setContentsMargins(pad, pad, pad, pad)
-        panel_layout.setSpacing(row_gap())
+        # Every card lays its title out as its first row (card_title_row),
+        # as the Figure Viewer's data cards and the Device Manager's do; the
+        # four setting sections are built as the Setting frame builds them.
         self.panel_form = FluentParameterForm(
             FormSpec(()), {}, runtime=self._signal_runtime
         )
         self.panel_form.changed.connect(self._panel_value_changed)
         self.panel_form.value_normalized.connect(self._panel_value_changed)
-        panel_layout.addWidget(self.panel_form)
-        body_layout.addWidget(panel_group)
+        body_layout.addWidget(_section_card("Panel", self.panel_form))
 
         self.parameter_groups: dict[str, FluentGroupBox] = {}
         self.parameter_forms: dict[str, FluentParameterForm] = {}
-        self.parameter_unavailable: dict[str, FluentLabel] = {}
-        for section, title in (
-            ("semantic", "Semantic"),
-            ("display", "Display"),
-            ("fit", "Fit"),
-        ):
-            group = FluentGroupBox(title)
-            layout = QtWidgets.QVBoxLayout(group)
-            layout.setContentsMargins(pad, pad, pad, pad)
-            layout.setSpacing(row_gap())
-            unavailable = FluentLabel("")
+        self.parameter_unavailable: dict[str, QtWidgets.QLabel] = {}
+        for section, title in PARAMETER_SECTIONS:
+            unavailable = muted_note_label("")
             unavailable.setWordWrap(True)
-            unavailable.setStyleSheet(
-                f"color: {MUTED_INK}; background: transparent; border: none;"
-            )
-            layout.addWidget(unavailable)
             form = FluentParameterForm(FormSpec(()), {})
             form.changed.connect(
                 lambda key, name=section: self._mapping_value_changed(name, str(key))
@@ -191,17 +185,18 @@ class PanelEditorView(QtWidgets.QWidget):
             form.value_normalized.connect(
                 lambda key, name=section: self._mapping_value_changed(name, str(key))
             )
-            layout.addWidget(form)
+            group = _section_card(title, form, note=unavailable)
             self.parameter_groups[section] = group
             self.parameter_forms[section] = form
             self.parameter_unavailable[section] = unavailable
             body_layout.addWidget(group)
 
-        snapshot_group = FluentGroupBox("Frozen snapshot")
+        snapshot_group = FluentGroupBox("Frozen snapshot", title_strip_px=0)
         self.snapshot_group = snapshot_group
         snapshot_layout = QtWidgets.QVBoxLayout(snapshot_group)
         snapshot_layout.setContentsMargins(pad, pad, pad, pad)
         snapshot_layout.setSpacing(row_gap())
+        snapshot_layout.addLayout(card_title_row("Frozen snapshot")[0])
         self.surface_holder = FluentFrame(bordered=False)
         self.surface_holder.setMinimumHeight(scaled_px(360, minimum=280))
         self.surface_layout = QtWidgets.QVBoxLayout(self.surface_holder)
@@ -223,10 +218,11 @@ class PanelEditorView(QtWidgets.QWidget):
         snapshot_layout.addLayout(snapshot_actions)
         body_layout.addWidget(snapshot_group)
 
-        self.producer_group = FluentGroupBox("Direct producer")
+        self.producer_group = FluentGroupBox("Direct producer", title_strip_px=0)
         producer_layout = QtWidgets.QVBoxLayout(self.producer_group)
         producer_layout.setContentsMargins(pad, pad, pad, pad)
         producer_layout.setSpacing(row_gap())
+        producer_layout.addLayout(card_title_row("Direct producer")[0])
         self.producer_summary = FluentLabel(
             "This signal has no editable direct producer."
         )
@@ -251,11 +247,12 @@ class PanelEditorView(QtWidgets.QWidget):
         producer_layout.addLayout(producer_actions)
         body_layout.addWidget(self.producer_group)
 
-        save_group = FluentGroupBox("Save figure")
+        save_group = FluentGroupBox("Save figure", title_strip_px=0)
         self.save_group = save_group
         save_layout = QtWidgets.QVBoxLayout(save_group)
         save_layout.setContentsMargins(pad, pad, pad, pad)
         save_layout.setSpacing(row_gap())
+        save_layout.addLayout(card_title_row("Save figure")[0])
         label_width = setting_label_width(("Directory", "Name", "Format", "File"))
         #: The Save figure rows and their words: they take the page's one
         #: label column with the forms above (see _share_label_column).
@@ -328,7 +325,7 @@ class PanelEditorView(QtWidgets.QWidget):
         kind_text = state["kind"].replace("_", " ") or "automatic"
         if state["cell_kind"]:
             kind_text += f" · {state['cell_kind'].replace('_', ' ')} cells"
-        self.kind_label.setText(kind_text)
+        self.kind_label.setText(f"({kind_text})")
         if not self._save_directory_initialized:
             self.save_directory.setText(str(incoming.get("save_directory") or ""))
             self._save_directory_initialized = True
@@ -355,17 +352,7 @@ class PanelEditorView(QtWidgets.QWidget):
                 "Overlay",
                 default=state["overlay_signal"],
             ))
-        fields.append(
-            FormFieldProps(
-                "size",
-                "choice",
-                "Panel size",
-                default=state["size"],
-                choices=self._size_choices(
-                    incoming.get("size_choices"), state["size"]
-                ),
-            )
-        )
+        fields.append(size_form_field(incoming.get("size_choices"), state["size"]))
         fields.append(interval_form_field(
             incoming.get("interval_choices"),
             state["interval_ms"],
@@ -488,13 +475,10 @@ class PanelEditorView(QtWidgets.QWidget):
             widget for widget in self._producer_contributions.values()
             if callable(getattr(widget, "set_label_width", None))
         )
-        column = max(
+        column = share_label_column(forms, widths=(
             setting_label_width(text for _row, text in self._save_rows),
-            *(_form_label_width(form.spec.fields) for form in forms if form.spec.fields),
             *(_contribution_label_width(widget, spec) for widget in takers),
-        )
-        for form in forms:
-            form.set_label_width(column)
+        ))
         for row, text in self._save_rows:
             row.set_label(text, width=column)
         for widget in takers:
@@ -626,17 +610,6 @@ class PanelEditorView(QtWidgets.QWidget):
         self._save_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         self._update_save_controls()
 
-    @staticmethod
-    def _size_choices(values: object, current: str) -> tuple[FormChoice, ...]:
-        choices = tuple(str(value) for value in tuple(values or ()))
-        if not choices:
-            raise RuntimeError("panel size choices were not projected")
-        if current not in choices:
-            raise ValueError(
-                f"unknown panel size {current!r}; choose from {', '.join(choices)}"
-            )
-        return tuple(FormChoice(value, value) for value in choices)
-
     def _panel_value_changed(self, key: str) -> None:
         try:
             value = self.panel_form.read_value(str(key))
@@ -691,9 +664,9 @@ class PanelEditorView(QtWidgets.QWidget):
                 signal = str(state.get("signal") or "")
             frozen_signal = str(projection.get("frozen_signal") or "")
             pieces.append(
-                "STALE: this panel now shows another signal; refresh before saving"
+                "Stale: this panel now shows another signal; refresh before saving"
                 if signal and frozen_signal and signal != frozen_signal
-                else "STALE: panel configuration changed; refresh before saving"
+                else "Stale: panel configuration changed; refresh before saving"
             )
         elif projection.get("source_status") == "earlier_run":
             pieces.append("Frozen from an earlier run; Refresh to update; Save keeps this snapshot")
@@ -706,6 +679,20 @@ class PanelEditorView(QtWidgets.QWidget):
         if projection.get("snapshot_error"):
             pieces.append(f"Refresh failed: {projection['snapshot_error']}; Save keeps this snapshot")
         return " · ".join(pieces)
+
+
+def _section_card(
+    title: str, form: FluentParameterForm, *, note: QtWidgets.QWidget | None = None
+) -> FluentGroupBox:
+    """One setting section as a card of the page: :func:`panel_section`, a
+    card pad inside the card's edge."""
+
+    card = FluentGroupBox(title, title_strip_px=0)
+    layout = QtWidgets.QVBoxLayout(card)
+    pad = card_pad()
+    layout.setContentsMargins(pad, pad, pad, pad)
+    layout.addLayout(panel_section(title, form, note=note)[0])
+    return card
 
 
 def panel_editor_projection(owner: Any, projection: object) -> dict[str, object]:

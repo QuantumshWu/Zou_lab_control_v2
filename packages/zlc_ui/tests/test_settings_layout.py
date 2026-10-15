@@ -67,7 +67,8 @@ area.show()
 app.processEvents()
 card._open_settings()
 app.processEvents()
-form = card._settings_form
+# The rows these tests grow are the Display section's.
+form = card._settings_parameter_forms['display']
 body = card._settings_body
 viewport = card._settings_scroll.viewport()
 """
@@ -95,16 +96,31 @@ def assert_the_viewport_spans_the_body():
     # is sized from the form's measured requirement plus the popup's real
     # chrome -- so the viewport always spans the body and no row loses its
     # right edge.
-    form = card._settings_form
     body = card._settings_body
     viewport = card._settings_scroll.viewport()
     assert body.minimumWidth() == 0
     assert body.width() <= viewport.width(), (body.width(), viewport.width())
     margins = body.layout().contentsMargins()
-    required = form.minimum_content_width() + margins.left() + margins.right()
+    required = max(form.minimum_content_width() for form in card._settings_forms()) + (
+        margins.left() + margins.right())
     assert viewport.width() >= required, (viewport.width(), required)
 
 assert_the_viewport_spans_the_body()
+# The frame is bounded by its page, not by the card it belongs to: with
+# the page's room below Setting it shows every row, reaching past the
+# card's foot instead of ending on it edge on edge with its form cut off.
+popup = card._settings_popup
+page = popup.parentWidget()
+card_foot = card.mapTo(page, QtCore.QPoint(0, card.height())).y()
+assert popup.geometry().bottom() > card_foot, (popup.geometry(), card_foot)
+assert card._settings_scroll.verticalScrollBar().maximum() == 0
+# It opens clear of the strip -- never over its second line -- with its
+# right edge under Setting's as far as the page's left edge allows.
+strip_foot = card.mapTo(page, QtCore.QPoint(0, card.strip_rect().bottom() + 1)).y()
+assert popup.y() > strip_foot, (popup.geometry(), strip_foot)
+setting = card.settings_button
+setting_right = setting.mapTo(page, QtCore.QPoint(setting.width(), 0)).x()
+assert popup.x() == max(0, setting_right - popup.width()), (popup.geometry(), setting_right)
 rows = [form._rows[key] for key in form.spec.keys]
 rects = [QtCore.QRect(row.mapTo(body, QtCore.QPoint(0, 0)), row.size()) for row in rows]
 for index, rect in enumerate(rects):
@@ -527,7 +543,7 @@ before = {
     key: widget.mapTo(form, widget.rect().topLeft()).y()
     for key, widget in form._widgets.items()
 }
-assert len(before) >= 3, before
+assert len(before) >= 2, before
 
 card.set_panel_projection(state, parameter_surface(3))
 app.processEvents()
@@ -609,12 +625,11 @@ app.processEvents()
 def test_a_frame_carried_away_from_its_button_still_does_not_move(run_qt) -> None:
     """The previous guard only ever tested the frame where it opens.
 
-    Anchored, the frame is already pinned to its card-relative height cap and
-    cannot grow, so nothing moved and the fix looked complete.  Carried
-    somewhere else it was placed under a DIFFERENT height rule -- no cap at
-    all -- and the first content change after the drag grew it by 131 px and
-    moved every row 100 px.  A gesture that chooses a POSITION was deciding
-    the SIZE.
+    Anchored, the frame was pinned to a height cap and could not grow, so
+    nothing moved and the fix looked complete.  Carried somewhere else it
+    was placed under a DIFFERENT height rule -- no cap at all -- and the
+    first content change after the drag grew it by 131 px and moved every
+    row 100 px.  A gesture that chooses a POSITION was deciding the SIZE.
 
     Placement now happens once, when the frame opens.  What is on screen
     stays where the operator put it, and a new control goes below.

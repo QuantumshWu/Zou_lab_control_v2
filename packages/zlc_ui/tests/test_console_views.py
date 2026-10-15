@@ -300,7 +300,7 @@ tabs.setCurrentIndex(1)
 app.processEvents()
 assert not popup.isVisible(), 'the frame floated over another tab'
 # Hidden page updates stay as metadata until the same popup becomes visible.
-form = card._settings_form
+form = card._settings_parameter_forms['display']
 reconciles = []
 original_reconcile = form.reconcile
 form.reconcile = lambda *args, **kwargs: (reconciles.append(True), original_reconcile(*args, **kwargs))[1]
@@ -314,34 +314,41 @@ changed_surface['display'] = ({
     'minimum': None, 'maximum': None, 'step': None,
 },)
 console.set_panel_projection('panel-1', changed_state, changed_surface)
-assert not reconciles and 'display__colormap' not in form.spec.keys
+assert not reconciles and 'colormap' not in form.spec.keys
 tabs.setCurrentIndex(0)
 app.processEvents()
 assert popup.isVisible(), 'the frame did not come back with its tab'
 print('restored Setting keys', form.spec.keys)
-assert form.read_value('display__colormap') == 'magma'
+assert form.read_value('colormap') == 'magma'
 assert len(reconciles) == 1
+# The rows came with their section: titled, and in the page's one column.
+assert card._settings_sections['display'].isVisible()
+assert not card._settings_sections['fit'].isVisible()
 tabs.setCurrentIndex(1); app.processEvents()
 tabs.setCurrentIndex(0); app.processEvents()
 assert len(reconciles) == 1, 'an unchanged page return rebuilt the form'
 
 # Runtime keyed choices are not part of FormSpec: retain their invalidation too.
+form = card._settings_form
+panel_reconciles = []
+panel_reconcile = form.reconcile
+form.reconcile = lambda *args, **kwargs: (panel_reconciles.append(True), panel_reconcile(*args, **kwargs))[1]
 card.set_signal_choices((('source', (('Original', '@logic/source/value'),)),),
                         current='@logic/source/value')
 picker = form.widget_for('signal')
 QtTest.QTest.mouseClick(card._settings_close_button, QtCore.Qt.LeftButton)
 app.processEvents()
-before_choices = len(reconciles)
+before_choices = len(panel_reconciles)
 card.set_signal_choices((('source', (('Original', '@logic/source/value'),
                                     ('Derived', '@logic/source/derived'))),),
                         current='@logic/source/value')
-assert len(reconciles) == before_choices
+assert len(panel_reconciles) == before_choices
 assert not picker._find_choice_index('@logic/source/derived').isValid()
 QtTest.QTest.mouseClick(card.settings_button, QtCore.Qt.LeftButton)
 app.processEvents()
 assert form.widget_for('signal') is picker
 assert picker._find_choice_index('@logic/source/derived').isValid()
-assert len(reconciles) == before_choices + 1
+assert len(panel_reconciles) == before_choices + 1
 
 # The console going behind another program cannot separate them: a child
 # has no desktop presence to leave behind.
@@ -561,7 +568,7 @@ try:
     assert not specs, 'a hidden Setting rebuilt its controls'
     card._open_settings()
     app.processEvents()
-    assert popup.isVisible() and 'fit__expression' not in card._settings_form.keys
+    assert popup.isVisible() and 'expression' not in card._settings_parameter_forms['fit'].keys
 finally:
     console.close()
     app.processEvents()
@@ -1091,6 +1098,20 @@ assert ('camera-1', {'source_signal': 'camera-1.frames'}) in patches
 assert ('camera-1', {'device_keys': {'camera': 'mot_camera'}}) in patches
 editor.form.widget_for('repeat').valueNormalized.emit()
 assert patches[-1] == ('camera-1', {'values': {'repeat': 3}, 'normalized': True})
+# A number the form cannot read yet is no value: the draft keeps its last
+# one and the header keeps its own line -- no raw read error in it.
+status_line = editor.status_label.text()
+repeat_box = editor.form.widget_for('repeat')
+repeat_box.setProperty('numericError', 'the number does not fit the box')
+sent = len(patches)
+editor.form.changed.emit('repeat')
+assert len(patches) == sent and editor.status_label.text() == status_line
+repeat_box.setProperty('numericError', '')
+# An emptied path is the vacancy the draft holds, for Start's admission to
+# name in the header as a draft problem.
+artifact_picker.setText('')
+assert patches[-1] == ('camera-1', {'artifact_inputs': {'calibration_path': ''}}), patches[-1]
+artifact_picker.setText('C:/data/manual.json')
 readout = editor._artifact_result_readouts['artifact_path']
 assert readout.isReadOnly()
 assert readout.text() == 'C:/data/calibration-2.json'
@@ -1169,6 +1190,8 @@ assert not editor.form.widget_for('pulse_template').isEnabled()
 assert not editor.form.widget_for('exposure_seconds').isEnabled()
 assert editor._acquisition_combo.isEnabled() and editor.source_combo is not None
 assert set(editor._device_combos) == {'slm'}
+# A device argument reads as words, its acronym kept: not "Slm".
+assert editor._selector_rows[editor._device_combos['slm']][1] == 'SLM'
 view.editor_close_requested.emit(editor)
 app.processEvents()
 assert view.tabs.indexOf(editor) < 0
@@ -1290,7 +1313,8 @@ app.processEvents()
 assert card.size() == authored_size, 'same-size projection reset the card geometry'
 assert card._settings_popup.isVisible()
 card._settings_body.layout().activate()
-bound_editor = card._settings_form.widget_for('display__colormap')
+display_form = card._settings_parameter_forms['display']
+bound_editor = display_form.widget_for('colormap')
 bound_editor_right = bound_editor.mapTo(
     card._settings_scroll.viewport(),
     QtCore.QPoint(bound_editor.width() - 1, 0),
@@ -1301,41 +1325,58 @@ assert bound_editor_right < card._settings_scroll.viewport().width(), (
     f'editor-right={bound_editor_right}, '
     f'viewport={card._settings_scroll.viewport().width()}'
 )
-for key, row in card._settings_form._rows.items():
+# The Edit page's sections, each under its title a section gap from the
+# last, every control on ONE column across them.
+setting_rows = lambda: [
+    (section, key, form) for section, form in (
+        ('panel', card._settings_form), *card._settings_parameter_forms.items())
+    for key in form.spec.keys
+]
+for section, key, form in setting_rows():
+    row = form._rows[key]
     assert row.height() >= row.minimumSizeHint().height(), (
         f'Setting row {key!r} was vertically cut off: '
         f'{row.height()} < {row.minimumSizeHint().height()}'
     )
-parameter_left_edges = {
-    key: card._settings_form.widget_for(key).mapTo(
-        card._settings_form, QtCore.QPoint(0, 0)
-    ).x()
-    for key in ('display__title', 'display__x_label', 'display__colormap')
-}
+def control_edges():
+    return {
+        (section, key): form.widget_for(key).mapTo(card._settings_body, QtCore.QPoint(0, 0)).x()
+        for section, key, form in setting_rows()
+    }
+parameter_left_edges = control_edges()
 assert len(set(parameter_left_edges.values())) == 1, parameter_left_edges
 label_slot_widths = {
-    key: card._settings_form._rows[key].layout().itemAt(0).widget().width()
-    for key in ('display__title', 'display__x_label', 'display__colormap')
+    (section, key): form._rows[key].layout().itemAt(0).widget().width()
+    for section, key, form in setting_rows()
 }
 assert len(set(label_slot_widths.values())) == 1, label_slot_widths
-stable_geometry = {
-    key: (
-        card._settings_form._rows[key].geometry(),
-        card._settings_form.widget_for(key).geometry(),
-    )
-    for key in card._settings_form.spec.keys
-}
+from zlc_ui.fluent import control_height, row_gap, section_gap
+headings = [card._settings_sections[name] for name in ('panel', 'semantic', 'display', 'fit')]
+section_forms = card._settings_forms()
+assert [heading.isVisible() for heading in headings] == [True, True, True, True]
+assert [heading.text() for heading in headings] == ['Panel', 'Semantic', 'Display', 'Fit']
+for heading, form in zip(headings, section_forms):
+    assert heading.height() == control_height(), heading.height()
+    assert form.y() - heading.y() - heading.height() == row_gap(), (heading.geometry(), form.geometry())
+for form, heading in zip(section_forms, headings[1:]):
+    assert heading.y() - form.y() - form.height() == section_gap(), (form.geometry(), heading.geometry())
+# The Panel section names its size as the Edit page does.
+assert card._settings_form._labels['size'].text() == 'Panel size'
+def setting_geometry():
+    return {
+        (section, key): (
+            QtCore.QRect(form._rows[key].mapTo(card._settings_body, QtCore.QPoint(0, 0)),
+                         form._rows[key].size()),
+            form.widget_for(key).geometry(),
+        )
+        for section, key, form in setting_rows()
+    }
+stable_geometry = setting_geometry()
 card._settings_form.widget_for('interval_ms').button(800).click()
 state = dict(state, interval_ms=800)
 handle.set_panel_projection('panel-1', state, surface)
 app.processEvents()
-projected_geometry = {
-    key: (
-        card._settings_form._rows[key].geometry(),
-        card._settings_form.widget_for(key).geometry(),
-    )
-    for key in card._settings_form.spec.keys
-}
+projected_geometry = setting_geometry()
 assert projected_geometry == stable_geometry, {
     key: (stable_geometry[key], projected_geometry[key])
     for key in stable_geometry
@@ -1354,15 +1395,11 @@ class LayoutProbe(QtCore.QObject):
             self.requests += 1
         return False
 layout_probe = LayoutProbe()
-for watched in (
-    card._settings_form,
-    *card._settings_form._rows.values(),
-):
-    watched.installEventFilter(layout_probe)
-card._settings_form.reconcile(
-    card._settings_form.spec,
-    card._settings_form.read_all(),
-)
+for form in card._settings_forms():
+    for watched in (form, *form._rows.values()):
+        watched.installEventFilter(layout_probe)
+for form in card._settings_forms():
+    form.reconcile(form.spec, form.read_all())
 app.processEvents()
 assert layout_probe.requests == 0, (
     'a value-only Setting projection rebuilt the form layout'
@@ -1381,13 +1418,10 @@ card._settings_popup.hide()
 app.processEvents()
 card._open_settings()
 app.processEvents()
-compact_left_edges = {
-    key: card._settings_form.widget_for(key).mapTo(
-        card._settings_form, QtCore.QPoint(0, 0)
-    ).x()
-    for key in ('display__title', 'display__x_label', 'display__colormap')
-}
+compact_left_edges = control_edges()
 assert len(set(compact_left_edges.values())) == 1, compact_left_edges
+assert not card._settings_sections['semantic'].isVisible()
+assert not card._settings_sections['fit'].isVisible()
 handle.set_panel_projection('panel-1', state, surface)
 title_widget = card._settings_form.widget_for('title')
 natural_title_width = title_widget.minimumWidth()
@@ -1429,13 +1463,13 @@ handle.set_panel_signal_choices(
 )
 handle.set_panel_projection('panel-1', state, surface)
 assert 'kind' not in card._settings_form.read_all()
-assert card._settings_form.read_all()['display__show_colorbar'] is True
-assert card._settings_form.read_all()['display__colormap'] == 'viridis'
-assert card._settings_form.read_all()['display__title'] is None
-assert card._settings_form.auto_switch_for('display__title').isChecked()
-assert not card._settings_form.widget_for('display__title').isEnabled()
-assert card._settings_form.read_all()['semantic__x'] == 'sensor_x'
-assert card._settings_form.widget_for('fit__model').currentText() == '(none)'
+assert display_form.read_all()['show_colorbar'] is True
+assert display_form.read_all()['colormap'] == 'viridis'
+assert display_form.read_all()['title'] is None
+assert display_form.auto_switch_for('title').isChecked()
+assert not display_form.widget_for('title').isEnabled()
+assert card._settings_parameter_forms['semantic'].read_all()['x'] == 'sensor_x'
+assert card._settings_parameter_forms['fit'].widget_for('model').currentText() == '(none)'
 assert card._settings_form.read_all()['overlay_signal'] == '@logic/occ/site_overlay'
 # The scheduler's refresh policy is a closed set: every interval at once,
 # each segment just its number, the unit said once by the row.
@@ -1499,10 +1533,10 @@ handle.panel_save_figure_requested.connect(
 handle.panel_editor_closed.connect(
     lambda panel_id: events.append(('closed', panel_id))
 )
-card_semantic = card._settings_form.widget_for('semantic__x')
+card_semantic = card._settings_parameter_forms['semantic'].widget_for('x')
 card_semantic.setCurrentIndex(1)
 card_semantic.activated.emit(1)
-card_fit = card._settings_form.widget_for('fit__model')
+card_fit = card._settings_parameter_forms['fit'].widget_for('model')
 card_fit.setCurrentIndex(1)
 card_fit.activated.emit(1)
 fit_state = dict(
@@ -1525,7 +1559,7 @@ fit_surface = dict(
     ),
 )
 handle.set_panel_projection('panel-1', fit_state, fit_surface)
-fit_expression = card._settings_form.widget_for('fit__expression')
+fit_expression = card._settings_parameter_forms['fit'].widget_for('expression')
 fit_expression.setText('center_x=10, radius_x=guess(4)')
 fit_expression.editingFinished.emit()
 assert ('state', 'panel-1', {
@@ -1577,10 +1611,20 @@ noisy.widget.errorOccurred.emit('stale editor noise')
 assert reports == ['editor refusal'], reports
 assert editor._surface is second_host.widget
 assert view.tabs.count() == 3 and view.tabs.currentWidget() is editor
-assert editor.kind_label.text() == 'image'
+assert view.tabs.tabText(view.tabs.indexOf(editor)) == 'Edit panel · Camera'
+assert editor.kind_label.text() == '(image)'
+# The page's name is its heading; every card lays its title out as its
+# first row, a control high, as the Figure Viewer's and Device Manager's do.
+from zlc_ui.fluent import FluentSectionLabel
+assert isinstance(editor.title_label, FluentSectionLabel)
+for group in (*editor.parameter_groups.values(), editor.snapshot_group,
+              editor.producer_group, editor.save_group):
+    assert group._zlc_strip_px == 0, group.title()
+    assert group.layout().itemAt(0).layout().itemAt(0).widget().text() == group.title()
+assert editor.panel_form._labels['size'].text() == 'Panel size'
 facet_projection = dict(projection, state=facet_state)
 assert handle.update_panel_editor('panel-1', facet_projection)
-assert editor.kind_label.text() == 'facet grid · curve cells'
+assert editor.kind_label.text() == '(facet grid · curve cells)'
 assert handle.update_panel_editor('panel-1', projection)
 assert editor.producer_summary.text() == 'Logic node: cm'
 assert editor.open_producer_button.isEnabled()
@@ -1680,10 +1724,10 @@ assert not card._settings_form.widget_for('signal').isEnabled(), (
     f'groups={bool(card._groups)}'
 )
 assert not card._settings_form.widget_for('overlay_signal').isEnabled()
-assert not card._settings_form.widget_for('semantic__x').isEnabled()
+assert not card._settings_parameter_forms['semantic'].widget_for('x').isEnabled()
 assert card._settings_form.widget_for('size').isEnabled()
-assert card._settings_form.widget_for('display__colormap').isEnabled()
-assert card._settings_form.widget_for('fit__model').isEnabled()
+assert card._settings_parameter_forms['display'].widget_for('colormap').isEnabled()
+assert card._settings_parameter_forms['fit'].widget_for('model').isEnabled()
 assert not editor.panel_form.widget_for('signal').isEnabled()
 assert not editor.panel_form.widget_for('overlay_signal').isEnabled()
 assert not editor.parameter_forms['semantic'].isEnabled()
@@ -1989,9 +2033,9 @@ assert view.kind_combo.itemData(3) == ('logic', 'occupancy')
 assert view.kind_combo.itemData(4) == ('logic', 'calibration')
 assert view.kind_combo.itemText(0) == 'Plot: Curve'
 assert view.kind_combo.itemText(1) == 'Plot: 2D image'
-assert view.kind_combo.itemText(2) == 'Measurement: Camera Measurement'
-assert view.kind_combo.itemText(3) == 'Processor: Occupancy'
-assert view.kind_combo.itemText(4) == 'Task: Calibration'
+assert view.kind_combo.itemText(2) == 'Measurement: camera_measurement'
+assert view.kind_combo.itemText(3) == 'Processor: occupancy'
+assert view.kind_combo.itemText(4) == 'Task: calibration'
 assert view.kind_combo.currentData() == ('plot', 'image')
 QtTest.QTest.mouseClick(view.add_panel_button, QtCore.Qt.LeftButton)
 view.kind_combo.setCurrentIndex(2)
@@ -2643,8 +2687,7 @@ app.processEvents()
 card._open_settings()
 app.processEvents()
 
-form = card._settings_form
-declared = set(form.spec.keys)
+declared = {key for form in card._settings_forms() for key in form.spec.keys}
 for section in ('semantic', 'display', 'fit'):
     assert f'{section}_unavailable' not in declared, declared
 assert not any('unavailable' in key for key in declared), declared

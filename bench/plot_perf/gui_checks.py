@@ -27,6 +27,19 @@ def _plain(value):
     raise TypeError(f"unexpected selector/checkpoint value: {type(value).__name__}")
 
 
+def setting_rows(card):
+    """Every row of a card's Setting frame by its section-qualified key:
+    ``(form, field)`` for a Panel row under its own key and for a plot-owner
+    row under ``section__key``.  Empty while the frame was never opened."""
+
+    if card._settings_form is None:
+        return {}
+    rows = {field.key: (card._settings_form, field) for field in card._settings_form.spec.fields}
+    for section, form in card._settings_parameter_forms.items():
+        rows.update({f"{section}__{field.key}": (form, field) for field in form.spec.fields})
+    return rows
+
+
 def authored_selectors(panel):
     """Canonical authored selections; excludes host-local revision counters."""
     return {"region": _plain(panel.state.selector),
@@ -322,13 +335,14 @@ def panel_checkpoint(panel, card=None, *, editor=None):
         label = card._title_label
         title = html.unescape(re.sub(r"<[^>]*>", "", label.text()))
         form = card._settings_form
+        rows = setting_rows(card)
         result["card"] = {"structure": _plain(card._parameter_surface.get("data_structure", ())),
                           "landed": _plain(card._parameter_surface.get("data_valid", ())),
                           "title_text": title, "title_tooltip": label.toolTip(),
                           "title_may_be_elided": "…" in title,
                           "repair_keys": {section: [str(field["key"]) for field in card._parameter_surface.get(section, ())]
                                           for section in ("semantic", "fit")},
-                          "visible_form_keys": ([field.key for field in form.spec.fields]
+                          "visible_form_keys": (list(rows)
                                                 if form is not None and form.isVisible() else None)}
     return result
 

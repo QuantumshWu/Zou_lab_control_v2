@@ -3,8 +3,8 @@
 The board owns placement; this widget owns only the titled Fluent surface and
 the compact ``Setting`` / guarded ``×`` affordances.  Signal, size and update
 interval are edited in the Setting form and nowhere else: the card keeps no
-second control for any of them.  The title strip is the card's one handle: a
-card is carried by it whether or not it holds a picture yet.
+second control for any of them.  A drawn card is carried by its title strip,
+its body being its plot's; an empty card is carried by the whole of it.
 """
 
 from __future__ import annotations
@@ -18,7 +18,6 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 from zlc_data.units import figure_padded
 from zlc_ui.fluent import (
     detach_widget,
-    ACCENT_TINT,
     AXIS_GROUP_COLORS,
     BG,
     CARD_TITLE_PAD,
@@ -28,23 +27,25 @@ from zlc_ui.fluent import (
     FluentLabel,
     FluentOverlayFrame,
     FluentScrollArea,
+    FluentSectionLabel,
     FluentSettingsPopupAnchor,
     FluentStatusDot,
     fluent_text_width,
     GREY,
     MUTED_INK,
     RED_DARK,
-    popup_gap,
     RADIUS,
     RED,
     card_pad,
+    control_height,
     row_gap,
     scaled_px,
+    section_gap,
     show_fluent_popup_for_anchor,
     FONT,
     fluent_font_size,)
 from zlc_ui.form.form import FormChoice, FormFieldProps, FormSpec
-from zlc_ui.form.qt_form import FluentParameterForm, being_edited
+from zlc_ui.form.qt_form import FluentParameterForm, _form_label_width, being_edited
 
 from ._panel_projection import (
     interval_form_field,
@@ -54,7 +55,61 @@ from ._panel_projection import (
     parameter_form_spec,
     parameter_form_values,
     signal_form_runtime,
+    size_form_field,
 )
+
+
+#: The sections a plot owner declares a panel's parameters in, after the
+#: panel's own "Panel" section, each with its title.
+PARAMETER_SECTIONS = (("semantic", "Semantic"), ("display", "Display"), ("fit", "Fit"))
+
+
+def panel_section(
+    title: str,
+    form: FluentParameterForm,
+    *,
+    note: QtWidgets.QWidget | None = None,
+) -> tuple[QtWidgets.QVBoxLayout, FluentSectionLabel]:
+    """One titled section of a panel's settings, and its title: the title,
+    the section's ``note`` if it has one, then its form, a row gap apart.
+
+    THE one construction for both places a panel is set up.  The Edit page
+    lays each section out as a card of its own, the Setting frame as a
+    block of its body a section gap from the next; either way the title is
+    the one section title, a control high like every card's title row, so
+    a section is titled and starts its rows the same in both.
+    """
+
+    layout = QtWidgets.QVBoxLayout()
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.setSpacing(row_gap())
+    heading = FluentSectionLabel(title)
+    layout.addWidget(heading)
+    if note is not None:
+        layout.addWidget(note)
+    layout.addWidget(form)
+    return layout, heading
+
+
+def share_label_column(forms, *, widths: tuple[int, ...] = ()) -> int:
+    """Give ``forms`` one label column, the widest any of their rows needs,
+    and answer it (0 when nothing needs one).
+
+    Each form sizes a column to its own words, so sections stacked down one
+    page would start their controls at as many x.  ``widths`` are the
+    columns the page's other rows need (Save figure's rows, a producer
+    contribution's labels); the caller gives those rows the answer.
+    """
+
+    forms = tuple(forms)
+    column = max(
+        (*widths, *(_form_label_width(form.spec.fields) for form in forms if form.spec.fields)),
+        default=0,
+    )
+    if column:
+        for form in forms:
+            form.set_label_width(column)
+    return column
 
 
 def _coordinate_text(value: object) -> str:
@@ -329,7 +384,12 @@ class PanelCardView(FluentGroupBox):
         self._settings_close_button: FluentButton | None = None
         self._settings_scroll: FluentScrollArea | None = None
         self._settings_body: QtWidgets.QWidget | None = None
+        #: The Setting frame's sections, as on the Edit page: the Panel
+        #: form, then one form per plot-owner section, each in its block.
         self._settings_form: FluentParameterForm | None = None
+        self._settings_parameter_forms: dict[str, FluentParameterForm] = {}
+        #: Each section's title, by section, shown with its form.
+        self._settings_sections: dict[str, FluentSectionLabel] = {}
         # None means current; a deferred request retains whether keyed choices changed.
         self._settings_pending_rebuild: bool | None = None
         #: What the card's status dot says, kept so the Setting frame can say
@@ -442,10 +502,8 @@ class PanelCardView(FluentGroupBox):
         command_layout.addWidget(self.settings_button)
         command_layout.addWidget(self.close_button)
         band_layout.addWidget(self._title_commands, 0, QtCore.Qt.AlignVCenter)
-        # The strip is what the card is carried by (see mousePressEvent), so
-        # the hand is shown over it and nowhere else; its two commands are
-        # clicked, not carried.
-        self._title_band.setCursor(QtCore.Qt.OpenHandCursor)
+        # The hand is shown over what carries the card (see handle_rect and
+        # _show_grip); the strip's two commands are clicked, not carried.
         self._title_commands.setCursor(QtCore.Qt.ArrowCursor)
         band_height = self._band_height()
         self._title_band.setFixedHeight(band_height)
@@ -484,9 +542,10 @@ class PanelCardView(FluentGroupBox):
         # card before a mounted panel can be used.
         self._selectors_on = True
         self._surface_error_connected = False
-        #: (row, text) of a Setting value this card could not read; the
-        #: row is kept so a re-projection knows whether it replaced it.
-        self._local_setting_error = ("", "")
+        self._show_grip(QtCore.Qt.OpenHandCursor)
+        #: (form, row, text) of a Setting value this card could not read;
+        #: the row is kept so a re-projection knows whether it replaced it.
+        self._local_setting_error: tuple[FluentParameterForm | None, str, str] = (None, "", "")
         self.set_status("", error=False)
         self.set_selectors_enabled(True)
         # An empty card still has a size: the frame it is.  Settle it now, so
@@ -504,12 +563,32 @@ class PanelCardView(FluentGroupBox):
 
         return card_pad()
 
-    def handle_rect(self) -> QtCore.QRect:
-        """The part of the card it is carried by -- its strip -- in card
-        coordinates.  A drawn card's body is its plot's."""
+    def strip_rect(self) -> QtCore.QRect:
+        """The card's title strip, across its whole width, in card coordinates."""
 
         band = self._title_band.geometry()
         return QtCore.QRect(0, 0, self.width(), band.bottom() + 1)
+
+    def handle_rect(self) -> QtCore.QRect:
+        """The part of the card it is carried by, in card coordinates.
+
+        A drawn card is carried by its strip: its body is its plot's (a
+        gesture with Selectors on, nothing with them off).  An empty card's
+        body is a blank frame, so the whole card carries it -- the drop is
+        the slot under the pointer, wherever on the card it is held.
+        """
+
+        return self.rect() if self._surface is None else self.strip_rect()
+
+    def _show_grip(self, cursor: QtCore.Qt.CursorShape) -> None:
+        """Show ``cursor`` -- the open hand, or the closed one while carried --
+        over what carries this card: its strip, and an empty card's body."""
+
+        self._title_band.setCursor(cursor)
+        if self._surface is None:
+            self.setCursor(cursor)
+        else:
+            self.unsetCursor()
 
     def follow_pointer(self, pointer: QtCore.QPoint) -> None:
         """Keep the point this card is held by under ``pointer`` (global).
@@ -853,6 +932,7 @@ class PanelCardView(FluentGroupBox):
             detach_widget(self._surface)
         self._surface = widget
         self._surface_framed = False
+        self._show_grip(QtCore.Qt.OpenHandCursor)
         self._refresh_title_band()
         if widget is None:
             # The picture left, so the card is the empty frame its preset
@@ -1025,7 +1105,7 @@ class PanelCardView(FluentGroupBox):
         self._show_status()
 
     def _show_status(self) -> None:
-        local = self._local_setting_error[1]
+        local = self._local_setting_error[2]
         value, error = (local, True) if local else self._presented_status
         self._status_text = value
         self._status_error = error
@@ -1072,6 +1152,8 @@ class PanelCardView(FluentGroupBox):
             self._settings_popup.hide()
 
     def _form_spec(self) -> FormSpec:
+        """The Panel section: what the panel draws and how it is framed."""
+
         state = self._state_projection
         current_signal = str(state.get("signal") or "")
         fields: list[FormFieldProps] = []
@@ -1111,15 +1193,7 @@ class PanelCardView(FluentGroupBox):
                 "Overlay",
                 default=str(state.get("overlay_signal") or ""),
             ))
-        fields.append(
-            FormFieldProps(
-                "size",
-                "choice",
-                "Size",
-                default=state["size"],
-                choices=tuple(FormChoice(value, value) for value in self._size_choices),
-            )
-        )
+        fields.append(size_form_field(self._size_choices, state["size"]))
         if self._interval_choices:
             fields.append(
                 interval_form_field(
@@ -1127,42 +1201,6 @@ class PanelCardView(FluentGroupBox):
                     state["interval_ms"],
                 )
             )
-        for section in ("semantic", "display", "fit"):
-            declared_fields = tuple(
-                parameter_fields(self._parameter_surface, section)
-            )
-            for declared in declared_fields:
-                field = parameter_form_spec(
-                    (declared,),
-                ).fields[0]
-                fields.append(
-                    FormFieldProps(
-                        key=f"{section}__{str(declared['key'])}",
-                        kind=field.kind,
-                        label=field.label,
-                        default=field.default,
-                        required=field.required,
-                        unit=field.unit,
-                        description=field.description,
-                        minimum=field.minimum,
-                        maximum=field.maximum,
-                        choices=field.choices,
-                        cycle_choices=field.cycle_choices,
-                        cycle_label=field.cycle_label,
-                        segmented=field.segmented,
-                        allow_blank=field.allow_blank,
-                        unavailable_reason=field.unavailable_reason,
-                        automatic=field.automatic,
-                    )
-                )
-            # A REASON IS NOT A SETTING, so the form does not declare one.
-            # Each section's "why this could not be applied" used to be
-            # appended here as a field: kind "text", so it became a line
-            # edit labelled with the bare section name, sitting under the
-            # controls it was about and reading as another input.  The
-            # console already has one place for what it could not do -- the
-            # header line, and the standing mark on the card -- and that is
-            # where these go.
         return FormSpec(tuple(fields))
 
     def _form_values(self) -> dict[str, object]:
@@ -1185,16 +1223,27 @@ class PanelCardView(FluentGroupBox):
             )
         if self._interval_choices:
             values["interval_ms"] = int(self._state_projection["interval_ms"])
-        for section in ("semantic", "display", "fit"):
-            declared_fields = tuple(
-                parameter_fields(self._parameter_surface, section)
-            )
-            declared_values = parameter_form_values(
-                declared_fields,
-            )
-            for key, value in declared_values.items():
-                values[f"{section}__{key}"] = value
         return values
+
+    def _parameter_projection(self, section: str) -> tuple[FormSpec, dict[str, object]]:
+        """One plot-owner section's form: its declared fields and values.
+
+        A REASON IS NOT A SETTING, so no section declares one: a section's
+        "why this could not be applied" is a message, which the console
+        says in its header line and the card's standing mark.
+        """
+
+        declared = tuple(parameter_fields(self._parameter_surface, section))
+        if not declared:
+            return FormSpec(()), {}
+        return parameter_form_spec(declared), parameter_form_values(declared)
+
+    def _settings_forms(self) -> tuple[FluentParameterForm, ...]:
+        """Every form of the Setting frame, top to bottom."""
+
+        if self._settings_form is None:
+            return ()
+        return (self._settings_form, *self._settings_parameter_forms.values())
 
     def _rebuild_settings_form(self, *, force: bool = False, opening: bool = False) -> None:
         if not opening and (
@@ -1203,25 +1252,35 @@ class PanelCardView(FluentGroupBox):
             self._settings_pending_rebuild = bool(force or self._settings_pending_rebuild)
             return
         if self._settings_form is not None:
-            spec = self._form_spec()
-            values = self._form_values()
-            if (
-                force
-                or self._settings_pending_rebuild
-                or not self._settings_form.adopt_projection(spec, values)
-            ):
-                self._settings_form.reconcile(spec, values)
+            projections = [(self._settings_form, "panel", self._form_spec(), self._form_values())]
+            projections.extend(
+                (form, section, *self._parameter_projection(section))
+                for section, form in self._settings_parameter_forms.items()
+            )
+            # Keyed choices changed (``force``) is the Panel form's alone:
+            # it is the one whose rows read the signal domain.
+            keyed = bool(force or self._settings_pending_rebuild)
+            for form, section, spec, values in projections:
+                if (
+                    (keyed and form is self._settings_form)
+                    or not form.adopt_projection(spec, values)
+                ):
+                    form.reconcile(spec, values)
+                # A section with nothing declared is not shown, and takes
+                # no section gap.
+                self._settings_sections[section].setVisible(bool(spec.fields))
+                form.setVisible(bool(spec.fields))
+            share_label_column(self._settings_forms())
             # The projection now stands in every row the operator is not
             # typing in -- written with signals blocked, so no ``changed``
             # clears a read error its value replaced.  Left standing, the
             # red text outlived the value and hid every later presenter
             # condition.  A row still being typed in keeps both.
-            row = self._local_setting_error[0]
-            if row and not (
-                row in spec.keys
-                and being_edited(self._settings_form.widget_for(row))
+            form, row, _text = self._local_setting_error
+            if form is not None and not (
+                row in form.spec.keys and being_edited(form.widget_for(row))
             ):
-                self._local_setting_error = ("", "")
+                self._local_setting_error = (None, "", "")
                 self._show_status()
             self._apply_settings_enabled_state()
             self._sync_settings_body_size(opening=opening)
@@ -1240,11 +1299,8 @@ class PanelCardView(FluentGroupBox):
         for key in ("overlay_signal", "cell_kind"):
             if key in form.spec.keys:
                 form.widget_for(key).setEnabled(not science_locked)
-        if science_locked:
-            for field in parameter_fields(self._parameter_surface, "semantic"):
-                key = f"semantic__{field['key']}"
-                if key in form.spec.keys:
-                    form.widget_for(key).setEnabled(False)
+        # A Task-protected panel keeps its semantics, as on the Edit page.
+        self._settings_parameter_forms["semantic"].setEnabled(not science_locked)
 
     def _sync_settings_body_size(self, *, opening: bool = False) -> None:
         """Measure the content.  Do NOT move the frame it is sitting in.
@@ -1272,7 +1328,7 @@ class PanelCardView(FluentGroupBox):
             return
         margins = body.layout().contentsMargins()
         required_width = (
-            self._settings_form.minimum_content_width()
+            max(form.minimum_content_width() for form in self._settings_forms())
             + margins.left()
             + margins.right()
         )
@@ -1318,20 +1374,6 @@ class PanelCardView(FluentGroupBox):
             else QtCore.Qt.ScrollBarAlwaysOff
         )
 
-    def _settings_available_height(self) -> int:
-        """Vertical room the popup may take: from below Setting to the card foot."""
-
-        anchor_bottom = self.settings_button.mapTo(
-            self,
-            QtCore.QPoint(0, self.settings_button.height()),
-        ).y()
-        return max(
-            1,
-            self.rect().bottom()
-            - anchor_bottom
-            - popup_gap(),
-        )
-
     def _show_settings_popup(self) -> None:
         """The card's ONE popup placement call, always with fresh geometry.
 
@@ -1340,21 +1382,26 @@ class PanelCardView(FluentGroupBox):
         form was rebuilt.
         """
 
+        popup = self._settings_popup
+        # Placed off the STRIP, so the frame stands clear of it -- under its
+        # foot where the page has the room, over its top where it has more
+        # -- and never over the strip's second line.  ONE height rule: the
+        # form's, bounded by the frame's PAGE, never by the card, whose foot
+        # is not an edge of anything the frame belongs to.  Placement
+        # happens once, when the frame opens.
         show_fluent_popup_for_anchor(
-            self._settings_popup,
-            self.settings_button,
+            popup,
+            self._title_band,
             self._settings_body,
             minimum_width=1,
             minimum_height=320,
-            # ONE height rule.  There used to be a second one -- no cap at
-            # all once the operator had dragged the frame -- which only ever
-            # ran on the while-visible re-placement, and made the frame grow
-            # by 131 px the first time anything changed after a drag.
-            # Placement now happens once, when the frame opens, and it opens
-            # beside its button.
-            maximum_height=self._settings_available_height(),
             content_width=self._settings_content_width,
         )
+        # Beside its button: the frame's right edge is Setting's.
+        right = self.settings_button.mapTo(
+            popup.parentWidget(), QtCore.QPoint(self.settings_button.width(), 0)
+        ).x()
+        popup.move(max(0, right - popup.width()), popup.y())
 
     def _open_settings(self) -> None:
         created = self._settings_popup is None
@@ -1374,10 +1421,15 @@ class PanelCardView(FluentGroupBox):
             # button -- centred in the row -- read as sitting low in a blank
             # that was all above it.
             layout.setSpacing(pad)
+            scroll = FluentScrollArea(popup)
             header = QtWidgets.QWidget(popup)
             header.setStyleSheet("background: transparent;")
             header_layout = QtWidgets.QHBoxLayout(header)
-            header_layout.setContentsMargins(0, 0, pad, 0)
+            # The close x ends where the fields end: the body stops a pad
+            # short of the scroll viewport, which stops the bar's gutter
+            # short of the frame's edge.
+            gutter = scroll.verticalScrollBar().sizeHint().width()
+            header_layout.setContentsMargins(0, 0, pad + gutter, 0)
             header_layout.setSpacing(row_gap())
             drag_handle = FluentLabel(
                 f"Setting · {self.panel_id}",
@@ -1386,31 +1438,22 @@ class PanelCardView(FluentGroupBox):
             drag_handle.setCursor(QtCore.Qt.SizeAllCursor)
             drag_handle.installEventFilter(self)
             header_layout.addWidget(drag_handle, 1)
-            close_button = FluentButton("×", header)
-            close_button.setFixedSize(
-                scaled_px(24, minimum=20),
-                scaled_px(24, minimum=20),
-            )
+            # Closing the frame takes nothing away and commits nothing: the
+            # quiet one-glyph look of a tab's close x, never the red of the
+            # card's own remover, square at a control's height.
+            close_button = FluentButton("×", header, role="quiet")
+            close_button.setFixedSize(control_height(), control_height())
             close_button.setToolTip("Close settings")
-            # Closing the frame takes nothing away and commits nothing: a
-            # plain ghost, with no face until the pointer is over it, and
-            # never the red of the card's own remover.  The held face stays
-            # the button sheet's own, hence ``:!pressed``.
-            close_button.setStyleSheet(
-                close_button.styleSheet()
-                + "QPushButton { background: transparent; border-color: transparent; }"
-                + f"QPushButton:hover:!pressed {{ background: {ACCENT_TINT};"
-                + f" border-color: {ACCENT_TINT}; }}"
-            )
             close_button.clicked.connect(self.retire_settings_popup)
             header_layout.addWidget(close_button, 0)
             layout.addWidget(header)
-            scroll = FluentScrollArea(popup)
             body = QtWidgets.QWidget()
             body.setStyleSheet("background: transparent;")
             body_layout = QtWidgets.QVBoxLayout(body)
             body_layout.setContentsMargins(0, 0, pad, 0)
-            body_layout.setSpacing(row_gap())
+            # The sections of the Edit page, each under its title, a section
+            # gap apart; a hidden one takes no gap.
+            body_layout.setSpacing(section_gap())
             status = FluentLabel("", body)
             status.setWordWrap(True)
             status.hide()
@@ -1420,13 +1463,34 @@ class PanelCardView(FluentGroupBox):
                 self._form_spec(),
                 self._form_values(),
                 runtime=self._signal_runtime,
-                parent=body,
             )
-            self._settings_pending_rebuild = None
             self._settings_form.changed.connect(self._setting_changed)
             self._settings_form.value_normalized.connect(self._setting_changed)
+            blocks = [("panel", "Panel", self._settings_form)]
+            for section, title in PARAMETER_SECTIONS:
+                form = FluentParameterForm(*self._parameter_projection(section))
+                form.changed.connect(
+                    lambda key, name=section: self._parameter_changed(name, str(key))
+                )
+                form.value_normalized.connect(
+                    lambda key, name=section: self._parameter_changed(name, str(key))
+                )
+                self._settings_parameter_forms[section] = form
+                blocks.append((section, title, form))
+            for section, title, form in blocks:
+                # A block of the body's own layout: its form is the body's
+                # child, so a row it gains or loses reaches the body's own
+                # layout request, where the frame is measured.
+                block, heading = panel_section(title, form)
+                body_layout.addLayout(block)
+                # A section with nothing declared is not shown, and a block
+                # all of whose widgets are hidden takes no section gap.
+                heading.setVisible(bool(form.spec.fields))
+                form.setVisible(bool(form.spec.fields))
+                self._settings_sections[section] = heading
+            share_label_column(self._settings_forms())
+            self._settings_pending_rebuild = None
             self._apply_settings_enabled_state()
-            body_layout.addWidget(self._settings_form)
             buttons = QtWidgets.QHBoxLayout()
             buttons.setContentsMargins(0, 0, 0, 0)
             buttons.setSpacing(row_gap())
@@ -1527,33 +1591,48 @@ class PanelCardView(FluentGroupBox):
         )
 
     def _setting_changed(self, key: str) -> None:
-        if self._settings_form is None:
+        """A Panel row edited: its value, as one patch."""
+
+        form = self._settings_form
+        if form is None:
             return
         name = str(key)
         try:
-            value = self._settings_form.read_value(name)
-            section, separator, parameter_key = name.partition("__")
-            if separator and section in {"semantic", "display", "fit"}:
-                patch: dict[str, object] = parameter_edit_values(
-                    parameter_fields(self._parameter_surface, section),
-                    section,
-                    parameter_key,
-                    lambda key: self._settings_form.read_value(
-                        f"{section}__{key}"
-                    ),
-                )
-            elif name == "interval_ms":
-                patch = {name: int(value)}
+            value = form.read_value(name)
+            if name == "interval_ms":
+                patch: dict[str, object] = {name: int(value)}
             elif name in {"title", "signal", "overlay_signal", "size", "cell_kind"}:
                 patch = {name: str(value or "")}
             else:
                 return
         except (KeyError, TypeError, ValueError) as error:
-            self._local_setting_error = (name, str(error) or type(error).__name__)
-            self._show_status()
+            self._setting_unreadable(form, name, error)
             return
-        if self._local_setting_error[0]:
-            self._local_setting_error = ("", "")
+        self._setting_read(patch)
+
+    def _parameter_changed(self, section: str, key: str) -> None:
+        """A plot-owner row edited: it and what is edited with it, as one patch."""
+
+        form = self._settings_parameter_forms[section]
+        try:
+            patch = parameter_edit_values(
+                parameter_fields(self._parameter_surface, section),
+                section,
+                key,
+                form.read_value,
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            self._setting_unreadable(form, key, error)
+            return
+        self._setting_read(patch)
+
+    def _setting_unreadable(self, form: FluentParameterForm, row: str, error: Exception) -> None:
+        self._local_setting_error = (form, row, str(error) or type(error).__name__)
+        self._show_status()
+
+    def _setting_read(self, patch: dict[str, object]) -> None:
+        if self._local_setting_error[0] is not None:
+            self._local_setting_error = (None, "", "")
             self._show_status()
         self.state_changed.emit(patch)
 
@@ -1565,11 +1644,9 @@ class PanelCardView(FluentGroupBox):
         return ()
 
     def mousePressEvent(self, event) -> None:  # noqa: N802 - Qt API
-        # The STRIP carries the card, whatever the card holds.  A drawn
-        # card's body is its plot's (a gesture with Selectors on, nothing
-        # with them off), so the strip is the only grip it has, and an empty
-        # card -- whose blank body would take the press -- is held the same
-        # way, so the two kinds of card cannot be carried differently.
+        # What carries the card is handle_rect: a drawn card's strip, an
+        # empty card's whole frame.  A press on a strip command is the
+        # command's; a press in a drawn card's body is its plot's.
         if (
             event.button() == QtCore.Qt.LeftButton
             and self.handle_rect().contains(event.pos())
@@ -1599,9 +1676,9 @@ class PanelCardView(FluentGroupBox):
                     return
                 self._drag_offset = self._press_at
                 # The closed hand marks the grab, so it appears when the
-                # card actually starts following the pointer -- on the strip,
-                # which is what stays under the pointer while it does.
-                self._title_band.setCursor(QtCore.Qt.ClosedHandCursor)
+                # card actually starts following the pointer -- over what
+                # it is held by, which stays under the pointer while it does.
+                self._show_grip(QtCore.Qt.ClosedHandCursor)
                 self.drag_started.emit(pointer)
             self.follow_pointer(event.globalPos())
             self.drag_moved.emit(pointer)
@@ -1612,7 +1689,7 @@ class PanelCardView(FluentGroupBox):
             dragged = self._drag_offset is not None
             self._press_at = None
             self._drag_offset = None
-            self._title_band.setCursor(QtCore.Qt.OpenHandCursor)
+            self._show_grip(QtCore.Qt.OpenHandCursor)
             self.releaseMouse()
             # A press that reaches release without ever crossing the
             # threshold IS a click, and a click drops nothing.

@@ -1546,7 +1546,7 @@ class FluentGroupBox(QtWidgets.QGroupBox):
 #: a ghost in quiet ink that turns red only under the pointer, since red at
 #: rest marks problems); and ``destructive_primary`` the confirm of a
 #: destructive question -- the one white-on-red fill.
-BUTTON_ROLES = ("primary", "standard", "destructive", "destructive_primary")
+BUTTON_ROLES = ("primary", "standard", "quiet", "destructive", "destructive_primary")
 
 _BUTTON_STYLE_CACHE: tuple[float, str] | None = None
 
@@ -1575,7 +1575,10 @@ def _button_stylesheet() -> str:
     one-glyph remover repeated down a list of rows (x) stays a ghost with
     the red wash only under the pointer, because a column of red faces
     shouted louder than the rows it removed.  destructive_primary is the
-    RED_DARK fill with white ink.  A command ON A TINTED CARD (``on_tint``,
+    RED_DARK fill with white ink.  Quiet is the one-glyph command that
+    takes nothing away -- closing a frame: the look of a tab's close x, no
+    face and MUTED_INK at rest, TEXT on the ACCENT_TINT wash under the
+    pointer and SELECTED held down; never the red of a remover.  A command ON A TINTED CARD (``on_tint``,
     the green config Subpulse) is a white face with HOVER ink (9.9:1): no
     blue is laid on green, and the white face against the card is the
     command's whole boundary.  Pointer and press each step the face a
@@ -1643,6 +1646,15 @@ def _button_stylesheet() -> str:
     QPushButton[role="destructive_primary"]:pressed {{
         background: {red_strong_pressed}; border-color: {red_strong_pressed};
     }}
+    QPushButton[role="quiet"] {{
+        background: transparent; border-color: transparent; color: {MUTED_INK};
+    }}
+    QPushButton[role="quiet"]:hover {{
+        background: {ACCENT_TINT}; border-color: {ACCENT_TINT}; color: {TEXT};
+    }}
+    QPushButton[role="quiet"]:pressed {{
+        background: {SELECTED}; border-color: {SELECTED}; color: {TEXT};
+    }}
     QPushButton[glyph="true"] {{
         padding: 0px {scaled_px(4, minimum=2)}px;
         font-size: {round(fluent_font_size() * 1.35)}pt;
@@ -1661,7 +1673,8 @@ def _button_stylesheet() -> str:
     QPushButton[role="destructive_primary"]:disabled {{
         background: {DIVIDER}; border-color: {DIVIDER}; color: {DISABLED_INK};
     }}
-    QPushButton[role="destructive"][glyph="true"]:disabled {{
+    QPushButton[role="destructive"][glyph="true"]:disabled,
+    QPushButton[role="quiet"]:disabled {{
         background: transparent; border-color: transparent; color: {DISABLED_INK};
     }}
     """
@@ -1722,6 +1735,8 @@ class FluentButton(QtWidgets.QPushButton):
             return DISABLED_INK
         if role == "destructive":
             return RED_DARK if self.underMouse() or self.isDown() else MUTED_INK
+        if role == "quiet":
+            return TEXT if self.underMouse() or self.isDown() else MUTED_INK
         if role in ("primary", "destructive_primary"):
             return SURFACE
         return HOVER

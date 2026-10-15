@@ -10,9 +10,9 @@ both sides already depend on, in a module that imports nothing, so
 referencing it costs no Qt; the strip builds its colour table from it.
 
 The words a summary or status line is built from live here for the same
-reason: a count and the mark between a line's parts are written by
-headless presenters and by plugin editors alike, and every window has to
-word them one way.
+reason: a count, the mark between a line's parts and a declared name read
+out as words are written by headless presenters and by plugin editors
+alike, and every window has to word them one way.
 """
 
 from __future__ import annotations
@@ -50,4 +50,27 @@ def sentence(text: str) -> str:
     return text if not text or text.endswith((".", "?", "!", "…")) else f"{text}."
 
 
-__all__ = ["STATUS_SEVERITIES", "SUMMARY_SEPARATOR", "counted", "sentence"]
+#: The words a declared name keeps in capitals wherever it stands.
+_ACRONYMS = frozenset({"api", "dac", "daq", "id", "psf", "rf", "roi", "slm", "ttl"})
+
+
+def name_words(name: str) -> str:
+    """A snake_case ``name`` read out as words: "SLM feedback", "Fit params".
+
+    Sentence case -- the first word capitalised, the rest as declared --
+    with the lab's acronyms (SLM, DAQ, API, ROI, DAC, PSF, ID, RF, TTL) in
+    capitals, so a node kind, a device argument and a result name read
+    like every form label beside them.  Not ``str.title()``: that
+    capitalises every word and writes SLM as "Slm".
+    """
+
+    words = [
+        word.upper() if word.lower() in _ACRONYMS else word
+        for word in str(name).replace("_", " ").split()
+    ]
+    if words:
+        words[0] = words[0][:1].upper() + words[0][1:]
+    return " ".join(words)
+
+
+__all__ = ["STATUS_SEVERITIES", "SUMMARY_SEPARATOR", "counted", "name_words", "sentence"]
