@@ -67,6 +67,7 @@ from .binding import (
     pulse_field_value,
     resolve_api_parameters,
     resolve_subpulse_sources,
+    stale_subpulse_bindings,
 )
 from .wire import load_streamer_config
 from .manifest import pulse_target_from_xdc
@@ -113,6 +114,7 @@ __all__ = [
     "replace_component",
     "set_subpulse_source",
     "resolve_subpulse_sources",
+    "stale_subpulse_bindings",
     "remove_component",
     "PERIOD_KIND_PERIOD",
     "PERIOD_KIND_SPACER",

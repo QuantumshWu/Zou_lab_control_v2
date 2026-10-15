@@ -38,6 +38,7 @@ from zlc_pulse import (
     bracket_label,
     PulseSequence,
     api_parameter_columns_for,
+    field_label,
     scan_columns_for,
     normalize_binding_values,
     resolve_subpulse_sources,
@@ -451,8 +452,17 @@ class ScanPlan:
 
     @classmethod
     def from_tree(cls, tree: object) -> "ScanPlan":
+        """The axes the plan scans.  A parked row (``"enabled": false``) is
+        kept by the draft and the run record but is no axis: it is not read,
+        bound, played or counted in the shape, and its knob keeps its value."""
+
+        rows = plan_input_rows(tree)
+        if rows and all(not row.get("enabled", True) for row in rows):
+            raise ValueError("every scan axis is parked; switch one on to scan it")
         axes = []
-        for index, entry in enumerate(plan_input_rows(tree), 1):
+        for index, entry in enumerate(rows, 1):
+            if not entry.get("enabled", True):
+                continue
             try:
                 if entry["port"].startswith(MANUAL_PARAM_FAMILY):
                     manual_axis_name(entry["port"])
@@ -586,29 +596,53 @@ def api_overrides_from_authored(payload: object) -> dict[str, float]:
 
 def apply_api_overrides(
     sequence: PulseSequence, overrides: Mapping[str, float]
-) -> PulseSequence:
-    """The pulse with this run's API values written into its fields.
+) -> tuple[PulseSequence, dict[str, float]]:
+    """The pulse with this run's API values written into its fields, and
+    the values it does not declare.
 
     Each number is read in the unit the pulse declares for that name, which
     is the unit the form printed beside the box.  The declarations survive,
     so a plan that scans one of these still overrides it per point.  A name
-    the pulse does not declare is refused: it is a form written against a
-    different pulse, and running the nominal value instead is the silence
-    this whole path exists to end.
+    the pulse does not declare -- a value kept from another pulse, or for a
+    field its Subpulse file no longer offers -- is parked: written into
+    nothing and returned, so the run record names it as not applied, as the
+    editor shows it.  A name two fields answer to is still refused
+    (:func:`ambiguous_api_value`).
     """
 
     declared = {
         parameter.field_id: parameter.unit
         for parameter in sequence.api_bindings
     }
-    overrides = normalize_binding_values(sequence, overrides, source="api")
+    labelled: dict[str, list[str]] = {}
+    for parameter in sequence.api_bindings:
+        labelled.setdefault(field_label(sequence, parameter.field_ref), []).append(parameter.field_id)
+    for name in overrides:
+        if name not in declared and len(labelled.get(name, ())) > 1:
+            raise ValueError(ambiguous_api_value(name, labelled[name]))
+    known = set(declared) | set(labelled)
+    unapplied = {name: float(value) for name, value in overrides.items() if name not in known}
+    overrides = normalize_binding_values(
+        sequence, {name: value for name, value in overrides.items() if name in known}, source="api",
+    )
     if not overrides:
-        return sequence
+        return sequence, unapplied
     applied, _ids, _absent = apply_api_values(
         sequence,
         {name: (float(value), declared[name]) for name, value in overrides.items()},
     )
-    return applied
+    return applied, unapplied
+
+
+def ambiguous_api_value(name: str, field_ids: Sequence[str]) -> str:
+    """Why an API value written by a label several of the pulse's fields
+    answer to cannot be applied: the sentence the draft and the build refuse
+    it with, and the one the Scan editor writes on its line."""
+
+    return (
+        f"API value {name!r} names {len(field_ids)} fields of this pulse "
+        f"({', '.join(field_ids)}); write the field id of the one it sets"
+    )
 
 
 def api_overrides_to_authored(overrides: Mapping[str, float]) -> str:
@@ -621,7 +655,11 @@ def api_overrides_to_authored(overrides: Mapping[str, float]) -> str:
 
 
 def plan_input_rows(payload: object) -> tuple[dict, ...]:
-    """Read the two independent input banks without compiling Values text."""
+    """Read the two independent input banks without compiling Values text.
+
+    A row carries ``"enabled": False`` exactly when it is parked; a row
+    that scans carries no such key, however it was written.
+    """
     if isinstance(payload, ScanPlan):
         payload = payload.to_tree()
     elif isinstance(payload, str):
@@ -635,13 +673,18 @@ def plan_input_rows(payload: object) -> tuple[dict, ...]:
         raise TypeError("scan plan axes must be a list")
     rows = []
     for index, entry in enumerate(entries, 1):
-        allowed = {"port", "values", "unit", "mode", "value_text"}
+        allowed = {"port", "values", "unit", "mode", "value_text", "enabled"}
         if not isinstance(entry, Mapping) or not {"port", "values"} <= set(entry) or set(entry) - allowed:
-            raise ValueError("scan axis fields must be port, values, and optional unit, mode, value_text")
+            raise ValueError("scan axis fields must be port, values, and optional unit, mode, value_text, enabled")
         row = {"port": entry["port"], "values": entry["values"], "unit": entry.get("unit", ""),
                "mode": entry.get("mode", "range"), "value_text": entry.get("value_text", "")}
         if any(not isinstance(row[key], str) for key in ("port", "unit", "mode", "value_text")):
             raise TypeError(f"scan axis {index}: port, unit, mode and value_text must be text")
+        enabled = entry.get("enabled", True)
+        if not isinstance(enabled, bool):
+            raise TypeError(f"scan axis {index} ({row['port']!r}): enabled must be true or false")
+        if not enabled:
+            row["enabled"] = False
         if row["mode"] not in ("range", "values"):
             raise ValueError(f"scan axis {index} ({row['port']!r}): mode must be range or values")
         values = row["values"]
@@ -697,9 +740,11 @@ def _selected_plan(
         str(getattr(item, "axis", "")): item
         for item in getattr(selection, "ranges", ())
     }
-    axis_ids = scan_axis_ids([port_label(row["port"]) for row in rows])
+    # The dataset's axes are the plan's scanned rows; a parked row drew none.
+    scanned = [row for row in rows if row.get("enabled", True)]
+    axis_ids = scan_axis_ids([port_label(row["port"]) for row in scanned])
     changed = False
-    for row, axis_id in zip(rows, axis_ids, strict=True):
+    for row, axis_id in zip(scanned, axis_ids, strict=True):
         chosen = wanted.get(axis_id)
         if chosen is None or len(row["values"]) < 2:
             continue
@@ -783,6 +828,7 @@ __all__ = [
     "ScanAxis",
     "ScanPlan",
     "ScanPort",
+    "ambiguous_api_value",
     "bind_plan",
     "device_port_parts",
     "hardware_scan_ports_for",

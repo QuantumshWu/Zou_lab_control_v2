@@ -832,7 +832,7 @@ def test_component_and_non_executable_subpulse_files_roundtrip(tmp_path) -> None
     from zlc_pulse import (
         extract_subpulse, group_component, insert_subpulse, read_pulse_document,
         read_subpulse, subpulse_from_tree, subpulse_to_tree, write_subpulse,
-        apply_api_values, resolve_subpulse_sources, set_subpulse_source,
+        apply_api_values, resolve_subpulse_sources, set_subpulse_source, stale_subpulse_bindings,
     )
 
     authored = group_component(
@@ -866,6 +866,10 @@ def test_component_and_non_executable_subpulse_files_roundtrip(tmp_path) -> None
     write_subpulse(path, api_fragment)
     defaults = insert_subpulse(insert_subpulse(None, api_fragment), api_fragment)
     first, second = defaults.components
+    unchosen = resolve_subpulse_sources(replace(
+        set_subpulse_source(defaults, first.component_id, "config", ""), config_enabled=True))
+    assert unchosen.periods == defaults.periods
+    assert (unchosen.components[0].source, unchosen.components[0].config_path) == ("default", "")
     referenced = set_subpulse_source(defaults, first.component_id, "config", path.name)
     assert resolve_subpulse_sources(referenced, base_directory=tmp_path) is referenced
     assert referenced.periods == defaults.periods
@@ -896,9 +900,16 @@ def test_component_and_non_executable_subpulse_files_roundtrip(tmp_path) -> None
     expanded = resolve_subpulse_sources(active)
     assert expanded.components[0].period_ids[:2] == first.period_ids
     assert expanded.periods == resolve_subpulse_sources(active).periods
+    assert stale_subpulse_bindings(active, expanded) == ()
+    # A file that holds an API field constant plays it; only a run that sets
+    # that field is refused, by name.
     write_subpulse(path, replace(changed, bindings=()))
-    with np.testing.assert_raises_regex(ValueError, "Scan/API field"):
-        resolve_subpulse_sources(active)
+    constant = resolve_subpulse_sources(active)
+    assert api_field in {binding.field_id for binding in stale_subpulse_bindings(active, constant)}
+    assert api_field not in {binding.field_id for binding in constant.api_bindings}
+    assert constant.period_by_id[first.period_ids[0]].duration == 80
+    with np.testing.assert_raises_regex(ValueError, "unknown or ambiguous api field"):
+        apply_api_values(active, {api_field: (100, "ns")})
     write_subpulse(path, replace(changed, time_step_ns=10))
     with np.testing.assert_raises_regex(ValueError, "time step"):
         resolve_subpulse_sources(active)

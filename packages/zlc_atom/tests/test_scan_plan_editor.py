@@ -67,6 +67,110 @@ def test_a_manual_row_authors_a_name_and_the_values_a_hand_will_set() -> None:
         editor.deleteLater()
 
 
+def test_an_axis_switched_off_is_parked_not_deleted() -> None:
+    """Off keeps the row -- greyed, its port and values written in the plan
+    as ``"enabled": false`` -- and scans nothing; the summary counts it as
+    kept; the last axis switched off is said once, as the plan's problem;
+    and the draft read back keeps the row parked."""
+
+    editor = _editor()
+    drafts: list[dict] = []
+    editor.draft_changed.connect(drafts.append)
+    try:
+        editor._add_manual_axis()
+        editor._add_axis()
+        hand, bias = editor._rows
+        bias.enabled_switch.click()
+        axes = json.loads(drafts[-1]["values"]["plan"])["axes"]
+        assert "enabled" not in axes[0] and axes[1]["enabled"] is False
+        assert axes[1]["port"] == BIAS.port, "the row keeps its port"
+        assert not bias.port_combo.isEnabled() and not bias.input_stack.isEnabled()
+        assert bias.enabled_switch.isEnabled() and bias.remove_button.isEnabled()
+        assert [axis.port for axis in _plan(editor).axes] == ["manual:manual 1"]
+        assert "1 parked axis is kept and not scanned." in editor.summary.text()
+        hand.enabled_switch.click()
+        assert editor.problem.text() == "every scan axis is parked; switch one on to scan it."
+        editor.update_projection({"form_values": {"plan": drafts[-1]["values"]["plan"]}})
+        assert [row.scanned for row in editor._rows] == [False, False]
+        bias = editor._rows[1]
+        bias.enabled_switch.click()
+        assert editor.problem.text() == "" and bias.port_combo.isEnabled()
+        assert [axis.port for axis in _plan(editor).axes] == [BIAS.port]
+    finally:
+        editor.deleteLater()
+
+
+def test_a_parked_row_says_no_problem_and_greys_its_hand_label() -> None:
+    """Switched off, a row is greyed all but its switch and its ×, its
+    "By hand" too, and the problem of a box it cannot read leaves with it:
+    nothing reads the row, and the draft is written.  A greyed box puts
+    back the last number it could read, so the row switched on again reads
+    as that number and is written too."""
+
+    editor = _editor()
+    drafts: list[dict] = []
+    editor.draft_changed.connect(drafts.append)
+    try:
+        editor._add_manual_axis()
+        editor._add_axis()
+        hand, bias = editor._rows
+        bias.start_spin.setProperty("numericError", "the number does not fit the box")
+        bias.start_spin.valueNormalized.emit()
+        assert not bias.error_label.isHidden()
+        drafts.clear()
+        bias.enabled_switch.click()
+        assert bias.error_label.isHidden() and bias.error_label.text() == ""
+        assert json.loads(drafts[-1]["values"]["plan"])["axes"][1]["enabled"] is False
+        drafts.clear()
+        bias.enabled_switch.click()
+        assert bias.error_label.isHidden() and bias.range_problem() == ""
+        assert "enabled" not in json.loads(drafts[-1]["values"]["plan"])["axes"][1]
+        hand.enabled_switch.click()
+        assert not hand._kind.isEnabled() and not hand.name_edit.isEnabled()
+        assert hand.enabled_switch.isEnabled() and hand.remove_button.isEnabled()
+        hand.enabled_switch.click()
+        assert hand._kind.isEnabled()
+    finally:
+        editor.deleteLater()
+
+
+def test_the_plans_problem_is_the_drafts_issue_said_once() -> None:
+    """What the line under the axes says is the draft's issue word for word,
+    and the editor names it as shown: the Logic page header counts it in
+    the Scan plan section instead of saying it a second time above."""
+
+    from zlc_atom.nodes.seamless_scan.logic_node import SEAMLESS_SCAN_SCHEMA
+    from zlc_ui.console.logic_editor_view import _draft_status
+
+    editor = _editor()
+    drafts: list[dict] = []
+    editor.draft_changed.connect(drafts.append)
+
+    def issue() -> str:
+        with pytest.raises(ValueError) as refused:
+            SEAMLESS_SCAN_SCHEMA.project_values(
+                {"pulse_template": "mot.json", "plan": drafts[-1]["values"]["plan"]})
+        return str(refused.value)
+
+    try:
+        editor._add_axis()
+        assert editor.shown_problems() == {}
+        editor._add_axis()
+        assert editor.shown_problems() == {issue(): "Scan plan"}
+        assert _draft_status((issue(),), None, editor.shown_problems()) == (
+            "Draft: 1 problem in Scan plan")
+        editor._remove_row(editor._rows[-1])
+        assert editor.shown_problems() == {}
+        editor._rows[0].mode_choice.button("values").click()
+        assert "Values is empty" in issue()
+        assert editor.shown_problems() == {issue(): "Scan plan"}
+        editor._rows[0].enabled_switch.click()
+        assert editor.shown_problems() == {issue(): "Scan plan"}
+        assert issue() == "every scan axis is parked; switch one on to scan it"
+    finally:
+        editor.deleteLater()
+
+
 def test_a_fresh_manual_row_is_already_runnable() -> None:
     """An unnamed axis is not a plan, so the button never authors one."""
 
@@ -797,18 +901,20 @@ def _level_only_sequence():
 
 
 def test_api_values_are_rescoped_to_the_pulse_they_are_written_against() -> None:
-    """A value written against one pulse does not follow the node to the next.
+    """A value written against one pulse is kept, not deleted, under another.
 
-    The draft kept the previous pulse's ``hold = 250`` when a pulse with no
-    API parameters replaced it; the form had no row to show that line in,
-    and Start refused it by name -- a refusal the operator could neither
-    see the cause of nor undo.  The editor owns the re-scoping: it writes
-    the text back only when the pulse's vocabulary changes it, so one round
-    trip settles it; a box mid-word, a missing pulse and a frozen editor
-    decide nothing.
+    The editor used to drop every line the current pulse did not declare,
+    so a fixed value was gone after a brief switch to another pulse.  Now
+    such a line is parked: kept in the draft, shown under the rows as not
+    in this pulse with its ×, applied to nothing (the build names it in the
+    run record), and back in its box when the pulse that declares it does.
+    Only a value equal to the pulse's own is dropped, since it overrides
+    nothing.  A box mid-word, a missing pulse and a frozen editor decide
+    nothing.
     """
 
     from PyQt5 import QtCore
+    from zlc_ui.fluent import FluentButton
 
     app = ensure_qt_app(["scan-editor-rescope"])
     editor = ScanPlanEditor()
@@ -822,24 +928,40 @@ def test_api_values_are_rescoped_to_the_pulse_they_are_written_against() -> None
     assert drafts == []
     assert editor._values_text == "duration:p0 = 250"
 
-    # A pulse with no API parameters: the line is dropped, once.
+    # A pulse with no API parameters: the line is kept and parked.
     editor.update_projection(_projection(_plain_sequence(), api_values="duration:p0 = 250"))
-    assert drafts == [{"values": {"api_values": ""}}]
-    assert editor._values_text == ""
-    editor.update_projection(_projection(_plain_sequence(), api_values=""))
-    assert len(drafts) == 1, "the re-scoped text projects back and settles"
+    assert drafts == []
+    assert editor._values_text == "duration:p0 = 250"
+    assert editor.values_form.keys == ()
+    assert editor.parked_values.isVisible() and editor.values_title.isVisible()
+    assert editor._parked_shown == {
+        "duration:p0": "not in this pulse: duration:p0 = 250 (kept, not applied)"
+    }
 
-    # A pulse declaring other names keeps only what it declares.
-    drafts.clear()
+    # Back to the pulse that declares it: the value is in its box again.
+    editor.update_projection(_projection(bound, api_values="duration:p0 = 250"))
+    assert drafts == [] and editor._parked_shown == {}
+    assert editor.values_form.read_value("duration:p0") == 250
+
+    # A value equal to the pulse's own overrides nothing and is dropped; a
+    # name the pulse does not declare stays beside it.
     editor.update_projection(
         _projection(_level_only_sequence(), api_values="duration:p0 = 250\ndac:p0:dac = 1")
     )
-    assert drafts == [{"values": {"api_values": ""}}], drafts
+    assert drafts == [{"values": {"api_values": "duration:p0 = 250"}}], drafts
+    assert editor._parked_shown == {
+        "duration:p0": "not in this pulse: duration:p0 = 250 (kept, not applied)"
+    }
+    # Editing a box keeps the parked line in the text it writes.
     drafts.clear()
-    editor.update_projection(
-        _projection(_level_only_sequence(), api_values="duration:p0 = 250\ndac:p0:dac = -1")
-    )
+    editor.values_form.widget_for("dac:p0:dac").stepBy(-2)
+    assert drafts[-1]["values"]["api_values"] == "duration:p0 = 250\ndac:p0:dac = -1"
+    # Its × takes it out of the draft.
+    drafts.clear()
+    remove = editor.parked_values.findChildren(FluentButton)[0]
+    remove.click()
     assert drafts == [{"values": {"api_values": "dac:p0:dac = -1"}}], drafts
+    assert editor._parked_shown == {} and not editor.parked_values.isVisible()
 
     # No pulse at all decides nothing: the text waits for one.
     drafts.clear()
@@ -849,6 +971,8 @@ def test_api_values_are_rescoped_to_the_pulse_they_are_written_against() -> None
     })
     assert drafts == []
     assert editor._values_text == "duration:p0 = 250"
+    # Nor does it say a value is not in a pulse it has not got.
+    assert editor._parked_shown == {} and not editor.values_title.isVisible()
 
     # A box mid-word is the operator's: the text is not re-read over it.
     editor.update_projection(_projection(bound, api_values="duration:p0 = 250"))
@@ -863,22 +987,101 @@ def test_api_values_are_rescoped_to_the_pulse_they_are_written_against() -> None
     editor.deleteLater()
 
 
-def test_a_value_for_a_parameter_the_pulse_does_not_declare_is_refused_by_name() -> None:
-    """The backstop behind the editor: a build never runs a form written
-    against another pulse as though it were this one's."""
+def test_a_value_for_a_parameter_the_pulse_does_not_declare_is_parked_by_the_build() -> None:
+    """The build applies what the pulse declares and hands back the rest,
+    for the run record to name as not applied."""
 
     from zlc_atom.nodes.scan.plan import apply_api_overrides
 
-    with pytest.raises(ValueError, match="unknown or ambiguous api field"):
-        apply_api_overrides(_plain_sequence(), {"duration:p0": 240.0})
-    applied = apply_api_overrides(_bound_sequence(), {"duration:p0": 240.0})
-    assert applied.periods[0].duration == 240
+    plain, unapplied = apply_api_overrides(_plain_sequence(), {"duration:p0": 240.0})
+    assert plain == _plain_sequence() and unapplied == {"duration:p0": 240.0}
+    applied, unapplied = apply_api_overrides(_bound_sequence(), {"duration:p0": 240.0, "gone": 1.0})
+    assert applied.periods[0].duration == 240 and unapplied == {"gone": 1.0}
+
+
+def _shared_label_sequence():
+    """Two API DAC fields whose ports carry one label: 'p0.coil' names both."""
+
+    from zlc_pulse import (
+        AnalogStep, PulseBinding, PulseFieldRef, PulsePeriod, PulsePortSpec, PulseSequence, PulseTarget,
+    )
+
+    target = PulseTarget(
+        lanes=("d0", "d1", "a0", "a1", "a2", "a3"),
+        ports=(
+            PulsePortSpec("d0", "digital", ("d0",)),
+            PulsePortSpec("d1", "digital", ("d1",)),
+            PulsePortSpec("dac", "dac", ("a0", "a1"), bus_index=0, label="coil"),
+            PulsePortSpec("dac2", "dac", ("a2", "a3"), bus_index=1, label="coil"),
+        ),
+    )
+    return PulseSequence(
+        name="shared", target=target, time_step_ns=20,
+        periods=(
+            PulsePeriod("p0", 200, "ns", (1, 0, 0, 0, 0, 0),
+                        (AnalogStep("dac", "edge", 1), AnalogStep("dac2", "edge", 1))),
+            PulsePeriod("p1", 20, "ns", (0, 1, 0, 0, 0, 0)),
+        ),
+        bindings=(
+            PulseBinding(PulseFieldRef("dac", "p0", "dac"), "value", source="api"),
+            PulseBinding(PulseFieldRef("dac", "p0", "dac2"), "value", source="api"),
+        ),
+    )
+
+
+def test_a_label_two_fields_share_is_refused_at_the_draft_and_said_on_its_line() -> None:
+    """An API value written by a label two of the pulse's fields answer to
+    cannot be applied: the draft refuses it whatever axes the plan has, in
+    the build's own words and with no word about switching an axis off; the
+    editor writes that sentence on the value's line, in red, with its ×,
+    and names it as shown -- not as a value kept and not applied."""
+
+    from pathlib import Path
+    from types import SimpleNamespace
+    from PyQt5 import QtWidgets
+    from zlc_atom.nodes import ResolvedWorkspaceResource
+    from zlc_atom.nodes.scan import SCAN_PULSE_CONTRACT
+    from zlc_atom.nodes.scan.plan import ambiguous_api_value, apply_api_overrides
+    from zlc_atom.nodes.seamless_scan.logic_node import LOGIC_NODE, SEAMLESS_SCAN_SCHEMA
+
+    shared = _shared_label_sequence()
+    sentence = ambiguous_api_value("p0.coil", ("dac:p0:dac", "dac:p0:dac2"))
+    with pytest.raises(ValueError) as refused:
+        apply_api_overrides(shared, {"p0.coil": 1.0})
+    assert str(refused.value) == sentence
+    resources = {"pulse_template": ResolvedWorkspaceResource(Path("shared.json"), SCAN_PULSE_CONTRACT, shared)}
+    installation = SimpleNamespace(devices={})
+
+    def admitted(plan: dict, api_values: str) -> tuple[str, ...]:
+        values = SEAMLESS_SCAN_SCHEMA.project_values(
+            {"pulse_template": "shared.json", "plan": json.dumps(plan), "api_values": api_values})
+        return LOGIC_NODE.admit_resources(values, resources, installation)
+
+    hand = {"port": "manual:power", "values": [1.0, 2.0]}
+    assert admitted({"axes": [hand]}, "p0.coil = 1") == (sentence,)
+    assert admitted({"axes": [hand]}, "dac:p0:dac = 1\ngone = 2") == ()
+    (unbound,) = admitted({"axes": [hand, {"port": "pulse:param:gone", "values": [1.0]}]}, "")
+    assert unbound.endswith("; switch that axis off to keep it without scanning it")
+
+    ensure_qt_app(["scan-editor-shared-label"])
+    editor = ScanPlanEditor()
+    try:
+        editor.update_projection(_projection(shared, api_values="p0.coil = 1"))
+        assert editor._parked_shown == {"p0.coil": sentence}
+        assert editor.shown_problems() == {sentence: "API values"}
+        (line,) = editor.parked_values.findChildren(QtWidgets.QLabel)
+        assert line.text() == sentence + "."
+        editor.update_projection(_projection(shared, api_values="dac:p0:dac = 1"))
+        assert editor.shown_problems() == {} and editor._parked_shown == {}
+    finally:
+        editor.deleteLater()
 
 
 def test_an_api_axis_in_the_plan_locks_that_parameters_value_box() -> None:
     """A parameter the plan walks keeps its row in the API values form,
-    locked and named as swept, until its axis leaves the plan; the run's
-    values never carry it, because the plan says what it plays."""
+    locked and named as swept, until its axis leaves the plan.  A value the
+    draft fixed for it is kept meanwhile -- the plan overrides it point by
+    point -- and is back in force when the axis leaves."""
 
     import json
 
@@ -913,6 +1116,21 @@ def test_an_api_axis_in_the_plan_locks_that_parameters_value_box() -> None:
     app.processEvents()
     assert form.widget_for("dac:p0:dac").isEnabled(), "its axis left the plan"
     assert "swept" not in editor.values_note.text()
+
+    # Fixed, then swept, then the axis removed: the fixed value survives.
+    drafts: list[dict] = []
+    editor.draft_changed.connect(drafts.append)
+    kept = "duration:p0 = 250\ndac:p0:dac = -2"
+    editor.update_projection(_projection(bound, plan=plan, api_values=kept))
+    app.processEvents()
+    assert drafts == [] and not form.widget_for("dac:p0:dac").isEnabled()
+    assert form.read_value("dac:p0:dac") == -2
+    assert "kept" in next(field.unavailable_reason for field in form.spec.fields if field.key == "dac:p0:dac")
+    assert editor._overrides() == {"dac:p0:dac": -2.0, "duration:p0": 250.0}
+    editor.update_projection(_projection(bound, plan="", api_values=kept))
+    app.processEvents()
+    assert drafts == [] and form.widget_for("dac:p0:dac").isEnabled()
+    assert form.read_value("dac:p0:dac") == -2
     editor.close()
 
 

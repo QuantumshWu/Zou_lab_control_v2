@@ -309,6 +309,10 @@ class BindingRecord:
     source: str = "default"
     group_id: str = ""
     group_label: str = ""
+    #: Why the mark plays nothing today, said after it in muted ink: "not in
+    #: file" for a Scan/API mark inside a Subpulse whose file holds that
+    #: field constant.
+    note: str = ""
 
 
 @dataclass(frozen=True)

@@ -1552,9 +1552,13 @@ def test_default_config_mode_projects_file_subpulse_without_replacing_defaults(s
     source = group_component(sequence, (first.period_id, second.period_id), "Imaging")
     component, = source.components
     source = replace(source, bindings=(PulseBinding(PulseFieldRef("duration", period_id=outside.period_id),
-                                                   outside.unit, source="config", config_key="wait"),))
+                                                   outside.unit, source="config", config_key="wait"),
+                                       PulseBinding(PulseFieldRef("duration", period_id=second.period_id),
+                                                    second.unit, source="api")))
     fragment = extract_subpulse(source, component.component_id)
-    changed = replace(fragment, periods=(replace(fragment.periods[0], duration=4, unit="ms"), *fragment.periods[1:]))
+    # The file holds the API-marked duration constant: it does not offer it.
+    changed = replace(fragment, periods=(replace(fragment.periods[0], duration=4, unit="ms"), *fragment.periods[1:]),
+                      bindings=())
     path = tmp_path / "imaging.subpulse.json"
     write_subpulse(path, changed)
     values = tmp_path / "values.json"
@@ -1564,11 +1568,26 @@ def test_default_config_mode_projects_file_subpulse_without_replacing_defaults(s
     try:
         assert not presenter.sequence.config_enabled
         assert presenter.load_config_values(str(values))
+        # Config chosen before any file: the Subpulse plays its embedded
+        # default, the Pulse previews and runs, and its contents stay editable.
+        view.component_action_requested.emit("source", (component.component_id, "config", ""))
+        view.config_mode_committed.emit(True)
+        assert not view.config_error
+        assert view.subpulse_sources[0][4] == "No file — plays Default"
+        assert not view.schedule_view.schedule.periods[0].readonly
+        executed, _rows, _repeats = presenter._execution_request()
+        assert (executed.components[0].source, executed.components[0].config_path) == ("default", "")
+        assert executed.period_by_id[first.period_id].duration == first.duration
+        view.config_mode_committed.emit(False)
         view.component_action_requested.emit("source", (component.component_id, "config", str(path)))
         authored = presenter.sequence
         assert view.schedule_view.schedule.periods[0].duration.text == str(first.duration)
         view.config_mode_committed.emit(True)
         assert presenter.sequence.periods == authored.periods
+        assert not view.config_error
+        stale, = (record for record in view.scan_view.page.bindings if record.note)
+        assert (stale.field_id, stale.source, stale.group_label, stale.note) == (
+            f"duration:{second.period_id}", "api", "Imaging", "not in file")
         shown = view.schedule_view.schedule
         assert shown.components[0].config_active
         assert shown.periods[0].duration.text == "4" and shown.periods[0].readonly
