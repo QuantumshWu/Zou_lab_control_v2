@@ -206,7 +206,7 @@ def cold_kernels() -> tuple[str, ...]:
 #: compile of every kernel that reads a plane in its own dtype.  A camera is
 #: unsigned and may be either width; a derived plane is floating and may be
 #: either width; a derived COUNT is int64 -- every ``count`` reduction of a
-#: derive expression, loaded shots per site among them; a comparison or an
+#: derive variable, loaded shots per site among them; a comparison or an
 #: ``any``/``all`` is bool -- an occupancy or survival plane.  ONE tuple for
 #: every warm loop a producer's dtype reaches: the image fit kept a copy of
 #: its own and went on warming four of these after the image warmed eight.

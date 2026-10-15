@@ -321,30 +321,40 @@ occupancy-rate output. The generic
 compatible presenter join `occupied` to `frame_judged` without knowing the
 Occupancy plugin. Two processors build on that classification without
 adding a second one: `derive` publishes named Dataset results computed
-within each shot. Each row of its `outputs` is one published signal, written
-as flat columns and applied in a fixed order -- select, mask, combine,
-reduce: `value` (a member of the bound bundle or an earlier output) pinned
-with `at` (a label of its readout-event axis, such as `"1"`; empty keeps every
-frame, and a pin removes the axis), then optionally `where`/`where_at`/
-`where_is` (a boolean that invalidates the other samples), `op`/`with`/
-`with_at` (`+ - * / == != > < >= <= & |` with a member, an earlier output or a
-number in the value's unit) and `statistic`/`over` (`sum mean count min max
-std any all` over comma-separated axes inside the shot). For example
-`{"name": "bright", "value": "counts", "at": "1", "where": "occupied",
-"where_at": "1"}` keeps the counts of the sites frame 1 judged occupied, and
-`{"name": "loaded", "value": "occupied", "at": "0", "statistic": "sum",
-"over": "Site"}` counts the atoms loaded in each shot; agreement of frames 0
-and 2 is `"op": "=="` with `"with_at": "2"`, and a later row masks with it.
-On booleans `sum` is the number true, `mean` the fraction true and `count`
-the valid samples, as in a plot; booleans do not mix with numbers. An operand
-whose axes are a subset of the value's repeats along the rest, so a per-shot
-level normalises every site. The editor types each row against the source's
-own schemas -- the evaluation's rules, no data -- and shows the result
-(`→ repeat 1 × Site 35 · float32 · unit 1`) or the error beside its control;
-Start refuses a row that does not type. A row with only `name` and `code` is
-ordinary Python over `a.<member>` assigning `result`, for anything else (a
-site subset, a custom function). Statistics across shots -- averages,
-per-site probabilities with error bars, fits -- belong in a plot panel, so
+within one evaluation -- each publication live, the run's Dataset at the end
+of a finite run. Its draft is `variables`, one row per variable: a `name`,
+`publish` (on by default; off keeps an internal helper other variables read
+and nothing publishes), `terms` -- the formula, one row per line -- and an
+optional `statistic` over named axes. A term reads `of` (a member of the bound
+bundle or any other variable), a `number`, or `boolean` true/false (only
+after `==`/`!=`), and may pick labels of one axis of `of` by name, in any
+domain: `at` is the axis name, `labels` its exact labels as the catalog lists
+them; one label drops the axis, several keep those coordinates in axis order.
+Every later term has an operator of one of four kinds -- arithmetic
+`+ - * /`, comparison `== != > < >= <=`, logic `and`/`or`/`and not`, mask
+`where`/`where not` -- under one left-associative precedence (`* /`, `+ -`,
+one comparison, `and`, `or`, `where`); a group is an internal variable. For
+example agreement of frames 0 and 2 is an internal
+
+    {"name": "same", "publish": false, "terms": [
+        {"of": "occupied", "at": "frame", "labels": ["0"]},
+        {"op": "==", "of": "occupied", "at": "frame", "labels": ["2"]}]}
+
+and the published `{"name": "kept", "terms": [{"of": "counts"}, {"op":
+"where", "of": "same"}]}` keeps the counts of every frame where they agree
+(`same` repeats along the frames it lacks); `{"name": "loaded", "terms":
+[{"of": "occupied", "at": "frame", "labels": ["0"]}], "statistic": "sum",
+"over": ["Site"]}` counts the atoms loaded in each shot. On booleans `sum`
+is the number true, `mean` the fraction true and `count` the valid samples,
+as in a plot; booleans do not mix with numbers. An operand whose axes are a
+subset of the other's repeats along the rest, so a per-shot level
+normalises every site. Only the published variables and what they read are
+evaluated; a helper nothing published reads never blocks Start. The editor
+types each variable against the source's own schemas -- the evaluation's
+rules, no data -- and shows the result (`→ repeat 1 × Site 35 · float32 ·
+unit 1`) or the problem under the line it is about; Start refuses a
+published variable that does not type. Statistics across shots with error
+bars, per-site probabilities and fits belong in a plot panel, so
 Derive owns no history.
 The separate processor
 `frame_survival` asks, for selected forward frame pairs

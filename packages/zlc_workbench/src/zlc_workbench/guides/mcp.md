@@ -149,31 +149,52 @@ starts with no pairs and explicitly selects rows, e.g. `{"selection":"custom",
 draft changes update Occupancy and Frame Survival editors before new data arrives;
 runtime data still follows the actual acquired source schema.
 
-Derive is within-shot algebra on one producer's bundle; averages over shots,
-per-site probabilities and fits belong in a plot panel. Read the exact member,
-axis names and frame labels from `lab_catalog(node_id=<derive>)["node"]["inputs"]`,
-then give `values.outputs` one row per published signal. A row applies, in
-order, `value` at `at` (a readout-event label) → `where` → `op`/`with` →
-`statistic` over within-shot axes; chain rows for more. Booleans: `sum` is the
-number true, `mean` the fraction true, `count` the valid samples.
+Derive is algebra within one evaluation of one producer's bundle: live, each
+publication; at the end of a finite run, the run's Dataset. Read the member
+names, axis names and exact labels from
+`lab_catalog(node_id=<derive>)["node"]["inputs"]` -- a label is a coordinate
+label, or the coordinate written exactly: `0`, `1`, `0.1`, `6834700000` --
+then send `values.variables`, one row per variable: `name`, `terms` (the
+formula, one row per line, in order), optional `statistic` + `over`, and
+`"publish": false` for an internal helper that other variables read and
+nothing publishes. A term is `of` (a member or any other variable, no
+cycles), or `number`, or `boolean` (`"true"`/`"false"`, only after `==` or
+`!=`); a pick is `at` = an axis name of `of`, in any domain, plus `labels` = a
+list of its labels: one label drops the axis, several keep those coordinates.
+Every term after the first has `op`: `+ - * /`, `== != > < >= <=`, `and`,
+`or`, `and not`, `where`, `where not`. Precedence: `* /`, then `+ -`, then one
+comparison, then `and`/`and not`, then `or`, then `where`; left to right within
+a level; no parentheses -- put a group in an internal variable. `over` lists
+axis names of any domain; at the end of a finite run Derive reads the run's
+Dataset, so `over` a repeat axis is a shot average without error bars -- use a
+plot panel's Reduce for those. Booleans: `sum` is the number true, `mean` the
+fraction true, `count` the valid samples; booleans never mix with numbers. An
+operand whose axes are all on the other side repeats along the rest. A live
+publication that lacks a picked Repeat/Point value (another scan point or
+shot) fails the run, named by variable and term.
 
 | name | row |
 | --- | --- |
-| bright | `{"value":"counts","at":"1","where":"occupied","where_at":"1"}` |
-| loaded | `{"value":"occupied","at":"0","statistic":"sum","over":"Site"}` |
-| survival | `{"value":"occupied","at":"2","where":"occupied","where_at":"0","statistic":"mean","over":"Site"}` |
-| ratio | `{"value":"counts","at":"1","op":"/","with":"counts","with_at":"0"}` |
-| over30 | `{"value":"counts","at":"1","op":">","with":"30"}` |
-| norm | `{"value":"counts","at":"1","op":"/","with":"level"}` (level: a per-shot mean row above it) |
-| subset | `{"code":"a.occupied.sel(frame=1).sel(Site=[1, 2, 3]).all('Site')"}` |
+| same | `{"publish":false,"terms":[{"of":"occupied","at":"frame","labels":["0"]},{"op":"==","of":"occupied","at":"frame","labels":["2"]}]}` |
+| kept | `{"terms":[{"of":"counts"},{"op":"where","of":"same"}]}` (counts of every frame where frames 0 and 2 agree) |
+| loaded | `{"terms":[{"of":"occupied","at":"frame","labels":["0"]}],"statistic":"sum","over":["Site"]}` |
+| survived | `{"terms":[{"of":"occupied","at":"frame","labels":["2"]},{"op":"where","of":"occupied","at":"frame","labels":["0"]}],"statistic":"mean","over":["Site"]}` |
+| brightened | `{"terms":[{"of":"counts","at":"frame","labels":["2"]},{"op":"-","of":"counts","at":"frame","labels":["0"]},{"op":">","number":30},{"op":"and","of":"occupied","at":"frame","labels":["0"]}]}` |
+| window | `{"terms":[{"of":"counts","at":"frame","labels":["1"]},{"op":">","number":10},{"op":"and","of":"counts","at":"frame","labels":["1"]},{"op":"<","number":50},{"op":"and","of":"occupied","at":"frame","labels":["1"]}]}` |
+| rise | `{"terms":[{"of":"counts","at":"frame","labels":["1","2"]},{"op":"-","of":"counts","at":"frame","labels":["0"]}]}` (keeps frames 1 and 2) |
+| lost | `{"terms":[{"of":"occupied","at":"frame","labels":["0"]},{"op":"and not","of":"occupied","at":"frame","labels":["2"]}],"statistic":"sum","over":["Site"]}` |
+| empty0 | `{"terms":[{"of":"occupied","at":"frame","labels":["0"]},{"op":"==","boolean":"false"}]}` |
+| level + norm | `{"name":"level","publish":false,"terms":[{"of":"counts","at":"frame","labels":["1"]},{"op":"where","of":"occupied","at":"frame","labels":["1"]}],"statistic":"mean","over":["Site"]}` then `{"name":"norm","terms":[{"of":"counts","at":"frame","labels":["1"]},{"op":"/","of":"level"}]}` |
+| corner + corner_full | `{"name":"corner","publish":false,"terms":[{"of":"occupied","at":"Site","labels":["1","2","3","7","8","9"]}]}` then `{"name":"corner_full","terms":[{"of":"corner","at":"frame","labels":["1"]}],"statistic":"all","over":["Site"]}` |
 
-Each row also carries its `name`. Once the producer has published, a row that
-does not type against it is a draft issue `<name> · <stage>: <reason>`
-(`lab_state` logic[].issues, `logic.validate`) and `logic.start` is refused
-with it until the row is fixed; a member
-the producer never publishes is refused at Start in the same words, and a code
-row's failure names its row too. Do not export arrays to reconstruct Occupancy
-or Frame Survival.
+Each row also carries its `name`. Issues read `<name> · term k: <reason>`,
+`<name> · statistic: <reason>` or `<name> · name: <reason>`, or `switch
+Publish on for at least one variable`, in `lab_state` logic[].issues and
+`logic.validate`; `logic.start` is refused until they are fixed, and a member
+the producer never publishes is refused at Start in the same words. An
+unpublished variable that no published one reads is not evaluated and never
+blocks Start. Old drafts with `outputs` or `code` are refused as unknown
+fields. Do not export arrays to reconstruct Occupancy or Frame Survival.
 
 ## scan
 

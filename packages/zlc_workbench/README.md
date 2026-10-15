@@ -209,8 +209,8 @@ saved direct-parent lineage as one node-edge Flow of unique Logic and Device
 nodes. Save and shutdown are asynchronous. TaskConsole
 keeps its lifecycle beat running while nodes, projections, plot hosts or Panel
 Save retire; the window stays visible until every owner is actually stopped.
-The one exception is a Logic row that drives no device (a Derive expression
-that loops): once the close has reported what it is waiting for, that row lets
+The one exception is a Logic row that drives no device (a processor that
+never settles): once the close has reported what it is waiting for, that row lets
 go of its bookkeeping lease and stops holding the window, and its daemon
 mailbox thread does not keep the process alive. A row inside a device call
 keeps the close waiting.
