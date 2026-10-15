@@ -209,6 +209,7 @@ class TaskConsoleView(QtWidgets.QWidget):
         self.scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
         self.scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
         self.scroll.setWidget(self.board)
+        self.scroll.reserve_vertical_gutter()
         monitor_layout.addWidget(self.scroll, 1)
         self.tabs.add_permanent_tab(monitor_page, "Monitor")
 
