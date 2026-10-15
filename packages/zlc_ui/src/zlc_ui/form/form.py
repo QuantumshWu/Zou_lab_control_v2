@@ -184,8 +184,6 @@ class FormFieldProps:
                 raise ValueError(f"rows field {self.key!r} needs at least one column")
             if any(not isinstance(column, FormFieldProps) for column in columns):
                 raise TypeError(f"rows field {self.key!r} columns must contain FormFieldProps")
-            if any(column.kind == "rows" for column in columns):
-                raise ValueError(f"rows field {self.key!r} cannot nest rows")
             keys = tuple(column.key for column in columns)
             if len(keys) != len(set(keys)):
                 raise ValueError(f"rows field {self.key!r} column keys must be unique")

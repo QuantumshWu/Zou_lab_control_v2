@@ -41,6 +41,9 @@ _FIELD_KINDS = {
     "bool": "bool",
     "choice": "choice",
     "numeric_tuple": "text",
+    #: A list of names or labels (a Derive pick's labels), edited only by
+    #: the node's own editor: as a form field it would read as text.
+    "text_tuple": "text",
     #: A pair is two integers, edited as the text "y, x".  It stays one field
     #: because it is one fact -- a frame shape with a half-edited width is not a
     #: state worth being able to reach -- and its box is a number's width.
