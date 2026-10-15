@@ -76,8 +76,9 @@ class AuthoringField:
     blank_label: str = ""
     #: For a ``rows`` field: the fields of one row.  Its value is a tuple
     #: of rows, each a mapping of these names, built one row at a time --
-    #: a derive's signals -- and every row is projected by these fields
-    #: exactly as a whole draft is by its schema.
+    #: a derive's variables -- and every row is projected by these fields
+    #: exactly as a whole draft is by its schema, a column of rows included
+    #: (a variable's terms), its problems located row by row.
     columns: tuple["AuthoringField", ...] = ()
     #: Show ``choices`` side by side as one segmented control rather than a
     #: popup.  The owner's call, for a closed set it declares with labels
@@ -122,8 +123,6 @@ class AuthoringField:
                 raise ValueError(f"rows field {self.name!r} needs the columns of a row")
             if any(not isinstance(column, AuthoringField) for column in columns):
                 raise TypeError("authoring field columns must contain AuthoringField values")
-            if any(str(column.value_type) == "rows" for column in columns):
-                raise ValueError(f"rows field {self.name!r} cannot nest rows in a column")
             names = tuple(column.name for column in columns)
             if len(set(names)) != len(names):
                 raise ValueError(f"rows field {self.name!r} column names must be unique")
@@ -460,7 +459,7 @@ class AuthoringSchema:
                 # One vacancy spelling per type family: an absent text is the
                 # empty string everywhere (form widgets hold "" natively).
                 value = ""
-            if value is None and str(field.value_type) == "rows":
+            if value is None and str(field.value_type) in ("rows", "text_tuple"):
                 value = ()
             vacant = value is None or (
                 field.required
@@ -517,6 +516,17 @@ def _project_value(
             except (TypeError, ValueError) as error:
                 raise type(error)(f"{field.label} row {index}: {error}") from None
         return tuple(rows)
+    if declared == "text_tuple":
+        # A list of names or labels, each one text: never a string split by
+        # a guessed separator, because a label may hold any character.
+        if isinstance(value, (str, bytes)) or not isinstance(value, (list, tuple)) or any(
+            not isinstance(item, str) for item in value
+        ):
+            raise TypeError(f"{field.label} must be a list of texts")
+        items = tuple(item.strip() for item in value)
+        if not all(items):
+            raise ValueError(f"{field.label} items must be non-empty text")
+        return items
     if declared == "numeric_tuple":
         try:
             parts = tuple(

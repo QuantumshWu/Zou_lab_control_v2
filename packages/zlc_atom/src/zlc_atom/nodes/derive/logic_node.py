@@ -12,87 +12,103 @@ from zlc_atom.nodes._framework.descriptor import (
 )
 from zlc_runtime import DatasetOutputDeclaration, split_signal_key
 
-from .expression import OUTPUT_COLUMNS, DeriveError, input_members, output_rows, typed_outputs
+from .expression import VARIABLE_COLUMNS, changing_axes, checked_variables, input_members, typed_variables
 from .processor import DeriveProcessor, declared_outputs
 
 
 def _readable(values: Mapping[str, object]) -> None:
-    """A complete draft is one whose outputs can be read without data.
+    """A complete draft is one whose variables read without data or the
+    source: every name, at least one published variable, and the formula
+    and statistic of every variable a published one reads.  What each one
+    reads is checked where the inputs' names are known: admission, build.
 
     Refused here, by what was written, while the draft is being edited --
     not at Start, where the same words would arrive as a failure to run.
     """
 
-    output_rows(values["outputs"])
+    checked_variables(values["variables"])
 
 
 DERIVE_SCHEMA = AuthoringSchema(
     (
         AuthoringField(
-            "outputs",
+            "variables",
             "rows",
-            "Outputs",
+            "Variables",
             (),
             required=True,
-            columns=OUTPUT_COLUMNS,
-            description="one row per published signal: structured columns, or code",
+            columns=VARIABLE_COLUMNS,
+            description="one row per variable; only variables with publish on become signals",
         ),
     ),
     validator=_readable,
 )
+#: The same rows without the validator: a raw draft's rows projected only
+#: for what they declare.
+_ROWS = AuthoringSchema(DERIVE_SCHEMA.fields)
 
 
 def _draft_outputs(
     values: Mapping[str, object],
     devices: Mapping[str, object],
 ) -> tuple[DatasetOutputDeclaration, ...]:
-    """What one draft publishes: the names of its outputs.
+    """What one draft publishes: its published variables, in card order.
 
-    A draft that cannot be read publishes nothing yet; the schema's
-    validator is what says why, to the editor, in the draft's own words.
+    Each one whose name reads is declared -- a formula being edited does
+    not withdraw the signal a panel shows, and a variable being renamed
+    withdraws only its own -- and nothing while the rows do not project;
+    the schema's validator says why, to the editor, in the draft's own
+    words.
     """
 
     del devices
     try:
-        return declared_outputs(values.get("outputs") or ())
-    except DeriveError:
+        rows = _ROWS.draft_values({"variables": values.get("variables", ())})["variables"]
+        return declared_outputs(rows)
+    except (TypeError, ValueError):
         return ()
 
 
 def _admit_source(values: Mapping[str, object], publication: object) -> tuple[str, ...]:
-    """What the outputs cannot compute from the producer's latest publication.
+    """What the variables cannot compute from what the producer publishes.
 
-    Every structured output typed against the schemas the next evaluation
-    reads, by the evaluation's own rules -- the typing the editor shows
-    under each card -- and each refusal in its ``<output> · <stage>: …``
-    words.  Asked with the rest of the draft's admission, so the Edit page
-    says it as a draft and Start waits, as for an output left unfinished;
-    refused by the build instead, the page read "not started" under three
-    red errors and Start was there to press.
+    Every variable typed against the schemas an evaluation reads -- the
+    run's whole geometry for a finite source, the latest event for a
+    monitor -- by the evaluation's own rules, the typing the editor shows
+    under each card: what each one reads, its picks (never on an axis each
+    publication carries its own part of, :func:`changing_axes`), operators
+    and statistic.  Each problem of a LIVE variable, and any variable's
+    name problem, in its ``<variable> · <stage>: …`` words.  Asked with the
+    rest of the draft's admission, so the Edit page says it as a draft and
+    Start waits; a parked helper's problems never hold Start.
     """
 
-    inputs = {
-        parts[1]: value.schema for key, value in publication.signals.items()
-        if (parts := split_signal_key(key)) is not None
-    }
+    inputs, changing = {}, {}
+    for key, value in publication.signals.items():
+        parts = split_signal_key(key)
+        if parts is None:
+            continue
+        event = value.snapshot.block.schema
+        inputs[parts[1]] = schema = value.canonical_schema or event
+        changing.update(changing_axes(schema, event))
     return tuple(
-        str(answer["error"]) for answer in typed_outputs(values["outputs"], inputs)
-        if answer["error"] is not None
+        str(answer["error"]) for answer in typed_variables(values["variables"], inputs, changing)
+        if answer["error"] is not None and (answer["live"] or answer["error"].stage == "name")
     )
 
 
 def _build(*, signal_plane: object, source_signal: str, **values: object) -> DeriveProcessor:
-    """The processor for the outputs over the bound producer's bundle.
+    """The processor for the variables over the bound producer's bundle.
 
-    The plane says which outputs the bound producer has, so a name an
-    output reads that the producer never publishes is refused here, by
-    output and stage, before anything runs -- and the bound signal is
+    The plane says which outputs the bound producer has, so a name a live
+    variable reads that the producer never publishes is refused here, by
+    variable and stage, before anything runs -- and the bound signal is
     recognised among them by the plane's own resolution, never by taking
-    its name apart.  What the outputs cannot compute from the producer's
+    its name apart.  What the variables cannot compute from the producer's
     latest publication was admitted with the draft (``_admit_source``).
     """
 
-    rows = DERIVE_SCHEMA.project_values(values)["outputs"]
+    rows = DERIVE_SCHEMA.project_values(values)["variables"]
     selected_source = str(source_signal).strip()
     if not selected_source:
         raise ValueError("source_signal must be non-empty")
@@ -111,7 +127,7 @@ def _build(*, signal_plane: object, source_signal: str, **values: object) -> Der
     )
     names = tuple(dict.fromkeys((primary, *input_members(rows, members))))
     signal_plane.resolve_sibling_signals(selected_source, names)
-    return DeriveProcessor(outputs=rows, primary_output=primary, input_outputs=names)
+    return DeriveProcessor(variables=rows, primary_output=primary, input_outputs=names)
 
 
 def _editor_factory(parent=None):
@@ -124,20 +140,31 @@ LOGIC_NODE = LogicNodeDescriptor(
     NodeKind.PROCESSOR,
     DERIVE_SCHEMA,
     description=(
-        "Within-shot algebra on one producer's synchronized bundle; each output row publishes a named "
-        "signal for plots, scans and processors. A structured row takes value (a member or an earlier "
-        "output), pins it with at (a readout-event label such as \"1\"; empty keeps every event), then "
-        "optionally masks it (where, where_at, where_is), combines it (op + - * / == != > < >= <= & | "
-        "with a member, an earlier output or a number in the value's unit; with_at) and reduces it "
-        "(statistic sum mean count min max std any all over comma-separated within-shot axes), in "
-        "that order; chain rows for more. On booleans sum is the number true, mean the fraction true, "
-        "count the valid samples; booleans do not mix with numbers. Operands whose axes are a subset "
-        "of the value's repeat along the rest. A code row has only name and code: Python over "
-        "a.<member>, assigning result. Example: {\"name\": \"loaded\", \"value\": \"occupied\", "
-        "\"at\": \"0\", \"statistic\": \"sum\", \"over\": \"Site\"}. Averages over shots, per-site "
-        "probabilities and fits belong in a plot panel."
+        "Within-evaluation algebra on one producer's synchronized bundle: live, each publication; at "
+        "the end of a finite run, the run's Dataset. values.variables has one row per variable: name; "
+        "publish (default true; false keeps a helper internal: other variables read it, nothing "
+        "publishes it); terms, the formula, one row per line; optional statistic + over. A term names "
+        "of (an input member or any other variable, no cycles), or gives number, or boolean "
+        "\"true\"/\"false\" (only after == or !=). at with labels (a list) picks coordinates of of: at is "
+        "an axis name (any domain) and labels are that axis' labels from the catalog, or at is a domain "
+        "with two or more axes (Repeat, Point, Cell) and labels are its rows written \"detuning 2 · power "
+        "1\"; one label drops the axis (the domain's axes), several keep those coordinates. A pick never "
+        "names an axis each publication carries its own part of (a finite run's shots and scan points, a "
+        "monitor's shots): reduce those, or plot them. Every term after the first has op: arithmetic + - "
+        "* /, comparison == != > < >= <=, logic and, or, \"and not\", mask where, \"where not\". "
+        "Precedence: * / then + - then one comparison then and/\"and not\" then or then where; left to "
+        "right within a level; no parentheses (put a group in an internal variable). statistic sum mean "
+        "count min max std any all reduces the over axis names (a list, any domains). Booleans: sum is "
+        "the number true, mean the fraction true, count the valid samples; booleans never mix with "
+        "numbers. An operand whose axes are a subset of the other's repeats along the rest. Only "
+        "published variables become signals; an unpublished variable no published one reads is not "
+        "evaluated and never blocks Start. Example: "
+        "[{\"name\":\"same\",\"publish\":false,\"terms\":[{\"of\":\"occupied\",\"at\":\"frame\","
+        "\"labels\":[\"0\"]},{\"op\":\"==\",\"of\":\"occupied\",\"at\":\"frame\",\"labels\":[\"2\"]}]},"
+        "{\"name\":\"kept\",\"terms\":[{\"of\":\"counts\"},{\"op\":\"where\",\"of\":\"same\"}]}]. "
+        "Shot averages with error bars, per-site probabilities and fits belong in a plot panel."
     ),
-    input_specs=(DatasetInputSpec("a", None, "exact", select_bundle=True),),
+    input_specs=(DatasetInputSpec("bundle", None, "exact", select_bundle=True),),
     declare_outputs=_draft_outputs,
     admit_source=_admit_source,
     ui_contributions=(_editor_factory,),

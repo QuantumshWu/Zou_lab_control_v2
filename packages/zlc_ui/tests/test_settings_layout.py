@@ -1255,12 +1255,12 @@ from zlc_ui.form.qt_form import FluentParameterForm
 app = ensure_qt_app(['test'])
 columns = (
     FormFieldProps('name', 'text', 'Name', default='', required=True, description='name of the signal'),
-    FormFieldProps('code', 'text', 'Code', default='', required=True, description='Python over a.<output>'),
+    FormFieldProps('note', 'text', 'Note', default='', required=True, description='what the signal says'),
 )
 spec = FormSpec((
     FormFieldProps('expressions', 'rows', 'Signals', default=(), required=True, columns=columns),
 ))
-first = {'name': 'agree', 'code': 'result = a.occupied.isel(frame=0) == a.occupied.isel(frame=2)'}
+first = {'name': 'agree', 'note': 'frames 0 and 2 agree'}
 form = FluentParameterForm(spec, {'expressions': (first,)})
 window = QtWidgets.QMainWindow(); window.setCentralWidget(form); window.show()
 window.activateWindow(); app.processEvents()
@@ -1285,24 +1285,24 @@ assert [top_of(below) - top_of(above) - above.height() for above, below in zip(l
 _row, cells, remove = editor._rows[1]
 assert isinstance(cells['name'], FluentLineEdit)
 assert QtWidgets.QApplication.focusWidget() is cells['name']
-assert cells['code'].placeholderText() == 'Python over a.<output>'
+assert cells['note'].placeholderText() == 'what the signal says'
 QtTest.QTest.keyClicks(cells['name'], 'counts')
-QtTest.QTest.keyClicks(cells['code'], 'result = a.counts.isel(frame=1).where(agree)')
+QtTest.QTest.keyClicks(cells['note'], 'counts where they agree')
 app.processEvents()
-second = {'name': 'counts', 'code': 'result = a.counts.isel(frame=1).where(agree)'}
+second = {'name': 'counts', 'note': 'counts where they agree'}
 assert form.read_all() == {'expressions': (first, second)}, form.read_all()
 assert seen.count('expressions') > 2
 
 # The projection of the same rows lands without rebuilding a box.
 form.reconcile(spec, {'expressions': (first, second)}); app.processEvents()
-assert editor._rows[1][1]['code'] is cells['code']
+assert editor._rows[1][1]['note'] is cells['note']
 # Different rows are not written under the operator's cursor ...
-cells['code'].setFocus(QtCore.Qt.MouseFocusReason); app.processEvents()
-assert QtWidgets.QApplication.focusWidget() is cells['code']
+cells['note'].setFocus(QtCore.Qt.MouseFocusReason); app.processEvents()
+assert QtWidgets.QApplication.focusWidget() is cells['note']
 form.reconcile(spec, {'expressions': (first,)}); app.processEvents()
 assert form.read_all() == {'expressions': (first, second)}
 # ... and land once they have left it.
-cells['code'].clearFocus(); app.processEvents()
+cells['note'].clearFocus(); app.processEvents()
 form.reconcile(spec, {'expressions': (first,)}); app.processEvents()
 assert form.read_all() == {'expressions': (first,)}
 

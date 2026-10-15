@@ -974,13 +974,13 @@ def test_header_save_layout_writes_no_panel_dataset(
     node, snapshot = _one_shot(session)
     presenter.add_panel(node.signal_key("frames"), snapshot, title="frames")
     rows = (
-        {"name": "first", "value": "frames", "at": "0"},
-        {"name": "twice", "value": "first", "op": "*", "with": "2"},
-        {"name": "rows", "code": "result = first.mean('spatial-y')"},
+        {"name": "first", "publish": False, "terms": [{"of": "frames", "at": "frame", "labels": ["0"]}]},
+        {"name": "twice", "terms": [{"of": "first"}, {"op": "*", "number": 2.0}]},
+        {"name": "rows", "terms": [{"of": "first"}], "statistic": "mean", "over": ["spatial-y"]},
     )
     derived = presenter.add_logic(
         "derive", source_signal=node.signal_key("frames"),
-        values={"outputs": rows},
+        values={"variables": rows},
     )
     path = tmp_path / "layout.json"
     presenter.view.save_answer = str(path)
@@ -994,13 +994,14 @@ def test_header_save_layout_writes_no_panel_dataset(
     assert presenter.LAYOUT_FORMAT == "zlc.console-board"
     assert document["format"] == presenter.LAYOUT_FORMAT
     assert document["panels"][0]["signal"] == node.signal_key("frames")
-    assert document["logic"][0]["values"]["outputs"] == list(rows)
+    assert document["logic"][0]["values"]["variables"] == list(rows)
     assert presenter.apply_layout(document)
     # A draft holds the projected value: a "rows" field is a tuple of rows,
-    # each with every column.
-    from zlc_atom.nodes.derive.expression import complete_row
+    # each with every column, a column of rows (the terms) included.
+    from zlc_atom.nodes.derive import DERIVE_SCHEMA
 
-    assert presenter.logic[derived].draft.values["outputs"] == tuple(complete_row(row) for row in rows)
+    assert presenter.logic[derived].draft.values["variables"] == DERIVE_SCHEMA.draft_values(
+        {"variables": rows})["variables"]
     assert not tuple(tmp_path.glob("*.npz"))
 
 
@@ -4221,12 +4222,12 @@ def test_a_board_names_its_panels_and_a_load_respells_every_reference_to_them() 
     with pytest.raises(LayoutError, match="unknown fit model"):
         LayoutDocument.from_tree(tree)
     saved["fit"] = {}
+    # A Derive saved before variables keeps none of its retired outputs: it
+    # loads empty, to be written again.
     tree["logic"].append({"node_id": "derived", "api_name": "derive", "values": {
         "outputs": [{"name": "result", "code": "a.counts +", "retired_column": 123}]}})
     _document, unfinished = _loaded_board(tree, ("panel-3", "panel-4", "panel-5"))
-    from zlc_atom.nodes.derive.expression import complete_row
-
-    assert unfinished.logic[-1].draft.values["outputs"] == (complete_row({"name": "result", "code": "a.counts +"}),)
+    assert unfinished.logic[-1].draft.values == {"variables": ()}
     with pytest.raises(LayoutError, match="one fresh panel_id per saved panel"):
         _loaded_board(tree, ("panel-3", "panel-4"))
 
@@ -5041,14 +5042,16 @@ def test_a_derive_publishes_the_counts_of_the_occupied_sites(
     assert presenter.start_logic(occupancy_id) is True
     _settle_logic(presenter, occupancy_id)
     counts_signal = stable_signal_key("occupancy", "counts")
+    at_1 = {"at": "frame", "labels": ["1"]}
     program = (
-        {"name": "bright", "value": "counts", "at": "1", "where": "occupied", "where_at": "1"},
-        {"name": "how_many", "value": "occupied", "at": "1", "statistic": "sum", "over": "calibration.site"},
+        {"name": "bright", "terms": [{"of": "counts", **at_1}, {"op": "where", "of": "occupied", **at_1}]},
+        {"name": "how_many", "terms": [{"of": "occupied", **at_1}], "statistic": "sum", "over": ["Site"]},
     )
     derive_id = presenter.add_logic(
         "derive",
         node_id="sites",
-        values={"outputs": (program[0], {"name": "how_many", "value": "occupied", "statistic": "sum"})},
+        values={"variables": (program[0], {"name": "how_many", "terms": [{"of": "occupied", **at_1}],
+                                           "statistic": "sum"})},
         source_signal=counts_signal,
         open_editor=False,
     )
@@ -5061,13 +5064,14 @@ def test_a_derive_publishes_the_counts_of_the_occupied_sites(
     # What the counts' own members cannot give is the same kind of draft
     # problem, admitted against the source's latest publication: said, and
     # Start waits, rather than a page reading "not started" over red errors.
-    typo = {**program[1], "over": "calibration.sties"}
-    assert presenter.update_logic_draft(derive_id, values={"outputs": (program[0], typo)})
+    typo = {**program[1], "over": ["Sties"]}
+    assert presenter.update_logic_draft(derive_id, values={"variables": (program[0], typo)})
     mistyped = presenter.logic_editor_projection(derive_id)
     assert not mistyped["can_start"]
-    assert mistyped["issues"][0].startswith("how_many · statistic: "), mistyped["issues"]
+    assert mistyped["issues"][0].startswith("how_many · statistic: the value has no axis 'Sties'; its axes: "), (
+        mistyped["issues"])
     assert presenter._logic_state(presenter.logic[derive_id])[0] == "draft"
-    assert presenter.update_logic_draft(derive_id, values={"outputs": program})
+    assert presenter.update_logic_draft(derive_id, values={"variables": program})
     assert presenter.logic_editor_projection(derive_id)["can_start"]
     # Named by the draft, before anything ran: the board's own listing of
     # what this row will publish.
@@ -5097,7 +5101,11 @@ def test_a_derive_publishes_the_counts_of_the_occupied_sites(
     np.testing.assert_array_equal(values[judged], expected[judged])
     assert bright.schema.point_domain.axes == (), "scalar isel removes the named frame axis"
     assert bright.schema.value_schema.value_unit == (counts.schema.value_schema.value_unit or "1")
-    assert bright.run_record["parameters"]["outputs"] == program
+    from zlc_atom.nodes.derive import DERIVE_SCHEMA
+    from zlc_atom.nodes.derive.expression import compact_variable
+
+    assert bright.run_record["parameters"]["variables"] == tuple(
+        compact_variable(row) for row in DERIVE_SCHEMA.project_values({"variables": program})["variables"])
     how_many = front.value(stable_signal_key("sites", "how_many"))
     assert how_many is not None
     np.testing.assert_array_equal(

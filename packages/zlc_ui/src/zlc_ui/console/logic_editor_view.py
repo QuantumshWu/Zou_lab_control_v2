@@ -484,7 +484,7 @@ class LogicEditorView(QtWidgets.QWidget):
         """The draft problems the contributions state under their own lines.
 
         A contribution that writes a draft problem in red where it arises --
-        Derive's typing error under the output line it is about -- names
+        Derive's typing error under the card line it is about -- names
         each one, with the section it stands in, as ``shown_problems()``;
         the header counts them rather than saying one again.
         """
@@ -867,8 +867,12 @@ def _draft_status(
     own = [issue for issue in issues if issue not in shown_below]
     if own:
         return f"Draft: {own[0]}"
-    sections = " and ".join(dict.fromkeys(shown_below[issue] for issue in issues))
-    count = len(issues)
+    # Every problem shown below is counted, not only the ones Start's
+    # check reached: it stops at a draft's first problem, while the
+    # editors below say each one under its own line.
+    problems = dict.fromkeys((*issues, *shown_below))
+    sections = " and ".join(dict.fromkeys(shown_below[problem] for problem in problems))
+    count = len(problems)
     return f"Draft: {count} problem{'' if count == 1 else 's'} in {sections}"
 
 

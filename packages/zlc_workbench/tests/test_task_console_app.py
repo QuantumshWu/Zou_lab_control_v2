@@ -2610,14 +2610,18 @@ async def client():
                 assert (await call('lab_results', {'panel_id':panel_id}))['status'] == 'not_enabled'
                 derived = await call("lab_action", {"action":"logic.add", "arguments":{
                     "api_name":"derive", "source_signal":"@logic/"+node+"/frames",
-                    "values":{"outputs":[{"name":"mean", "value":"frames", "statistic":"mean", "over":"spatial-y"}]}}})
+                    "values":{"variables":[{"name":"mean", "terms":[{"of":"frames"}], "statistic":"mean", "over":["spatial-y"]}]}}})
                 draft_revision = derived["state"]["logic"][0]["draft_revision"]
                 await asyncio.sleep(.03)
                 draft = (await call("lab_state", {"node_id":derived["node_id"]}))["console"]["logic"][0]
                 assert draft["draft_revision"] == draft_revision, draft
-                # The catalog names what the rows may read: members, dtypes and axes.
+                # The catalog names what the variables may read: members, dtypes,
+                # axes and their exact labels, every one up to 64.
                 (frames,) = (await call("lab_catalog", {"node_id":derived["node_id"]}))["node"]["inputs"]
                 assert frames["member"] == "frames" and "spatial-y" in [axis["name"] for axis in frames["axes"]]
+                for axis in frames["axes"]:
+                    assert len(axis["labels"]) == (axis["size"] if axis["size"] <= 64 else 16), axis
+                    assert axis.get("labels_truncated", False) == (axis["size"] > 64), axis
                 assert (await call("lab_action", {"action":"logic.remove", "arguments":{"node_id":derived["node_id"]}}))["accepted"]
                 screenshot = await c.call_tool("lab_screenshot", {"window":"devices"})
                 assert not screenshot.is_error

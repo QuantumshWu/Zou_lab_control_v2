@@ -59,15 +59,14 @@ def test_workbench_never_imports_a_concrete_logic_node_leaf() -> None:
     assert not violations, violations
 
 
-def test_a_source_row_names_a_bundle_as_code_reads_it_and_an_input_as_words() -> None:
-    """A bundle input is the name code reads its members through
-    (``a.counts``): Python is case sensitive, so the label keeps it exactly
-    as declared.  Any other input reads like the form labels beside it:
+def test_a_source_row_names_a_bundle_as_a_bundle_and_an_input_as_words() -> None:
+    """A bundle input is chosen as a whole producer's bundle: "Signal
+    bundle".  Any other input reads like the form labels beside it:
     sentence case, the lab's acronyms in capitals -- never str.title()."""
 
     from zlc_atom.nodes import DatasetInputSpec
 
-    assert source_label(DatasetInputSpec("a", None, "exact", select_bundle=True)) == "Signal bundle a"
+    assert source_label(DatasetInputSpec("bundle", None, "exact", select_bundle=True)) == "Signal bundle"
     assert source_label(DatasetInputSpec("frames", None, "exact")) == "Frames"
     assert source_label(DatasetInputSpec("roi_frame", None, "exact")) == "ROI frame"
 
@@ -1792,7 +1791,7 @@ def test_a_processor_adds_with_an_unresolved_source_and_no_modal(
     derived_id = presenter.add_logic("derive")
     projection = presenter.logic_editor_projection(derived_id)
     assert projection["source_bundle"] is True
-    assert projection["source_label"] == "Signal bundle a"
+    assert projection["source_label"] == "Signal bundle"
     bundle_members = [
         name for name in projection["source_options"]
         if name.startswith(f"@logic/{node_id}/")
@@ -1873,7 +1872,7 @@ def test_an_occupancys_frame_claims_survive_its_camera_changing_frame_count(pres
 
 
 def test_a_producers_new_output_reaches_every_open_editors_sources(presenter) -> None:
-    """A derive publishes what its rows name.  Naming another signal changes
+    """A derive publishes the variables it names.  Naming another changes
     what every other node may choose as its source, so every other open
     editor is re-projected -- the way adding or removing a node already
     re-projects them.  A draft edit that leaves the outputs alone reaches
@@ -1890,7 +1889,7 @@ def test_a_producers_new_output_reaches_every_open_editors_sources(presenter) ->
     assert total not in presenter.view.logic_editors[consumer_id]["source_options"]
     presenter.view.logic_draft_changed.emit(
         producer_id,
-        {"values": {"outputs": ({"name": "total", "value": "frames"},)}},
+        {"values": {"variables": ({"name": "total", "terms": ({"of": "frames"},)},)}},
     )
     assert total in presenter.view.logic_editors[consumer_id]["source_options"]
 
@@ -1944,7 +1943,7 @@ def test_a_calibrations_api_fields_come_from_its_pulse_unless_chosen(presenter, 
 def test_make_host_hands_the_descriptor_contract_to_its_node_host() -> None:
     """The host takes what the descriptor declares, never a node attribute.
 
-    A derive reads the outputs its rows name: the declaration says
+    A derive reads the members its variables name: the declaration says
     there is an input, the instance says which siblings of it to fetch, and
     what it publishes is named by its draft, not by its kind.
     """

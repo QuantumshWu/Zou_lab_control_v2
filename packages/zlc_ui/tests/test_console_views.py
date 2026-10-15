@@ -1156,19 +1156,23 @@ handle.update_logic_editor('camera-1', dict(
     projection, artifact_claims=claims, issues=('Frames must be selected', *claims['calibrations']['problems'])))
 assert editor.status_label.text() == 'Draft: Frames must be selected'
 # So is one a contribution states under the line it is about (Derive's
-# typing errors), by the section it names.
+# typing errors), by the section it names -- each one it shows, though
+# Start's check stopped at the first.
 from PyQt5 import QtWidgets
-typed = ('bright · where: the mask does not fit the value', 'same · combine: booleans do not mix with numbers')
+typed = ('bright · term 2: the mask has frame, which counts[frame 1] does not; pick one frame value of the mask',
+         'same · term 2: booleans do not mix with numbers', 'band · statistic: choose the statistic')
 class Typed(QtWidgets.QWidget):
     draft_changed = QtCore.pyqtSignal(object)
     def update_projection(self, projection):
         pass
     def shown_problems(self):
-        return {problem: 'Outputs' for problem in typed}
+        return {problem: 'Variables' for problem in typed}
 def typed_editor(parent):
     return Typed(parent)
 handle.update_logic_editor('camera-1', dict(projection, ui_contributions=(typed_editor,), issues=typed))
-assert editor.status_label.text() == 'Draft: 2 problems in Outputs'
+assert editor.status_label.text() == 'Draft: 3 problems in Variables'
+handle.update_logic_editor('camera-1', dict(projection, ui_contributions=(typed_editor,), issues=typed[:1]))
+assert editor.status_label.text() == 'Draft: 3 problems in Variables'
 handle.update_logic_editor('camera-1', dict(
     projection, ui_contributions=(typed_editor,), issues=('Frames must be selected', *typed)))
 assert editor.status_label.text() == 'Draft: Frames must be selected'
