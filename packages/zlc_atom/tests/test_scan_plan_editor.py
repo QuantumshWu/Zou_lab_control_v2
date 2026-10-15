@@ -797,18 +797,20 @@ def _level_only_sequence():
 
 
 def test_api_values_are_rescoped_to_the_pulse_they_are_written_against() -> None:
-    """A value written against one pulse does not follow the node to the next.
+    """A value written against one pulse is kept, not deleted, under another.
 
-    The draft kept the previous pulse's ``hold = 250`` when a pulse with no
-    API parameters replaced it; the form had no row to show that line in,
-    and Start refused it by name -- a refusal the operator could neither
-    see the cause of nor undo.  The editor owns the re-scoping: it writes
-    the text back only when the pulse's vocabulary changes it, so one round
-    trip settles it; a box mid-word, a missing pulse and a frozen editor
-    decide nothing.
+    The editor used to drop every line the current pulse did not declare,
+    so a fixed value was gone after a brief switch to another pulse.  Now
+    such a line is parked: kept in the draft, shown under the rows as not
+    in this pulse with its ×, applied to nothing (the build names it in the
+    run record), and back in its box when the pulse that declares it does.
+    Only a value equal to the pulse's own is dropped, since it overrides
+    nothing.  A box mid-word, a missing pulse and a frozen editor decide
+    nothing.
     """
 
     from PyQt5 import QtCore
+    from zlc_ui.fluent import FluentButton
 
     app = ensure_qt_app(["scan-editor-rescope"])
     editor = ScanPlanEditor()
@@ -822,24 +824,40 @@ def test_api_values_are_rescoped_to_the_pulse_they_are_written_against() -> None
     assert drafts == []
     assert editor._values_text == "duration:p0 = 250"
 
-    # A pulse with no API parameters: the line is dropped, once.
+    # A pulse with no API parameters: the line is kept and parked.
     editor.update_projection(_projection(_plain_sequence(), api_values="duration:p0 = 250"))
-    assert drafts == [{"values": {"api_values": ""}}]
-    assert editor._values_text == ""
-    editor.update_projection(_projection(_plain_sequence(), api_values=""))
-    assert len(drafts) == 1, "the re-scoped text projects back and settles"
+    assert drafts == []
+    assert editor._values_text == "duration:p0 = 250"
+    assert editor.values_form.keys == ()
+    assert editor.parked_values.isVisible() and editor.values_title.isVisible()
+    assert editor._parked_shown == {
+        "duration:p0": "not in this pulse: duration:p0 = 250 (kept, not applied)"
+    }
 
-    # A pulse declaring other names keeps only what it declares.
-    drafts.clear()
+    # Back to the pulse that declares it: the value is in its box again.
+    editor.update_projection(_projection(bound, api_values="duration:p0 = 250"))
+    assert drafts == [] and editor._parked_shown == {}
+    assert editor.values_form.read_value("duration:p0") == 250
+
+    # A value equal to the pulse's own overrides nothing and is dropped; a
+    # name the pulse does not declare stays beside it.
     editor.update_projection(
         _projection(_level_only_sequence(), api_values="duration:p0 = 250\ndac:p0:dac = 1")
     )
-    assert drafts == [{"values": {"api_values": ""}}], drafts
+    assert drafts == [{"values": {"api_values": "duration:p0 = 250"}}], drafts
+    assert editor._parked_shown == {
+        "duration:p0": "not in this pulse: duration:p0 = 250 (kept, not applied)"
+    }
+    # Editing a box keeps the parked line in the text it writes.
     drafts.clear()
-    editor.update_projection(
-        _projection(_level_only_sequence(), api_values="duration:p0 = 250\ndac:p0:dac = -1")
-    )
+    editor.values_form.widget_for("dac:p0:dac").stepBy(-2)
+    assert drafts[-1]["values"]["api_values"] == "duration:p0 = 250\ndac:p0:dac = -1"
+    # Its × takes it out of the draft.
+    drafts.clear()
+    remove = editor.parked_values.findChildren(FluentButton)[0]
+    remove.click()
     assert drafts == [{"values": {"api_values": "dac:p0:dac = -1"}}], drafts
+    assert editor._parked_shown == {} and not editor.parked_values.isVisible()
 
     # No pulse at all decides nothing: the text waits for one.
     drafts.clear()
@@ -863,22 +881,23 @@ def test_api_values_are_rescoped_to_the_pulse_they_are_written_against() -> None
     editor.deleteLater()
 
 
-def test_a_value_for_a_parameter_the_pulse_does_not_declare_is_refused_by_name() -> None:
-    """The backstop behind the editor: a build never runs a form written
-    against another pulse as though it were this one's."""
+def test_a_value_for_a_parameter_the_pulse_does_not_declare_is_parked_by_the_build() -> None:
+    """The build applies what the pulse declares and hands back the rest,
+    for the run record to name as not applied."""
 
     from zlc_atom.nodes.scan.plan import apply_api_overrides
 
-    with pytest.raises(ValueError, match="unknown or ambiguous api field"):
-        apply_api_overrides(_plain_sequence(), {"duration:p0": 240.0})
-    applied = apply_api_overrides(_bound_sequence(), {"duration:p0": 240.0})
-    assert applied.periods[0].duration == 240
+    plain, unapplied = apply_api_overrides(_plain_sequence(), {"duration:p0": 240.0})
+    assert plain == _plain_sequence() and unapplied == {"duration:p0": 240.0}
+    applied, unapplied = apply_api_overrides(_bound_sequence(), {"duration:p0": 240.0, "gone": 1.0})
+    assert applied.periods[0].duration == 240 and unapplied == {"gone": 1.0}
 
 
 def test_an_api_axis_in_the_plan_locks_that_parameters_value_box() -> None:
     """A parameter the plan walks keeps its row in the API values form,
-    locked and named as swept, until its axis leaves the plan; the run's
-    values never carry it, because the plan says what it plays."""
+    locked and named as swept, until its axis leaves the plan.  A value the
+    draft fixed for it is kept meanwhile -- the plan overrides it point by
+    point -- and is back in force when the axis leaves."""
 
     import json
 
@@ -913,6 +932,21 @@ def test_an_api_axis_in_the_plan_locks_that_parameters_value_box() -> None:
     app.processEvents()
     assert form.widget_for("dac:p0:dac").isEnabled(), "its axis left the plan"
     assert "swept" not in editor.values_note.text()
+
+    # Fixed, then swept, then the axis removed: the fixed value survives.
+    drafts: list[dict] = []
+    editor.draft_changed.connect(drafts.append)
+    kept = "duration:p0 = 250\ndac:p0:dac = -2"
+    editor.update_projection(_projection(bound, plan=plan, api_values=kept))
+    app.processEvents()
+    assert drafts == [] and not form.widget_for("dac:p0:dac").isEnabled()
+    assert form.read_value("dac:p0:dac") == -2
+    assert "kept" in next(field.unavailable_reason for field in form.spec.fields if field.key == "dac:p0:dac")
+    assert editor._overrides() == {"dac:p0:dac": -2.0, "duration:p0": 250.0}
+    editor.update_projection(_projection(bound, plan="", api_values=kept))
+    app.processEvents()
+    assert drafts == [] and form.widget_for("dac:p0:dac").isEnabled()
+    assert form.read_value("dac:p0:dac") == -2
     editor.close()
 
 

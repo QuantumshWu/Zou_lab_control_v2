@@ -85,7 +85,13 @@ SEAMLESS_SCAN_SCHEMA = AuthoringSchema(
             "text",
             "API values",
             "",
-            description="Optional fixed API overrides, one <field_id> = <number> per line in that field's authored unit; empty keeps the Pulse defaults.",
+            description=(
+                "Optional fixed API overrides, one <field_id> = <number> per line in that field's "
+                "authored unit; empty keeps the Pulse defaults. Keep lines you are not using: a "
+                "value for a field the plan sweeps is overridden point by point and comes back "
+                "when the axis is removed, and a name this Pulse does not declare is applied to "
+                "nothing and listed in the run record as unapplied_api_values."
+            ),
         ),
         # Repeats and shots both land on the dataset's repeat axis (size
         # repeats x shots): shots override the Pulse's Run repeats while the
@@ -133,8 +139,9 @@ def _build(
         raise TypeError("pulse_resource must be a resolved scan template")
     # This run's own API values over whatever the pulse carries, before
     # anything reads what its slots hold.  The plan still overrides the
-    # ones it sweeps.
-    sequence = apply_api_overrides(
+    # ones it sweeps; a value for a name this pulse does not declare is
+    # kept in the draft and named in the run record as not applied.
+    sequence, unapplied = apply_api_overrides(
         pulse_resource.value, api_overrides_from_authored(api_values)
     )
     parsed = plan_from_authored(plan)
@@ -174,6 +181,7 @@ def _build(
         shots_per_point=int(shots_per_point),
         acquisition_logic=acquisition_logic,
         restart_logic=restart_logic,
+        unapplied_api_values=unapplied,
     )
 
 

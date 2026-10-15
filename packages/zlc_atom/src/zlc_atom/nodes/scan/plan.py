@@ -35,6 +35,7 @@ from zlc_pulse import (
     apply_api_values,
     PulseSequence,
     api_parameter_columns_for,
+    field_label,
     scan_columns_for,
     normalize_binding_values,
     resolve_subpulse_sources,
@@ -549,29 +550,37 @@ def api_overrides_from_authored(payload: object) -> dict[str, float]:
 
 def apply_api_overrides(
     sequence: PulseSequence, overrides: Mapping[str, float]
-) -> PulseSequence:
-    """The pulse with this run's API values written into its fields.
+) -> tuple[PulseSequence, dict[str, float]]:
+    """The pulse with this run's API values written into its fields, and
+    the values it does not declare.
 
     Each number is read in the unit the pulse declares for that name, which
     is the unit the form printed beside the box.  The declarations survive,
     so a plan that scans one of these still overrides it per point.  A name
-    the pulse does not declare is refused: it is a form written against a
-    different pulse, and running the nominal value instead is the silence
-    this whole path exists to end.
+    the pulse does not declare -- a value kept from another pulse, or for a
+    field its Subpulse file no longer offers -- is parked: written into
+    nothing and returned, so the run record names it as not applied, as the
+    editor shows it.  A name two fields answer to is still refused.
     """
 
     declared = {
         parameter.field_id: parameter.unit
         for parameter in sequence.api_bindings
     }
-    overrides = normalize_binding_values(sequence, overrides, source="api")
+    known = set(declared) | {
+        field_label(sequence, parameter.field_ref) for parameter in sequence.api_bindings
+    }
+    unapplied = {name: float(value) for name, value in overrides.items() if name not in known}
+    overrides = normalize_binding_values(
+        sequence, {name: value for name, value in overrides.items() if name in known}, source="api",
+    )
     if not overrides:
-        return sequence
+        return sequence, unapplied
     applied, _ids, _absent = apply_api_values(
         sequence,
         {name: (float(value), declared[name]) for name, value in overrides.items()},
     )
-    return applied
+    return applied, unapplied
 
 
 def api_overrides_to_authored(overrides: Mapping[str, float]) -> str:

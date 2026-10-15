@@ -182,6 +182,12 @@ input names the existing acquisition node; the Scan handles its ready/Fire flow.
 Plan axes may be Pulse slots, device fields or manual coordinates. Query the
 bound node's catalog for actual scan ports/units; names must not be guessed.
 
+`api_values` lines the operator wrote are theirs: do not delete one because the
+current Pulse does not declare it or the plan sweeps it. Such a line is kept and
+applied to nothing (the run record lists it as `unapplied_api_values`) or is
+overridden point by point, and comes back into play when the Pulse or the axis
+does. Only a line equal to the Pulse's own value is dropped by the editor.
+
 `repeats` means complete table sweeps; `shots_per_point` means repetitions at each
 point before advancing. Their product changes total statistics, but their order
 also changes when a complete first curve is visible. `lab_estimate(node_id)` reads

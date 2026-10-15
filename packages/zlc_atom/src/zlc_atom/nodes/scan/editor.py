@@ -64,7 +64,7 @@ from zlc_ui.fluent.column_set import section_header
 from zlc_ui.form import FluentParameterForm, FormFieldProps, FormSpec, being_edited, decimal_number_width
 from zlc_ui.status import counted
 
-from zlc_data.units import DEFAULT_UNITS
+from zlc_data.units import DEFAULT_UNITS, format_quantity
 from zlc_pulse import api_parameter_columns_for, authored_api_entries
 
 from .plan import (
@@ -620,6 +620,17 @@ class ScanPlanEditor(QtWidgets.QWidget):
             lambda key: self._value_changed(key, normalized=True)
         )
         column.addWidget(self.values_form)
+        #: The values the draft keeps but this run does not apply, one muted
+        #: line each with its ×: a name this pulse does not declare, or one a
+        #: board axis sweeps.  Kept, never deleted behind the operator's back
+        #: -- they come back into play when the pulse or the axis does.
+        self.parked_values = QtWidgets.QWidget(self)
+        parked_layout = QtWidgets.QVBoxLayout(self.parked_values)
+        parked_layout.setContentsMargins(0, 0, 0, 0)
+        parked_layout.setSpacing(row_gap() // 2)
+        self.parked_values.hide()
+        self._parked_shown: dict[str, str] = {}
+        column.addWidget(self.parked_values)
         self.values_error = error_note_label()
         column.addWidget(self.values_error)
         self.values_note = muted_note_label("")
@@ -922,7 +933,10 @@ class ScanPlanEditor(QtWidgets.QWidget):
 
         A parameter an ``api:`` axis walks keeps its row, locked: the plan
         says what it plays, point by point, and the box says so until the
-        axis is taken out of the plan.
+        axis is taken out of the plan -- holding the value the draft keeps
+        for it, which comes back into play then.  A value the run does not
+        apply and no row can show -- a name this pulse does not declare, one
+        a board axis sweeps -- is a parked line under the rows.
         """
 
         parameters = tuple(getattr(sequence, "api_bindings", ()) or ())
@@ -983,7 +997,10 @@ class ScanPlanEditor(QtWidgets.QWidget):
                     minimum=int(column.limit_lo) if code else column.limit_lo,
                     maximum=int(column.limit_hi) if code else column.limit_hi,
                     unavailable_reason=(
-                        "swept by the scan plan; take its axis out of the "
+                        "swept by the scan plan; the value shown is kept for "
+                        "when its axis is taken out of the plan"
+                        if name in walked and name in overrides
+                        else "swept by the scan plan; take its axis out of the "
                         "plan to set a value for the run"
                         if name in walked
                         else ""
@@ -1002,7 +1019,13 @@ class ScanPlanEditor(QtWidgets.QWidget):
         finally:
             self._loading = False
         self._values_broken = bool(broken)
-        shown = bool(self.values_form.keys) or bool(broken)
+        parked = {} if broken else {
+            name: self._parked_text(name, value)
+            for name, value in overrides.items()
+            if name not in self.values_form.keys
+        }
+        self._show_parked(parked)
+        shown = bool(self.values_form.keys) or bool(broken) or bool(parked)
         self._show_values(shown)
         # A pulse that cannot be read says so in the error line; the muted
         # note is for what the rows set.
@@ -1011,6 +1034,51 @@ class ScanPlanEditor(QtWidgets.QWidget):
         if broken:
             return
         self._refresh_values_note()
+
+    def _parked_text(self, name: str, value: float) -> str:
+        """One kept value the run does not apply, said as what it is."""
+
+        number = format_quantity(value, "1")
+        if name not in self._authored:
+            return f"not in this pulse: {name} = {number} (kept, not applied)"
+        unit = self._authored[name][1]
+        shown = number if unit in ("value", "count") else f"{number} {unit}"
+        return (
+            f"swept by the scan plan: {self._api_labels.get(name, name)} = {shown} "
+            "(kept for when its axis is taken out of the plan)"
+        )
+
+    def _show_parked(self, parked: Mapping[str, str]) -> None:
+        """Put the parked values' lines under the rows, each with its ×."""
+
+        if dict(parked) == self._parked_shown:
+            return
+        self._parked_shown = dict(parked)
+        layout = self.parked_values.layout()
+        while layout.count():
+            retire_widget(layout.takeAt(0).widget())
+        for name, text in parked.items():
+            line = QtWidgets.QWidget(self.parked_values)
+            row = QtWidgets.QHBoxLayout(line)
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(row_gap())
+            label = muted_note_label(text)
+            label.setWordWrap(True)
+            remove = FluentButton("×", role="destructive")
+            remove.setToolTip("Remove this kept value from the draft")
+            remove.clicked.connect(lambda _checked=False, key=name: self._remove_kept_value(key))
+            row.addWidget(label, 1)
+            row.addWidget(remove)
+            layout.addWidget(line)
+
+    def _remove_kept_value(self, name: str) -> None:
+        current = self._current_overrides()
+        if current.pop(name, None) is None:
+            return
+        self._values_text = api_overrides_to_authored(current)
+        self._port_read_projection = None
+        self.draft_changed.emit({"values": {"api_values": self._values_text}})
+        self._reconcile_values(self._sequence)
 
     def _show_values(self, shown: bool) -> None:
         """Show or hide the API values section, with the section gap above its title."""
@@ -1022,47 +1090,58 @@ class ScanPlanEditor(QtWidgets.QWidget):
         self.layout().invalidate()
         self.values_title.setVisible(shown)
         self.values_form.setVisible(shown)
+        self.parked_values.setVisible(shown and bool(self._parked_shown))
 
     def _rescope_values(self) -> None:
         """The projected text, re-read against THIS pulse.
 
         An API value is a difference written against one pulse: a name it
-        declares, at a value other than the one it carries.  Change the
-        pulse and the text may name parameters the new pulse does not
-        declare -- and the run's build refuses those by name, while the
-        form has no row to show them in, so the operator could neither see
-        the stale line nor remove it.  The draft is this editor's
-        projection, so the editor re-scopes it here: names the pulse does
-        not declare and values equal to its own are dropped, and the text
-        is written back only when that changes it, so one round trip
-        settles it.  Only the TEXT is re-read, never the boxes -- a box may
-        be mid-word, and the boxes speak through ``_value_changed``.  A
-        pulse that could not be read, or one that is not there, decides
-        nothing; nor does an editor its host has frozen.
+        declares, at a value other than the one it carries.  A value equal
+        to the pulse's own is no override, and is dropped; a label is
+        written as the field id it names.  Everything else is KEPT: a name
+        the pulse does not declare (another pulse's, or a field its Subpulse
+        file no longer offers) and one the plan sweeps are parked lines the
+        operator can see and remove, and they come back into play when the
+        pulse or the axis does -- the build applies only what the pulse
+        declares and names the rest in the run record.  The text is written
+        back only when that changes it, so one round trip settles it.  Only
+        the TEXT is re-read, never the boxes -- a box may be mid-word, and
+        the boxes speak through ``_value_changed``.  A pulse that could not
+        be read, or one that is not there, decides nothing; nor does an
+        editor its host has frozen.
         """
 
         if self._sequence is None or self._values_broken or not self.isEnabled():
             return
-        current = self._current_overrides()
-        walked = self._walked_parameters()
+        try:
+            written = api_overrides_from_authored(self._values_text)
+        except ValueError:
+            return
         kept = {
             name: value
-            for name, value in current.items()
-            if name in self.values_form.keys
-            and name not in walked
-            and value != self._authored[name][0]
+            for name, value in self._current_overrides().items()
+            if name not in self._authored or value != self._authored[name][0]
         }
-        if kept == current:
+        if kept == written:
             return
         self._values_text = api_overrides_to_authored(kept)
         self.draft_changed.emit({"values": {"api_values": self._values_text}})
-        self._refresh_values_note()
+        self._reconcile_values(self._sequence)
 
     def _current_overrides(self) -> dict[str, float]:
+        """The written values, a parameter's label read as its field id."""
+
         try:
-            return api_overrides_from_authored(self._values_text)
+            written = api_overrides_from_authored(self._values_text)
         except ValueError:
             return {}
+        named: dict[str, list[str]] = {}
+        for field_id, label in self._api_labels.items():
+            named.setdefault(label, []).append(field_id)
+        return {
+            named[name][0] if name not in self._authored and len(named.get(name, ())) == 1 else name: value
+            for name, value in written.items()
+        }
 
     def _value_changed(self, _key: str, *, normalized: bool = False) -> None:
         """A value moved: the draft says so now.
@@ -1078,20 +1157,22 @@ class ScanPlanEditor(QtWidgets.QWidget):
         self._emit_values(normalized=normalized)
 
     def _overrides(self) -> dict[str, float]:
-        """Only what this run sets differently.
+        """Only what this run sets differently, and every value kept.
 
         A box left at the value the pulse carries is not an override: the
         pulse's own number is already the workspace's current one, and
         freezing a copy of it here would quietly outrank the next
-        recalibration.
+        recalibration.  A value no free box holds -- one the plan sweeps, or
+        a name this pulse does not declare -- is carried over as written.
         """
 
-        overrides: dict[str, float] = {}
         walked = self._walked_parameters()
-        for name in self.values_form.keys:
-            if name in walked:
-                # The plan says what this one plays, point by point.
-                continue
+        editable = tuple(name for name in self.values_form.keys if name not in walked)
+        overrides = {
+            name: value for name, value in self._current_overrides().items()
+            if name not in editable
+        }
+        for name in editable:
             try:
                 value = self.values_form.read_value(name)
             except ValueError:
@@ -1120,12 +1201,13 @@ class ScanPlanEditor(QtWidgets.QWidget):
 
         parts = []
         walked = self._walked_parameters()
-        free = sum(1 for name in self.values_form.keys if name not in walked)
+        free = tuple(name for name in self.values_form.keys if name not in walked)
         if free:
-            set_here = len(self._overrides())
+            overrides = self._overrides()
+            set_here = sum(1 for name in free if name in overrides)
             parts.append(
-                f"{set_here} of {free} set for this run"
-                + ("; the rest run what the pulse carries." if set_here < free else ".")
+                f"{set_here} of {len(free)} set for this run"
+                + ("; the rest run what the pulse carries." if set_here < len(free) else ".")
             )
         swept = (self._scanned_parameters() | walked) & set(self._authored)
         if swept:

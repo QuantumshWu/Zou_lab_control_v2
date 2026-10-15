@@ -373,6 +373,8 @@ def test_device_axes_alone_repeat_a_fixed_pulse_and_restore_the_device() -> None
     value, record, bench, source, claims = _device_run(
         frequencies=(1.0, 1.5, 2.0), values=None, unit="GHz", shots=2, repeats=2,
         device_labels={"rf": "Cooling RF"},
+        # Kept in the draft for a parameter this pulse does not declare.
+        api_values="retired = 5",
     )
     assert bench.fired_repeats == [(2, 1)] * 6
     assert bench.loads == 1 and bench.scan_tables == []
@@ -395,6 +397,7 @@ def test_device_axes_alone_repeat_a_fixed_pulse_and_restore_the_device() -> None
     assert record["plan"]["axes"] == [
         {"port": "device:rf:frequency", "values": [1.0, 1.5, 2.0], "unit": "GHz"},
     ]
+    assert record["unapplied_api_values"] == {"retired": 5.0}
     assert claims[0].protected_fields == ("frequency",)
 
 
@@ -1075,6 +1078,7 @@ def _device_run(
     unit="",
     device_field="frequency",
     device_labels=None,
+    api_values="",
 ):
     """Walk a plan whose outer axis is an installed device knob.
 
@@ -1116,6 +1120,7 @@ def _device_run(
         device_labels=device_labels,
         repeats=repeats,
         shots_per_point=shots,
+        api_values=api_values,
     ) as run:
         host = run.host
         deadline = time.monotonic() + 60.0
