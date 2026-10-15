@@ -48,6 +48,7 @@ from collections.abc import Sequence
 
 from PyQt5 import QtCore, QtWidgets, sip
 
+from ..status import sentence
 from .fluent import FluentLabel, FluentSectionLabel, fluent_font_size, row_gap
 from .style import FONT, RED_DARK
 
@@ -91,7 +92,8 @@ def section_header(
 def error_note_label(text: str = "") -> QtWidgets.QLabel:
     """The one error line: RED_DARK ink, word-wrapped, hidden while it says
     nothing.  It stands under what it concerns (see
-    :meth:`FluentColumnSet.follow`), never in the width left beside it."""
+    :meth:`FluentColumnSet.follow`), never in the width left beside it, and
+    says it as a sentence (:func:`show_problem`)."""
 
     label = FluentLabel(text)
     label.setStyleSheet(
@@ -109,6 +111,16 @@ def show_note(label: QtWidgets.QLabel, text: str) -> None:
     if label.text() != text:
         label.setText(text)
     label.setVisible(bool(text))
+
+
+def show_problem(label: QtWidgets.QLabel, text: str) -> None:
+    """Write a problem into its :func:`error_note_label` as one sentence
+    (:func:`zlc_ui.status.sentence`: a full stop at its end, never a capital
+    added at its start), shown only while there is one.  Every editor's
+    problem under its row is written through here, so none reads as a
+    fragment beside another that ends in a full stop."""
+
+    show_note(label, sentence(text))
 
 
 def hold_place(widget: QtWidgets.QWidget) -> QtWidgets.QWidget:
@@ -346,4 +358,5 @@ __all__ = [
     "hold_place",
     "section_header",
     "show_note",
+    "show_problem",
 ]

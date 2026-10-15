@@ -70,7 +70,8 @@ def _under_pointer(widget, pos=None) -> None:
 
 
 def test_a_chosen_grid_card_is_the_selected_fill_and_nothing_round_it(app, host) -> None:
-    from zlc_ui.fluent import FluentSelectionGrid, scaled_px
+    from zlc_ui.fluent import FluentSelectionGrid, control_height, row_gap
+    from zlc_ui.fluent.fluent import _grid_row_insets
     from zlc_ui.fluent.style import ACCENT_TINT, BG, RED_TINT, SELECTED, SELECTION_EDGE
 
     grid = FluentSelectionGrid(host)
@@ -90,8 +91,10 @@ def test_a_chosen_grid_card_is_the_selected_fill_and_nothing_round_it(app, host)
         return _at(viewport, x, y)
 
     chosen, empty, derived, warned = card(0, 0), card(0, 2), card(0, 1), card(1, 2)
-    # The card's top row: the cell inset by the grid's gutter.
-    inset = scaled_px(2, minimum=1)
+    # A row is a form row: a control-high card and a row gap shared above
+    # and below it.  The card's top row: the cell inset by its share above.
+    assert chosen.height() == control_height() + row_gap()
+    inset = _grid_row_insets()[0]
     middle = chosen.center().x()
     assert colour(chosen.left() + 6, chosen.center().y()) == SELECTED.upper()
     assert colour(middle, chosen.top() + inset) == SELECTED.upper(), "no outline on the chosen card"
@@ -124,11 +127,11 @@ def test_a_chosen_grid_card_is_the_selected_fill_and_nothing_round_it(app, host)
 
 
 def test_a_row_remover_in_a_grid_is_the_buttons_ghost_x(app, host) -> None:
-    from zlc_ui.fluent import FluentSelectionGrid
-    from zlc_ui.fluent.style import RED_TINT, SURFACE
+    from zlc_ui.fluent import FluentSelectionGrid, control_height
+    from zlc_ui.fluent.style import BG, RED_TINT, SURFACE
 
     grid = FluentSelectionGrid(host, row_actions=(("remove", "×", "Remove"),))
-    grid.set_grid(("a",), ("0",), {(0, 0): "0"})
+    grid.set_grid(("a", "b"), ("0",), {(0, 0): "0", (1, 0): "0"})
     grid.resize(grid.sizeHint())
     _shown(app, host, grid)
     viewport = grid.viewport()
@@ -138,6 +141,18 @@ def test_a_row_remover_in_a_grid_is_the_buttons_ghost_x(app, host) -> None:
     viewport.update()
     app.processEvents()
     assert _at(viewport, action.left() + 4, action.top() + 6) == RED_TINT.upper()
+    # Its face is a control-high square on the band of the cards beside it.
+    cell = grid.visualRect(grid.model().index(0, 0))
+
+    def band(x, fill):
+        return [y for y in range(cell.top(), cell.bottom() + 1) if _at(viewport, x, y) == fill.upper()]
+
+    # Read beside the glyph, and along a row under the rounded corners and above it.
+    face = band(action.left() + 4, RED_TINT)
+    assert face == band(cell.left() + 4, BG) and len(face) == control_height()
+    across = [x for x in range(action.left(), action.right() + 1)
+              if _at(viewport, x, face[4]) == RED_TINT.upper()]
+    assert len(across) == control_height()
 
 
 def test_a_selected_run_of_table_rows_is_one_rounded_block(app, host) -> None:

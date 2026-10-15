@@ -720,6 +720,32 @@ assert field.refresh.isVisible() is False, 'unshown parent, unshown child'
     )
 
 
+def test_a_path_field_shows_a_name_in_its_folder_and_names_the_whole_path(tmp_path) -> None:
+    """A relative text is a file in the field's ``base_dir`` -- a pulse in
+    the workspace's pulse folder shown by its name -- so the tooltip, and
+    the folder Browse opens on, read the whole path it names."""
+
+    import os
+
+    from zlc_ui import ensure_qt_app
+    from zlc_ui.fluent import FluentPathEdit
+
+    ensure_qt_app(["zlc-ui-tests"])
+    (tmp_path / "imaging.json").write_text("{}", encoding="utf-8")
+    field = FluentPathEdit("imaging.json", base_dir=str(tmp_path))
+    try:
+        field.setToolTip("Choose a file")
+        whole = os.path.normpath(str(tmp_path / "imaging.json"))
+        assert field.text() == "imaging.json"
+        assert field.named_path() == whole
+        assert field.edit.toolTip().splitlines() == [whole, "Choose a file"]
+        assert field._dialog_start() == whole
+        field.setText(str(tmp_path / "elsewhere.json"))
+        assert field.named_path() == str(tmp_path / "elsewhere.json"), "a whole path is its own"
+    finally:
+        field.deleteLater()
+
+
 def test_a_widget_named_twice_is_unblocked_when_the_block_ends() -> None:
     """The second block records "already blocked" as the state to restore;
     restored in the order of blocking, that stale True went back after the

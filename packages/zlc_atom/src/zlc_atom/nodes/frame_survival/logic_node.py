@@ -68,7 +68,7 @@ def _build(*, source_signal: str, **values: object) -> FrameSurvivalProcessor:
 def _editor_factory(parent=None):
     from PyQt5 import QtCore, QtWidgets
     from zlc_ui.fluent import (
-        FluentSegmentedButtons, FluentSelectionGrid, error_note_label, muted_note_label, row_gap, show_note,
+        FluentSegmentedButtons, FluentSelectionGrid, error_note_label, muted_note_label, row_gap, show_problem,
     )
     from zlc_ui.fluent.column_set import section_header
     from .processor import PAIR_RULES
@@ -196,7 +196,7 @@ def _editor_factory(parent=None):
                 self.table.set_cell_states({})
                 self._wanted = ()
                 self.summary.setText("Waiting for the source frames")
-                show_note(self.note, "")
+                show_problem(self.note, "")
                 return
             count = len(frames)
             wanted, absent = _selected_pairs(
@@ -221,7 +221,7 @@ def _editor_factory(parent=None):
             # Named with the strip's own word for its current segment.
             self.summary.setText(
                 f"{self.presets.button(current).text()} · {len(wanted)} of {count * (count - 1) // 2} pairs")
-            show_note(self.note, "" if not absent else "Not in this source: " + ", ".join(
+            show_problem(self.note, "" if not absent else "not in this source: " + ", ".join(
                 pair_label(start, end) for start, end, _selected in absent))
 
         def set_mutation_enabled(self, enabled):

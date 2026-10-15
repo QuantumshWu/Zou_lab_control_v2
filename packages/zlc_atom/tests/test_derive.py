@@ -503,3 +503,53 @@ def test_a_typing_error_is_said_once_under_its_line_where_the_result_stood() -> 
         host.close()
         host.deleteLater()
         app.processEvents()
+
+
+def test_a_line_names_only_what_has_a_choice_after_it_and_code_notes_start_at_the_code() -> None:
+    """``at`` stands on the where line only before frames to pick, and
+    ``over`` on the statistic line only before axes to tick: a word with no
+    control after it read as a sentence cut off.  A code card's example,
+    status and error are about its code box, so they start where its code
+    does, not at the operand column of the structured cards."""
+    from PyQt5 import QtCore
+
+    from zlc_ui.fluent import field_text_inset
+    from zlc_ui.qt import ensure_qt_app
+
+    app = ensure_qt_app(["zlc-derive-editor-test"])
+    editor = LOGIC_NODE.ui_contributions[0]()
+    row = {"name": "bright", "value": "counts", "where": "occupied", "statistic": "sum"}
+    # A verdict reduced over its frames: a mask with no frame left to pin.
+    seen = {"name": "seen", "value": "occupied", "statistic": "any", "over": "frame"}
+
+    def project(rows, bundle):
+        editor.update_projection({"form_values": {"outputs": rows}, "input_bundle": bundle})
+        app.processEvents()
+        return editor._cards
+
+    editor.resize(1200, 500)
+    editor.show()
+    try:
+        counts = ("counts", _schema(2, 3, 4, np.dtype(float), "count"), None)
+        occupied = ("occupied", _schema(2, 3, 4, np.dtype(bool), "1"), None)
+        (card,) = project((row,), (counts, occupied))
+        assert not card.where_at_label.isHidden() and not card.where_at.isHidden()
+        assert not card.over_word.isHidden() and card.over, "axes to reduce follow the word"
+        _seen, card = project((seen, dict(row, where="seen")), (counts, occupied))
+        assert card.where_at_label.isHidden() and card.where_at.isHidden(), "a mask with no frames has no pin"
+        # Before the source publishes nothing is typed: no axis follows "over".
+        (card,) = project((row,), (("counts", None, None), ("occupied", None, None)))
+        assert card.over == {} and card.over_word.isHidden()
+
+        (code,) = project(({"name": "c", "code": "result = a.counts"},), (counts,))
+        text_x = code.code.mapTo(editor, QtCore.QPoint()).x() + field_text_inset()
+        status = code.status
+        assert status.isVisible()
+        assert status.mapTo(editor, QtCore.QPoint()).x() + status.contentsMargins().left() == text_x
+        # The example and the error, shown in turn, stand at the same x.
+        assert {note.contentsMargins().left() for note in (code.example, status, code.error)} == {
+            status.contentsMargins().left()}
+    finally:
+        editor.close()
+        editor.deleteLater()
+        app.processEvents()

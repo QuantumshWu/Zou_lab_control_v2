@@ -14,10 +14,13 @@ below.  Nothing here changes a claim
 because the frame count changed: what was authored stays until the operator
 edits it.  A file is removed by the × that ends its row and replaced by
 clicking its name.  A file row is one line, as tall as every other
-control: what the file is (its exposure, sites and model) is in the name's
-tooltip with its path.  The readout model -- which model each file is read
-with, set once -- is a segmented choice under the files it applies to: the
-four models are this node's closed set.
+control and one row pitch from the next: what the file is (its exposure,
+sites and model) is in the name's tooltip with its path.  The readout
+model -- which model each file is read with, set once -- is a segmented
+choice under the files it applies to: the four models are this node's
+closed set.  The reasons stand under that choice and above the section's
+hint, one sentence each, so the files and the model keep their place
+whether a problem is there or not.
 
 The section opens like every editor's section: its title, then at the right
 end its summary and "Add calibration…".  The file names stand in the
@@ -52,9 +55,8 @@ from zlc_ui.fluent import (
     row_gap,
     scaled_px,
     setting_label_width,
-    show_note,
+    show_problem,
 )
-from zlc_ui.status import sentence
 from zlc_ui.fluent.column_set import section_header
 
 from zlc_atom.nodes._framework.frames import FIRST, LAST, REST, canonical_frames, claim_names, reach_frames
@@ -66,9 +68,9 @@ _NAMED = ((FIRST, "First"), (LAST, "Last"), (REST, "Rest"))
 #: Design px of label column a calibration file name gets (see label_width_floor).
 _FILE_NAME_ROOM = 150
 _GAP = None
-_HINT = ("Click a cell to give that frame to a file · First and Last follow the cycle's ends, "
-         "middle frames keep their number")
-_EMPTY = "Add a calibration file; the first one reads every frame"
+_HINT = ("Click a cell to give that frame to a file. First and Last follow the cycle's ends; "
+         "middle frames keep their number.")
+_EMPTY = "Add a calibration file; the first one reads every frame."
 
 
 class CalibrationsEditor(QtWidgets.QWidget):
@@ -97,15 +99,6 @@ class CalibrationsEditor(QtWidgets.QWidget):
         self.grid.selection_edited.connect(self._marked)
         self.grid.row_action.connect(self.row_action)
         layout.addWidget(self.grid, 0, QtCore.Qt.AlignLeft)
-        # One red block per problem, half a row gap apart: a problem that
-        # wraps is still told from the next one.
-        self.problems = QtWidgets.QWidget(self)
-        self._problem_layout = QtWidgets.QVBoxLayout(self.problems)
-        self._problem_layout.setContentsMargins(0, 0, 0, 0)
-        self._problem_layout.setSpacing(row_gap() // 2)
-        self._problem_labels: list[QtWidgets.QLabel] = []
-        self.problems.hide()
-        layout.addWidget(self.problems)
         self.model_row = QtWidgets.QWidget(self)
         model_layout = QtWidgets.QHBoxLayout(self.model_row)
         model_layout.setContentsMargins(0, 0, 0, 0)
@@ -122,6 +115,17 @@ class CalibrationsEditor(QtWidgets.QWidget):
         model_layout.addWidget(self.model)
         model_layout.addStretch(1)
         layout.addWidget(self.model_row)
+        # The section's problems stand under its content -- the files and
+        # the model they are read with -- so a problem coming or going
+        # moves nothing above it.  One red block per problem, half a row
+        # gap apart: a problem that wraps is still told from the next one.
+        self.problems = QtWidgets.QWidget(self)
+        self._problem_layout = QtWidgets.QVBoxLayout(self.problems)
+        self._problem_layout.setContentsMargins(0, 0, 0, 0)
+        self._problem_layout.setSpacing(row_gap() // 2)
+        self._problem_labels: list[QtWidgets.QLabel] = []
+        self.problems.hide()
+        layout.addWidget(self.problems)
         # The section's hint is its last line, under everything it explains.
         self.hint = muted_note_label(_HINT)
         self.hint.setWordWrap(True)
@@ -274,8 +278,7 @@ class CalibrationsEditor(QtWidgets.QWidget):
         self._show_problems(problems)
 
     def _show_problems(self, problems) -> None:
-        """Each problem as its own sentence in its own block, ending in a full
-        stop.  Not capitalised: a problem may start with a file's stem."""
+        """Each problem as its own sentence (:func:`show_problem`) in its own block."""
 
         labels = self._problem_labels
         while len(labels) > len(problems):
@@ -284,7 +287,7 @@ class CalibrationsEditor(QtWidgets.QWidget):
             labels.append(error_note_label())
             self._problem_layout.addWidget(labels[-1])
         for label, problem in zip(labels, problems):
-            show_note(label, sentence(problem))
+            show_problem(label, problem)
         self.problems.setVisible(bool(problems))
 
     # ---------------------------------------------------------------- editing

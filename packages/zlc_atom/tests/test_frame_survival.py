@@ -332,7 +332,7 @@ def test_pair_matrix_selects_like_a_table_and_writes_the_draft() -> None:
         # Pairs the source no longer carries are named, not dropped silently.
         drafts.clear()
         project(selection="custom", pairs=({"start": "0", "end": "1"}, {"start": "2", "end": "5"}))
-        assert marked() == [(0, 1)] and form.note.text() == "Not in this source: 2→5" and drafts == []
+        assert marked() == [(0, 1)] and form.note.text() == "not in this source: 2→5." and drafts == []
         # The strip always marks one choice: a list with pairs is Selected.
         assert derived() == [] and form.presets.current() == "custom"
         # The reported 22-frame case: a real Ctrl click excludes only first→last.
@@ -350,6 +350,50 @@ def test_pair_matrix_selects_like_a_table_and_writes_the_draft() -> None:
         project()
         assert marked() == [(0, end) for end in range(1, 24)]
         assert form.presets.button("from_first").property("current")
+    finally:
+        form.close()
+        form.deleteLater()
+        app.processEvents()
+
+
+def test_pair_matrix_rows_are_form_rows_and_their_labels_end_a_row_gap_before_the_cards() -> None:
+    """The start frames stand in the editor's label column like a form's
+    labels: right-aligned, each ``k →`` ending a row gap before the first
+    card it points at, as a label ends before its field; and the rows keep
+    the form's pitch, a control high and a row gap."""
+    from PyQt5 import QtCore
+    from zlc_atom.nodes.frame_survival.logic_node import FRAME_SURVIVAL_SCHEMA, LOGIC_NODE
+    from zlc_ui.fluent import control_height, row_gap, setting_label_width
+    from zlc_ui.fluent.fluent import _grid_gutter
+    from zlc_ui.qt import ensure_qt_app
+
+    app = ensure_qt_app(["zlc-frame-survival-test"])
+    form = LOGIC_NODE.ui_contributions[0]()
+    form.update_projection({"form_values": FRAME_SURVIVAL_SCHEMA.draft_values(),
+                            "source_frames": ("0", "1", "2", "3", "4")})
+    form.set_label_width(setting_label_width(form.row_labels()))
+    form.resize(700, 400)
+    form.show()
+    app.processEvents()
+    try:
+        table, header = form.table, form.table.verticalHeader()
+        tops = [table.visualRect(form.model.index(row, 0)).top() for row in range(form.model.rowCount())]
+        assert {after - before for before, after in zip(tops, tops[1:])} == {control_height() + row_gap()}
+        card = table.viewport().mapTo(form, QtCore.QPoint(table.visualRect(form.model.index(0, 0)).left(), 0)).x()
+        card += _grid_gutter()
+        image = form.grab().toImage()
+        ratio = image.devicePixelRatio() or 1.0
+        left = int(header.viewport().mapTo(form, QtCore.QPoint()).x() * ratio)
+        # Read the labels' own column: the cells beyond it have the table's ground.
+        right = int(header.viewport().mapTo(form, QtCore.QPoint(header.viewport().width(), 0)).x() * ratio)
+        for row in range(header.count()):
+            top = header.viewport().mapTo(form, QtCore.QPoint(0, header.sectionViewportPosition(row))).y()
+            band = range(int(top * ratio), int((top + header.sectionSize(row)) * ratio))
+            ground = image.pixelColor(left, band.start).name()
+            inked = [x for x in range(left, right)
+                     if any(image.pixelColor(x, y).name() != ground for y in band)]
+            ink_end = (inked[-1] + 1) / ratio
+            assert row_gap() <= card - ink_end <= row_gap() + 1, (row, card, ink_end)
     finally:
         form.close()
         form.deleteLater()

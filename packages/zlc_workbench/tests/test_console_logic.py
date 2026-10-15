@@ -1566,8 +1566,24 @@ def test_calibration_pulse_is_a_workspace_file_picker(
 
     presenter.update_logic_draft(node_id, values={"pulse_template": template.name})
     projection = presenter.logic_editor_projection(node_id)
-    assert projection["form_values"]["pulse_template"] == str(template.resolve())
+    # A file in the pulse folder is shown by its name there -- the part
+    # that tells pulses apart -- whether the draft wrote it so or whole;
+    # the field's tooltip names the whole path (its base_dir is that folder).
+    assert projection["form_values"]["pulse_template"] == template.name
     assert projection["can_start"] is True
+    presenter.update_logic_draft(node_id, values={"pulse_template": str(template.resolve())})
+    projection = presenter.logic_editor_projection(node_id)
+    assert projection["form_values"]["pulse_template"] == template.name
+    assert presenter.logic[node_id].draft.values["pulse_template"] == str(template.resolve()), (
+        "showing it shorter does not rewrite the draft")
+    assert projection["can_start"] is True
+    # A file anywhere else is shown whole, and refused by the folder's name.
+    outside = presenter.session.workspace.root / "imaging_template.json"
+    outside.write_bytes(pulse_document("imaging_template.json"))
+    presenter.update_logic_draft(node_id, values={"pulse_template": str(outside)})
+    projection = presenter.logic_editor_projection(node_id)
+    assert projection["form_values"]["pulse_template"] == str(outside.resolve())
+    assert "Calibration pulse template must be a file in pulses/" in projection["issues"]
 
     presenter.update_logic_draft(
         node_id,
