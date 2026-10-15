@@ -370,25 +370,37 @@ def test_pair_matrix_selects_like_a_table_and_writes_the_draft() -> None:
         # Selected, picked under a rule, keeps the rule's pairs as the list.
         project(**drafts[-1]["values"])
         form.presets.button("custom").click()
-        assert drafts[-1] == {"values": {"selection": "custom", "pairs": (), "custom_pairs": tuple(
-            {"start": "0", "end": end, "selected": True} for end in ("1", "2", "last"))}}
-        # None clears every mark at once: no pair at all, and no list kept.
+        listed = tuple({"start": "0", "end": end, "selected": True} for end in ("1", "2", "last"))
+        assert drafts[-1] == {"values": {"selection": "custom", "pairs": (), "custom_pairs": listed}}
+        project(**drafts[-1]["values"])
+        # None publishes no pair and keeps the list; the strip marks it.
         form.presets.button("none").click()
-        assert drafts[-1] == {"values": {"selection": "none", "pairs": (), "custom_pairs": ()}}
+        assert drafts[-1] == {"values": {"selection": "none", "pairs": ()}}
         project(**drafts[-1]["values"])
         assert marked() == [] and form.presets.button("none").property("current")
         assert form.summary.text() == "None · 0 of 6 pairs", "the summary names the strip's segment"
-        # Selected after None begins an empty list, and the strip marks it:
-        # None and Selected are two choices, either follows the other.
+        # None and Selected are two choices, either follows the other:
+        # Selected after None comes back to its list.
+        form.presets.button("custom").click()
+        assert drafts[-1] == {"values": {"selection": "custom", "pairs": ()}}
+        project(**drafts[-1]["values"])
+        assert marked() == [(0, 1), (0, 2), (0, 3)] and form.presets.current() == "custom"
+        assert form.summary.text() == "Selected · 3 of 6 pairs"
+        # A pair marked under None joins the list and picks Selected.
+        form.presets.button("none").click()
+        project(**drafts[-1]["values"])
+        QtTest.QTest.mouseClick(view, QtCore.Qt.LeftButton, QtCore.Qt.NoModifier,
+                               form.table.visualRect(form.model.index(1, 1)).center())
+        assert drafts[-1] == {"values": {"selection": "custom", "custom_pairs": (
+            *listed, {"start": "1", "end": "2", "selected": True})}}
+        project(**drafts[-1]["values"])
+        assert marked() == [(0, 1), (0, 2), (0, 3), (1, 2)] and form.presets.current() == "custom"
+        # With no list to come back to, Selected after None begins an empty one.
+        project(selection="none", custom_pairs=())
         form.presets.button("custom").click()
         assert drafts[-1] == {"values": {"selection": "custom", "pairs": (), "custom_pairs": ()}}
         project(**drafts[-1]["values"])
-        assert marked() == [] and form.presets.current() == "custom"
-        assert form.summary.text() == "Selected · 0 of 6 pairs"
-        form.presets.button("none").click()
-        assert drafts[-1] == {"values": {"selection": "none", "pairs": (), "custom_pairs": ()}}
-        project(**drafts[-1]["values"])
-        # A pair marked under None begins a Selected list with it.
+        assert marked() == [] and form.summary.text() == "Selected · 0 of 6 pairs"
         QtTest.QTest.mouseClick(view, QtCore.Qt.LeftButton, QtCore.Qt.NoModifier,
                                form.table.visualRect(form.model.index(0, 0)).center())
         assert drafts[-1] == {"values": {"selection": "custom", "custom_pairs": (
@@ -436,6 +448,88 @@ def test_pair_matrix_selects_like_a_table_and_writes_the_draft() -> None:
         project()
         assert marked() == [(0, end) for end in range(1, 24)]
         assert form.presets.button("from_first").property("current")
+    finally:
+        form.close()
+        form.deleteLater()
+        app.processEvents()
+
+
+def test_pair_matrix_edits_only_what_it_marks_and_never_writes_over_a_list_it_cannot_read() -> None:
+    """Selected's list as the lab API may write it: a gesture changes only the
+    pairs it marks or unmarks -- parked rows, however written, and selected
+    pairs this source does not carry stay as they are -- and a list the grid
+    cannot read locks the grid instead of being replaced by the next click."""
+    from PyQt5 import QtCore, QtTest
+    from zlc_atom.nodes.frame_survival.logic_node import FRAME_SURVIVAL_SCHEMA, LOGIC_NODE
+    from zlc_ui.qt import ensure_qt_app
+
+    app = ensure_qt_app(["zlc-frame-survival-test"])
+    form = LOGIC_NODE.ui_contributions[0]()
+    drafts = []
+    form.draft_changed.connect(drafts.append)
+
+    def project(**values):
+        form.update_projection({"form_values": {**FRAME_SURVIVAL_SCHEMA.draft_values(), **values},
+                                "source_frames": ("0", "1", "2", "3")})
+        app.processEvents()
+
+    def click(start, end, modifier=QtCore.Qt.ControlModifier):
+        QtTest.QTest.mouseClick(form.table.viewport(), QtCore.Qt.LeftButton, modifier,
+                               form.table.visualRect(form.model.index(start, end - 1)).center())
+
+    def marked():
+        return sorted((index.row(), index.column() + 1) for index in form.table.selectedIndexes())
+
+    form.resize(520, 300)
+    form.show()
+    try:
+        selected = ({"start": "0", "end": "1", "selected": True}, {"start": "1", "end": "2", "selected": True})
+        parked = tuple({"start": start, "end": end, "selected": False}
+                       for start, end in (("0", "1"), ("x", "1"), ("0", "")))
+        absent = {"start": "1", "end": "4", "selected": True}
+        listed = (*selected, *parked, absent)
+        project(selection="custom", custom_pairs=listed)
+        # A parked row naming a published pair is not said: the selected row wins.
+        assert marked() == [(0, 1), (1, 2)] and form.summary.text() == "Selected · 2 of 6 pairs"
+        assert form.parked.text() == "kept, not selected: x→1, 0→(no end)." and form.error.isHidden()
+        assert form.note.text() == "kept, not in this source: 1→4."
+        # A click elsewhere adds its pair and leaves every other row as written.
+        click(2, 3)
+        assert drafts[-1] == {"values": {"selection": "custom", "custom_pairs": (
+            *listed, {"start": "2", "end": "last", "selected": True})}}
+        # Unmarking a published pair takes its selected row out; the parked
+        # row naming it stays parked, and is said again.
+        project(selection="custom", custom_pairs=listed)
+        click(0, 1)
+        assert drafts[-1] == {"values": {"selection": "custom", "custom_pairs": (selected[1], *parked, absent)}}
+        project(**drafts[-1]["values"])
+        assert marked() == [(1, 2)] and form.parked.text() == "kept, not selected: 0→1, x→1, 0→(no end)."
+        # A rule keeps the list as it is; Selected brings it back unchanged.
+        form.presets.button("consecutive").click()
+        assert drafts[-1] == {"values": {"selection": "consecutive", "pairs": ()}}
+        # Lists the grid cannot read: two selected rows naming one pair, a
+        # selected row with no end, rows that are not rows, no list at all.
+        for unread, problem in (
+            ((*selected, selected[0]), "Selected pairs cannot be marked on the grid: frame survival pairs "
+                                       "must not contain duplicates."),
+            (({"start": "0", "end": ""},), "Selected pairs cannot be marked on the grid: Selected pairs row 1: "
+                                           "End frame must be filled in."),
+            ("['0', '1']", "Selected pairs cannot be marked on the grid: Selected pairs must be a list of rows."),
+            (5, "Selected pairs cannot be marked on the grid: Selected pairs must be a list of rows."),
+        ):
+            for selection in ("custom", "none"):
+                drafts.clear()
+                project(selection=selection, custom_pairs=unread)
+                assert form.error.text() == problem and not form.table.isEnabled() and marked() == []
+                # Nothing a gesture says reaches the list.
+                form.table.selection_edited.emit(((2, 2),))
+                assert drafts == []
+            # Under a rule the grid does not write Selected's list: it is
+            # left as it is, and still the list Selected comes back to.
+            project(selection="all", custom_pairs=unread)
+            assert form.error.isHidden() and form.table.isEnabled() and len(marked()) == 6
+            form.presets.button("custom").click()
+            assert drafts[-1] == {"values": {"selection": "custom", "pairs": ()}}
     finally:
         form.close()
         form.deleteLater()

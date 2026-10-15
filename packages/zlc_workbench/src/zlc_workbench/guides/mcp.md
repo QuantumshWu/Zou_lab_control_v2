@@ -150,8 +150,8 @@ parked: kept as written in the draft, the layout and the run record
 (`parked_pairs`), never checked, never published and never in the way of Start --
 it may repeat a selected pair or have an empty end. Only the selected rows are
 checked (filled-in ends, start before end, no pair twice). The list stays in the
-draft while a rule is selected, so selecting `custom` again brings it back.
-Endpoints are text: `0` (or `first`) is first and only ever starts a pair,
+draft while a rule or `none` is selected, so selecting `custom` again brings it
+back. Endpoints are text: `0` (or `first`) is first and only ever starts a pair,
 `last` is last, and positive indices name middle frames. A selected pair
 whose middle frame the source does not carry stays in the draft, is left out of
 this source's pairs and is named in the run record (`absent_pairs`); it does not
