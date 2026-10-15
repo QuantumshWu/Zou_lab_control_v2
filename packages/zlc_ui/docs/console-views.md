@@ -41,6 +41,7 @@ panel_publisher_draft_changed = pyqtSignal(str, object)
 logic_start_requested = pyqtSignal(str)
 logic_auto_preview_changed = pyqtSignal(str, bool)
 logic_stop_requested = pyqtSignal(str)
+logic_revert_requested = pyqtSignal(str)       # put the running configuration back in the draft
 logic_edit_requested = pyqtSignal(str)
 logic_remove_requested = pyqtSignal(str)
 logic_draft_changed = pyqtSignal(str, object)
@@ -274,9 +275,30 @@ raises the same `stop_requested` as the status strip's "Stop task".
 
 A node's Edit page is three bands and only the middle one scrolls: the
 header (name, kind, status line) above, the rows, and the action bar
-(Remove | Plot, Start, Stop) as the page's foot, on the rows' left and right
-edges.  A newly opened page starts at its first row; after that its bar is
-the operator's, across tab switches.
+(Remove | Revert, Plot, Start, Stop) as the page's foot, on the rows' left and
+right edges.  A newly opened page starts at its first row; after that its bar
+is the operator's, across tab switches.
+
+A running node's page stays editable, and the edits are the next run's.  The
+projection's `edited` says the draft differs from the configuration the
+current run (running, following or queued) was started with.  While it holds,
+Revert -- a standard command in its own fixed slot left of the Plot group,
+always shown -- is enabled and raises `revert_requested`
+(`logic_revert_requested` on the handle), which makes that whole configuration
+the draft again -- replacing it, so a device or artifact input only the edit
+named goes too -- without restarting; Restart wears the dirty star and the
+primary role (`set_dirty`, the On Pulse rule) with the tooltip "Restart to run
+the edited configuration".  A Restart of an unedited run is a standard
+command; Start, with nothing running, is the page's primary.  The presenter
+also ends the row's and the header's status with `· edited`, and a Restart
+it refused while the run goes on adds `; Restart refused: <why>` there until
+the next edit.  Only Restart or Revert ends an edit: a following processor
+whose source restarts, or a Measurement a Task restarts to acquire from,
+rebuilds the configuration it was started with, so the cue stays, and while it
+follows its status names that configuration's source even when the edit has
+issues -- those are the next run's.  A queued Restart's configuration is the
+one the node runs only until the Restart is discarded (Stop, another node
+taking its device); then it is the old run's again.
 
 ## `StatusStrip` (internal)
 

@@ -94,6 +94,8 @@ class TaskConsoleHandle(QtCore.QObject):
     logic_start_requested = QtCore.pyqtSignal(str)
     logic_auto_preview_changed = QtCore.pyqtSignal(str, bool)
     logic_stop_requested = QtCore.pyqtSignal(str)
+    #: Put the configuration the running node uses back into its draft.
+    logic_revert_requested = QtCore.pyqtSignal(str)
     logic_edit_requested = QtCore.pyqtSignal(str)
     logic_remove_requested = QtCore.pyqtSignal(str)
     logic_draft_changed = QtCore.pyqtSignal(str, object)
@@ -760,6 +762,9 @@ class TaskConsoleHandle(QtCore.QObject):
             )
             editor.stop_requested.connect(
                 lambda _=None, nid=key: self.logic_stop_requested.emit(nid)
+            )
+            editor.revert_requested.connect(
+                lambda _=None, nid=key: self.logic_revert_requested.emit(nid)
             )
             editor.remove_requested.connect(
                 lambda _=None, nid=key: self.logic_remove_requested.emit(nid)

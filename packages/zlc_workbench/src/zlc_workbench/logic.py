@@ -125,6 +125,11 @@ class LogicCandidate:
     reservation: LogicReservation | None = None
     run_root: Path | None = None
     input_summary: Mapping[str, object] = field(default_factory=dict)
+    #: A copy of the draft this run was built from, kept where the Start is
+    #: accepted.  It becomes the node's running configuration
+    #: (``LogicBinding.started_draft``) only when the run is installed; a
+    #: candidate discarded before then takes its configuration with it.
+    draft: LogicDraft | None = None
 
     @property
     def waiting_for(self) -> tuple[str, ...]:
@@ -168,6 +173,15 @@ class LogicBinding:
     #: every publication of the same incompatible schema.
     following: bool = False
     draft_revision: int = 0
+    #: A copy of the draft the installed run (or a standing follow) was
+    #: started with.  While a Restart is queued the configuration the node
+    #: runs is that candidate's own copy (``pending.draft``); this one is
+    #: replaced only when the candidate is installed, so a queued Restart
+    #: that is discarded leaves the old run's record in place.  The draft
+    #: goes on being edited for the next run; the running configuration is
+    #: what Revert puts back, what a follow restart rebuilds, and what the
+    #: draft is compared with to say "edited".
+    started_draft: LogicDraft | None = None
     finalization_key: tuple = ()
     finalization: LogicDraftFinalization | None = None
     #: Open this node's declared preview panel when it starts.  A preference
