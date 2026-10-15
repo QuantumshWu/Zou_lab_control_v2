@@ -1700,6 +1700,7 @@ def _accumulate_run(
     *,
     spot_sigma: float,
     detection_sigma: float,
+    electrons_per_count: float | None = None,
 ) -> _RunEvidence:
     """Read the run once, keeping every quantity a later step could want.
 
@@ -1724,6 +1725,15 @@ def _accumulate_run(
     total_image = np.zeros(stack.shape[1:], dtype=float)
     transitions = 0
     previous_smoothed: np.ndarray | None = None
+    previous_source_variance: np.ndarray | None = None
+    if electrons_per_count is not None:
+        # Exactly the finite Gaussian used by gaussian_filter, squared rather
+        # than renormalised: Var(sum(w * photons)) = sum(w**2 * photons).
+        radius = int(4.0 * spot_sigma + 0.5)
+        offsets = np.arange(-radius, radius + 1, dtype=float)
+        kernel = np.exp(-0.5 * (offsets / spot_sigma) ** 2)
+        kernel /= np.sum(kernel)
+        variance_kernel = kernel ** 2
     # Frames are filtered many at a time, in blocks sized by memory rather than
     # by frame count: one SciPy call over a block costs a fraction of one call
     # per frame, and filtering makes two more copies of whatever it is given,
@@ -1736,6 +1746,25 @@ def _accumulate_run(
         smoothed = ndimage.gaussian_filter(
             frames, sigma=(0.0, spot_sigma, spot_sigma)
         )
+        source_variance = None
+        if electrons_per_count is not None:
+            # Background/read noise is already measured below. Add only the
+            # source's excess photon noise, in the INPUT's units; a raw ADU is
+            # not one electron. Do not infer gain from signal dtype or offset.
+            excess = np.maximum(
+                frames - np.median(frames, axis=(1, 2), keepdims=True), 0.0
+            ) / electrons_per_count
+            variance = ndimage.correlate1d(excess, variance_kernel, axis=1)
+            del excess
+            variance = ndimage.correlate1d(variance, variance_kernel, axis=2)
+            source_variance = variance[1:] + variance[:-1]
+            if previous_source_variance is not None:
+                source_variance = np.concatenate((
+                    variance[:1] + previous_source_variance[np.newaxis, ...],
+                    source_variance,
+                ), axis=0)
+            previous_source_variance = np.array(variance[-1], copy=True)
+            del variance
         response = smoothed - ndimage.gaussian_filter(
             frames, sigma=(0.0, background_sigma, background_sigma)
         )
@@ -1768,6 +1797,9 @@ def _accumulate_run(
             np.finfo(float).eps
             * np.maximum(1.0, np.max(magnitude, axis=(1, 2), keepdims=True)),
         )
+        if source_variance is not None:
+            noise = np.sqrt(noise ** 2 + source_variance)
+            del source_variance
         # Preserve identity BEFORE combining transitions. A rare site's peak
         # can disappear in a sum (or maximum) of images from different times.
         # The ring belongs to the same transition as its local peak, never a
@@ -1777,7 +1809,7 @@ def _accumulate_run(
             - inner * ndimage.uniform_filter(magnitude, size=(1, change_window - 2, change_window - 2), mode="nearest")
         ) / float(outer - inner)
         # Score the localized change, not a bright neighbour's broad skirt.
-        # Keep the pre-contrast background scatter as the conservative scale;
+        # Keep the pre-contrast local scatter as the conservative scale;
         # this is not an exact per-pixel photon-noise probability.
         standardized = (magnitude - ring) / noise
         del ring
@@ -2050,6 +2082,7 @@ def detect_sites(
     spot_sigma: float = 1.0,
     detection_sigma: float = 6.0,
     measurement_radius: int = 0,
+    electrons_per_count: float | None = None,
 ) -> SiteMap:
     """Find the traps in a run of frames, and say where each one is.
 
@@ -2059,7 +2092,8 @@ def detect_sites(
     * BETWEEN NEIGHBOURING FRAMES.  Loading or unloading makes one spatially
       shaped difference peak.  A site that loaded on only one frame therefore
       remains a possible site even when its complete average is weak.  The
-      change threshold is measured on each difference image's own background.
+      Its noise includes the measured background and the source's photon
+      variance when the input's electron conversion is known.
       A difference has no direction -- that is the point of it: a weak trap
       in its bright neighbours' band-pass dark ring is never bright on any
       one frame, and it is still a trap.
@@ -2076,6 +2110,9 @@ def detect_sites(
     ``detection_sigma`` is how sure one neighbouring-frame change must be.
     ``measurement_radius`` is the box the readout will later ask for round
     each site, which a published site must be able to carry.
+    ``electrons_per_count`` describes these input numbers: 1 for electrons,
+    the camera's conversion for raw counts, None for an unknown conversion.
+    Unknown units do not license assuming one count is one photon.
     """
 
     # The frames' own dtype: the run is filtered in blocks, each widened to
@@ -2095,13 +2132,18 @@ def detect_sites(
         raise ValueError("spot_sigma must be positive and finite")
     if detection_sigma <= 0 or not np.isfinite(detection_sigma):
         raise ValueError("detection_sigma must be positive and finite")
+    if electrons_per_count is not None:
+        electrons_per_count = float(electrons_per_count)
+        if electrons_per_count <= 0 or not np.isfinite(electrons_per_count):
+            raise ValueError("electrons_per_count must be positive and finite")
     # How near in y two sites must be to be READ as one row of the array.
     # Ordering only: it decides the order site ids are handed out in, never
     # which places are sites.
     row_tolerance = max(2.0, float(spot_sigma))
 
     evidence = _accumulate_run(
-        stack, spot_sigma=spot_sigma, detection_sigma=detection_sigma
+        stack, spot_sigma=spot_sigma, detection_sigma=detection_sigma,
+        electrons_per_count=electrons_per_count,
     )
     admission = _admission_thresholds(
         stack, evidence, detection_sigma=detection_sigma
@@ -2575,6 +2617,7 @@ def calibrate(
     psf_padding: int = 3,
     detection_spot_sigma: float = 1.0,
     detection_sigma: float = 6.0,
+    electrons_per_count: float | None = None,
     site_map_filter: Callable[[SiteMap, np.ndarray], SiteMap] | None = None,
 ) -> CalibrationResult:
     """Discover sites and fit all readout models from one complete capture."""
@@ -2610,6 +2653,7 @@ def calibrate(
         references.reshape(-1, *references.shape[2:]),
         spot_sigma=detection_spot_sigma,
         detection_sigma=detection_sigma,
+        electrons_per_count=electrons_per_count,
         # Every box this calibration will read out of a site: the integration
         # box, and the PSF box with the background ring round it.  A place that
         # cannot carry all of them is not a site THIS calibration can use.
