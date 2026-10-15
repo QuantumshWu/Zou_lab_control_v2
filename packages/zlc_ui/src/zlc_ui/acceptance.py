@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import time
 
-from PyQt5 import QtCore, QtGui, QtWidgets
+from PyQt5 import QtCore, QtGui, QtWidgets, sip
 
 from .fluent import WINDOW_SCREEN_FRACTION, screen_fit_window_size
 from .qt import ensure_qt_app
@@ -56,9 +56,12 @@ class AcceptanceCapture:
     #: Whether the window had actually left the screen when the capture
     #: returned -- None when it was asked to stay.  A close is a REQUEST:
     #: a window guarded by an asynchronous owner may refuse it or finish it
-    #: later, and a capture that reported the screenshot alone let that
-    #: pending close pass for a finished one.
+    #: later, so the capture waits for it (``close_timeout_ms``) and False
+    #: means it was still on screen at that deadline.
     window_closed: bool | None
+    #: How long the close took to land, in milliseconds -- the wait up to
+    #: the deadline when it never did; None when the window stayed.
+    close_ms: int | None
 
     def as_dict(self) -> dict[str, object]:
         """Return a JSON-friendly diagnostic mapping."""
@@ -82,6 +85,7 @@ class AcceptanceCapture:
                 None if self.desktop_output is None else str(self.desktop_output)
             ),
             "window_closed": self.window_closed,
+            "close_ms": self.close_ms,
         }
 
 
@@ -124,6 +128,34 @@ def _settle(app: QtWidgets.QApplication, milliseconds: int) -> None:
             return
 
 
+def _window_gone(window: QtWidgets.QWidget) -> bool:
+    """Whether ``window`` has left the screen (or been deleted outright)."""
+
+    return sip.isdeleted(window) or not window.isVisible()
+
+
+def _wait_closed(
+    app: QtWidgets.QApplication, window: QtWidgets.QWidget, timeout_ms: int
+) -> tuple[bool, int]:
+    """Pump Qt events until ``window`` is gone or ``timeout_ms`` passes.
+
+    Returns whether it went and how long that took (the whole wait when it
+    did not).  A window whose owner finishes the close later -- a console
+    stopping its Logic nodes, an editor whose presenter completes the
+    request -- is reported as it ends up, not as it stood one settle after
+    the request.
+    """
+
+    start = time.monotonic()
+    deadline = start + max(0, int(timeout_ms)) / 1000.0
+    while True:
+        app.processEvents(QtCore.QEventLoop.AllEvents, 20)
+        gone = _window_gone(window)
+        now = time.monotonic()
+        if gone or now >= deadline:
+            return gone, int(round((now - start) * 1000.0))
+
+
 def _desktop_relative_pixmap(
     screen: QtGui.QScreen,
     window: QtWidgets.QWidget,
@@ -159,6 +191,7 @@ def capture_window(
     desktop_output: str | Path | None = None,
     settle_ms: int = 120,
     close: bool = True,
+    close_timeout_ms: int = 15000,
 ) -> AcceptanceCapture:
     """Capture one human-visible Qt window through its real entry point.
 
@@ -178,6 +211,11 @@ def capture_window(
     make the 90%-of-screen relationship visible.  For the shared
     :class:`~zlc_ui.fluent.FluentWindow` shell, the report also validates that
     the loaded body begins below the actual native title-bar bottom.
+
+    With ``close`` the window is closed after the grab and the capture
+    pumps events until it has really left the screen, for at most
+    ``close_timeout_ms``; ``window_closed`` and ``close_ms`` report the
+    outcome.
     """
 
     if not callable(opener):
@@ -265,15 +303,14 @@ def capture_window(
             actual.width() / available.width(),
             actual.height() / available.height(),
         )
-        window_closed = None
+        frame = _rect(window.frameGeometry())
+        window_closed = close_ms = None
         if close:
-            # Asked, then given the same settle interval the capture had,
-            # and reported as it stands: still visible means the close is
-            # refused or pending, and the report says so rather than
-            # pretending.
+            # Asked, then waited for: still visible at the deadline means the
+            # close was refused or never finished, and the report says so
+            # rather than pretending.
             window.close()
-            _settle(app, settle_ms)
-            window_closed = not window.isVisible()
+            window_closed, close_ms = _wait_closed(app, window, close_timeout_ms)
         return AcceptanceCapture(
             platform=platform,
             available_geometry=_rect(available),
@@ -281,7 +318,7 @@ def capture_window(
             screen_dpr=float(screen.devicePixelRatio()),
             target_size=None if target is None else _size(target),
             window_size=_size(actual),
-            frame_geometry=_rect(window.frameGeometry()),
+            frame_geometry=frame,
             window_fraction=fraction,
             grab_size=(pixmap.width(), pixmap.height()),
             desktop_size=(
@@ -295,9 +332,10 @@ def capture_window(
             output=output_path,
             desktop_output=desktop_path,
             window_closed=window_closed,
+            close_ms=close_ms,
         )
     finally:
-        if close and window is not None and window.isVisible():
+        if close and window is not None and not _window_gone(window):
             window.close()
             app.processEvents()
 

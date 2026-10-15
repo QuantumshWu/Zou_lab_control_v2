@@ -11,6 +11,7 @@ _EXPORTS = {
     "FormSpec": ("zlc_ui.form.form", "FormSpec"),
     "FormFieldKind": ("zlc_ui.form.form", "FormFieldKind"),
     "parse_number_text": ("zlc_ui.form.form", "parse_number_text"),
+    "required_label": ("zlc_ui.form.form", "required_label"),
     "FormRuntimeContext": ("zlc_ui.form.qt_form", "FormRuntimeContext"),
     "FluentParameterForm": ("zlc_ui.form.qt_form", "FluentParameterForm"),
     "being_edited": ("zlc_ui.form.qt_form", "being_edited"),

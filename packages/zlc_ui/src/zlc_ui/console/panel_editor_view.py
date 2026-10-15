@@ -210,7 +210,7 @@ class PanelEditorView(QtWidgets.QWidget):
         self._producer_contributions: dict[object, QtWidgets.QWidget] = {}
         producer_actions = QtWidgets.QHBoxLayout()
         producer_actions.addStretch(1)
-        self.open_producer_button = FluentButton("Open Producer")
+        self.open_producer_button = FluentButton("Open producer")
         self.open_producer_button.setToolTip(
             "Open this node's existing Logic Edit tab"
         )
@@ -262,7 +262,7 @@ class PanelEditorView(QtWidgets.QWidget):
         ))
         actions = QtWidgets.QHBoxLayout()
         actions.addStretch(1)
-        self.save_button = FluentButton("Save Fig", role="primary")
+        self.save_button = FluentButton("Save figure", role="primary")
         actions.addWidget(self.save_button)
         save_layout.addLayout(actions)
         body_layout.addWidget(save_group)
@@ -625,9 +625,9 @@ class PanelEditorView(QtWidgets.QWidget):
                 signal = str(state.get("signal") or "")
             frozen_signal = str(projection.get("frozen_signal") or "")
             pieces.append(
-                "STALE: this panel now shows another signal; refresh before Save Fig"
+                "STALE: this panel now shows another signal; refresh before Save figure"
                 if signal and frozen_signal and signal != frozen_signal
-                else "STALE: panel configuration changed; refresh before Save Fig"
+                else "STALE: panel configuration changed; refresh before Save figure"
             )
         elif projection.get("source_status") == "earlier_run":
             pieces.append("Frozen from an earlier run; Refresh to update; Save keeps this snapshot")

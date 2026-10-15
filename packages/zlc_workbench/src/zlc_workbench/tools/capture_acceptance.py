@@ -103,6 +103,8 @@ def main(argv: list[str] | None = None) -> int:
         "grab_physical",
         "content_top_margin",
         "output",
+        "window_closed",
+        "close_ms",
     ):
         print(f"{key}={values[key]}")
     return 0

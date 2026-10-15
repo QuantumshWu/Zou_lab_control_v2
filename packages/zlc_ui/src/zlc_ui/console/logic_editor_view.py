@@ -36,7 +36,7 @@ from zlc_ui.fluent import (
     setting_label_width,
     status_dot_gap,
 )
-from zlc_ui.form import FluentParameterForm, FormSpec
+from zlc_ui.form import FluentParameterForm, FormSpec, required_label
 from zlc_ui.form.qt_form import _form_label_width
 from .logic_row_view import (
     STATE_COLOURS,
@@ -551,9 +551,7 @@ class LogicEditorView(QtWidgets.QWidget):
                 # activation and the tree's own leaf-click re-emission --
                 # exactly as the shared keyed-choice form handler wires it.
                 self.source_combo.activated[int].connect(self._source_changed)
-                self._add_selector_row(
-                    str(projection.get("source_label") or "Signal"), self.source_combo, first=True
-                )
+                self._add_selector_row(_source_row_label(projection), self.source_combo, first=True)
             # The one grouped signal chooser every other picker already uses:
             # a producer tree with keyed leaves, not a second flat list.
             if bundle:
@@ -617,7 +615,7 @@ class LogicEditorView(QtWidgets.QWidget):
                     })
                 )
                 self._acquisition_combo = combo
-                self._add_selector_row(field.label, combo)
+                self._add_selector_row(required_label(field.label, field.required), combo)
             combo.setToolTip(field.description)
             combo.setEnabled(bool(projection.get("acquisition_enabled", True)) and not field.unavailable)
             self._fill_combo(
@@ -665,7 +663,10 @@ class LogicEditorView(QtWidgets.QWidget):
         if existing != desired:
             combo.clear()
             for label, value in desired:
-                combo.addItem(label, value)
+                if blank and not value:
+                    combo.add_blank_item(label)
+                else:
+                    combo.addItem(label, value)
         index = combo.findData(current)
         combo.setCurrentIndex(max(0, index))
         combo.blockSignals(False)
@@ -758,6 +759,13 @@ def _device_label(name: str) -> str:
     return str(name).replace("_", " ").title()
 
 
+def _source_row_label(projection: Mapping[str, object]) -> str:
+    """The source row's words: a draft refuses without its signal, so it
+    carries the column's required marker like every required form field."""
+
+    return required_label(str(projection.get("source_label") or "Signal"), True)
+
+
 def _draft_status(
     issues: tuple[str, ...],
     claims: object,
@@ -793,11 +801,11 @@ def _row_labels(projection: Mapping[str, object]) -> tuple[str, ...]:
 
     labels = [_device_label(name) for name in (projection.get("device_options") or {})]
     if projection.get("source_required"):
-        labels.append(str(projection.get("source_label") or "Signal"))
+        labels.append(_source_row_label(projection))
     acquisition_key = str(projection.get("acquisition_input") or "")
     if acquisition_key:
         labels.extend(
-            field.label for field in projection["form_spec"].fields
+            required_label(field.label, field.required) for field in projection["form_spec"].fields
             if field.key == acquisition_key
         )
     labels.extend(

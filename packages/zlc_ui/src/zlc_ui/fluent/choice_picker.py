@@ -147,7 +147,7 @@ def fill_grouped_choice_combo(
     with _signals_blocked(combo):
         combo.clear()
         if none_label is not None:
-            combo.addItem(none_label, "")
+            combo.add_blank_item(none_label)
         for label, key in grouped_choice_items(
             names,
             sources,

@@ -613,7 +613,7 @@ project the effective live config, and remain retryable.
 Runtime owns complete live/final Dataset truth. Plot surfaces keep one
 active+latest solve and atomically show matching data/fit revisions. The three
 save actions stay separate: Save Layout writes stopped wiring, Save Screenshot
-writes a GUI image, and Panel Save Fig writes only that panel's frozen data/image
+writes a GUI image, and Panel Save figure writes only that panel's frozen data/image
 plus actual run/device provenance.
 
 Every hosted Task allocates its unique run folder only when execution actually

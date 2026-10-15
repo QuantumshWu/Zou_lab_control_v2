@@ -1541,7 +1541,7 @@ class FluentGroupBox(QtWidgets.QGroupBox):
 #: ACCENT_STRONG fill, white ink) -- at most one per surface; ``standard``
 #: every other command (the light-blue tint); ``destructive`` a command that
 #: takes something away or stops or shuts something down -- Remove, Delete,
-#: Clear, Unload, a device's Close, Shutdown devices, every Stop (a labelled
+#: Clear, Unload, a device's Close, Shut down devices, every Stop (a labelled
 #: one sits on the RED_TINT face; a one-glyph remover repeated down rows is
 #: a ghost in quiet ink that turns red only under the pointer, since red at
 #: rest marks problems); and ``destructive_primary`` the confirm of a
@@ -2510,6 +2510,10 @@ class FluentReadoutEdit(FluentLineEdit):
         self.setTextMargins(left, margins.top(), margins.right(), margins.bottom())
         self.setReadOnly(True)
         self.setCursor(QtCore.Qt.IBeamCursor)        # the I-beam signals "selectable text"
+        # Focus by a click only, for selecting and copying: there is nothing to
+        # type, so the readout is neither a Tab stop nor a window's first focus
+        # -- a focused readout drops its middle elision and scrolls to its tail.
+        self.setFocusPolicy(QtCore.Qt.ClickFocus)
         self.set_display_elide(QtCore.Qt.ElideMiddle)
         self.setToolTip(self.text())
 
@@ -2587,12 +2591,13 @@ class FluentReadoutMultiline(QtWidgets.QPlainTextEdit):
         inset = 0 if self._plain else field_text_inset()
         self.setViewportMargins(inset - scaled_px(PADDING_V), 0, 0, 0)
         self._apply_style()
+        # Not an input, like the single-line readout: focus by a click only, so it is neither a
+        # Tab stop nor a dialog's initial focus (which lands on the OK button -> Enter dismisses).
+        # Mouse selection + copy still work.
+        self.setFocusPolicy(QtCore.Qt.ClickFocus)
         if self._plain:
-            # A MESSAGE body is not an input: hide the blinking text caret and don't steal the dialog's
-            # initial focus (so it lands on the OK button -> Enter dismisses).  Mouse selection + copy
-            # still work regardless of focus policy.
+            # A MESSAGE body also hides the blinking text caret.
             self.setCursorWidth(0)
-            self.setFocusPolicy(QtCore.Qt.ClickFocus)
         if text:
             self.setPlainText(str(text))
         # Recompute height when the text changes AND when the wrapped layout size changes (a resize
@@ -3283,8 +3288,8 @@ def stamped_file_name(stem: str, extension: str, *, stamp: str | None = None) ->
 
     A name the operator recognises plus the moment it was written, because two
     saves of the same board are two files and the second must not silently be
-    the first.  ONE rule: the Edit tab's Save Fig and the console's own Save
-    Layout / Save Screenshot had begun to grow their own.
+    the first.  ONE rule: the Edit tab's Save figure and the console's own
+    Save… (layout) and Save image… had begun to grow their own.
     """
 
     from datetime import datetime  # noqa: PLC0415 -- only a save needs the clock
@@ -3402,6 +3407,11 @@ QAbstractItemView::corner {{
     return style
 
 
+#: The item role that marks a combo's blank choice -- the row meaning
+#: "nothing chosen yet" (see :meth:`FluentComboBox.add_blank_item`).
+_BLANK_CHOICE_ROLE = QtCore.Qt.UserRole + 2
+
+
 class FluentComboBox(QtWidgets.QAbstractButton):
     """A Fluent combo with an optional, lazily created text editor.
 
@@ -3502,6 +3512,24 @@ class FluentComboBox(QtWidgets.QAbstractButton):
     def addItems(self, texts) -> None:  # noqa: N802 - Qt API name
         for text in texts:
             self.addItem(text)
+
+    def add_blank_item(self, text: object) -> None:
+        """Add the choice that means nothing is chosen yet ("(not selected)").
+
+        It carries the empty key like any other keyed row, and while it is
+        current the collapsed box paints its words as an empty field paints
+        its placeholder, in MUTED_INK: a missing input must not look like a
+        value someone picked.  A row whose empty key IS a choice ("Subpulse
+        file") is an ordinary ``addItem``.
+        """
+
+        self.addItem(text, "")
+        self._model.setData(self._model.index(self.count() - 1, 0), True, _BLANK_CHOICE_ROLE)
+
+    def current_is_blank(self) -> bool:
+        """Whether the current row is the blank choice of :meth:`add_blank_item`."""
+
+        return self.currentData(_BLANK_CHOICE_ROLE) is True
 
     def clear(self) -> None:
         previous = self._current_index
@@ -3885,7 +3913,9 @@ class FluentComboBox(QtWidgets.QAbstractButton):
 
         if self._line_edit is None:
             text_rect = self._collapsed_text_rect()
-            painter.setPen(QtGui.QColor(TEXT if enabled else DISABLED_INK))
+            # The blank choice reads as an empty field's placeholder does.
+            ink = DISABLED_INK if not enabled else MUTED_INK if self.current_is_blank() else TEXT
+            painter.setPen(QtGui.QColor(ink))
             painter.setFont(self._collapsed_font())
             text = painter.fontMetrics().elidedText(
                 self._display_text(), QtCore.Qt.ElideRight, text_rect.width()
@@ -4766,6 +4796,9 @@ class FluentTreeComboBox(FluentComboBox):
                 none_item.setData("", QtCore.Qt.UserRole)
             if none_item.data(QtCore.Qt.UserRole + 1) != "":
                 none_item.setData("", QtCore.Qt.UserRole + 1)
+            # The none row is this tree's blank choice (add_blank_item).
+            if none_item.data(_BLANK_CHOICE_ROLE) is not True:
+                none_item.setData(True, _BLANK_CHOICE_ROLE)
             if none_item.isEditable():
                 none_item.setEditable(False)
             desired_top.append(none_item)
@@ -5524,9 +5557,16 @@ def fluent_switch_width(text: str) -> int:
 
     track_w, _track_h = _switch_track_size()
     if not text:
+        # Room for the bare track's anti-aliased ends.
         return track_w + 2
-    metrics = QtGui.QFontMetrics(QtGui.QFont(FONT, fluent_font_size()))
-    return track_w + scaled_px(8) + fluent_text_width(metrics, str(text)) + 2
+    metrics = QtGui.QFontMetricsF(QtGui.QFont(FONT, fluent_font_size()))
+    label = str(text)
+    # A labelled switch ends on the pixel where its word's ink does -- the
+    # advance less the last glyph's right bearing, which is negative for a
+    # glyph that overhangs -- so a row's gap after the switch is measured
+    # from the word, as the gap before it is from the track.
+    ink = metrics.horizontalAdvance(label) - metrics.rightBearing(label[-1])
+    return track_w + scaled_px(8) + int(math.ceil(ink))
 
 
 class FluentSwitch(QtWidgets.QAbstractButton):
@@ -7355,9 +7395,10 @@ class FluentCheckBox(QtWidgets.QCheckBox):
     fill whose edge is that fill, never an outline: unticked it is
     NEUTRAL_FILL, dark enough to read on a white card and on the BG face of
     a Spacer card; ticked it is ACCENT with a white tick.  Under the pointer
-    the fill steps one shade toward blue; disabled it is DIVIDER, a ticked
-    one with a BG tick.  The tick is centred on the box's device-pixel
-    centre.
+    the fill steps one shade toward blue.  Disabled, unticked it is DIVIDER
+    and ticked it is DISABLED_INK with the same white tick (3.5:1, and 2.9:1
+    against the unticked box), so a read-only card still says which boxes
+    are on.  The tick is centred on the box's device-pixel centre.
     """
 
     def __init__(self, text: str = "", parent=None):
@@ -7384,8 +7425,9 @@ class FluentCheckBox(QtWidgets.QCheckBox):
             QCheckBox::indicator:checked {{ border-color: {ACCENT}; background: {ACCENT}; }}
             QCheckBox::indicator:checked:hover {{ border-color: {ACCENT_HOVER}; background: {ACCENT_HOVER}; }}
             QCheckBox:disabled {{ color: {DISABLED_INK}; }}
-            QCheckBox::indicator:disabled, QCheckBox::indicator:checked:disabled {{
-                border-color: {DIVIDER}; background: {DIVIDER};
+            QCheckBox::indicator:disabled {{ border-color: {DIVIDER}; background: {DIVIDER}; }}
+            QCheckBox::indicator:checked:disabled {{
+                border-color: {DISABLED_INK}; background: {DISABLED_INK};
             }}
             """
         )
@@ -7414,7 +7456,7 @@ class FluentCheckBox(QtWidgets.QCheckBox):
         dy = cy - (0.34 + 0.68) / 2.0 * h
         painter = QtGui.QPainter(self)
         painter.setRenderHint(QtGui.QPainter.Antialiasing)
-        pen = QtGui.QPen(QtGui.QColor(SURFACE if self.isEnabled() else BG))
+        pen = QtGui.QPen(QtGui.QColor(SURFACE))
         pen.setWidthF(max(1.5, w / 8.0))
         pen.setCapStyle(QtCore.Qt.RoundCap)
         pen.setJoinStyle(QtCore.Qt.RoundJoin)
@@ -9884,17 +9926,20 @@ class FluentStatusStrip(FluentFrame):
         self._severity = None
         self.show_message("", severity="idle")
 
-    def set_inset(self, inset: bool, *, right: int = 0) -> None:
-        """Whether the strip keeps its content one card pad in from its
-        sides -- a strip that is its own white card, whose dot then starts
-        where a card's title and the tabs' first underline start -- or lies
-        flush, in a page that is already white and padded, where the page's
-        own edge is the one its dot starts on.  ``right`` keeps out of the
-        line whatever room the page reserves on its right (a scroll
-        gutter), so the line ends where the page's rows end."""
+    def set_inset(self, inset: bool, *, pad: int | None = None, right: int = 0) -> None:
+        """Whether the strip keeps its content in from its sides -- a strip
+        that is its own white card, whose dot then starts where the content
+        under it starts -- or lies flush, in a page that is already white and
+        padded, where the page's own edge is the one its dot starts on.
 
-        pad = card_pad() if inset else 0
-        self.layout().setContentsMargins(pad, scaled_px(4), pad + max(0, int(right)), scaled_px(4))
+        An inset strip stands ``pad`` in, one card pad unless the window
+        under it puts its pages elsewhere (TaskConsole's pages start a window
+        pad in, so its strip does too).  ``right`` keeps out of the line
+        whatever room the page reserves on its right (a scroll gutter), so
+        the line ends where the page's rows end."""
+
+        side = (card_pad() if pad is None else max(0, int(pad))) if inset else 0
+        self.layout().setContentsMargins(side, scaled_px(4), side + max(0, int(right)), scaled_px(4))
 
     @property
     def current_severity(self) -> str:

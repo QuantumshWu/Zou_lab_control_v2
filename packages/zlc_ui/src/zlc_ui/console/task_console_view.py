@@ -81,9 +81,12 @@ class TaskConsoleView(QtWidgets.QWidget):
         # a bottom log panel and therefore never shifts the board vertically.
         self.status_strip = StatusStrip(action_text="Stop task")
         self.status_strip.action_clicked.connect(self.stop_task_requested.emit)
-        # The header's dot and word are laid out as the strip's dot and line
-        # right under them -- its side margin, one dot size, its gap -- so
-        # the two dots stand on one x and the two texts start on one x.
+        # Every content edge of the window is one x: the header, the strip
+        # and every tab page start (and end) a window pad in.  The header's
+        # dot and word are laid out as the strip's dot and line right under
+        # them -- its side margin, one dot size, its gap -- so the two dots
+        # stand on one x and the two texts start on one x.
+        self.status_strip.set_inset(True, pad=window_pad())
         strip_layout = self.status_strip.layout()
         side = strip_layout.contentsMargins().left()
 
@@ -121,12 +124,14 @@ class TaskConsoleView(QtWidgets.QWidget):
         # An on/off setting is a switch, even in a row of commands: a
         # checkable button there read as one more command.
         self.selectors_switch = FluentSwitch("Selectors")
-        self.save_screenshot_button = FluentButton("Save image")
+        # The file commands ask where before they act, so each carries the
+        # ellipsis; reading one is Open, as in every window of the suite.
+        self.save_screenshot_button = FluentButton("Save image…")
         self.save_screenshot_button.setToolTip("Save one screenshot of TaskConsole")
-        self.save_layout_button = FluentButton("Save")
+        self.save_layout_button = FluentButton("Save…")
         self.save_layout_button.setToolTip("Save the layout and signal wiring")
-        self.load_layout_button = FluentButton("Load")
-        self.load_layout_button.setToolTip("Load a saved layout and signal wiring")
+        self.load_layout_button = FluentButton("Open…")
+        self.load_layout_button.setToolTip("Open a saved layout and signal wiring")
         self.clear_board_button = FluentButton("Clear", role="destructive")
         self.clear_board_button.setToolTip("Remove every panel and logic node from the board")
 

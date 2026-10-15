@@ -2942,7 +2942,7 @@ class ConsolePresenter:
             return False
         if binding.editor_host is None:
             # Focusing an already-open Edit keeps its frozen revision: that is
-            # the one its fit and its Save Fig belong to.
+            # the one its fit and its Save figure belong to.
             self.refresh_panel_snapshot(panel_id, report_unchanged=False)
         projection = self.panel_editor_projection(panel_id)
         opened = getattr(self.view, "open_panel_editor", None)
@@ -6065,7 +6065,7 @@ class ConsolePresenter:
         interactive = path is None
         if interactive:
             path = self.view.ask_open_path(
-                "Load TaskConsole layout", str(self.session.day_folder_path()), "Layouts (*.json)"
+                "Open TaskConsole layout", str(self.session.day_folder_path()), "Layouts (*.json)"
             )
         if not path:
             return False
@@ -6080,7 +6080,7 @@ class ConsolePresenter:
             if not interactive:
                 self._report("Loading this layout needs stop_running=true while Logic is active", severity="warning")
                 return False
-            if not self._confirm_board_replaced("Loading this layout", confirm_text="Stop and load"):
+            if not self._confirm_board_replaced("Opening this layout", confirm_text="Stop and open"):
                 return False
             stop_running = True
         return self.apply_layout(document, stop_running=stop_running)

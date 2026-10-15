@@ -1043,7 +1043,7 @@ class DeviceManagerView(QtWidgets.QWidget):
         # names the templates; a combo box in the row read as a setting.
         self.new_button = FluentButton("New…")
         self._templates: tuple[tuple[str, str], ...] = ()
-        self.load_button = FluentButton("Load…")
+        self.load_button = FluentButton("Open…")
         self.save_button = FluentButton("Save")
         self.save_as_button = FluentButton("Save as…")
         self.lifecycle_button = FluentButton("Init devices", role="primary")
