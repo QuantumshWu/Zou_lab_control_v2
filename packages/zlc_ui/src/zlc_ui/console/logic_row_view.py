@@ -20,6 +20,7 @@ from zlc_ui.fluent import (
     FluentStatusDot,
     FluentSwitch,
     add_row_switch,
+    fit_button_words,
     scaled_px,
     set_status_ink,
     setting_label_width,
@@ -96,24 +97,6 @@ def start_label(*, pending: bool, active: bool) -> str:
     if pending:
         return "Starting…"
     return "Restart" if active else "Start"
-
-
-def fit_button_words(button: FluentButton, words: tuple[str, ...]) -> None:
-    """Size ``button`` for the widest of the ``words`` it can say.
-
-    Measured through the button itself, so its padding and font count; the
-    slot then keeps one width whatever it says, and what stands beside it
-    never moves -- Stop beside a Start that reads Restart, the header's
-    commands beside an Add that names a panel or a node.
-    """
-
-    shown = button.text()
-    widths = []
-    for label in words:
-        button.setText(label)
-        widths.append(button.sizeHint().width())
-    button.setText(shown)
-    button.setMinimumWidth(max(widths))
 
 
 class LogicRowView(FluentFrame):
@@ -291,7 +274,6 @@ __all__ = [
     "STATE_WORDS",
     "STATUS_DOT",
     "LogicRowView",
-    "fit_button_words",
     "mount_logic_page",
     "start_label",
 ]

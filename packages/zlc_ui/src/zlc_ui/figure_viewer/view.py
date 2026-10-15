@@ -52,6 +52,7 @@ from zlc_ui.fluent import (
     InfoPane,
     add_row_switch,
     card_title_row,
+    fit_button_words,
     fluent_save_path,
     fluent_scrollbar_thickness,
     muted_note_label,
@@ -432,7 +433,7 @@ class _DataEditorView(QtWidgets.QWidget):
         # what the fields below are doing -- editing the chosen axis or
         # drafting a new one -- said beside it.  Choosing which axis to edit
         # is a different sentence: the labelled Editing row, whose Apply and
-        # Delete act on the axis it holds.
+        # Remove act on the axis it holds.
         self.add_axis_button = FluentButton("Add axis")
         self.add_axis_button.setToolTip("Create a new axis")
         self.axis_mode_label = muted_summary_label("Edit selected axis")
@@ -442,6 +443,9 @@ class _DataEditorView(QtWidgets.QWidget):
         self.axis_combo = FluentComboBox()
         self.axis_combo.setMinimumContentsLength(13)
         self.apply_axis_button = FluentButton("Apply axis")
+        # It reads Create axis while a new axis is drafted: one width for
+        # both, so the combo beside it never gives up room to the flip.
+        fit_button_words(self.apply_axis_button, ("Apply axis", "Create axis"))
         # One verb for every remover: Remove, red, one click.
         self.remove_axis_button = FluentButton("Remove", role="destructive")
         self.remove_axis_button.setToolTip(

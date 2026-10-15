@@ -77,7 +77,7 @@ _MANUAL_DTYPES = tuple(
 )
 # The manual editor works on one dense logical tensor.  Repeat and Point are
 # flattened only at the Dataset boundary; keeping them expanded here makes
-# every axis obey the same Add/Edit/Delete and Rows/Columns/Scope rules.
+# every axis obey the same Add/Edit/Remove and Rows/Columns/Scope rules.
 
 
 def _manual_version() -> str:
@@ -178,7 +178,7 @@ def _edited_mapped_domain(axes: tuple[object, ...], source: object) -> object:
     """Keep an existing carrier map until the operator changes its topology.
 
     Editing data, coordinates, names or units does not turn a sparse/serpentine
-    acquisition into a Cartesian product.  Add/Delete, moving an axis between
+    acquisition into a Cartesian product.  Add/Remove, moving an axis between
     domains, or changing an axis length does change the topology and therefore
     intentionally starts a new dense authored map.
     """

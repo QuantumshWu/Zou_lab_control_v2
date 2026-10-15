@@ -23,6 +23,7 @@ from zlc_ui.fluent import (
     FluentSwitch,
     add_row_switch,
     card_pad,
+    fit_button_words,
     FluentTabWidget,
     fluent_widget_stylesheet,
     muted_note_label,
@@ -34,7 +35,7 @@ from zlc_ui.fluent import (
 from zlc_ui.status import name_words
 
 from .board_view import ConsoleBoardView
-from .logic_row_view import STATUS_DOT, LogicRowView, fit_button_words, mount_logic_page
+from .logic_row_view import STATUS_DOT, LogicRowView, mount_logic_page
 from .panel_card_view import PanelCardView
 from .status_strip import StatusStrip
 

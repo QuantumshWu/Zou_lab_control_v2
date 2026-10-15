@@ -863,18 +863,24 @@ def status_cue(word: str) -> tuple[str, str]:
     return STATUS_CUES[str(word)]
 
 
-def set_status_ink(label: QtWidgets.QLabel, word: str) -> None:
+def set_status_ink(label: QtWidgets.QWidget, word: str) -> None:
     """Write ``label`` in the ink of status ``word``, in the body font.
 
     The whole sheet, so the font is never dropped with the colour, and only
     when the word CHANGES: a status beat arrives ten times a second, and a
-    sheet write re-parses, repolishes and repaints whatever it says."""
+    sheet write re-parses, repolishes and repaints whatever it says.  A
+    :class:`FluentReadoutEdit` (a status that can be selected and copied)
+    takes the same ink through its own sheet."""
 
     word = str(word)
     if label.property("status_word") == word:
         return
     ink = STATUS_CUES[word][1]
     label.setProperty("status_word", word)
+    if isinstance(label, FluentReadoutEdit):
+        label._ink = ink
+        label._apply_style()
+        return
     label.setStyleSheet(
         f'QLabel {{ color: {ink}; font: {fluent_font_size()}pt "{FONT}"; '
         f"background: transparent; border: none; }}"
@@ -1628,11 +1634,12 @@ class FluentGroupBox(QtWidgets.QGroupBox):
 #: every other command (the light-blue tint); ``quiet`` a one-glyph command
 #: that closes a view and takes nothing away (a frame's ×: a ghost, never
 #: red); ``destructive`` a command that takes something away or stops or
-#: shuts something down -- Remove, Delete, Clear, Unload, Discard, Ungroup,
-#: Exclude selected, Reset wavefront, a device's Close, Shut down devices,
-#: every Stop (a labelled one sits on the RED_TINT face; a one-glyph remover
-#: repeated down rows is a ghost in quiet ink that turns red only under the
-#: pointer, since red at rest marks problems), and it acts on ONE click;
+#: shuts something down -- Remove, Clear, Unload, Discard, Ungroup, Exclude
+#: selected, Reset (a review's exclusions), Reset wavefront, a device's Close,
+#: Shut down devices, every Stop (a labelled one sits on the RED_TINT face; a
+#: one-glyph remover repeated down rows is a ghost in quiet ink that turns red
+#: only under the pointer, since red at rest marks problems), and it acts on
+#: ONE click;
 #: and ``destructive_primary`` the confirm of a destructive question -- the
 #: one white-on-red fill.
 #: Active (:meth:`FluentButton.set_active`) is not a role but a state: the
@@ -1683,7 +1690,7 @@ def _button_stylesheet() -> str:
     ink (7.7:1), and held down it is SELECTED, the one colour that means
     "picked"; primary the deep ACCENT_STRONG with white ink (5.2:1), the one
     dark face on its surface.  Destructive has ONE look for every labelled
-    command -- Remove, Delete, Clear, Close, Stop: the RED_TINT face,
+    command -- Remove, Clear, Close, Stop: the RED_TINT face,
     RED_DARK ink (5.4:1), as far from white as the light-blue face is -- so
     a Remove reads the same in a toolbar, a button grid or alone; a
     one-glyph remover repeated down a list of rows (x) stays a ghost with
@@ -2126,6 +2133,25 @@ class FluentButton(QtWidgets.QPushButton):
 
     def is_dirty(self) -> bool:
         return self._dirty
+
+
+def fit_button_words(button: FluentButton, words: tuple[str, ...]) -> None:
+    """Size ``button`` for the widest of the ``words`` it can say.
+
+    Measured through the button itself, so its padding and font count; the
+    slot then keeps one width whatever it says, and what stands beside it
+    never moves -- Stop beside a Start that reads Restart, the header's
+    commands beside a Pause that reads Resume, an axis combo beside an
+    Apply axis that reads Create axis.
+    """
+
+    shown = button.text()
+    widths = []
+    for label in words:
+        button.setText(label)
+        widths.append(button.sizeHint().width())
+    button.setText(shown)
+    button.setMinimumWidth(max(widths))
 
 
 def _apply_fluent_context_menu(widget, event, *, extra=()) -> None:
@@ -2761,6 +2787,7 @@ class FluentReadoutEdit(FluentLineEdit):
 
     It wore a grey box with a faint edge, which is the disabled button's chrome: a path
     the operator was meant to read looked like a control that was switched off.
+    A readout that reports a status takes its ink from :func:`set_status_ink`.
 
     Inherits FluentLineEdit's sizing / API (``setText`` / ``text``) so it drops into the same
     rows.  A value stands in a column of fields -- a card's Total under its Name, a result
@@ -2787,6 +2814,9 @@ class FluentReadoutEdit(FluentLineEdit):
         self.set_display_elide(QtCore.Qt.ElideMiddle)
         self.setToolTip(self.text())
 
+    #: The text's ink: TEXT, or a status word's (:func:`set_status_ink`).
+    _ink = TEXT
+
     def setText(self, text: str) -> None:  # noqa: N802 - Qt API name
         super().setText(text)
         self.setToolTip(self.text())
@@ -2802,7 +2832,7 @@ class FluentReadoutEdit(FluentLineEdit):
                 border-left-width: 0px;
                 border-right-width: 0px;
                 padding: {scaled_px(PADDING_V)}px 0px;
-                color: {TEXT};
+                color: {self._ink};
                 font: {fluent_font_size()}pt "{FONT}";
             }}
             """

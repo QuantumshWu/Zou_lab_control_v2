@@ -211,13 +211,12 @@ QtTest.QTest.mouseClick(card.edit_button, QtCore.Qt.LeftButton)
 app.processEvents()
 QtTest.QTest.mouseClick(card.settings_button, QtCore.Qt.LeftButton)
 app.processEvents()
-# Setting's Remove removes the same panel as the header x: two clicks.
-QtTest.QTest.mouseClick(card.remove_button, QtCore.Qt.LeftButton)
-assert events.count(('remove',)) == 1, events
-assert card.remove_button.role() == 'destructive_primary'
+# Setting's Remove takes ONE click: only the header x is armed.
+assert not card.remove_button.is_armed()
 QtTest.QTest.mouseClick(card.remove_button, QtCore.Qt.LeftButton)
 assert ('edit',) in events
 assert events.count(('remove',)) == 2, events
+assert card.remove_button.role() == 'destructive'
 assert any(event[0] == 'state' and event[1]['title'] == 'Card changed' for event in events)
 assert ('state', {'interval_ms': 800}) in events
 popup.close(); card.close(); card.deleteLater()
@@ -2166,6 +2165,21 @@ assert camera_row.start_button.isEnabled()
 assert camera_row.stop_button.isEnabled()
 assert camera_row.edit_button.isEnabled()
 assert camera_row.remove_button.isEnabled()
+
+# The header dot is the worst of the nodes': a failure anywhere, else a run
+# anywhere, else grey -- from the one status table.
+from zlc_ui.fluent import STATUS_CUES
+def header_is(word):
+    return f"background:{STATUS_CUES[word][0]};" in view.status_dot.styleSheet()
+assert header_is('idle'), view.status_dot.styleSheet()
+handle.set_logic_state('camera', 'running')
+assert header_is('running')
+handle.set_logic_state('calibration', 'error', 'broke')
+assert header_is('error')
+handle.set_logic_state('calibration', 'idle')
+assert header_is('running')
+handle.remove_logic_row('camera')
+assert header_is('idle')
 
 """
     )

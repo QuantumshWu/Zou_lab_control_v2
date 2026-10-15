@@ -28,6 +28,7 @@ from zlc_ui.fluent import (
     FluentTreeComboBox,
     FONT,
     fill_grouped_choice_combo,
+    fit_button_words,
     fluent_font_size,
     retire_widget,
     row_gap,
@@ -44,7 +45,6 @@ from .logic_row_view import (
     STATE_WORDS,
     STATUS_DOT,
     START_LABELS,
-    fit_button_words,
     mount_logic_page,
     start_label,
 )

@@ -149,10 +149,11 @@ card's strip (`strip_rect()`) -- its body is its plot's -- and the whole of
 an empty card, whose blank body shows the open hand; where the board puts
 a carried card does not depend on where it is held.  Setting is as tall as every other button and the header `×` is
 square at that height: the quiet one-glyph remover (red only under the
-pointer).  Removing a panel takes two clicks, from the header `×` and from
-the Remove in its Setting frame alike (`FluentButton(confirm_twice=...)`):
-the first arms the white-on-red confirm, a second within the system
-double-click interval removes, and left alone it returns to rest.  Setting
+pointer).  Removing a panel from the header `×` takes two clicks
+(`FluentButton(confirm_twice=...)`): the first arms the white-on-red
+confirm, a second within the system double-click interval removes, and left
+alone it returns to rest.  The Remove in its Setting frame takes one click,
+because opening Setting is the deliberate step.  Setting
 is held down (the active face) while its frame is open.  On a card
 wider than what its viewport shows, the two ride the viewport's right edge
 (`keep_commands_within(right)`), as far in from it as from the card's own

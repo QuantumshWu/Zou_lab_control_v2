@@ -77,25 +77,26 @@ A state is a fill, never an extra outline or a focus ring.
   and held down they are medium blue -- the colour of anything chosen.
 - **Toggle commands** -- a command whose next press undoes the last one:
   Expand/Collapse, Pause/Resume, Hide/Show side panels, a button that opens
-  a frame (Setting, Preset…, Edit…), a device card's fold -- stay medium blue
-  while what they did is in effect.  When the label flips, it names what the
-  next press will do.  On/off settings are switches, not toggle commands.
+  a frame (Setting, Preset…, Edit…) -- stay medium blue while what they did
+  is in effect.  When the label flips, it names what the next press will do.
+  On/off settings are switches, not toggle commands, and a disclosure chevron
+  (a device card's fold, a tree's triangle) shows its state by its direction.
 - **Red takes something away or stops it**: Remove, Clear, Ungroup, Unload,
-  Discard, Exclude selected, a device's Close, Shut down devices, every Stop.
-  A labelled one has a
-  pale red face; a one-glyph `×` repeated down rows rests as a grey ghost and
-  turns red under the pointer.  It acts on one click.
+  Discard, Exclude selected, Reset (a point review's exclusions), Reset
+  wavefront, a device's Close, Shut down devices, every Stop.  A labelled
+  one has a pale red face; a one-glyph `×` repeated down rows rests as a grey
+  ghost and turns red under the pointer.  It acts on one click.
 - **Closing a view is not removing anything**: a tab's `×` and a Setting
   frame's `×` are quiet grey ghosts that never turn red.
 
 Removing a **logic node** or a **plot panel** takes two clicks — a
 double-click, or two clicks within the system double-click interval. The first
 click turns the control into the white-on-red confirm; if the second click does
-not come, it returns to rest. This applies to every control that removes one:
-the node's × in the Logic list and the Remove on its Edit page, and the panel's
-× on its card and the Remove in its Setting frame. Every other remover in the
-application is red and acts on one click. Stop always acts on one click.
-Commands that already ask in a dialog are not armed as well.
+not come, it returns to rest. This applies to the node's × in the Logic list
+and the Remove on its Edit page, and to the panel's × on its card; Setting's
+Remove takes one click, because opening Setting is the deliberate step. Every
+other remover in the application is red and acts on one click. Stop always
+acts on one click. Commands that already ask in a dialog are not armed as well.
 
 Status is one table of five words, the dot and the words beside it from the
 same row: `idle` grey (nothing under way and nothing wrong, a draft still to
@@ -111,7 +112,8 @@ The API, one line each:
 - `FluentButton(..., confirm_twice="remove this node")` and its `confirmed`
   signal — the two-click remover; act on `confirmed`, never on `clicked`.
 - `FluentStatusDot.set_state(word)` and `set_status_ink(label, word)` — a dot
-  and its words from `STATUS_CUES`.
+  and its words (a label, or a copyable readout) from `STATUS_CUES`; a
+  presenter says the word with the text, so a failure is always red.
 
 ## Development
 

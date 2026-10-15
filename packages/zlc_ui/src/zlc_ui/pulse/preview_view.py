@@ -13,7 +13,7 @@ from zlc_ui.fluent import (
     detach_widget,
     FluentButton, FluentComboBox, FluentFrame, FluentLabel,
     FluentReadoutEdit, FluentScrollArea, FluentSwitch, LinkedScrollPanes, add_row_switch,
-    signals_blocked,
+    set_status_ink, signals_blocked,
 )
 
 from ._layout import (
@@ -129,8 +129,11 @@ class PulsePreviewView(QtWidgets.QWidget):
         with signals_blocked(self.preview_size_combo):
             self.preview_size_combo.setCurrentText(str(size))
 
-    def set_status(self, text: str) -> None:
+    def set_status(self, text: str, word: str) -> None:
+        """What the preview shows or is doing, in the ink of status ``word``."""
+
         self.preview_status.setText(str(text))
+        set_status_ink(self.preview_status, word)
 
     def mount_content(self, widget: QtWidgets.QWidget, *, logical_size: tuple[int, int] | None = None,
                       wheel_target: QtWidgets.QWidget | None = None) -> None:

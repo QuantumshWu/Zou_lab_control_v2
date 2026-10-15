@@ -181,6 +181,7 @@ class _PreviewView:
         self.logical_size = None
         self.placeholder = ""
         self.status = ""
+        self.status_word = ""
         self._include_off = False
 
     @property
@@ -200,8 +201,9 @@ class _PreviewView:
         self.placeholder = str(text)
         self.content = None
 
-    def set_status(self, text: str) -> None:
+    def set_status(self, text: str, word: str) -> None:
         self.status = str(text)
+        self.status_word = str(word)
 
     def set_size_names(self, names) -> None:
         self.size_names = tuple(names)
@@ -219,6 +221,7 @@ class _TargetView:
         self.status = ""
         self.reserved: tuple = ()
         self.feedback = ""
+        self.feedback_word = ""
         self.width_rules = None
 
     def set_ports(self, records, editable, status_text, *, reserved=()) -> None:
@@ -230,8 +233,9 @@ class _TargetView:
     def set_width_rules(self, digital, dac) -> None:
         self.width_rules = (digital, dac)
 
-    def set_feedback(self, text: str) -> None:
+    def set_feedback(self, text: str, word: str) -> None:
         self.feedback = str(text)
+        self.feedback_word = str(word)
 
 
 class _ScanView:
@@ -240,12 +244,14 @@ class _ScanView:
     def __init__(self) -> None:
         self.page = None
         self.progress = ""
+        self.progress_word = ""
 
     def set_page(self, record) -> None:
         self.page = record
 
-    def set_progress_text(self, text: str) -> None:
+    def set_progress_text(self, text: str, word: str) -> None:
         self.progress = str(text)
+        self.progress_word = str(word)
 
 
 class _PreviewHost:
@@ -429,8 +435,8 @@ class _EditorView:
     def set_scan_page(self, record) -> None:
         self.scan_view.set_page(record)
 
-    def set_scan_progress_text(self, text: str) -> None:
-        self.scan_view.set_progress_text(text)
+    def set_scan_progress_text(self, text: str, word: str) -> None:
+        self.scan_view.set_progress_text(text, word)
 
     def set_config_page(self, record) -> None:
         self.config_page = record
@@ -484,8 +490,8 @@ class _EditorView:
     def set_preview_size_names(self, names) -> None:
         self.preview_view.set_size_names(names)
 
-    def set_preview_status(self, text: str) -> None:
-        self.preview_view.set_status(text)
+    def set_preview_status(self, text: str, word: str) -> None:
+        self.preview_view.set_status(text, word)
 
     def show_preview_placeholder(self, text: str) -> None:
         self.preview_view.show_placeholder(text)
@@ -503,8 +509,8 @@ class _EditorView:
     def set_target_width_rules(self, digital, dac) -> None:
         self.target_view.set_width_rules(digital, dac)
 
-    def set_target_feedback(self, text: str) -> None:
-        self.target_view.set_feedback(text)
+    def set_target_feedback(self, text: str, word: str) -> None:
+        self.target_view.set_feedback(text, word)
 
 
 @pytest.fixture
@@ -1732,6 +1738,7 @@ def test_connecting_attaches_a_sequencer_and_shows_it(sequence, monkeypatch) -> 
     try:
         initial_connection = view.schedule_view.connection
         assert initial_connection.status == "not connected"
+        assert initial_connection.status_word == "idle"
         assert initial_connection.locked is False
         assert tuple(choice.value for choice in initial_connection.choices) == (
             "virtual", "remote", "offline",
@@ -1751,6 +1758,7 @@ def test_connecting_attaches_a_sequencer_and_shows_it(sequence, monkeypatch) -> 
         )
         status = connection.status
         assert "127.0.0.1:18861" in status and "ports" in status and "MHz" in status
+        assert connection.status_word == "running"
         # Sync and hold need a board; stepping also needs a table to step
         # through, and offering it without one is a button that cannot work.
         assert view.schedule_view.capabilities == (True, True, False)
@@ -1776,6 +1784,8 @@ def test_a_refused_connection_says_so_and_stays_offline(sequence) -> None:
 
         assert presenter.sequencer is None
         assert "failed" in view.schedule_view.connection.status
+        # A failure is written in the error ink, as every failure is.
+        assert view.schedule_view.connection.status_word == "error"
         assert view.schedule_view.capabilities == (False, False, False)
         assert any("Cannot connect" in text for text in view.warnings)
     finally:
@@ -2602,6 +2612,7 @@ def test_a_board_that_will_not_describe_itself_is_reported(sequence) -> None:
     try:
         presenter.connect_to("remote", "127.0.0.1:18861")
         assert "cannot read the board" in view.schedule_view.connection.status
+        assert view.schedule_view.connection.status_word == "error"
         assert any("would not describe itself" in text for text in view.warnings)
     finally:
         presenter.close()
@@ -2621,6 +2632,8 @@ def test_the_preview_offers_its_sizes_and_the_content_picks_one(presenter) -> No
     assert view.size == recommended_pulse_preset(
         _preview_rows(presenter), len(presenter.sequence.periods)
     )
+    # What the drawing shows is a report of the operation just done.
+    assert "period" in view.status and view.status_word == "task"
 
 
 def test_picking_a_size_pins_it_until_the_content_changes_shape(presenter) -> None:
@@ -2784,6 +2797,7 @@ def test_a_board_owns_its_wiring_and_only_names_may_change(presenter, sequence, 
         port for port in presenter.sequence.target.ports if port.label == "renamed"
     ]
     assert renamed, presenter.view.target_view.feedback
+    assert presenter.view.target_view.feedback_word == "task"
     # A rename is metadata: the wiring and its fingerprint do not move.
     assert presenter.sequence.target.raw_lanes == sequence.target.raw_lanes
     assert presenter.sequence.target.package_pins == sequence.target.package_pins
@@ -2813,6 +2827,7 @@ def test_dropping_a_port_while_a_board_is_attached_is_refused(presenter) -> None
 
     assert presenter.sequence.target is before
     assert "cannot be added or removed" in view.feedback
+    assert view.feedback_word == "error"
 
 
 def test_offline_apply_takes_the_wiring_the_page_offers(presenter, sequence) -> None:
@@ -2844,6 +2859,7 @@ def test_offline_apply_takes_the_wiring_the_page_offers(presenter, sequence) -> 
     presenter.view.target_apply_requested.emit(tuple(view.records))
     assert presenter.sequence is before
     assert "nothing to change" in view.feedback
+    assert view.feedback_word == "idle"
 
     dac = next(record for record in view.records if record.kind == "dac")
     spec = before.target.by_key[dac.key]
@@ -3094,7 +3110,13 @@ def test_running_the_program_keeps_a_table_of_the_right_width(presenter, sequenc
     assert len(presenter._state.scan_rows) == 7
     assert presenter._state.scan_source_dirty is False
     assert "7 scan point" in scan.page.progress_text
+    assert scan.page.progress_word == "task"
     assert "more point" not in scan.page.table_text
+    # A program that leaves no table says why on the same line, in the
+    # error ink.
+    _run_scan(presenter.view, "x = 1")
+    assert "did not assign scan_table" in scan.page.progress_text
+    assert scan.page.progress_word == "error"
 
 
 def test_a_table_of_the_wrong_width_is_refused(presenter, sequence) -> None:

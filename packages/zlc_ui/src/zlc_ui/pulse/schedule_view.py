@@ -17,12 +17,13 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 from zlc_ui.form import FormChoice, being_edited
 from zlc_ui.fluent import (
     retire_widget,
-    ACCENT, ACCENT_TINT, BG, DERIVED_INK, FIELD_BORDER_PX, MUTED_INK, SELECTION_EDGE, TEXT, CONFIG_GREEN,
+    ACCENT, ACCENT_TINT, BG, DERIVED_INK, DISABLED_INK, FIELD_BORDER_PX, HOVER, MUTED_INK,
+    SELECTION_EDGE, TEXT, CONFIG_GREEN,
     CONFIG_GREEN_DARK, CONFIG_GREEN_TINT, FluentButton, FluentCheckBox, FluentSegmentedButtons,
     FluentSwitch, FluentComboBox, FluentFrame, FluentGroupBox, fluent_count_box,
     FluentLabel, FluentLineEdit, FluentReadoutEdit, FluentScrollArea, LinkedScrollPanes,
     ElidedLabel, FluentPopup, FluentSettingsPopupAnchor, field_text_inset,
-    show_fluent_popup_for_anchor, signals_blocked,
+    set_status_ink, show_fluent_popup_for_anchor, signals_blocked,
 )
 
 from ._layout import (
@@ -83,17 +84,23 @@ class _PortToggleIcon(QtGui.QIconEngine):
     small disc read as a dot beside a circle, the large one as a dark blot
     heavier than every word on the page -- so both are drawn: the same
     ring, the same stroke, in the command's own ink -- its button's
-    :meth:`FluentButton.glyph_ink`, so a ring that takes steps away is the
-    quiet ghost that turns red under the pointer, as every row's x is."""
+    :meth:`FluentButton.glyph_ink`, so the ring follows the button's state
+    exactly as a one-glyph label does.  The button is held weakly (it owns
+    its icon); a copy Qt paints after the button is gone takes the
+    standard command's ink."""
 
-    def __init__(self, on: bool, button: FluentButton) -> None:
+    def __init__(self, on: bool, button: "weakref.ref[FluentButton]") -> None:
         super().__init__()
         self._on = bool(on)
-        self._button = weakref.ref(button)
+        self._button = button
 
     def paint(self, painter, rect, mode, state) -> None:  # noqa: N802 - Qt API name
-        del mode, state
-        ink = QtGui.QColor(self._button().glyph_ink())
+        del state
+        button = self._button()
+        if button is not None:
+            ink = QtGui.QColor(button.glyph_ink())
+        else:
+            ink = QtGui.QColor(DISABLED_INK if mode == QtGui.QIcon.Disabled else HOVER)
         side = float(min(rect.width(), rect.height()))
         stroke = max(1.0, side / 9.0)
         centre = QtCore.QRectF(rect).center()
@@ -119,12 +126,18 @@ class _PortToggleIcon(QtGui.QIconEngine):
         return QtGui.QPixmap.fromImage(image)
 
     def clone(self):
-        return _PortToggleIcon(self._on, self._button())
+        return _PortToggleIcon(self._on, self._button)
+
+
+def _show_port_ring(button: FluentButton, on: bool) -> None:
+    """Draw ``button`` as the ring (``on``: with its dot), in its own ink."""
+
+    button.setIcon(QtGui.QIcon(_PortToggleIcon(on, weakref.ref(button))))
 
 
 def _port_toggle_button(on: bool, tooltip: str) -> FluentButton:
     button = FluentButton("")
-    button.setIcon(QtGui.QIcon(_PortToggleIcon(on, button)))
+    _show_port_ring(button, on)
     side = row_height()
     # About half the face, of the face's parity: an odd ring in an even
     # face has no centred place, and stood half a pixel off on every row.
@@ -814,9 +827,18 @@ class ChannelPanel(FluentGroupBox):
             digital = port.kind == "digital"
             # Inapplicable actions keep their column in every port row.
             fill.setEnabled(digital)
-            # On an analog row the ring takes the output's steps away: a
-            # row remover, ghost at rest and red under the pointer.
-            clear.set_role("standard" if digital else "destructive")
+            # On an analog row there is no "off" to turn it to: the button
+            # takes the output's steps away, so it is the row remover every
+            # row has -- the ghost x, red under the pointer, one click --
+            # not a ring that read as a radio button beside the disabled fill.
+            if digital and clear.text():
+                clear.setText("")
+                _show_port_ring(clear, False)
+                clear.set_role("standard")
+            elif not digital and not clear.text():
+                clear.setIcon(QtGui.QIcon())
+                clear.setText("×")
+                clear.set_role("destructive")
             clear.setToolTip(
                 "Turn this output off in every period"
                 if digital
@@ -1145,8 +1167,8 @@ class ComponentCard(FluentGroupBox):
         # something away, and one click.
         self.ungroup_button = FluentButton("Ungroup", role="destructive")
         self.ungroup_button.setToolTip(
-            "Dissolve this Subpulse: its periods become ordinary Pulse items "
-            "and its source link is removed"
+            "Dissolve this Subpulse: its embedded (Default) periods become "
+            "ordinary Pulse items; a Config source link is dropped"
         )
         self.ungroup_button.clicked.connect(lambda: self.action_requested.emit("ungroup", self.component_id))
         # One command per port row, from the first: as tall as a row and
@@ -2458,6 +2480,7 @@ class PulseScheduleView(QtWidgets.QWidget):
         self._sync_endpoint_enabled()
         self.connection_status.setText(vm.status)
         self.connection_status.setToolTip(vm.status)
+        set_status_ink(self.connection_status, vm.status_word)
 
     def _request_connection(self) -> None:
         """Emit the selected presenter-supplied connection intent."""

@@ -60,6 +60,18 @@ QtTest.QTest.keyClicks(card.role_edit, 'output')
 QtTest.QTest.keyClick(card.role_edit, QtCore.Qt.Key_Return)
 card.type_combo.setCurrentIndex(1)
 card.form.widget_for('count').setValue(3)
+# The fold is a disclosure: its chevron's direction is its state, and it
+# never wears the held-down (active) face a toggle command does.
+fold = card.collapse_button
+assert fold.toolTip() == 'Hide parameters' and not fold.is_active()
+QtTest.QTest.mouseClick(fold, QtCore.Qt.LeftButton)
+assert card.form.isHidden() and fold.toolTip() == 'Show parameters'
+assert not fold.is_active()
+QtTest.QTest.mouseClick(fold, QtCore.Qt.LeftButton)
+assert not card.form.isHidden() and fold.toolTip() == 'Hide parameters'
+# Remove takes the device out on ONE click: only a logic node and a plot
+# panel are armed.
+assert card.remove_button.role() == 'destructive'
 QtTest.QTest.mouseClick(card.remove_button, QtCore.Qt.LeftButton)
 assert ('add', 'sensor.fake') in events
 assert ('role', 'id-1', 'output') in events

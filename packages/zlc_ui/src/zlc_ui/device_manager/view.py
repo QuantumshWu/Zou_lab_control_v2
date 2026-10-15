@@ -118,8 +118,9 @@ class _Disclosure(FluentButton):
     boxes paint, centred on it; a text glyph sat its ink a pixel low.  It
     is a quiet button: no face at rest, the one hover wash and press every
     quiet thing shares, in body ink -- a command's tinted face would make it
-    a command again.  A toggle, too: a card rests unfolded, so a folded
-    card's disclosure wears the active face until it is unfolded.
+    a command again.  Its state is the chevron's direction, as a tree's
+    triangle; it wears no active face, which would read as "on" for a card
+    that is merely folded.
     """
 
     def __init__(self, parent=None) -> None:
@@ -131,7 +132,6 @@ class _Disclosure(FluentButton):
 
     def set_expanded(self, expanded: bool) -> None:
         self._expanded = bool(expanded)
-        self.set_active(not self._expanded)
         self.setToolTip("Hide parameters" if self._expanded else "Show parameters")
         self.update()
 

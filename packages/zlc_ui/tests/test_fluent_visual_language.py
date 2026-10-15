@@ -580,6 +580,68 @@ def test_a_button_disabled_or_hidden_with_the_focus_hands_it_to_nobody(app, host
         assert QtWidgets.QApplication.focusWidget() is None
 
 
+def test_a_status_word_is_one_colour_for_a_dot_a_line_and_a_readout(app, host) -> None:
+    """One table, ``STATUS_CUES``: a dot, the words beside it, a copyable
+    readout and the error line under a form all take a status word's colour
+    from it -- read back from the render, not from the sheet."""
+
+    from PyQt5 import QtCore, QtGui
+    from zlc_ui.fluent import (
+        STATUS_CUES, FluentLabel, FluentReadoutEdit, FluentStatusDot, error_note_label,
+        set_status_ink,
+    )
+    from zlc_ui.fluent.style import FONT, TEXT
+
+    def closest(widget, colour: str) -> int:
+        """How far the render's darkest pixel -- a stem fully inked -- is
+        from ``colour`` (summed channel distance).  Not the nearest pixel:
+        a dark ink's antialiased edges pass through every lighter grey."""
+
+        want = QtGui.QColor(colour)
+        window = widget.window()
+        image = window.grab(QtCore.QRect(widget.mapTo(window, QtCore.QPoint(0, 0)),
+                                         widget.size())).toImage()
+        pixel = min(
+            (image.pixelColor(x, y) for y in range(image.height()) for x in range(image.width())),
+            key=lambda colour: colour.lightness(),
+        )
+        return (abs(pixel.red() - want.red()) + abs(pixel.green() - want.green())
+                + abs(pixel.blue() - want.blue()))
+
+    dot = FluentStatusDot(host)
+    label = FluentLabel("IIII WWWW", host)
+    label.move(0, 30)
+    readout = FluentReadoutEdit("IIII WWWW", host, flush=True)
+    readout.setFixedWidth(200)
+    readout.move(0, 70)
+    note = error_note_label("IIII WWWW broke")
+    note.setParent(host)
+    note.move(0, 110)
+    _shown(app, host, dot, label, readout, note)
+    # A readout reports in body ink until it is told a word.
+    assert closest(readout, TEXT) <= 24
+    for word, (dot_colour, ink) in STATUS_CUES.items():
+        dot.set_state(word)
+        set_status_ink(label, word)
+        set_status_ink(readout, word)
+        app.processEvents()
+        centre = dot.rect().center()
+        assert _at(dot, centre.x(), centre.y()) == QtGui.QColor(dot_colour).name().upper(), word
+        assert closest(label, ink) <= 24, (word, ink)
+        assert closest(readout, ink) <= 24, (word, ink)
+        # The font travels with the ink: a colour sheet that dropped it
+        # re-set the words in the window's default face.
+        assert FONT in label.styleSheet(), word
+    # The same word again writes nothing: a status beat must not repolish.
+    last = label.property("status_word")
+    sheet = label.styleSheet()
+    label.setStyleSheet(sheet + " ")
+    set_status_ink(label, last)
+    assert label.styleSheet() == sheet + " "
+    assert note.property("status_word") == "error"
+    assert closest(note, STATUS_CUES["error"][1]) <= 24
+
+
 def test_only_a_button_told_to_confirm_twice_arms_and_its_second_click_confirms(app, host) -> None:
     """Removing a logic node or a plot panel takes two clicks, and nothing
     else does.  The first click arms the white-on-red confirm, label and

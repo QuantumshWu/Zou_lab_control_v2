@@ -15,7 +15,7 @@ from zlc_ui.form import being_edited
 from zlc_ui.fluent import (
     FluentButton, FluentFrame, FluentGroupBox, FluentLabel,
     FluentLineEdit, FluentScrollArea, FluentSpinBox, column_header_label, field_text_inset,
-    fluent_scrollbar_thickness, signals_blocked,
+    fluent_scrollbar_thickness, set_status_ink, signals_blocked,
 )
 
 from ._layout import (
@@ -148,9 +148,19 @@ class PulseTargetView(QtWidgets.QWidget):
         Add never mints one of those: the presenter refuses a port under a
         taken name, and a key minted here is not one the page lets anybody
         edit, so Remove and Add again would only mint it again.
+        ``status_text`` is the presenter's note on what the page shows, in
+        the idle ink.
         """
 
-        incoming = tuple(records)
+        self._reserved = frozenset(str(key) for key in reserved)
+        self._editable = bool(editable)
+        self._show_records(tuple(records))
+        self.set_feedback(status_text, "idle")
+
+    def _show_records(self, incoming: tuple[TargetPortRecord, ...]) -> None:
+        """The rows for ``incoming``, editable as the page is; the status
+        line and the reserved names stay as they are."""
+
         if any(not isinstance(record, TargetPortRecord) for record in incoming):
             raise TypeError("records must contain TargetPortRecord values")
         existing = {row.record.key: row for row in self._rows}
@@ -167,16 +177,17 @@ class PulseTargetView(QtWidgets.QWidget):
         for row in existing.values():
             self._destroy_row(row)
         self._rows = reconciled
-        self._reserved = frozenset(str(key) for key in reserved)
         self._place_rows()
-        self._editable = bool(editable)
-        self.status_label.setText(str(status_text))
         self._set_editable(self._editable)
         self.digital_card.setTitle(f"Digital outputs · {sum(r.record.kind == 'digital' for r in self._rows)}")
         self.dac_card.setTitle(f"DAC outputs · {sum(r.record.kind == 'dac' for r in self._rows)}")
 
-    def set_feedback(self, text: str) -> None:
+    def set_feedback(self, text: str, word: str) -> None:
+        """One line of what the page or its presenter says, in the ink of
+        status ``word``: a refusal is ``error``."""
+
         self.status_label.setText(str(text))
+        set_status_ink(self.status_label, word)
 
     def _make_row(self, record: TargetPortRecord) -> _TargetRowWidgets:
         signal = FluentLineEdit(record.signal)
@@ -327,40 +338,40 @@ class PulseTargetView(QtWidgets.QWidget):
         try:
             current = self._current_records()
         except ValueError as error:
-            self.set_feedback(str(error))
+            self.set_feedback(str(error), "error")
             return
         key = self._allocate_key("digital")
         record = TargetPortRecord(key, "digital", key, (f"endpoint:{key}",))
         split = next((index for index, row in enumerate(current) if row.kind == "dac"), len(current))
-        self.set_ports(current[:split] + (record,) + current[split:], self._editable, self.status_label.text(), reserved=tuple(self._reserved))
+        self._show_records(current[:split] + (record,) + current[split:])
         self._queue_reveal_row(key)
 
     def _add_dac(self) -> None:
         try:
             current = self._current_records()
         except ValueError as error:
-            self.set_feedback(str(error))
+            self.set_feedback(str(error), "error")
             return
         key = self._allocate_key("dac")
         clock_key = self._allocate_key(f"{key}_clock")
         width = self._width_rules["dac"].default
         record = TargetPortRecord(key, "dac", key, tuple(self._endpoint_template.format(key=key, bit=bit) for bit in range(width)), clock_key, f"endpoint:{clock_key}")
-        self.set_ports(current + (record,), self._editable, self.status_label.text(), reserved=tuple(self._reserved))
+        self._show_records(current + (record,))
         self._queue_reveal_row(key)
 
     def _remove_key(self, key: str) -> None:
         try:
             current = self._current_records()
         except ValueError as error:
-            self.set_feedback(str(error))
+            self.set_feedback(str(error), "error")
             return
-        self.set_ports(tuple(row for row in current if row.key != key), self._editable, self.status_label.text(), reserved=tuple(self._reserved))
+        self._show_records(tuple(row for row in current if row.key != key))
 
     def _emit_apply(self) -> None:
         try:
             records = self._current_records()
         except (TypeError, ValueError) as error:
-            self.set_feedback(str(error))
+            self.set_feedback(str(error), "error")
             return
         self.apply_requested.emit(records)
 
