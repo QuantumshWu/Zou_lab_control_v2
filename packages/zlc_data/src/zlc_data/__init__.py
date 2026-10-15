@@ -1,8 +1,8 @@
 """Stable role-axis contracts for named multidimensional data."""
 
-# Whether an array already rests on immutable bytes: a producer that owns
-# its frame that way hands it on without a second copy.
-from ._arrays import is_intrinsically_immutable_array
+# Whether an array already rests on immutable bytes, and which bytes: a
+# producer that owns its frame that way hands it on without a second copy.
+from ._arrays import is_intrinsically_immutable_array, owning_bytes
 from .axis import (
     COMPONENT,
     PRIMARY_INDEX,
@@ -99,6 +99,7 @@ __all__ = [
     "integer",
     "is_intrinsically_immutable_array",
     "nonnegative_integer",
+    "owning_bytes",
     "positive_integer",
     "AxisId",
     "AxisRoleId",

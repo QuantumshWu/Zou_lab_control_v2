@@ -57,6 +57,7 @@ from zlc_data import (
     OwnedSnapshot,
     StreamGenerationId,
     Valid,
+    owning_bytes,
     repeat_coordinate_counts,
 )
 from zlc_data.snapshot_projection import PRIMARY_INDEX_AXIS_ID, SHOT_TIME_AXIS_ID
@@ -172,12 +173,8 @@ def _retained_bytes(array: np.ndarray) -> bytes:
     """Pack booleans losslessly; reuse immutable numeric planes unchanged."""
     if array.dtype == np.bool_ and array.size > 1:
         return np.packbits(array).tobytes()
-    owner = array
-    while isinstance(owner, np.ndarray) and owner.base is not None:
-        owner = owner.base
-    if isinstance(owner, bytes) and array.flags.c_contiguous and len(owner) == array.nbytes:
-        return owner
-    return array.tobytes()
+    owner = owning_bytes(array)
+    return array.tobytes() if owner is None else owner
 
 
 def _retained_array(data: bytes, shape: tuple, dtype) -> np.ndarray:
