@@ -311,7 +311,9 @@ image_session.update_data(next_frame)
 Image 的主显示框始终是固定正方形，每个离散 data point 都是正方形 screen cell：规则 grid
 以 x/y cell pitch 的唯一比例把 canonical 坐标归一为 lattice geometry，canonical 步长只控制
 tick、selector、overlay 与 fit 的坐标映射，不控制 cell 长宽；非方阵数据在 square frame 内
-居中 letterbox。drag、wheel zoom、API viewport 和 reset 都只修改同一个 limits authority，
+居中 letterbox。Home limits 只由图像的像素边缘及这一 letterbox 决定：point overlay 的圈、编号、
+路径与 image fit 的圆都画在框上，不参与 limits（也不进 autoscale 读取的 data limits），站在图外
+的 site 不会撑大它。drag、wheel zoom、API viewport 和 reset 都只修改同一个 limits authority，
 不移动第二张缩略图或副本。x/y 量纲是否兼容只决定 radial fit 是否进入该 session 的
 catalogue，不改变几何。
 
