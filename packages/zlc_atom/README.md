@@ -346,8 +346,10 @@ bundle or any other variable), a `number`, or `boolean` true/false (only
 after `==`/`!=`), and may pick on `of` by name: `at` is one of its axes, in
 any domain, and `labels` its exact labels as the catalog lists them -- or
 `at` is a domain with two or more axes (`Point`, `Cell`, `Repeat`) and
-`labels` its rows, written `"detuning 2 · power 1"`; one label drops the axis
-(the domain's axes), several keep those coordinates. A pick never names an
+`labels` its rows, written `"detuning 2 · power 1"`; `"first"` and `"last"`
+are its first and last coordinate (row) as long as it is, so a pick of the
+last frame follows a frame count. One label drops the axis (the domain's
+axes), several keep those coordinates. A pick never names an
 axis each publication carries its own part of (a finite run's shots and
 scan points, a monitor's shots): those are reduced, or plotted.
 Every later term has an operator of one of four kinds -- arithmetic

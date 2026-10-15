@@ -15,7 +15,9 @@ each -- and the operand column is the page's control column: the bundle
 combo's text, the Inputs' names, every operand, result and problem read
 down one x.  Fixed sets (an operator kind, the statistics) are segmented
 strips; whatever comes from the data (members, variables, axes and
-domains, labels, ``over``) is a combo, several values a checkable one.  A
+domains, labels, ``over``) is a combo, several values a checkable one --
+a pick's values led by All (no pick), First and Last (its ends, whatever
+its length).  A
 problem stands under the line it is about, as one sentence
 (``show_problem``); a parked helper's in muted ink, because it blocks
 nothing.  A line's two wide commands -- the statistic strip with its
@@ -42,7 +44,7 @@ from zlc_ui.fluent import (
 from zlc_ui.fluent.column_set import section_header
 
 from zlc_atom.authoring import AuthoringField, AuthoringSchema
-from zlc_atom.nodes._framework.frames import FRAME_AXIS_NAME
+from zlc_atom.nodes._framework.frames import FIRST, FRAME_AXIS_NAME, LAST
 
 from .expression import (
     CATEGORIES, DOMAINS, NO_PUBLISHED, OPERATORS, STATISTICS, TERM_DEFAULTS, VARIABLE_COLUMNS, axis_groups,
@@ -60,6 +62,11 @@ _EMPTY = ("No variables yet. A variable picks values of an input, combines them 
 #: The operand combo's constants.  A member or variable name never starts
 #: with "#", so no name reads like these keys.
 _NUMBER, _TRUE, _FALSE = "#number", "#true", "#false"
+#: "No pick": the axis combo's first row, and a pick's first value.
+_ALL = ""
+#: What a pick's values list starts with: All, then the axis' ends, written
+#: in the draft as Occupancy's frame claims write a cycle's.
+_ENDS = (("All", _ALL), ("First", FIRST), ("Last", LAST))
 _CONSTANTS = {_NUMBER: "Number", _TRUE: "true", _FALSE: "false"}
 _COLOURS = dict(zip(DOMAINS, AXIS_GROUP_COLORS))
 #: The most labels one labels list offers; a longer axis says how many it has.
@@ -169,11 +176,15 @@ def _fill(combo: FluentComboBox, items, current=None) -> None:
 
 
 @functools.lru_cache(maxsize=64)
-def _label_items(keys: tuple, alternates: tuple) -> tuple:
-    """A pick's choices as list rows, each with its alternate coordinates'
-    (``1 · time 0.1 s``), at most ``_LABEL_LIMIT`` of them.  Kept: a long
-    axis is offered again on every projection."""
+def _label_items(at: str, keys: tuple | None, alternates: tuple) -> tuple:
+    """A pick's choices as list rows: All, First and Last, then under the
+    axis' (domain's) name -- which keeps the collapsed text from reading a
+    run across the ends -- its values, each with its alternate
+    coordinates' (``1 · time 0.1 s``), at most ``_LABEL_LIMIT`` of them;
+    none while nothing says them.  Kept: a long axis is offered again on
+    every projection."""
 
+    keys = keys or ()
     items = tuple(
         _item(key + "".join(f" · {name} {labels[index]}" + (f" {unit}" if unit else "")
                             for name, unit, labels in alternates), key)
@@ -181,7 +192,7 @@ def _label_items(keys: tuple, alternates: tuple) -> tuple:
     )
     if len(keys) > _LABEL_LIMIT:
         items += ((f"{_LABEL_LIMIT} of {len(keys)} shown", None, False, MUTED_INK, False),)
-    return items
+    return (*(_item(text, key) for text, key in _ENDS), _header(at), *items)
 
 
 def _alternates(schema, at: str) -> tuple:
@@ -540,7 +551,7 @@ class _VariableCard(FluentFrame):
         labels to pick; the pick is written once they are picked, so the
         card, its readers and the page say nothing in between.  The axis
         the line already picks opens its labels again."""
-        axis = ui["axis"].currentData() or ""
+        axis = ui["axis"].currentData() or _ALL
         if not axis:
             ui["pending"] = None
             self._term_edit(ui, at="", labels=())
@@ -563,9 +574,14 @@ class _VariableCard(FluentFrame):
             self._term_edit(ui, at=at, labels=())
 
     def _labels_edited(self, ui, values: tuple) -> None:
+        """The values ticked; All among them is no pick, as the axis
+        combo's All is."""
         if ui not in self.terms_ui:
             return
-        if ui["pending"] is not None:
+        if _ALL in values:
+            ui["pending"] = None
+            self._term_edit(ui, at="", labels=())
+        elif ui["pending"] is not None:
             at, ui["pending"] = ui["pending"], None
             self._term_edit(ui, at=at, labels=values)
         else:
@@ -647,7 +663,8 @@ class _VariableCard(FluentFrame):
         if schema is not None and head["at"] and pick_values(schema, head["at"]) is not None:
             if kind != "where":
                 pending = head["at"]
-            elif all(label in pick_values(schema, head["at"]) for label in head["labels"]):
+            elif all(label in (FIRST, LAST) or label in pick_values(schema, head["at"])
+                     for label in head["labels"]):
                 # The mask at the value's own pick.
                 term.update(at=head["at"], labels=tuple(head["labels"]))
         self.row["terms"].append(term)
@@ -765,7 +782,7 @@ class _VariableCard(FluentFrame):
         _visible(ui["unit"], number, hold=False)
         if picks:
             changing = context["changing"]
-            items = [_item("All", "")]
+            items = [_item("All", _ALL)]
             for word, _domain, axes in groups:
                 # An axis each publication carries its own part of is never
                 # a pick; a domain is one when every axis of it may be.
@@ -786,9 +803,9 @@ class _VariableCard(FluentFrame):
                 keys, alternates = pick_values(schema, at), _alternates(schema, at)
             else:
                 keys, alternates = (frames if frames and at == FRAME_AXIS_NAME else None), ()
-            offered = _label_items(keys, alternates) if keys is not None else ()
+            offered = _label_items(at, keys, alternates)
             shown = () if ui["pending"] is not None else tuple(term["labels"])
-            known = set(keys or ())
+            known = {*(keys or ()), FIRST, LAST}
             extra = tuple(_item(label, label) for label in shown if label not in known)
             _fill(ui["labels"], offered + extra if extra else offered)
             ui["labels"].set_checked_data(shown)

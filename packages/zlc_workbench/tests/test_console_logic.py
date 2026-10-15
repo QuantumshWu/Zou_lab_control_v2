@@ -1925,7 +1925,7 @@ def test_a_frame_survival_after_derive_is_edited_before_anything_starts(presente
         head = derive_editor._cards[1].head
         assert texts(head["operand"])[:4] == ["Inputs", "    counts", "    occupied", "    frame_judged"]
         assert texts(head["axis"]) == ["All", "Point", "    frame"]
-        assert texts(derive_editor._cards[0].head["labels"]) == ["0", "1", "2"]
+        assert texts(derive_editor._cards[0].head["labels"]) == ["All", "First", "Last", "frame", "0", "1", "2"]
         assert not derive_editor._cards[1].terms_ui[1]["axis"].isVisibleTo(derive_editor), "same keeps no frame"
 
         # Frame Survival's pairs, marked by a click before anything runs.

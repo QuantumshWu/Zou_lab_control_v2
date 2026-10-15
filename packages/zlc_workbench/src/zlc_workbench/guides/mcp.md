@@ -223,8 +223,13 @@ cycles), or `number`, or `boolean` (`"true"`/`"false"`, only after `==` or
 `of`, in any domain, and `labels` its labels; or `at` = a domain with two or
 more axes (`Repeat`, `Point`, `Cell`) and `labels` its rows, each written as
 its axes' names and labels joined by ` · ` (`"detuning 2 · power 1"`, `"y 3 ·
-x 5"`). One label drops the axis (the domain's axes), several keep those
-coordinates; a Cell domain's rows must fill a grid. A pick never names an axis
+x 5"`). `"first"` and `"last"` are the axis' (domain's) first and last
+coordinate (row) as long as it is when evaluated -- the words Occupancy's frame
+claims and Frame Survival's ends use -- so a pick written with `"last"` follows
+a frame count where `"2"` would not; mix them with labels freely. One label
+drops the axis (the domain's axes), several keep those coordinates (a
+coordinate two of them name, as First and Last of a one-frame axis, once); a
+Cell domain's rows must fill a grid. A pick never names an axis
 each publication carries its own part of -- a finite run's shots and scan
 points, a monitor's shots: the catalog's labels of those are the run's, and a
 live publication carries one -- so reduce over it with a statistic or plot it
@@ -250,6 +255,7 @@ name.
 | brightened | `{"terms":[{"of":"counts","at":"frame","labels":["2"]},{"op":"-","of":"counts","at":"frame","labels":["0"]},{"op":">","number":30},{"op":"and","of":"occupied","at":"frame","labels":["0"]}]}` |
 | window | `{"terms":[{"of":"counts","at":"frame","labels":["1"]},{"op":">","number":10},{"op":"and","of":"counts","at":"frame","labels":["1"]},{"op":"<","number":50},{"op":"and","of":"occupied","at":"frame","labels":["1"]}]}` |
 | rise | `{"terms":[{"of":"counts","at":"frame","labels":["1","2"]},{"op":"-","of":"counts","at":"frame","labels":["0"]}]}` (keeps frames 1 and 2) |
+| ends | `{"terms":[{"of":"occupied","at":"frame","labels":["first","last"]}]}` (keeps the first and the last frame, whatever the cycle's length) |
 | lost | `{"terms":[{"of":"occupied","at":"frame","labels":["0"]},{"op":"and not","of":"occupied","at":"frame","labels":["2"]}],"statistic":"sum","over":["Site"]}` |
 | empty0 | `{"terms":[{"of":"occupied","at":"frame","labels":["0"]},{"op":"==","boolean":"false"}]}` |
 | level + norm | `{"name":"level","publish":false,"terms":[{"of":"counts","at":"frame","labels":["1"]},{"op":"where","of":"occupied","at":"frame","labels":["1"]}],"statistic":"mean","over":["Site"]}` then `{"name":"norm","terms":[{"of":"counts","at":"frame","labels":["1"]},{"op":"/","of":"level"}]}` |
