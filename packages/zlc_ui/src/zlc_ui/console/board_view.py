@@ -168,6 +168,38 @@ class ConsoleBoardView(QtWidgets.QWidget):
             # the old width.
             self._frame_drag()
 
+    def showEvent(self, event) -> None:  # noqa: N802 - Qt API
+        super().showEvent(event)
+        # A viewport that widens or narrows over a board wider than it moves
+        # where the board is cut without moving or resizing the board.
+        area = self._scroll_area()
+        if area is not None:
+            area.viewport().installEventFilter(self)
+        self._keep_commands_in_view()
+
+    def moveEvent(self, event) -> None:  # noqa: N802 - Qt API
+        # The viewport scrolls by moving the board under it.
+        super().moveEvent(event)
+        self._keep_commands_in_view()
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802 - Qt API
+        if event.type() == QtCore.QEvent.Resize:
+            self._keep_commands_in_view()
+        return super().eventFilter(watched, event)
+
+    def _keep_commands_in_view(self) -> None:
+        """Tell every card where the viewport's right edge cuts it, so its
+        Setting and × ride that edge (``PanelCardView.keep_commands_within``)
+        on a card wider than what the viewport shows of it."""
+
+        area = self._scroll_area()
+        if area is None:
+            return
+        viewport = area.viewport()
+        right = self.mapFrom(viewport, QtCore.QPoint(viewport.width(), 0)).x()
+        for card in self._cards.values():
+            card.keep_commands_within(right - card.x())
+
     def paintEvent(self, event) -> None:  # noqa: N802 - Qt API
         """The slot a carried card will land in, under the cards.
 
@@ -296,6 +328,7 @@ class ConsoleBoardView(QtWidgets.QWidget):
             if suppress_updates:
                 self.setUpdatesEnabled(True)
                 self.update()
+        self._keep_commands_in_view()
         return bottom
 
     def _pack_current(self) -> dict[str, GeomProxy]:

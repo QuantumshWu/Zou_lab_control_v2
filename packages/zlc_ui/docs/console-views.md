@@ -125,6 +125,7 @@ set_cell_kind_choices(kinds: tuple[str, ...]) -> None
 set_panel_projection(state, surface) -> None
 set_status(text: str, *, error: bool) -> None
 set_selectors_enabled(enabled: bool) -> None
+keep_commands_within(right: int) -> None
 ```
 
 `new_panel_card(...)` builds one; TaskConsole and FigureViewer both use it.
@@ -148,7 +149,11 @@ a drag that starts on it carries the card, a press in the body never does
 -- a drawn card's body is its plot's -- so both kinds of card are carried
 alike.  Setting is as tall as every other button and the header `×` is
 square at that height: the quiet one-glyph remover (red only under the
-pointer), whose first click arms it as the white-on-red confirm.
+pointer), whose first click arms it as the white-on-red confirm.  On a card
+wider than what its viewport shows, the two ride the viewport's right edge
+(`keep_commands_within(right)`), as far in from it as from the card's own
+end, so a panel is edited or removed without scrolling sideways; scrolled
+to its end, they are back in the corner.
 
 `set_selectors_enabled(False)` suspends the mounted plot's whole pointer
 transport -- area, zoom, pan, hover and double-click focus -- and the
@@ -177,8 +182,10 @@ card with a dashed edge.  Near the viewport's top or bottom edge the board
 scrolls under the pointer.  On release the card takes that slot and the new
 `panel_id` order is committed.  `text_left()` is where a card's strip text
 starts, from the board's left edge, for a note on an empty board to start
-at.  One `panel_id` is one card: a different object arriving under an id
-already on the board retires the one it replaces, and a card retired in the
+at.  On every pack, scroll and viewport resize the board tells each card
+where the viewport's right edge cuts it, for its Setting and `×`.  One
+`panel_id` is one card: a different object arriving under an id already on
+the board retires the one it replaces, and a card retired in the
 middle of a drag is ignored when it drops.  The presenter persists that
 order and each card's size; it never sends pixel rectangles back to the
 view.  `order_committed` is the only board-level reorder payload.
