@@ -100,6 +100,77 @@ def test_an_axis_switched_off_is_parked_not_deleted() -> None:
         editor.deleteLater()
 
 
+def test_a_parked_row_says_no_problem_and_greys_its_hand_label() -> None:
+    """Switched off, a row is greyed all but its switch and its ×, its
+    "By hand" too, and the problem of a box it cannot read leaves with it:
+    nothing reads the row, and the draft is written.  A greyed box puts
+    back the last number it could read, so the row switched on again reads
+    as that number and is written too."""
+
+    editor = _editor()
+    drafts: list[dict] = []
+    editor.draft_changed.connect(drafts.append)
+    try:
+        editor._add_manual_axis()
+        editor._add_axis()
+        hand, bias = editor._rows
+        bias.start_spin.setProperty("numericError", "the number does not fit the box")
+        bias.start_spin.valueNormalized.emit()
+        assert not bias.error_label.isHidden()
+        drafts.clear()
+        bias.enabled_switch.click()
+        assert bias.error_label.isHidden() and bias.error_label.text() == ""
+        assert json.loads(drafts[-1]["values"]["plan"])["axes"][1]["enabled"] is False
+        drafts.clear()
+        bias.enabled_switch.click()
+        assert bias.error_label.isHidden() and bias.range_problem() == ""
+        assert "enabled" not in json.loads(drafts[-1]["values"]["plan"])["axes"][1]
+        hand.enabled_switch.click()
+        assert not hand._kind.isEnabled() and not hand.name_edit.isEnabled()
+        assert hand.enabled_switch.isEnabled() and hand.remove_button.isEnabled()
+        hand.enabled_switch.click()
+        assert hand._kind.isEnabled()
+    finally:
+        editor.deleteLater()
+
+
+def test_the_plans_problem_is_the_drafts_issue_said_once() -> None:
+    """What the line under the axes says is the draft's issue word for word,
+    and the editor names it as shown: the Logic page header counts it in
+    the Scan plan section instead of saying it a second time above."""
+
+    from zlc_atom.nodes.seamless_scan.logic_node import SEAMLESS_SCAN_SCHEMA
+    from zlc_ui.console.logic_editor_view import _draft_status
+
+    editor = _editor()
+    drafts: list[dict] = []
+    editor.draft_changed.connect(drafts.append)
+
+    def issue() -> str:
+        with pytest.raises(ValueError) as refused:
+            SEAMLESS_SCAN_SCHEMA.project_values(
+                {"pulse_template": "mot.json", "plan": drafts[-1]["values"]["plan"]})
+        return str(refused.value)
+
+    try:
+        editor._add_axis()
+        assert editor.shown_problems() == {}
+        editor._add_axis()
+        assert editor.shown_problems() == {issue(): "Scan plan"}
+        assert _draft_status((issue(),), None, editor.shown_problems()) == (
+            "Draft: 1 problem in Scan plan")
+        editor._remove_row(editor._rows[-1])
+        assert editor.shown_problems() == {}
+        editor._rows[0].mode_choice.button("values").click()
+        assert "Values is empty" in issue()
+        assert editor.shown_problems() == {issue(): "Scan plan"}
+        editor._rows[0].enabled_switch.click()
+        assert editor.shown_problems() == {issue(): "Scan plan"}
+        assert issue() == "every scan axis is parked; switch one on to scan it"
+    finally:
+        editor.deleteLater()
+
+
 def test_a_fresh_manual_row_is_already_runnable() -> None:
     """An unnamed axis is not a plan, so the button never authors one."""
 
@@ -900,6 +971,8 @@ def test_api_values_are_rescoped_to_the_pulse_they_are_written_against() -> None
     })
     assert drafts == []
     assert editor._values_text == "duration:p0 = 250"
+    # Nor does it say a value is not in a pulse it has not got.
+    assert editor._parked_shown == {} and not editor.values_title.isVisible()
 
     # A box mid-word is the operator's: the text is not re-read over it.
     editor.update_projection(_projection(bound, api_values="duration:p0 = 250"))

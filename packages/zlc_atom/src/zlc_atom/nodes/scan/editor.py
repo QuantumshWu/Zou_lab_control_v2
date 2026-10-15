@@ -223,6 +223,8 @@ class _AxisRow(QtWidgets.QWidget):
         self.enabled_switch.setChecked(True)
         self.enabled_switch.setToolTip("Scan this axis; off parks it: kept in the plan, not scanned")
         self._identity = identity
+        #: "By hand" before a manual axis, greyed with the rest of a parked row.
+        self._kind = kind
         if kind is not None:
             line.place("kind", kind)
         line.place("axis", identity, fill=True)
@@ -271,10 +273,17 @@ class _AxisRow(QtWidgets.QWidget):
         self.edited.emit()
 
     def _show_parked(self) -> None:
-        """A parked row is greyed, all but its switch and its ×."""
+        """A parked row is greyed, all but its switch and its ×, and says no
+        problem: nothing reads its values, and a greyed box puts back the
+        last number it could read, which the row reads as when it is
+        switched on again."""
 
-        for widget in (self._identity, self.input_stack, self._unit_host, self.mode_choice):
-            widget.setEnabled(self.scanned)
+        for widget in (self._kind, self._identity, self.input_stack, self._unit_host,
+                       self.mode_choice, self.custom_label):
+            if widget is not None:
+                widget.setEnabled(self.scanned)
+        if not self.scanned:
+            show_note(self.error_label, "")
 
     def _pick_mode(self, mode: str) -> None:
         index = int(mode == "values")
@@ -618,7 +627,8 @@ class ScanPlanEditor(QtWidgets.QWidget):
         column.setSpacing(row_gap())
         self.add_button = FluentButton("Add axis")
         self.add_manual_button = FluentButton("Add manual axis")
-        _title, header = section_header("Scan plan", actions=(self.add_button, self.add_manual_button))
+        self.plan_title, header = section_header(
+            "Scan plan", actions=(self.add_button, self.add_manual_button))
         column.addLayout(header)
         self.rows_layout = QtWidgets.QVBoxLayout()
         self.rows_layout.setSpacing(row_gap())
@@ -626,6 +636,9 @@ class ScanPlanEditor(QtWidgets.QWidget):
         # Why the plan cannot be read stands under its rows in the one error
         # line; what the plan IS stands there as a muted note (:meth:`_say`).
         self.problem = error_note_label()
+        #: What :attr:`problem` says, as the words the draft's issue has
+        #: (:meth:`shown_problems`), before the full stop is added.
+        self._plan_problem = ""
         column.addWidget(self.problem)
         self.summary = muted_note_label("")
         self.summary.setWordWrap(True)
@@ -736,6 +749,16 @@ class ScanPlanEditor(QtWidgets.QWidget):
 
         self.values_form.set_number_edge(int(edge))
 
+    def shown_problems(self) -> dict[str, str]:
+        """The draft's problems this editor states in red where they arise,
+        each with its section: the plan's under the axes.  The page header
+        counts them rather than saying one again above."""
+
+        shown: dict[str, str] = {}
+        if self._plan_problem and self.problem.isVisibleTo(self):
+            shown[self._plan_problem] = self.plan_title.text()
+        return shown
+
     def update_projection(self, projection: Mapping[str, object]) -> None:
         if projection.get("read_only_fields"):
             # Panel Edit shows the same draft rows, without offering ports,
@@ -827,7 +850,7 @@ class ScanPlanEditor(QtWidgets.QWidget):
                 self._start_port_read()
                 return
             self._apply_projection(template_ports, sequence, plan_text, values_text)
-            show_problem(self.problem, "device range reads require the console's device worker")
+            self._show_plan_problem("device range reads require the console's device worker")
             return
         self._port_read_request = None
         self._apply_projection(template_ports, sequence, plan_text, values_text)
@@ -857,7 +880,7 @@ class ScanPlanEditor(QtWidgets.QWidget):
                 return
             if error is not None:
                 owner._refresh_summary()
-                show_problem(owner.problem, f"cannot read device ranges: {error}")
+                owner._show_plan_problem(f"cannot read device ranges: {error}")
                 return
             owner._port_read_request = None
             owner._device_scan_ports = (key, tuple(ports))
@@ -923,7 +946,7 @@ class ScanPlanEditor(QtWidgets.QWidget):
                     or current._unit_request is not request):
                 return
             current._unit_request = None
-            current._unit_host.setEnabled(True)
+            current._unit_host.setEnabled(current.scanned)
             if current.input_entry() != entry or owner._tunable_devices.get(key) is not device:
                 current._refresh_mode()
                 return
@@ -972,7 +995,9 @@ class ScanPlanEditor(QtWidgets.QWidget):
         axis is taken out of the plan -- holding the value the draft keeps
         for it, which comes back into play then.  A value the run does not
         apply and no row can show -- a name this pulse does not declare, one
-        a board axis sweeps -- is a parked line under the rows.
+        a board axis sweeps -- is a parked line under the rows.  With no
+        pulse there is nothing to say any value is not in: the lines wait
+        for one.
         """
 
         parameters = tuple(getattr(sequence, "api_bindings", ()) or ())
@@ -1055,7 +1080,7 @@ class ScanPlanEditor(QtWidgets.QWidget):
         finally:
             self._loading = False
         self._values_broken = bool(broken)
-        parked = {} if broken else {
+        parked = {} if broken or sequence is None else {
             name: self._parked_text(name, value)
             for name, value in overrides.items()
             if name not in self.values_form.keys
@@ -1408,8 +1433,15 @@ class ScanPlanEditor(QtWidgets.QWidget):
     def _say(self, *, summary: str = "", problem: str = "") -> None:
         """Under the rows: what the plan is, or why it cannot be read."""
 
-        show_problem(self.problem, problem)
+        self._show_plan_problem(problem)
         show_note(self.summary, summary)
+
+    def _show_plan_problem(self, problem: str) -> None:
+        """The one line under the axes that says what is wrong, and the
+        words it says it in, for :meth:`shown_problems`."""
+
+        self._plan_problem = problem
+        show_problem(self.problem, problem)
 
     def _refresh_summary(self) -> None:
         if not self._rows:
