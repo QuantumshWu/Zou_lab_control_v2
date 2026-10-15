@@ -451,7 +451,10 @@ same generation/receipt; do not replay a partially completed batch.
 stops the current run and queues the replacement. The reply reads
 `status='queued'` and still carries the old `generation` (`pending.generation`
 is null); once `logic[].pending` is null, read the new `generation` from
-`lab_state(node_id=...)` before waiting on it.
+`lab_state(node_id=...)` before waiting on it. A processor restarted onto a
+source that has not published has nothing to queue: its run stops, a queued
+Restart is dropped, and it follows the new source (`pending` null,
+`running_draft` names that source).
 
 `logic.update` on a running, following or queued node edits only its draft for
 the next Start; the run keeps the configuration it was started with, and
@@ -466,8 +469,9 @@ current run or its draft already matches, and accepted only when the draft is
 `running_draft` again, never the unrestarted edit; only `logic.start` runs
 the edit. A queued Restart that is discarded before it runs (Stop, another
 node taking its device) leaves the old run's configuration as
-`running_draft`. `logic.update` refuses value names the node's schema does not
-declare and names the valid fields (`lab_catalog(api_name).fields`).
+`running_draft`. `logic.add` and `logic.update` refuse value names the node's
+schema does not declare and name the valid fields
+(`lab_catalog(api_name).fields`).
 
 Draft issues name a field the way its Edit page does, not by its draft key.
 "X must be selected", where X is `lab_catalog(node_id).node.source_label`,

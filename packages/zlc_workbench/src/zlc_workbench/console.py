@@ -284,6 +284,28 @@ def _same_draft_value(previous: object, proposed: object) -> bool:
     return type(previous) is type(proposed) and previous == proposed
 
 
+def _unknown_fields_refusal(
+    subject: str, descriptor: Any, values: Mapping[str, Any]
+) -> str:
+    """The refusal of value names the node's schema does not declare, or "".
+
+    Such a name is no setting of the node: kept, it would ride along in
+    every later draft, Start and comparison with the running configuration,
+    and no edit could take it out again.  Adding a row and changing its
+    draft refuse it with this one sentence.
+    """
+
+    fields = descriptor.authoring_schema.field_names
+    unknown = sorted(str(name) for name in values if name not in fields)
+    if not unknown:
+        return ""
+    return (
+        f"{subject} has no field "
+        f"{', '.join(repr(name) for name in unknown)}; "
+        f"its fields are {', '.join(fields)}"
+    )
+
+
 def _same_draft(draft: LogicDraft, other: LogicDraft) -> bool:
     """Whether two drafts would Start the same run: every part, by value."""
 
@@ -8258,6 +8280,10 @@ class ConsolePresenter:
         if selected_id in self.logic:
             self._report(f"logic row {selected_id!r} already exists", severity="error")
             return ""
+        refusal = _unknown_fields_refusal(descriptor.api_name, descriptor, dict(values or {}))
+        if refusal:
+            self._report(refusal, severity="error")
+            return ""
         drafted_values = {
             field.name: field.default for field in descriptor.authoring_schema.fields
         }
@@ -8641,18 +8667,9 @@ class ConsolePresenter:
         if binding is None:
             return False
         if values is not None:
-            # A name the schema does not declare is no setting of this node:
-            # kept, it would ride along in every later draft, Start and
-            # comparison with the running configuration.
-            fields = binding.descriptor.authoring_schema.field_names
-            unknown = sorted(str(name) for name in values if name not in fields)
-            if unknown:
-                self._report(
-                    f"{binding.node_id} has no field "
-                    f"{', '.join(repr(name) for name in unknown)}; "
-                    f"its fields are {', '.join(fields)}",
-                    severity="error",
-                )
+            refusal = _unknown_fields_refusal(binding.node_id, binding.descriptor, values)
+            if refusal:
+                self._report(refusal, severity="error")
                 return False
             # An editor may echo its initial projection (rows as tuples,
             # numeric normalization, or an unchanged source choice). Only
@@ -8815,7 +8832,15 @@ class ConsolePresenter:
             # A processor is a standing follower, not a one-shot run: with
             # no source signal yet there is nothing to bind to, so the Start
             # is accepted as an intent and the poll beat completes it the
-            # moment the source publishes.
+            # moment the source publishes.  It is still a Restart: a queued
+            # one is replaced and the current run ends, as for any Restart,
+            # so the configuration recorded here is the one the node runs.
+            self._discard_pending(binding)
+            host = binding.host
+            if host is not None and host.running:
+                host.cancel(
+                    f"the operator restarted it to follow {finalization.source_signal}"
+                )
             binding.following = True
             binding.started_draft = deepcopy(draft)
             binding.draft_error = ""
@@ -9249,8 +9274,14 @@ class ConsolePresenter:
             else:
                 issues = draft_issues()
                 if following:
+                    # The run ended; the follow waits for its source to run
+                    # again, or -- restarted onto a source that never
+                    # published -- for that source's first signal.
                     state = "running"
-                    status = f"following {followed} (source stopped)"
+                    published = self.session.signal_plane.latest_publication(followed)
+                    status = f"following {followed} " + (
+                        "(waiting for the signal)" if published is None else "(source stopped)"
+                    )
                 elif issues:
                     state, status = "draft", f"Draft: {issues[0]}"
                 else:

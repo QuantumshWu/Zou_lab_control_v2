@@ -2435,6 +2435,13 @@ async def client():
                 await edit("subpulse.save", {"path":"pulses/load.subpulse.json"})
                 await edit("save", {"path":"pulses/mcp_checked.json"})
                 assert "fields" not in (await call("lab_catalog"))["logic"][0]
+                # A value name the schema lacks never makes a row: kept, it
+                # could neither Start nor be updated away.
+                unknown = await call("lab_action", {"action":"logic.add", "arguments":{
+                    "api_name":"camera_measurement", "values":{"exposure":0.01}}})
+                assert not unknown["accepted"] and unknown["node_id"] is None, unknown
+                assert "no field 'exposure'" in unknown["error"], unknown
+                assert "exposure_seconds" in unknown["error"], unknown
                 added = await call("lab_action", {"action":"logic.add", "arguments":{
                     "api_name":"camera_measurement", "values":{"repeat":0}, "device_keys":{"camera":"camera"}}})
                 node = added["node_id"]
