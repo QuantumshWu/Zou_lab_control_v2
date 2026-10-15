@@ -439,6 +439,8 @@
 
 ### 2.4 Domain Task artifacts
 
+- Occupancy多Calibration通过原读出入口的frame_indices直接选择像素窗口，不再为首尾/中间分组复制整幅图像；原BOX/PSF、单图/整叠及边缘fallback共用同一数值实现。
+
 - 2026-10-14 用户提供calibration-5并修订短帧Gaussian流程：使用第1/3帧一致的有效参考标签，对Empty/Occupied各自做单Gaussian MLE，按有效组比例合成总曲线；重叠区域不再由无标签EM重新解释身份。原weighted crossing、Gaussian积分、Empirical fallback、Figure持久化复用，长reference/Feedback的无标签模型选择不改。该批PSF第33站点原bright权重16.09%，参考实际48.35%；有标签模型阈值8.47→3.78，同批正确率69.23%→84.62%。这些是标定集内结果，不声称独立实验精度。
 
 - 2026-10-14 完整逐帧calibration-3揭示此前几何去重没有修到准入根因：三次副峰全部来自bright→bright，背景MAD约0.8–1而亮PSF局部差分噪声约2.3–2.5，误把约2–3σ波动判为6σ新site。检测现按实际输入电子换算传播Gaussian平方核的源光子方差，背景/读出下限保留；Task的live/replay共用保存时的有效单位与camera identity。原3×3峰、时间/average并集、全局sigma、定位与窄核心去重不变，不凑站点数。真实100cycles完整重放38→35，PSF/Uniform可用30→35；新增回归覆盖同PSF肩峰、原始ADU与电子输入等价以及2/200张罕见近邻仍保留。9项直接检测及采集保存重放用例通过；真实重放的native Figure/Calibration留ignored research，不修改用户旧文件。

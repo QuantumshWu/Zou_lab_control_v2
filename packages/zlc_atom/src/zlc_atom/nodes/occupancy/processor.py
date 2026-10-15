@@ -421,13 +421,10 @@ class OccupancyProcessor:
             for entry, readout in enumerate(self.placed):
                 selected = valid_cells[entry_of_valid == entry]
                 if selected.size:
-                    # The readout gathers a few pixels round each site; the
-                    # whole stack is handed over as it is when this
-                    # calibration reads every frame of it, which is the
-                    # usual case, rather than copied first.
                     counts[selected] = readout.signals_of_frames(
-                        flat if selected.size == flat.shape[0] else flat[selected],
+                        flat,
                         model_kind=self._model_kind,
+                        frame_indices=None if selected.size == flat.shape[0] else selected,
                     )
         # Every frame judges its sites by the thresholds and the usable set
         # of the calibration IT reads with: one row of each per cell.
