@@ -569,16 +569,21 @@ def apply_api_overrides(
     the pulse does not declare -- a value kept from another pulse, or for a
     field its Subpulse file no longer offers -- is parked: written into
     nothing and returned, so the run record names it as not applied, as the
-    editor shows it.  A name two fields answer to is still refused.
+    editor shows it.  A name two fields answer to is still refused
+    (:func:`ambiguous_api_value`).
     """
 
     declared = {
         parameter.field_id: parameter.unit
         for parameter in sequence.api_bindings
     }
-    known = set(declared) | {
-        field_label(sequence, parameter.field_ref) for parameter in sequence.api_bindings
-    }
+    labelled: dict[str, list[str]] = {}
+    for parameter in sequence.api_bindings:
+        labelled.setdefault(field_label(sequence, parameter.field_ref), []).append(parameter.field_id)
+    for name in overrides:
+        if name not in declared and len(labelled.get(name, ())) > 1:
+            raise ValueError(ambiguous_api_value(name, labelled[name]))
+    known = set(declared) | set(labelled)
     unapplied = {name: float(value) for name, value in overrides.items() if name not in known}
     overrides = normalize_binding_values(
         sequence, {name: value for name, value in overrides.items() if name in known}, source="api",
@@ -590,6 +595,17 @@ def apply_api_overrides(
         {name: (float(value), declared[name]) for name, value in overrides.items()},
     )
     return applied, unapplied
+
+
+def ambiguous_api_value(name: str, field_ids: Sequence[str]) -> str:
+    """Why an API value written by a label several of the pulse's fields
+    answer to cannot be applied: the sentence the draft and the build refuse
+    it with, and the one the Scan editor writes on its line."""
+
+    return (
+        f"API value {name!r} names {len(field_ids)} fields of this pulse "
+        f"({', '.join(field_ids)}); write the field id of the one it sets"
+    )
 
 
 def api_overrides_to_authored(overrides: Mapping[str, float]) -> str:
@@ -775,6 +791,7 @@ __all__ = [
     "ScanAxis",
     "ScanPlan",
     "ScanPort",
+    "ambiguous_api_value",
     "bind_plan",
     "device_port_parts",
     "hardware_scan_ports_for",

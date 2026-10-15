@@ -106,7 +106,8 @@ SEAMLESS_SCAN_SCHEMA = AuthoringSchema(
                 "authored unit; empty keeps the Pulse defaults. Keep lines you are not using: a "
                 "value for a field the plan sweeps is overridden point by point and comes back "
                 "when the axis is removed, and a name this Pulse does not declare is applied to "
-                "nothing and listed in the run record as unapplied_api_values."
+                "nothing and listed in the run record as unapplied_api_values. A label two of the "
+                "Pulse's fields share is refused at the draft; write the field id instead."
             ),
         ),
         # Repeats and shots both land on the dataset's repeat axis (size
@@ -133,25 +134,35 @@ SEAMLESS_SCAN_SCHEMA = AuthoringSchema(
 
 
 def _admit_resources(values, resources, installation) -> tuple[str, ...]:
-    """Every enabled axis against the knobs this draft can reach, so an axis
-    on a port its pulse does not offer, or on a device not installed, is a
-    draft issue the Edit page says and Start waits on.  A parked axis is not
-    asked: it binds nothing.  A device field's range needs the device read,
-    on its worker, so that one is still checked by the build."""
+    """The API values and every enabled axis against the knobs this draft
+    can reach, so an API value the pulse cannot take (a label two of its
+    fields answer to), an axis on a port its pulse does not offer, or one on
+    a device not installed, is a draft issue the Edit page says and Start
+    waits on.  A parked axis is not asked: it binds nothing; nor is a kept
+    API value the pulse does not declare: it is applied to nothing.  A
+    device field's range needs the device read, on its worker, so that one
+    is still checked by the build."""
 
     from zlc_atom.install import tunable_devices
 
     plan = plan_from_authored(values["plan"])
     issues = []
     resource = resources.get("pulse_template")
-    pulse_axes = tuple(
-        axis for axis in plan.axes if axis.port.startswith((PULSE_PARAM_FAMILY, API_PARAM_FAMILY))
-    )
-    if resource is not None and pulse_axes:
+    sequence = None
+    if resource is not None:
         try:
             sequence, _unapplied = apply_api_overrides(
                 resource.value, api_overrides_from_authored(values.get("api_values"))
             )
+        except ValueError as error:
+            # The build refuses these values before it binds anything, and
+            # so does the draft: the axes are asked once they can be applied.
+            issues.append(str(error))
+    pulse_axes = tuple(
+        axis for axis in plan.axes if axis.port.startswith((PULSE_PARAM_FAMILY, API_PARAM_FAMILY))
+    )
+    if sequence is not None and pulse_axes:
+        try:
             bind_plan(ScanPlan(pulse_axes), (
                 *hardware_scan_ports_for(sequence), *api_scan_ports_for(sequence),
             ))

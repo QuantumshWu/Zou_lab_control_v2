@@ -999,6 +999,84 @@ def test_a_value_for_a_parameter_the_pulse_does_not_declare_is_parked_by_the_bui
     assert applied.periods[0].duration == 240 and unapplied == {"gone": 1.0}
 
 
+def _shared_label_sequence():
+    """Two API DAC fields whose ports carry one label: 'p0.coil' names both."""
+
+    from zlc_pulse import (
+        AnalogStep, PulseBinding, PulseFieldRef, PulsePeriod, PulsePortSpec, PulseSequence, PulseTarget,
+    )
+
+    target = PulseTarget(
+        lanes=("d0", "d1", "a0", "a1", "a2", "a3"),
+        ports=(
+            PulsePortSpec("d0", "digital", ("d0",)),
+            PulsePortSpec("d1", "digital", ("d1",)),
+            PulsePortSpec("dac", "dac", ("a0", "a1"), bus_index=0, label="coil"),
+            PulsePortSpec("dac2", "dac", ("a2", "a3"), bus_index=1, label="coil"),
+        ),
+    )
+    return PulseSequence(
+        name="shared", target=target, time_step_ns=20,
+        periods=(
+            PulsePeriod("p0", 200, "ns", (1, 0, 0, 0, 0, 0),
+                        (AnalogStep("dac", "edge", 1), AnalogStep("dac2", "edge", 1))),
+            PulsePeriod("p1", 20, "ns", (0, 1, 0, 0, 0, 0)),
+        ),
+        bindings=(
+            PulseBinding(PulseFieldRef("dac", "p0", "dac"), "value", source="api"),
+            PulseBinding(PulseFieldRef("dac", "p0", "dac2"), "value", source="api"),
+        ),
+    )
+
+
+def test_a_label_two_fields_share_is_refused_at_the_draft_and_said_on_its_line() -> None:
+    """An API value written by a label two of the pulse's fields answer to
+    cannot be applied: the draft refuses it whatever axes the plan has, in
+    the build's own words and with no word about switching an axis off; the
+    editor writes that sentence on the value's line, in red, with its ×,
+    and names it as shown -- not as a value kept and not applied."""
+
+    from pathlib import Path
+    from types import SimpleNamespace
+    from PyQt5 import QtWidgets
+    from zlc_atom.nodes import ResolvedWorkspaceResource
+    from zlc_atom.nodes.scan import SCAN_PULSE_CONTRACT
+    from zlc_atom.nodes.scan.plan import ambiguous_api_value, apply_api_overrides
+    from zlc_atom.nodes.seamless_scan.logic_node import LOGIC_NODE, SEAMLESS_SCAN_SCHEMA
+
+    shared = _shared_label_sequence()
+    sentence = ambiguous_api_value("p0.coil", ("dac:p0:dac", "dac:p0:dac2"))
+    with pytest.raises(ValueError) as refused:
+        apply_api_overrides(shared, {"p0.coil": 1.0})
+    assert str(refused.value) == sentence
+    resources = {"pulse_template": ResolvedWorkspaceResource(Path("shared.json"), SCAN_PULSE_CONTRACT, shared)}
+    installation = SimpleNamespace(devices={})
+
+    def admitted(plan: dict, api_values: str) -> tuple[str, ...]:
+        values = SEAMLESS_SCAN_SCHEMA.project_values(
+            {"pulse_template": "shared.json", "plan": json.dumps(plan), "api_values": api_values})
+        return LOGIC_NODE.admit_resources(values, resources, installation)
+
+    hand = {"port": "manual:power", "values": [1.0, 2.0]}
+    assert admitted({"axes": [hand]}, "p0.coil = 1") == (sentence,)
+    assert admitted({"axes": [hand]}, "dac:p0:dac = 1\ngone = 2") == ()
+    (unbound,) = admitted({"axes": [hand, {"port": "pulse:param:gone", "values": [1.0]}]}, "")
+    assert unbound.endswith("; switch that axis off to keep it without scanning it")
+
+    ensure_qt_app(["scan-editor-shared-label"])
+    editor = ScanPlanEditor()
+    try:
+        editor.update_projection(_projection(shared, api_values="p0.coil = 1"))
+        assert editor._parked_shown == {"p0.coil": sentence}
+        assert editor.shown_problems() == {sentence: "API values"}
+        (line,) = editor.parked_values.findChildren(QtWidgets.QLabel)
+        assert line.text() == sentence + "."
+        editor.update_projection(_projection(shared, api_values="dac:p0:dac = 1"))
+        assert editor.shown_problems() == {} and editor._parked_shown == {}
+    finally:
+        editor.deleteLater()
+
+
 def test_an_api_axis_in_the_plan_locks_that_parameters_value_box() -> None:
     """A parameter the plan walks keeps its row in the API values form,
     locked and named as swept, until its axis leaves the plan.  A value the

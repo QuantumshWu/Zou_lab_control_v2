@@ -75,6 +75,7 @@ from .plan import (
     MANUAL_PARAM_FAMILY,
     PULSE_PARAM_FAMILY,
     API_PARAM_FAMILY,
+    ambiguous_api_value,
     api_overrides_from_authored,
     api_scan_ports_for,
     api_overrides_to_authored,
@@ -677,6 +678,10 @@ class ScanPlanEditor(QtWidgets.QWidget):
         parked_layout.setSpacing(row_gap() // 2)
         self.parked_values.hide()
         self._parked_shown: dict[str, str] = {}
+        #: The kept values the run cannot take, each with the sentence the
+        #: draft refuses it with: a label two of the pulse's fields answer
+        #: to.  Said on the value's own line, in red, and nowhere else.
+        self._value_problems: dict[str, str] = {}
         column.addWidget(self.parked_values)
         self.values_error = error_note_label()
         column.addWidget(self.values_error)
@@ -751,12 +756,16 @@ class ScanPlanEditor(QtWidgets.QWidget):
 
     def shown_problems(self) -> dict[str, str]:
         """The draft's problems this editor states in red where they arise,
-        each with its section: the plan's under the axes.  The page header
-        counts them rather than saying one again above."""
+        each with its section: the plan's under the axes, a kept API value's
+        on its line.  The page header counts them rather than saying one
+        again above."""
 
         shown: dict[str, str] = {}
         if self._plan_problem and self.problem.isVisibleTo(self):
             shown[self._plan_problem] = self.plan_title.text()
+        if self.parked_values.isVisibleTo(self):
+            for problem in self._value_problems.values():
+                shown.setdefault(problem, self.values_title.text())
         return shown
 
     def update_projection(self, projection: Mapping[str, object]) -> None:
@@ -995,9 +1004,10 @@ class ScanPlanEditor(QtWidgets.QWidget):
         axis is taken out of the plan -- holding the value the draft keeps
         for it, which comes back into play then.  A value the run does not
         apply and no row can show -- a name this pulse does not declare, one
-        a board axis sweeps -- is a parked line under the rows.  With no
-        pulse there is nothing to say any value is not in: the lines wait
-        for one.
+        a board axis sweeps -- is a parked line under the rows.  A label two
+        of the pulse's fields answer to is no parked value: the run refuses
+        it, and its line says why, in red.  With no pulse there is nothing
+        to say any value is not in: the lines wait for one.
         """
 
         parameters = tuple(getattr(sequence, "api_bindings", ()) or ())
@@ -1080,8 +1090,15 @@ class ScanPlanEditor(QtWidgets.QWidget):
         finally:
             self._loading = False
         self._values_broken = bool(broken)
-        parked = {} if broken or sequence is None else {
-            name: self._parked_text(name, value)
+        undecided = bool(broken) or sequence is None
+        labelled = self._fields_labelled()
+        self._value_problems = {} if undecided else {
+            name: ambiguous_api_value(name, labelled[name])
+            for name in overrides
+            if name not in self._authored and len(labelled.get(name, ())) > 1
+        }
+        parked = {} if undecided else {
+            name: self._value_problems.get(name) or self._parked_text(name, value)
             for name, value in overrides.items()
             if name not in self.values_form.keys
         }
@@ -1123,8 +1140,12 @@ class ScanPlanEditor(QtWidgets.QWidget):
             row = QtWidgets.QHBoxLayout(line)
             row.setContentsMargins(0, 0, 0, 0)
             row.setSpacing(row_gap())
-            label = muted_note_label(text)
-            label.setWordWrap(True)
+            if name in self._value_problems:
+                label = error_note_label()
+                show_problem(label, text)
+            else:
+                label = muted_note_label(text)
+                label.setWordWrap(True)
             remove = FluentButton("×", role="destructive")
             remove.setToolTip("Remove this kept value from the draft")
             remove.clicked.connect(lambda _checked=False, key=name: self._remove_kept_value(key))
@@ -1196,13 +1217,20 @@ class ScanPlanEditor(QtWidgets.QWidget):
             written = api_overrides_from_authored(self._values_text)
         except ValueError:
             return {}
-        named: dict[str, list[str]] = {}
-        for field_id, label in self._api_labels.items():
-            named.setdefault(label, []).append(field_id)
+        named = self._fields_labelled()
         return {
             named[name][0] if name not in self._authored and len(named.get(name, ())) == 1 else name: value
             for name, value in written.items()
         }
+
+    def _fields_labelled(self) -> dict[str, list[str]]:
+        """Each label this pulse's API parameters show, with the field ids
+        that answer to it, in the pulse's order."""
+
+        named: dict[str, list[str]] = {}
+        for field_id, label in self._api_labels.items():
+            named.setdefault(label, []).append(field_id)
+        return named
 
     def _value_changed(self, _key: str, *, normalized: bool = False) -> None:
         """A value moved: the draft says so now.

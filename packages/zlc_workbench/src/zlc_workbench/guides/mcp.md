@@ -195,6 +195,8 @@ current Pulse does not declare it or the plan sweeps it. Such a line is kept and
 applied to nothing (the run record lists it as `unapplied_api_values`) or is
 overridden point by point, and comes back into play when the Pulse or the axis
 does. Only a line equal to the Pulse's own value is dropped by the editor.
+A line named by a label two of the Pulse's fields share is a draft issue: rewrite
+it with the field id it means.
 
 `repeats` means complete table sweeps; `shots_per_point` means repetitions at each
 point before advancing. Their product changes total statistics, but their order
