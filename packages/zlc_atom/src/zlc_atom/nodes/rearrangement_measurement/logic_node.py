@@ -3,7 +3,7 @@ from dataclasses import replace
 
 from zlc_atom.authoring import AuthoringSchema
 from zlc_atom.devices.camera import CAMERA_PROTECTED_FIELDS
-from zlc_atom.devices.camera.authoring import CAMERA_MEASUREMENT_SCHEMA, _validate_measurement, _IMAGE_AREA_TO_ROI
+from zlc_atom.devices.camera.authoring import CAMERA_MEASUREMENT_SCHEMA, _IMAGE_AREA_TO_ROI, _ROI_FIELDS
 from zlc_atom.devices.camera.photoelectrons import resolve_photoelectron_availability
 from zlc_atom.devices.slm.rearrangement import REARRANGEMENT_FIELDS, rearrangement_defaults
 from zlc_atom.devices.slm.solver import SCIENCE_CONTEXT_ARTIFACT_CONTRACT, load_science_context, load_target
@@ -24,7 +24,6 @@ REARRANGEMENT_MEASUREMENT_SCHEMA = AuthoringSchema(
                   description="First frame starts rearrangement; the last frame restores the initial SLM state. Pulse timing and any verification image remain operator-controlled.")
           if field.name == "frames_per_cycle" else field for field in CAMERA_MEASUREMENT_SCHEMA.fields)
     + tuple(field for field in REARRANGEMENT_FIELDS if field.name in _MOVEMENT_FIELDS),
-    validator=_validate_measurement,
 )
 
 
@@ -36,10 +35,9 @@ def _build(*, camera, camera_key, slm, slm_key, signal_plane, calibration, scien
         destination, kind = end_target.value
         if kind != "spots":
             raise ValueError("The end Target must be a spots Target")
-    roi = tuple(authored[name] for name in ("roi_x", "roi_y", "roi_width", "roi_height"))
     return RearrangementMeasurement(camera=camera, slm=slm, slm_key=slm_key, signal_plane=signal_plane,
         request=CameraMeasurementRequest(camera_key=camera_key, exposure_seconds=authored["exposure_seconds"],
-            roi_xywh=None if all(value is None for value in roi) else roi,
+            roi_xywh=tuple(authored[name] for name in _ROI_FIELDS),
             repeat=authored["repeat"], frames_per_cycle=authored["frames_per_cycle"],
             photoelectrons=authored["photoelectrons"]),
         calibration=calibration.value, calibration_path=calibration.path,

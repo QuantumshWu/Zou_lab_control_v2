@@ -3927,6 +3927,52 @@ def test_a_board_naming_a_signal_nobody_publishes_keeps_the_blank_panel(
     assert any("nobody.publishes.this" in text for _severity, text in presenter.view.status)
 
 
+def test_a_board_row_whose_device_or_source_no_longer_fits_is_kept(presenter) -> None:
+    """A stale row costs that row its Start, not the board its load.
+
+    Boards keep rows the operator is not using today, and the apparatus or
+    an upstream row can change under one: a device key now naming another
+    kind of device, a source now declared as another contract.  The row is
+    kept as written, the load says so, and the row's own check refuses it.
+    """
+
+    row = {"values": {}, "source_signal": "", "device_keys": {},
+           "artifact_inputs": {}, "auto_preview": False}
+    document = {
+        "format": "zlc.console-board",
+        "panels": [],
+        "logic": [
+            {**row, "node_id": "cm", "api_name": "camera_measurement",
+             "device_keys": {"camera": "sequencer"}},
+            {**row, "node_id": "fb", "api_name": "slm_feedback",
+             "values": {"feedback_mode": "ramsey_frequency"},
+             "source_signal": "@logic/cm/frames"},
+        ],
+    }
+
+    assert presenter.apply_layout(document) is True
+    assert tuple(presenter.logic) == ("cm", "fb")
+    assert presenter.logic["cm"].draft.device_keys["camera"] == "sequencer"
+    assert presenter.logic["fb"].draft.source_signal == "@logic/cm/frames"
+    warnings = [text for severity, text in presenter.view.status if severity == "warning"]
+    assert any(
+        "logic cm names 'sequencer' as its camera, which does not provide camera.adapter"
+        in text for text in warnings
+    )
+    assert any(
+        text.startswith("logic fb reads @logic/cm/frames, which publishes ")
+        for text in warnings
+    )
+    camera = presenter.control_action("logic.validate", {"node_id": "cm"})
+    assert camera["accepted"] is False
+    assert "'sequencer' does not provide camera.adapter" in camera["error"]
+    presenter.control_action("logic.validate", {"node_id": "fb"})
+    assert any(
+        "'@logic/cm/frames' is not declared as" in issue
+        for issue in presenter.logic["fb"].finalization.issues
+    )
+
+
 def test_a_board_panel_whose_saved_table_is_refused_does_not_stop_the_rest(
     presenter, session
 ) -> None:

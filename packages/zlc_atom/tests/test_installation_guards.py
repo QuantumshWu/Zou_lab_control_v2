@@ -322,6 +322,40 @@ def test_preflight_resolves_world_and_topology_without_running_a_factory() -> No
     installation.close()
 
 
+def test_an_unbuildable_type_is_given_only_its_own_folders_import_error() -> None:
+    """A missing driver is the reason only for the types its folder declares.
+
+    ``camera.dcam`` lives in ``camera/dcam/``, so DCAM's import error is its
+    reason.  A type no folder declares any more has no driver to blame: a
+    sibling's missing DCAM would send the operator to install the wrong one.
+    """
+
+    from zlc_atom.install import UnavailableDeviceTypes
+
+    catalog = DeviceCatalogSnapshot(
+        (),
+        (
+            UnavailableDeviceTypes(
+                "zlc_atom.devices.camera.dcam.device_types", "ImportError: no DCAM"
+            ),
+        ),
+    )
+    blueprint = preflight_installation(
+        (
+            DeviceSpec("qcmos", "camera.dcam"),
+            DeviceSpec("old", "camera.orca_retired"),
+        ),
+        catalog=catalog,
+    )
+    assert blueprint.specs == ()
+    assert str(blueprint.unbuildable["qcmos"]) == (
+        "device type camera.dcam is not available on this machine (ImportError: no DCAM)"
+    )
+    assert str(blueprint.unbuildable["old"]) == (
+        "device type camera.orca_retired is not available on this machine"
+    )
+
+
 def test_template_default_simulation_does_not_conflict_with_explicit_world() -> None:
     from zlc_atom.devices.simulation import SimulationWorld
 

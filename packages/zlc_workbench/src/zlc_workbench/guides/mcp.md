@@ -24,6 +24,10 @@ nodes. `lab_devices(action='load', path=...)` loads the requested apparatus JSON
 `lab_initialize()` submits Init. Wait for `lab_state.session_open=true` using
 `lab_wait_for`, then inspect `device_operation_pending`, `device_failures` and
 device identities. Init alone does not prepare optical traps.
+A device whose type this machine cannot build appears in `device_failures`
+with the reason; the others open normally. The operator may keep such a card
+(and simulation settings no virtual device reads) on purpose: do not delete
+them from the apparatus to make Init look clean.
 
 For SLM work, open the chosen device with `lab_device_action(action='open',
 device_id=...)`, inspect `lab_editor_catalog` and load the specified Science
@@ -56,7 +60,9 @@ without it they return the confirmation text without opening a GUI dialog.
 ## acquisition
 
 Camera Measurement publishes complete cycles with all authored frames, pixel
-coordinates, units and validity. It does not own the experiment Pulse. Collect
+coordinates, units and validity. It does not own the experiment Pulse. A blank
+exposure or ROI field keeps the camera's current value for that field alone:
+set only the ROI fields you mean to change. Collect
 all triggers in each Pulse cycle even when interested in just one frame. For
 manual finite capture, prepare the Pulse first; Camera Start → that generation
 ready → Fire belongs in one already-decided batch, not separate model decisions.
@@ -333,6 +339,10 @@ If the metadata exceeds limit, it is paged as JSON text with next_offset/total_b
 continue only as needed, or request one named metadata section.
 Use the native Figure Viewer to reopen; a custom np.savez array file is not a
 Figure archive. `layout.save` preserves reusable node and panel authoring.
+`layout.load` keeps a row whose device or source no longer fits today's board
+(a warning report names it) and that row's `logic.validate` says what to choose;
+the board may hold rows the operator is not using today. Fix only the rows the
+task runs; do not delete the others.
 
 ## recipes
 

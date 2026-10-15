@@ -33,20 +33,12 @@ def _build(
     **values: object,
 ) -> CameraMeasurementNode:
     authored = CAMERA_MEASUREMENT_SCHEMA.project_values(values)
-    roi_means = tuple(
-        authored[name] for name in _ROI_FIELDS
-    )
-    roi = (
-        None
-        if all(value is None for value in roi_means)
-        else tuple(int(value) for value in roi_means)
-    )
     return CameraMeasurementNode(
         camera=camera,  # type: ignore[arg-type]
         request=CameraMeasurementRequest(
             camera_key=camera_key,
             exposure_seconds=authored["exposure_seconds"],
-            roi_xywh=roi,  # type: ignore[arg-type]
+            roi_xywh=tuple(authored[name] for name in _ROI_FIELDS),
             repeat=int(authored["repeat"]),
             frames_per_cycle=int(authored["frames_per_cycle"]),
             photoelectrons=bool(authored[PHOTOELECTRONS]),

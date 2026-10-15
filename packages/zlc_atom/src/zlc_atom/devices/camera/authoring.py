@@ -11,13 +11,10 @@ from zlc_atom.devices.camera.photoelectrons import photoelectron_switch
 from zlc_atom.nodes._framework.descriptor import SelectionMapping
 
 
+#: Each blank keeps the camera's current value for that one field: a
+#: measurement that only changes the ROI height leaves x, y and width where
+#: the camera has them (``CameraMeasurementNode`` completes the rectangle).
 _ROI_FIELDS = ("roi_x", "roi_y", "roi_width", "roi_height")
-
-
-def _validate_measurement(values: dict[str, object]) -> None:
-    roi = tuple(values[name] for name in _ROI_FIELDS)
-    if any(value is None for value in roi) and not all(value is None for value in roi):
-        raise ValueError("camera ROI requires all four fields, or none to keep the camera's current ROI")
 
 
 def _spatial_range(selection: SelectionState, role: str) -> SelectionRange | None:
@@ -156,5 +153,4 @@ CAMERA_MEASUREMENT_SCHEMA = AuthoringSchema(
         AuthoringField("frames_per_cycle", "int", "Frames per cycle", 1, minimum=1),
         photoelectron_switch(),
     ),
-    validator=_validate_measurement,
 )
