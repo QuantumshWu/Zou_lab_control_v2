@@ -831,6 +831,21 @@ pane.set_tabs((
 ))
 pane.resize(520, 640); pane.show(); app.processEvents()
 
+# A tab of single rows keeps no chevron column: its names start where the
+# filter's words over them do (the same word, so the same side bearing).
+# A tab that nests keeps the column its chevrons are drawn in.
+def ink_left(widget):
+    image = widget.grab().toImage()
+    ratio = image.devicePixelRatio() or 1.0
+    x = next(x for x in range(image.width())
+             if any(image.pixelColor(x, y).lightness() < 110 for y in range(image.height())))
+    return widget.mapTo(pane, QtCore.QPoint()).x() + x / ratio
+plot = pane._rows_tabs['Plot']
+assert not plot.tree.rootIsDecorated() and pane._rows_tabs['Logic'].tree.rootIsDecorated()
+plot.filter_edit.setText('data'); app.processEvents()
+assert ink_left(plot.tree.viewport()) == ink_left(plot.filter_edit)
+plot.filter_edit.clear(); app.processEvents()
+
 # The record is a tree: the run's name, then its fields, then the fields
 # of its fields -- every one on a row of its own, open from the start, a
 # branch saying only how many rows are under it.  Nothing is repeated in

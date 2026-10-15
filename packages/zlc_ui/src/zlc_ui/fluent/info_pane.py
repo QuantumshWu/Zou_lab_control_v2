@@ -30,6 +30,7 @@ from .fluent import (
     apply_fluent_scrollbars,
     card_pad,
     device_snap,
+    field_text_inset,
     fluent_font_size,
     frame_border_px,
     retire_widget,
@@ -190,7 +191,6 @@ class InfoTree(QtWidgets.QTreeWidget):
         super().__init__(parent)
         self.setColumnCount(2)
         self.setHeaderHidden(True)
-        self.setRootIsDecorated(True)
         self.setIndentation(scaled_px(18, minimum=14))
         self._chevron = scaled_px(4, minimum=3)
         # A value is never elided: its column is as wide as its widest value.
@@ -227,6 +227,12 @@ class InfoTree(QtWidgets.QTreeWidget):
         header.setMinimumSectionSize(scaled_px(60, minimum=48))
         header.resizeSection(0, self._name_floor)
         radius = scaled_px(RADIUS, minimum=2)
+        padding = scaled_px(5, minimum=3)
+        # A name at the top level starts where the filter's words over it
+        # do: the item's left padding is what the field's text inset leaves
+        # after this frame's edge and the style's own text margin.
+        text_margin = self.style().pixelMetric(QtWidgets.QStyle.PM_FocusFrameHMargin, None, self) + 1
+        lead = max(0, field_text_inset() - FIELD_BORDER_PX - text_margin)
         # A cell paints no background of its own: the hover and selection
         # washes are the ROW's, painted by drawRow.
         self.setStyleSheet(
@@ -244,7 +250,7 @@ class InfoTree(QtWidgets.QTreeWidget):
             }}
             QTreeView::item {{
                 border: none;
-                padding: {scaled_px(5, minimum=3)}px;
+                padding: {padding}px {padding}px {padding}px {lead}px;
             }}
             QTreeView::item:selected, QTreeView::item:hover {{
                 background: transparent;
@@ -360,6 +366,9 @@ class InfoTree(QtWidgets.QTreeWidget):
                 self._add_action(str(label), value)
                 continue
             self._add_entry(None, str(label), value)
+        # The chevron column is the nesting's: a tab of single rows keeps
+        # none, and its names start where the filter's words do.
+        self.setRootIsDecorated(any(item.childCount() for item in self._top_level_items()))
         self.expandAll()
         self._fit_name_column()
 
@@ -399,7 +408,7 @@ class InfoTree(QtWidgets.QTreeWidget):
                 measure(item.child(index), depth + 1)
 
         for item in items:
-            measure(item, 1)
+            measure(item, 1 if self.rootIsDecorated() else 0)
         return max(self._name_floor, math.ceil(widest) + chrome)
 
     def resizeEvent(self, event) -> None:  # noqa: N802 - Qt naming
