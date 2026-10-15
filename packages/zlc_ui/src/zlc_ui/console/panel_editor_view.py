@@ -39,6 +39,7 @@ from zlc_ui.fluent import (
     retire_widget,
     window_pad,
 )
+from zlc_ui.form.qt_form import _form_label_width
 from zlc_ui.form import (
     FluentParameterForm,
     FormChoice,
@@ -55,6 +56,7 @@ from ._panel_projection import (
     parameter_form_values,
     signal_form_runtime,
 )
+from .logic_editor_view import _contribution_label_width
 from .panel_card_view import (
     _set_interaction,
     _shows_unrecorded_pick,
@@ -255,15 +257,18 @@ class PanelEditorView(QtWidgets.QWidget):
         save_layout.setContentsMargins(pad, pad, pad, pad)
         save_layout.setSpacing(row_gap())
         label_width = setting_label_width(("Directory", "Name", "Format", "File"))
+        #: The Save figure rows and their words: they take the page's one
+        #: label column with the forms above (see _share_label_column).
+        self._save_rows: list[tuple[FluentSettingRow, str]] = []
         self.save_directory = FluentPathEdit(
             "",
             mode="dir",
             caption="Choose where to save",
             parent=save_group,
         )
-        save_layout.addWidget(FluentSettingRow(
-            "Directory", self.save_directory, label_width=label_width, parent=save_group
-        ))
+        row = FluentSettingRow("Directory", self.save_directory, label_width=label_width, parent=save_group)
+        self._save_rows.append((row, "Directory"))
+        save_layout.addWidget(row)
         name_controls = QtWidgets.QWidget(save_group)
         name_layout = QtWidgets.QHBoxLayout(name_controls)
         name_layout.setContentsMargins(0, 0, 0, 0)
@@ -275,21 +280,21 @@ class PanelEditorView(QtWidgets.QWidget):
         self.save_name.set_placeholder_prompt()
         name_layout.addWidget(self.save_auto_name)
         name_layout.addWidget(self.save_name, 1)
-        save_layout.addWidget(FluentSettingRow(
-            "Name", name_controls, label_width=label_width, parent=save_group
-        ))
+        row = FluentSettingRow("Name", name_controls, label_width=label_width, parent=save_group)
+        self._save_rows.append((row, "Name"))
+        save_layout.addWidget(row)
         self.save_format = FluentSegmentedButtons(
             tuple((extension, extension.upper()) for extension in _IMAGE_FORMATS), save_group
         )
         self._save_extension = _IMAGE_FORMATS[0]
         self.save_format.set_current(self._save_extension)
-        save_layout.addWidget(FluentSettingRow(
-            "Format", self.save_format, label_width=label_width, parent=save_group
-        ))
+        row = FluentSettingRow("Format", self.save_format, label_width=label_width, parent=save_group)
+        self._save_rows.append((row, "Format"))
+        save_layout.addWidget(row)
         self.save_preview = FluentReadoutEdit("")
-        save_layout.addWidget(FluentSettingRow(
-            "File", self.save_preview, label_width=label_width, parent=save_group
-        ))
+        row = FluentSettingRow("File", self.save_preview, label_width=label_width, parent=save_group)
+        self._save_rows.append((row, "File"))
+        save_layout.addWidget(row)
         actions = QtWidgets.QHBoxLayout()
         actions.setSpacing(row_gap())
         actions.addStretch(1)
@@ -416,6 +421,7 @@ class PanelEditorView(QtWidgets.QWidget):
                 self.parameter_groups[section].setVisible(
                     bool(spec.fields) or bool(unavailable)
                 )
+            self._share_label_column()
         elif _shows_unrecorded_pick(self.panel_form, state):
             # A refused pick comes back as the same projection; the picker
             # that sent it goes back to what the panel draws.
@@ -464,6 +470,35 @@ class PanelEditorView(QtWidgets.QWidget):
         values = incoming.get("form_values") or {}
         self.producer_form.reconcile(visible, {key: values[key] for key in visible.keys})
         self.producer_form.setVisible(bool(visible.fields))
+        self._share_label_column()
+
+    def _share_label_column(self) -> None:
+        """One control column down the whole page.
+
+        Each card's form sizes a label column to its own words, so Panel,
+        Semantic, Display and Save figure would start their controls at as
+        many x.  Every card takes the column the widest shown label of any
+        card needs: the forms', the Save figure rows' and the producer
+        contributions' that take the column.
+        """
+
+        forms = (self.panel_form, *self.parameter_forms.values(), self.producer_form)
+        spec = (self._applied_producer or {}).get("form_spec", FormSpec(()))
+        takers = tuple(
+            widget for widget in self._producer_contributions.values()
+            if callable(getattr(widget, "set_label_width", None))
+        )
+        column = max(
+            setting_label_width(text for _row, text in self._save_rows),
+            *(_form_label_width(form.spec.fields) for form in forms if form.spec.fields),
+            *(_contribution_label_width(widget, spec) for widget in takers),
+        )
+        for form in forms:
+            form.set_label_width(column)
+        for row, text in self._save_rows:
+            row.set_label(text, width=column)
+        for widget in takers:
+            widget.set_label_width(column)
 
     def set_snapshot_status(self, status: Mapping[str, object]) -> None:
         """Update frozen age without reconciling the editor's forms."""

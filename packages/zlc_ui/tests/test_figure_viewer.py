@@ -705,8 +705,12 @@ view.resize(1200, 640); settle()
 state ={'signal': '@figure/1/data', 'kind': 'image', 'cell_kind': '', 'size': '2x2',
          'interval_ms': 400, 'title': 'Camera frame', 'semantic': {}, 'display': {},
          'fit': {}, 'overlay_signal': ''}
-panel_surface = {'semantic': (), 'display': (), 'fit': (), 'data_structure': (),
-                 'data_scope': (), 'paints_images': True}
+# Short semantic labels and a long display one: each card's own words
+# would start its controls at its own x.
+panel_surface = {'semantic': ({'key': 'x', 'label': 'x', 'kind': 'text', 'value': 'a'},),
+                 'display': ({'key': 'colormap_name', 'label': 'Colour map name', 'kind': 'text',
+                              'value': 'gray'},),
+                 'fit': (), 'data_structure': (), 'data_scope': (), 'paints_images': True}
 view.set_panel_intervals((100, 400), 400)
 view.set_panel_projection('panel-1', state, panel_surface)
 view.open_panel_editor('panel-1', {
@@ -726,6 +730,13 @@ assert box(panel_editor.refresh_button, panel_editor.snapshot_group)[0] == pad
 saved = panel_editor.save_group
 assert box(panel_editor.save_button, saved)[2] == saved.width() - pad
 assert box(panel_editor.save_button, saved)[3] == saved.height() - pad
+# One control column down the page: Panel, Semantic, Display and Save
+# figure all start their controls at one x.
+controls = (panel_editor.panel_form.widget_for('title'),
+            panel_editor.parameter_forms['semantic'].widget_for('x'),
+            panel_editor.parameter_forms['display'].widget_for('colormap_name'),
+            panel_editor.save_directory)
+assert len({box(control, surface)[0] for control in controls}) == 1, [box(c, surface) for c in controls]
 view.finish_close()
 """
     )
