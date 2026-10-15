@@ -58,6 +58,8 @@ class LogicEditorView(QtWidgets.QWidget):
     refresh_requested = QtCore.pyqtSignal()
     start_requested = QtCore.pyqtSignal()
     stop_requested = QtCore.pyqtSignal()
+    #: Put the configuration the running node uses back into the draft.
+    revert_requested = QtCore.pyqtSignal()
     remove_requested = QtCore.pyqtSignal()
     auto_preview_changed = QtCore.pyqtSignal(bool)
 
@@ -212,6 +214,9 @@ class LogicEditorView(QtWidgets.QWidget):
         # On Pulse then Stop Pulse -- and with its words: Start reads Restart
         # while the node is active and Starting… while its start waits.  Both
         # are always there, so nothing on this row moves when a run begins.
+        # Revert stands left of them, always there too: it answers the one
+        # question a page edited under a running node leaves -- what does
+        # the run use? -- by putting that configuration back.
         # Remove keeps to the far side, away from the buttons pressed most.
         # The bar is the page's foot, on the body's left and right edges and
         # a section gap under the last row the scroll shows, so the ghost
@@ -225,8 +230,12 @@ class LogicEditorView(QtWidgets.QWidget):
         self.remove_button.clicked.connect(self.remove_requested.emit)
         actions.addWidget(self.remove_button)
         actions.addStretch(1)
+        self.revert_button = FluentButton("Revert")
+        self.revert_button.setToolTip("Restore the configuration the running node uses")
+        self.revert_button.clicked.connect(self.revert_requested.emit)
         self.start_button = FluentButton("Start", role="primary")
-        fit_button_words(self.start_button, START_LABELS)
+        # Restart wears the dirty star while the draft differs from the run.
+        fit_button_words(self.start_button, (*START_LABELS, "Restart*"))
         self.start_button.clicked.connect(self.start_requested.emit)
         self.stop_button = FluentButton("Stop", role="destructive")
         self.stop_button.clicked.connect(self.stop_requested.emit)
@@ -239,8 +248,10 @@ class LogicEditorView(QtWidgets.QWidget):
             "Open this node's plot panel when it starts"
         )
         self.preview_switch.toggled.connect(self.auto_preview_changed.emit)
-        # The Plot setting sits immediately left of Start, as on the row.
-        add_row_switch(actions, self.preview_switch, lead=False)
+        # The Plot setting sits immediately left of Start, as on the row, a
+        # group of its own between Revert and Start.
+        actions.addWidget(self.revert_button)
+        add_row_switch(actions, self.preview_switch)
         actions.addWidget(self.start_button)
         actions.addWidget(self.stop_button)
         outer.addWidget(footer)
@@ -314,7 +325,7 @@ class LogicEditorView(QtWidgets.QWidget):
         # among them: it changes only when a run fails or recovers, and a
         # contribution shows a failure beside the row that caused it.
         volatile = ("running", "pending", "issues", "status", "state",
-                    "auto_preview", "can_start", "can_stop")
+                    "auto_preview", "can_start", "can_stop", "edited")
         structure = {
             key: value for key, value in incoming.items() if key not in volatile
         }
@@ -536,8 +547,20 @@ class LogicEditorView(QtWidgets.QWidget):
         pending = bool(self._projection.get("pending"))
         can_start = bool(self._projection.get("can_start"))
         can_stop = bool(self._projection.get("can_stop"))
+        edited = bool(self._projection.get("edited"))
+        startable = self._mutation_enabled and can_start and not pending
         self.start_button.setText(start_label(pending=pending, active=can_stop))
-        self.start_button.setEnabled(self._mutation_enabled and can_start and not pending)
+        self.start_button.setEnabled(startable)
+        # The On Pulse rule: Start is this page's run command; a Restart of
+        # what already runs is a standard command, and it is the one thing
+        # to press -- primary, with the star every save wears -- only while
+        # pressing it would put something new in place: the edited draft.
+        self.start_button.set_role("standard" if can_stop else "primary")
+        self.start_button.set_dirty(edited and startable)
+        self.start_button.setToolTip(
+            "Restart to run the edited configuration" if self.start_button.is_dirty() else ""
+        )
+        self.revert_button.setEnabled(self._mutation_enabled and edited)
         self.stop_button.setEnabled(can_stop and (self._mutation_enabled or self._owns_task))
         # It says what the next Start will do, so it follows Start's own gate.
         self.preview_switch.setEnabled(self._mutation_enabled)

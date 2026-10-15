@@ -2572,16 +2572,40 @@ assert start.role() == 'primary' and start.text() == 'Start' and start.isEnabled
 # always there, disabled while there is nothing to stop.
 assert stop.isVisible() and not stop.isEnabled() and stop.role() == 'destructive'
 assert abs(stop.y() - start.y()) <= 2 and start.x() + start.width() < stop.x()
-slots = lambda: (switch.x(), start.x(), start.width(), stop.x(), stop.width())
+# Revert has its own fixed slot left of the Plot group, always there and
+# disabled while there is no running configuration the draft differs from.
+revert = editor.revert_button
+assert revert.isVisible() and not revert.isEnabled() and revert.role() == 'standard'
+assert abs(revert.y() - start.y()) <= 2 and revert.x() + revert.width() < switch.x()
+assert revert.toolTip() == 'Restore the configuration the running node uses'
+slots = lambda: (revert.x(), revert.width(), switch.x(), start.x(), start.width(),
+                 stop.x(), stop.width())
 idle = slots()
 
-# Running, Start says Restart and stays this page's primary; nothing on the
-# row moves -- no button appears beside it.
+# Running what the page shows, Start says Restart and is a standard command:
+# pressing it would put nothing new in place.  Nothing on the row moves.
 editor.update_projection(dict(projection, running=True, can_stop=True))
 app.processEvents()
-assert start.text() == 'Restart' and start.role() == 'primary', (start.text(), start.role())
-assert start.isEnabled() and stop.isEnabled()
+assert start.text() == 'Restart' and start.role() == 'standard', (start.text(), start.role())
+assert start.isEnabled() and stop.isEnabled() and not revert.isEnabled()
 assert slots() == idle, (slots(), idle)
+
+# Edited under the run: Restart is the page's one thing to press -- primary,
+# with the star every save wears -- and Revert puts the run's configuration
+# back.  Still nothing moves.
+editor.update_projection(dict(projection, running=True, can_stop=True, edited=True))
+app.processEvents()
+assert start.text() == 'Restart*' and start.role() == 'primary', (start.text(), start.role())
+assert start.toolTip() == 'Restart to run the edited configuration'
+assert revert.isEnabled()
+assert slots() == idle, (slots(), idle)
+reverts = []
+editor.revert_requested.connect(lambda: reverts.append('revert'))
+QtTest.QTest.mouseClick(revert, QtCore.Qt.LeftButton)
+assert reverts == ['revert']
+editor.update_projection(dict(projection, running=True, can_stop=True))
+assert start.text() == 'Restart' and start.role() == 'standard' and not start.toolTip()
+assert not revert.isEnabled()
 
 # A follower waiting for its source has no host yet, but it IS active: the
 # page says what the row says, Restart and an enabled Stop.
@@ -2591,10 +2615,12 @@ app.processEvents()
 assert start.text() == start_label(pending=False, active=True) == 'Restart'
 assert stop.isEnabled()
 
-# A start queued behind a device release can be cancelled from here.
-editor.update_projection(dict(projection, pending=True, can_start=False, can_stop=True))
+# A start queued behind a device release can be cancelled from here, and an
+# edit made meanwhile reverted; the disabled Starting… wears no star.
+editor.update_projection(dict(projection, pending=True, can_start=False, can_stop=True, edited=True))
 app.processEvents()
 assert start.text() == 'Starting…' and not start.isEnabled() and stop.isEnabled()
+assert revert.isEnabled()
 assert slots() == idle, (slots(), idle)
 stops = []
 editor.stop_requested.connect(lambda: stops.append('stop'))
@@ -2602,15 +2628,16 @@ QtTest.QTest.mouseClick(stop, QtCore.Qt.LeftButton)
 assert stops == ['stop']
 
 # While a Task owns the console only that Task's own Stop stays live.
-editor.update_projection(dict(projection, running=True, can_stop=True))
+editor.update_projection(dict(projection, running=True, can_stop=True, edited=True))
 editor.set_mutation_enabled(False, owns_task=True)
 assert stop.isEnabled() and not start.isEnabled() and not editor.remove_button.isEnabled()
+assert not revert.isEnabled() and start.text() == 'Restart'
 editor.set_mutation_enabled(False)
 assert not stop.isEnabled()
 editor.set_mutation_enabled(True)
 editor.update_projection(projection)
 app.processEvents()
-assert start.text() == 'Start' and not stop.isEnabled()
+assert start.text() == 'Start' and start.role() == 'primary' and not stop.isEnabled()
 assert slots() == idle, (slots(), idle)
 
 raised = []

@@ -453,6 +453,13 @@ stops the current run and queues the replacement. The reply reads
 is null); once `logic[].pending` is null, read the new `generation` from
 `lab_state(node_id=...)` before waiting on it.
 
+`logic.update` on a running, following or queued node edits only its draft for
+the next Start; the run keeps the configuration it was started with, and
+`logic[].edited_since_start` is true while the draft differs from it.
+`logic.revert` (`node_id`) puts that whole configuration -- values, source,
+devices and artifact rows -- back into the draft without restarting; it is
+refused when the node has no current run or its draft already matches.
+
 Draft issues name a field the way its Edit page does, not by its draft key.
 "X must be selected", where X is `lab_catalog(node_id).node.source_label`,
 means set `source_signal` from `node.source_options`. A field or file label maps

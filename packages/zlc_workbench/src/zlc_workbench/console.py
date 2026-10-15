@@ -16,6 +16,7 @@ from __future__ import annotations
 from collections import deque
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from concurrent.futures import CancelledError, Future, TimeoutError as _AnswerTimeout
+from copy import deepcopy
 from dataclasses import dataclass, field, fields, is_dataclass, replace
 from enum import Enum
 import logging
@@ -267,6 +268,53 @@ def _artifact_draft_value(value: object) -> object:
         return frame_claim_entries(value)
     except ValueError:
         return value
+
+
+def _same_draft_value(previous: object, proposed: object) -> bool:
+    """Whether two draft values are one authored value.
+
+    Compared as the form shows them and of one type: an editor echoing its
+    projection back (rows as tuples, a number list as its text) and an
+    operator typing the same value again are no change.
+    """
+
+    from .authoring_form import display_value
+
+    previous, proposed = display_value(previous), display_value(proposed)
+    return type(previous) is type(proposed) and previous == proposed
+
+
+def _same_draft(draft: LogicDraft, other: LogicDraft) -> bool:
+    """Whether two drafts would Start the same run: every part, by value."""
+
+    return (
+        draft.source_signal == other.source_signal
+        and draft.device_keys == other.device_keys
+        and draft.artifact_inputs == other.artifact_inputs
+        and draft.values.keys() == other.values.keys()
+        and all(
+            _same_draft_value(value, other.values[name])
+            for name, value in draft.values.items()
+        )
+    )
+
+
+def _running_configuration(binding: LogicBinding) -> LogicDraft | None:
+    """The draft the current run -- running, queued or following -- was
+    started with; None while the node has no current run."""
+
+    active = bool(
+        binding.following or binding.pending is not None
+        or (binding.host is not None and binding.host.running)
+    )
+    return binding.started_draft if active else None
+
+
+def _edited_since_start(binding: LogicBinding) -> bool:
+    """Whether the draft differs from the configuration the node runs."""
+
+    running = _running_configuration(binding)
+    return running is not None and not _same_draft(binding.draft, running)
 
 
 def _shown_resource_path(value: object, directory: Path) -> str:
@@ -986,6 +1034,7 @@ class ConsolePresenter:
             self.view.logic_start_requested.connect(self._guarded(self.start_logic))
             self.view.logic_auto_preview_changed.connect(self._guarded(self.set_logic_auto_preview))
             self.view.logic_stop_requested.connect(self._guarded(self.stop_logic))
+            self.view.logic_revert_requested.connect(self._guarded(self.revert_logic_draft))
             self.view.logic_edit_requested.connect(self._guarded(self.edit_logic))
             self.view.logic_remove_requested.connect(self._guarded(self.remove_logic))
             self.view.stop_task_requested.connect(self._guarded(self.stop_active_task))
@@ -7322,6 +7371,7 @@ class ConsolePresenter:
                 "kind": binding.descriptor.kind.value,
                 "draft_revision": binding.draft_revision,
                 **({"draft": _control_plain(binding.draft)} if details else {}),
+                "edited_since_start": _edited_since_start(binding),
                 "status": phase,
                 "generation": None if host is None or host.generation is None else host.generation.value,
                 "observation": _control_plain(observed),
@@ -7661,6 +7711,10 @@ class ConsolePresenter:
                 if set(params) != {"node_id"}:
                     raise ValueError("logic.start accepts only node_id")
                 accepted = self.start_logic(node_id)
+            elif action == "logic.revert":
+                if set(params) != {"node_id"}:
+                    raise ValueError("logic.revert accepts only node_id")
+                accepted = self.revert_logic_draft(node_id)
             elif action == "logic.stop":
                 accepted = self.stop_logic(**params)
             elif action == "logic.remove":
@@ -8510,6 +8564,9 @@ class ConsolePresenter:
             "pending": binding.pending is not None,
             "can_start": can_start,
             "can_stop": can_stop,
+            # The draft differs from the configuration the current run was
+            # started with: Revert puts that back, Restart runs the draft.
+            "edited": _edited_since_start(binding),
             "issues": finalization.issues,
             "error": status if state == "error" else "",
             "state": state,
@@ -8564,18 +8621,13 @@ class ConsolePresenter:
         if binding is None:
             return False
         if values is not None:
-            from .authoring_form import display_value
-
             # An editor may echo its initial projection (rows as tuples,
             # numeric normalization, or an unchanged source choice). Only
             # actual authoring changes advance the shared draft revision.
-            changed = {}
-            for name, value in values.items():
-                previous = display_value(binding.draft.values.get(name, _UNCHANGED))
-                proposed = display_value(value)
-                if type(previous) is not type(proposed) or previous != proposed:
-                    changed[name] = value
-            values = changed
+            values = {
+                name: value for name, value in values.items()
+                if not _same_draft_value(binding.draft.values.get(name, _UNCHANGED), value)
+            }
         if source_signal is not _UNCHANGED and str(source_signal) == binding.draft.source_signal:
             source_signal = _UNCHANGED
         if device_keys is not None:
@@ -8639,6 +8691,36 @@ class ConsolePresenter:
             artifact_inputs=patch.get("artifact_inputs"),
         )
 
+    def revert_logic_draft(self, node_id: str) -> bool:
+        """Put the whole configuration the node runs back into its draft.
+
+        Values, source, devices and artifact inputs go back through the
+        ordinary draft path, so the editor and every consumer re-project
+        once.  Nothing restarts and nothing is asked: the run already uses
+        this configuration.
+        """
+
+        binding = self.logic.get(str(node_id))
+        if binding is None:
+            return False
+        running = _running_configuration(binding)
+        if running is None or _same_draft(binding.draft, running):
+            self._report(
+                f"{binding.node_id} has no running configuration to revert to"
+                if running is None else
+                f"{binding.node_id} already runs its draft; there is nothing to revert",
+                severity="warning",
+            )
+            return False
+        running = deepcopy(running)
+        return self.update_logic_draft(
+            binding.node_id,
+            values=running.values,
+            source_signal=running.source_signal,
+            device_keys=running.device_keys,
+            artifact_inputs=running.artifact_inputs,
+        )
+
     def start_logic(self, node_id: str, *, _acquisition: bool = False) -> bool:
         if not (_acquisition and node_id in self._task_acquisition_nodes()) and self._task_command_blocked("starting another logic node"):
             return False
@@ -8659,6 +8741,7 @@ class ConsolePresenter:
             # is accepted as an intent and the poll beat completes it the
             # moment the source publishes.
             binding.following = True
+            binding.started_draft = deepcopy(binding.draft)
             binding.draft_error = ""
             self._refresh_console_projection()
             self.refresh_logic_editor(binding.node_id)
@@ -8711,6 +8794,10 @@ class ConsolePresenter:
             self.refresh_logic_editor(binding.node_id)
             return False
 
+        # The Start is accepted: whether it runs now or queues behind the old
+        # run, this draft is the configuration the node runs from here on.
+        # A refused Start returned above and left the old run's in place.
+        binding.started_draft = deepcopy(binding.draft)
         blockers = set(candidate.reservation.waiting_for)
         if blockers:
             binding.pending = candidate
@@ -9106,6 +9193,10 @@ class ConsolePresenter:
                             f"restart queued: {names} still to read the last "
                             f"run ({age:.0f} s)"
                         )
+        if state == "running" and _edited_since_start(binding):
+            # The run goes on with the configuration it started with; the
+            # draft on the page is for the next one.
+            status = f"{status} · edited"
         return state, str(status)
 
     def _show_logic(
@@ -9166,6 +9257,9 @@ class ConsolePresenter:
             can_stop,
             pending,
             binding.auto_preview,
+            # Not always in the status (an error says only the error), and
+            # the Edit page's Revert and Restart follow it.
+            _edited_since_start(binding),
         )
         if shown == binding.shown:
             return

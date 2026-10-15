@@ -168,6 +168,11 @@ class LogicBinding:
     #: every publication of the same incompatible schema.
     following: bool = False
     draft_revision: int = 0
+    #: A copy of the draft the latest accepted Start was given: the
+    #: configuration the current run -- running, queued or following -- uses.
+    #: The draft goes on being edited for the next run; this is what Revert
+    #: puts back and what the draft is compared with to say "edited".
+    started_draft: LogicDraft | None = None
     finalization_key: tuple = ()
     finalization: LogicDraftFinalization | None = None
     #: Open this node's declared preview panel when it starts.  A preference

@@ -176,7 +176,7 @@ class _ConsoleView:
         "panel_edit_requested", "panel_plot_error",
         "panel_publisher_edit_requested", "panel_publisher_draft_changed",
         "logic_start_requested", "logic_auto_preview_changed",
-        "logic_stop_requested",
+        "logic_stop_requested", "logic_revert_requested",
         "logic_edit_requested", "logic_remove_requested", "logic_draft_changed",
         "panel_state_changed", "panel_snapshot_refresh_requested",
         "panel_editor_closed",

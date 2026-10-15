@@ -8,6 +8,7 @@ a notebook running beside the window.
 from __future__ import annotations
 
 import ast
+from copy import deepcopy
 import json
 import time
 from dataclasses import replace
@@ -464,22 +465,50 @@ def test_a_missing_device_is_a_repairable_draft_until_start(presenter) -> None:
 
 
 def test_editing_a_running_row_changes_only_its_shared_draft(presenter, session) -> None:
+    """The run keeps the configuration it started with and the draft is the
+    next run's.  While the two differ the row, the page and lab_state say so,
+    and Revert puts the run's configuration back without touching the run."""
 
     session.load_pulse(PULSE_NAME)
     node_id = presenter.add_logic("camera_measurement", values={"repeat": 0})
     presenter.start_logic(node_id)
+    started = deepcopy(presenter.logic[node_id].draft)
     current_host = presenter.logic[node_id].host
     current_node = presenter.logic[node_id].node
+    row = presenter.view._rows[node_id]
 
+    def edited():
+        return (
+            presenter.view.logic_editors[node_id]["edited"],
+            row.state[1].endswith(" · edited"),
+            presenter.control_state(node_id=node_id)["logic"][0]["edited_since_start"],
+        )
+
+    assert edited() == (False, False, False)
     assert presenter.update_logic_draft(node_id, values={"repeat": 9}) is True
     assert presenter.edit_logic(node_id) is True
     assert presenter.logic[node_id].draft.values["repeat"] == 9
     assert presenter.logic[node_id].host is current_host
     assert presenter.logic[node_id].node is current_node
-    presenter.update_logic_draft(node_id, values={"repeat": -1})
+    assert edited() == (True, True, True)
+    # Typed back to the value the run uses, the draft is the run's again.
+    presenter.view.logic_draft_changed.emit(node_id, {"values": {"repeat": 0}})
+    assert edited() == (False, False, False)
+    refused = presenter.control_action("logic.revert", {"node_id": node_id})
+    assert not refused["accepted"] and "nothing to revert" in refused["error"], refused
+
+    presenter.update_logic_draft(node_id, values={"repeat": -1, "exposure_seconds": 0.02})
     assert presenter.start_logic(node_id) is False
     assert presenter.logic[node_id].host is current_host
     assert current_host.running, "invalid Restart stopped the valid current run"
+    # A refused Restart left the run -- and the configuration it uses -- alone.
+    assert presenter.view.logic_editors[node_id]["edited"] is True
+    reverted = presenter.control_action("logic.revert", {"node_id": node_id})
+    assert reverted["accepted"], reverted
+    assert presenter.logic[node_id].draft == started
+    assert presenter.view.logic_editors[node_id]["form_values"]["repeat"] == 0
+    assert edited() == (False, False, False)
+    assert presenter.logic[node_id].host is current_host and current_host.running
     # The run keeps declaring what IT shows.  A half-typed draft is not even a
     # valid request -- asking it what to plot raised out of the console's poll.
     presenter.beat()
@@ -489,6 +518,68 @@ def test_editing_a_running_row_changes_only_its_shared_draft(presenter, session)
         for spec in presenter.logic[node_id].preview_specs
     ) == (("frames", "facet_grid"),), "the running node's declaration is the run's"
     presenter.stop_logic(node_id)
+
+
+def test_revert_restores_a_following_processors_source_and_calibration_rows(
+    presenter, tmp_path
+) -> None:
+    """Revert puts back the WHOLE configuration a node was started with -- an
+    Occupancy's source and calibration rows as well as its values -- and a
+    Restart makes the edited draft the configuration it runs."""
+
+    from test_console_presenter import _box_calibration
+
+    def calibration(name: str) -> str:
+        return str(_box_calibration(
+            ("site_0001",), ((64.0, 48.0),), (0.0,), (96, 128)
+        ).save(tmp_path / name))
+
+    first, second = calibration("first.json"), calibration("second.json")
+    node_id = presenter.add_logic("occupancy")
+    presenter.update_logic_draft(
+        node_id,
+        source_signal=stable_signal_key("camera-a", "frames"),
+        artifact_inputs={"calibrations": [{"path": first, "frames": ["rest"]}]},
+    )
+    refused = presenter.control_action("logic.revert", {"node_id": node_id})
+    assert not refused["accepted"] and "no running configuration" in refused["error"], refused
+
+    # No camera yet: the Start is a standing follow, which is a current run.
+    assert presenter.start_logic(node_id), presenter.logic[node_id].draft_error
+    binding = presenter.logic[node_id]
+    assert binding.following and binding.host is None
+    started = deepcopy(binding.draft)
+    assert presenter.view.logic_editors[node_id]["edited"] is False
+
+    presenter.view.logic_draft_changed.emit(node_id, {"values": {"model_kind": "box"}})
+    presenter.view.logic_draft_changed.emit(
+        node_id, {"source_signal": stable_signal_key("camera-b", "frames")}
+    )
+    presenter.view.logic_draft_changed.emit(node_id, {"artifact_inputs": {"calibrations": [
+        {"path": first, "frames": ["first"]}, {"path": second, "frames": ["rest"]},
+    ]}})
+    projection = presenter.view.logic_editors[node_id]
+    assert projection["edited"] is True and projection["status"].endswith(" · edited"), projection["status"]
+
+    presenter.view.logic_revert_requested.emit(node_id)
+    assert binding.draft == started
+    projection = presenter.view.logic_editors[node_id]
+    assert projection["edited"] is False
+    assert projection["source_signal"] == stable_signal_key("camera-a", "frames")
+    assert projection["form_values"]["model_kind"] == "default"
+    assert projection["artifact_claims"]["calibrations"]["entries"] == (
+        {"path": first, "frames": ("rest",)},
+    )
+    assert binding.following and binding.host is None, "Revert restarted nothing"
+
+    presenter.view.logic_draft_changed.emit(node_id, {"values": {"model_kind": "box"}})
+    assert presenter.view.logic_editors[node_id]["edited"] is True
+    assert presenter.start_logic(node_id)
+    assert presenter.view.logic_editors[node_id]["edited"] is False
+    assert binding.started_draft.values["model_kind"] == "box"
+    presenter.stop_logic(node_id)
+    presenter.view.logic_draft_changed.emit(node_id, {"values": {"model_kind": "default"}})
+    assert presenter.view.logic_editors[node_id]["edited"] is False, "nothing runs"
 
 
 def test_a_build_is_handed_only_what_it_asks_for(bench) -> None:
@@ -998,15 +1089,20 @@ def test_restart_is_queued_and_keeps_the_stable_signal_key(presenter, session) -
     assert old_host is not None
     old_key = old_host.signal_key("frames")
     old_generation = old_host.generation
-    presenter.update_logic_draft(
-        node_id,
-        values={"exposure_seconds": 0.031},
-        device_keys={"camera": "mot_camera"},
-    )
+    started = deepcopy(presenter.logic[node_id].draft)
+    edit = {"values": {"exposure_seconds": 0.031}, "device_keys": {"camera": "mot_camera"}}
+    presenter.update_logic_draft(node_id, **edit)
+    # Revert puts the run's camera back as well as its numbers.
+    assert presenter.revert_logic_draft(node_id)
+    assert presenter.logic[node_id].draft == started
+    presenter.update_logic_draft(node_id, **edit)
+    assert presenter.logic_editor_projection(node_id)["edited"] is True
 
     assert presenter.start_logic(node_id) is True
     assert presenter.logic[node_id].host is old_host
     assert presenter.logic[node_id].pending is not None
+    # Queued, the Restart's draft is already the configuration the node runs.
+    assert presenter.logic_editor_projection(node_id)["edited"] is False
 
     deadline = time.monotonic() + 5.0
     while time.monotonic() < deadline and presenter.logic[node_id].host is old_host:

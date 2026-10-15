@@ -890,7 +890,7 @@ def start_server(flow, *, host="127.0.0.1", port: int, token: str, allow_control
 
         @tool()
         async def lab_action(action: Literal["logic.add", "logic.update", "logic.validate", "logic.start",
-                                            "logic.stop", "logic.remove", "panel.add", "panel.update",
+                                            "logic.stop", "logic.revert", "logic.remove", "panel.add", "panel.update",
                                             "panel.remove", "panel.edit", "panel.refresh", "panel.save",
                                             "view.monitor", "view.logic", "layout.save", "layout.load"],
                              arguments: dict[str, object], expected_draft_revision: int | None = None,
@@ -901,7 +901,11 @@ def start_server(flow, *, host="127.0.0.1", port: int, token: str, allow_control
             Occupancy's calibrations takes [{path, frames}] rows). Start/Stop: node_id. logic.start on a running,
             following or queued node is the GUI Restart: it stops the current run and queues the replacement; the reply
             still carries the old generation (pending.generation null), so read the new one from lab_state once
-            pending is null. Draft issues name fields by their on-screen labels; map them back through
+            pending is null. Editing a running, following or queued node changes only its draft;
+            lab_state logic[].edited_since_start is true while that draft differs from the configuration the
+            current run started with. logic.revert (node_id) puts that whole configuration back into the draft
+            without restarting; it is refused when there is no current run or nothing differs.
+            Draft issues name fields by their on-screen labels; map them back through
             lab_catalog(node_id).node.source_label and form_spec. Panel add: kind; update: panel_id,patch.
             view.monitor/view.logic take empty arguments and navigate directly, without pixel clicks.
             layout.save/load take path (workspace JSON); load restores stopped drafts. Loading over active Logic
