@@ -455,6 +455,39 @@ def test_a_blank_choice_reads_as_a_placeholder(app, host) -> None:
     assert ink(tree) == TEXT.upper()
 
 
+def test_a_switched_off_editable_combo_writes_in_disabled_ink(app, host) -> None:
+    """Its prompt and its typed text alike, as a non-editable combo's text:
+    a prompt in reading ink invited typing into a box that refuses it."""
+
+    from PyQt5 import QtGui
+    from zlc_ui.fluent import FluentComboBox
+    from zlc_ui.fluent.style import DISABLED_INK, MUTED_INK, TEXT
+
+    prompt = FluentComboBox(host)
+    prompt.setEditable(True)
+    prompt.lineEdit().setPlaceholderText("Choose or type a name")
+    typed = FluentComboBox(host)
+    typed.move(0, 60)
+    typed.setEditable(True)
+    typed.setEditText("bias_value")
+    for combo in (prompt, typed):
+        combo.resize(240, combo.sizeHint().height())
+    _shown(app, host, prompt, typed)
+
+    def inks(combo):
+        image = combo.grab().toImage()
+        return {QtGui.QColor(image.pixel(x, y)).name().upper()
+                for x in range(image.width()) for y in range(image.height())}
+
+    assert MUTED_INK.upper() in inks(prompt) and TEXT.upper() in inks(typed)
+    for combo in (prompt, typed):
+        combo.setEnabled(False)
+    app.processEvents()
+    for combo in (prompt, typed):
+        assert DISABLED_INK.upper() in inks(combo)
+        assert not {MUTED_INK.upper(), TEXT.upper()} & inks(combo)
+
+
 def test_a_glyph_is_centred_on_its_ink(app) -> None:
     from PyQt5 import QtCore, QtGui, QtWidgets
     from zlc_ui.fluent import paint_centred_ink
