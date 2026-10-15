@@ -17,6 +17,7 @@ from types import SimpleNamespace
 import pytest
 
 from zlc_runtime import SignalDataPlane, stable_signal_key
+from zlc_workbench.device_use import DeviceUseCoordinator
 from zlc_workbench.logic import (
     LogicCatalog,
     LogicDraft,
@@ -31,6 +32,8 @@ from test_console_presenter import (  # noqa: F401 -- fixtures
     _LogicRowView,
     _console_over,
     _one_shot,
+    _settle_panel_hosts,
+    _started_camera,
     presenter,
     session,
 )
@@ -117,6 +120,7 @@ def bench(tmp_path):
             # session answers in exactly that case.
             device_labels={},
             nodes=(),
+            device_use=DeviceUseCoordinator(),
         )
     finally:
         plane.close()
@@ -204,7 +208,7 @@ def test_adding_a_node_creates_only_a_stopped_draft_and_opens_edit(bench_present
     assert presenter.logic[node_id].host is None
     assert presenter.logic[node_id].node is None
     assert [name for name, _by, _state in row.publishes] == ["frames"]
-    assert stable_signal_key(node_id, "frames") in row.publishes[0][2]
+    assert row.publishes[0][2] == f"waiting · {node_id}/frames"
     assert presenter.view.focused_logic_editor == node_id
     projection = presenter.view.logic_editors[node_id]
     assert projection["form_spec"].keys == tuple(
@@ -1950,15 +1954,17 @@ def test_an_armed_silent_source_admits_a_scan_draft(bench) -> None:
             source_options=(signal,) if offered else (),
         )
 
+    # An issue names the signal as a person reads it: its producer and output.
+    said = "camera/frames"
     source_issues = [
-        text for text in finalized(armed=True).issues if signal in text
+        text for text in finalized(armed=True).issues if said in text
     ]
     assert source_issues == []
     waiting_issues = [
-        text for text in finalized(armed=False).issues if signal in text
+        text for text in finalized(armed=False).issues if said in text
     ]
     assert waiting_issues == []
-    assert any(signal in text and "not declared" in text
+    assert any(said in text and "not declared" in text
                for text in finalized(armed=False, offered=False).issues)
 
     with _console_over(bench) as presenter:
@@ -1995,3 +2001,207 @@ def test_an_armed_silent_source_admits_a_scan_draft(bench) -> None:
         restored = presenter.logic_editor_projection(scan_id)
         assert restored["form_values"]["acquisition_logic"] == camera_id
         assert "settle_seconds" not in restored["form_values"]
+
+
+def test_a_renamed_node_is_called_by_its_name_and_addressed_by_its_id(presenter, session) -> None:
+    """The operator renames a node; everything a person reads follows, on the
+    same turn, and nothing that addresses it moves -- not while it runs.
+
+    One name, kept on the node's binding: its row, its Edit page, every
+    picker that offers it, the panels showing its signals, the status lines
+    and MCP all read it from there.  Its id stays every signal key, lease,
+    reference and run record's address.
+    """
+
+    from zlc_workbench.device_use import DeviceClaim, DeviceUseBusy
+
+    camera_id, frames, before_rename = _started_camera(presenter, session)
+    assert camera_id == "camera_measurement"
+    _settle_panel_hosts(presenter, lambda: any(
+        panel.state.signal == frames and panel.accepted_surface is not None
+        for panel in presenter.panels.values()
+    ))
+    panel = next(panel for panel in presenter.panels.values() if panel.state.signal == frames)
+    occupancy_id = presenter.add_logic("occupancy", source_signal=frames)
+    scan_id = presenter.add_logic("seamless_scan", values={"acquisition_logic": camera_id})
+    presenter.edit_logic(camera_id)
+    assert presenter.edit_panel(panel.panel_id)
+    binding = presenter.logic[camera_id]
+    host, generation, revision = binding.host, binding.host.generation, binding.draft_revision
+    record, published = panel.state, host.published_signals()
+    shown_from = len(presenter.view.status)
+
+    presenter.view.logic_name_committed.emit(camera_id, "  Camera A ")
+
+    # Identity: the same run, the same keys, the same panel record.
+    assert binding.name == "Camera A" and binding.host is host and host.running
+    assert (host.instance_id, host.generation) == (camera_id, generation)
+    assert host.published_signals() == published == (frames,)
+    assert panel.state == record and binding.draft_revision == revision
+    # What a person reads: the row, every Edit page, the pickers, the panel.
+    row = presenter.view._rows[camera_id]
+    assert row.title == "Camera A"
+    assert row.publishes[0][2].endswith("· Camera A/frames")
+    camera_page = presenter.view.logic_editors[camera_id]
+    assert (camera_page["name"], camera_page["name_problem"]) == ("Camera A", "")
+    occupancy_page = presenter.view.logic_editors[occupancy_id]
+    assert occupancy_page["source_signal"] == frames
+    assert occupancy_page["source_groups"][frames] == "Camera A"
+    scan_field = next(field for field in presenter.view.logic_editors[scan_id]["form_spec"].fields
+                      if field.key == "acquisition_logic")
+    assert ("Camera A", camera_id) in {(choice.label, choice.value) for choice in scan_field.choices}
+    surface = presenter.view.panel_parameter_surfaces[panel.panel_id]
+    assert surface["caption"] == f"{panel.panel_id}@Camera A/frames"
+    assert surface["panel_name"] == "Camera A/frames"
+    headings = {heading for heading, _leaves in presenter.view._cards[panel.panel_id].choices}
+    assert "Camera A" in headings and camera_id not in headings
+    panel_page = presenter.view.panel_editors[panel.panel_id]
+    assert (panel_page["producer_node_id"], panel_page["producer_name"]) == (camera_id, "Camera A")
+    assert panel_page["frozen_signal"] == frames
+    assert panel_page["frozen_signal_text"] == "Camera A/frames"
+    state = presenter.control_state()
+    assert {(row["node_id"], row["name"]) for row in state["logic"]} >= {(camera_id, "Camera A")}
+    assert next(item["name"] for item in state["panels"] if item["panel_id"] == panel.panel_id) == "Camera A/frames"
+    assert presenter.view.status[shown_from] == ("task", f"renamed {camera_id} to Camera A")
+    # Nowhere a person reads -- after the line that states the rename --
+    # still calls it by its id.
+    pages = [presenter.view.logic_editors[node] for node in (camera_id, occupancy_id, scan_id)]
+    said = [
+        *(text for _severity, text in presenter.view.status[shown_from + 1:]),
+        *(text for row in presenter.view.logic_rows for text in (row.title, *row.state)),
+        *(text for row in presenter.view.logic_rows for item in row.publishes for text in item),
+        *(str(page[key]) for page in pages for key in ("name", "status", "issues")),
+        *(text for page in pages for text in (*page["source_groups"].values(), *page["source_labels"].values())),
+        *(choice.label for choice in scan_field.choices),
+        surface["caption"], surface["panel_name"], *headings, panel_page["producer_name"],
+    ]
+    assert not [text for text in said if camera_id in text], said
+
+    # A device refusal names the owner as the operator calls it.
+    with pytest.raises(DeviceUseBusy, match="device is in use by Camera A$"):
+        session.device_use.acquire_command(
+            object(), "probe", (DeviceClaim("camera", "camera", session.camera),)
+        )
+    # History: a run is stamped with the name it was built under.
+    assert before_rename.run_record["node"] == camera_id
+    assert before_rename.run_record["node_name"] == camera_id
+    assert presenter.start_logic(camera_id)
+    deadline = time.monotonic() + 10.0
+    latest = None
+    while time.monotonic() < deadline:
+        session.fire(shots=1)
+        presenter.beat()
+        latest = session.signal_plane.latest_publication(frames)
+        if latest is not None and latest.run_record.get("node_name") == "Camera A":
+            break
+        time.sleep(0.005)
+    assert latest.run_record["node"] == camera_id
+    assert latest.run_record["node_name"] == "Camera A"
+
+    # A second camera on the same device waits for the first: by its name.
+    second = presenter.add_logic(
+        "camera_measurement", values={"exposure_seconds": 0.002, "repeat": 0},
+        device_keys={"camera": "camera"}, open_editor=False,
+    )
+    assert second == "camera_measurement2"
+    holder = presenter.logic[camera_id].host
+    assert presenter.start_logic(second)
+    assert presenter.logic[second].pending is not None
+    assert presenter.view._rows[second].state[1] == "waiting for Camera A"
+    assert presenter.view.status[-1] == ("task", f"{second} queued while Camera A stops")
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline and holder.running:
+        presenter.beat()
+        time.sleep(0.005)
+    assert not holder.running
+    assert presenter.stop_logic(second)
+
+    # Refusals: one sentence each, under the Name line and on the strip; the
+    # name is unchanged.  The current name needs no report.
+    for typed, problem in (
+        ("", "A node needs a name."),
+        ("a/b", "A name is one line of text without “/”."),
+        ("a\nb", "A name is one line of text without “/”."),
+        ("Panel-2", "“Panel-2” is how a panel is named; choose another name."),
+        ("CAMERA A", "Another node is already called “Camera A”."),
+        ("Camera_Measurement", "“camera_measurement” is another node's internal ID; choose another name."),
+    ):
+        assert presenter.rename_logic(second, typed) is False, typed
+        assert presenter.logic[second].name == second
+        assert presenter.logic_editor_projection(second)["name_problem"] == problem
+        assert presenter.view.status[-1] == ("warning", problem)
+    reports = len(presenter.view.status)
+    assert presenter.rename_logic(second, second) is True
+    assert len(presenter.view.status) == reports
+    assert presenter.logic_editor_projection(second)["name_problem"] == ""
+    refused = presenter.control_action("logic.rename", {"node_id": second, "name": "camera a"})
+    assert (refused["accepted"], refused["status"]) == (False, "rejected")
+    assert refused["error"] == "Another node is already called “Camera A”."
+    renamed = presenter.control_action("logic.rename", {"node_id": occupancy_id, "name": "Loading"})
+    assert (renamed["accepted"], renamed["status"]) == (True, "renamed")
+    assert renamed["state"]["logic"][0]["name"] == "Loading"
+
+    # Minting skips every name and id; an added node may be named at once.
+    assert presenter.rename_logic(second, "occupancy2")
+    assert presenter.add_logic("occupancy", open_editor=False) == "occupancy3"
+    named = presenter.add_logic("occupancy", name="Counting", open_editor=False)
+    assert presenter.logic[named].name == "Counting"
+    assert presenter.add_logic("occupancy", name="panel-1", open_editor=False) == ""
+    assert presenter.add_logic("occupancy", node_id="a/b", open_editor=False) == ""
+
+    # A node that is gone has no name left: what named it reads its id.
+    assert presenter.remove_logic(camera_id)
+    surface = presenter.view.panel_parameter_surfaces[panel.panel_id]
+    assert surface["caption"] == f"{panel.panel_id}@{camera_id}/frames"
+
+
+def test_a_board_keeps_its_names_and_refuses_one_no_operator_could_type(
+    bench_presenter, tmp_path
+) -> None:
+    """A saved board writes each node's name beside its id; a file without
+    names reads every node by its id, and a name the console would refuse
+    makes the whole file one sentence."""
+
+    from zlc_workbench.console_layout import (
+        LayoutDocument, LayoutError, logic_name_problem, read_experiment_recipe,
+    )
+
+    presenter = bench_presenter
+    camera_id = presenter.add_logic("camera_measurement", open_editor=False)
+    occupancy_id = presenter.add_logic(
+        "occupancy", source_signal=stable_signal_key(camera_id, "frames"), open_editor=False,
+    )
+    assert presenter.rename_logic(camera_id, "Camera A")
+    path = tmp_path / "board.json"
+    assert presenter.save_layout(str(path))
+    tree = json.loads(path.read_text(encoding="utf-8"))
+    entry = tree["logic"][0]
+    assert list(entry)[:3] == ["node_id", "name", "api_name"]
+    assert (entry["node_id"], entry["name"]) == (camera_id, "Camera A")
+
+    assert presenter.rename_logic(camera_id, camera_id)
+    assert presenter.load_layout(str(path))
+    assert presenter.logic[camera_id].name == "Camera A"
+    assert presenter.view._rows[camera_id].title == "Camera A"
+    assert presenter.logic_editor_projection(occupancy_id)["source_groups"][
+        stable_signal_key(camera_id, "frames")
+    ] == "Camera A"
+
+    del entry["name"]
+    assert LayoutDocument.from_tree(tree).logic[0].name == camera_id
+    tree["logic"][1]["name"] = "Loading"
+    for name, problem in (
+        ("LOADING", "logic entry 1: Another node is already called “Loading”."),
+        ("Occupancy", "logic entry 1: “occupancy” is another node's internal ID; choose another name."),
+        ("panel-3", "logic entry 1: “panel-3” is how a panel is named; choose another name."),
+        ("a/b", "logic entry 1: A name is one line of text without “/”."),
+    ):
+        entry["name"] = name
+        with pytest.raises(LayoutError) as refused:
+            LayoutDocument.from_tree(tree)
+        assert str(refused.value) == problem
+    assert read_experiment_recipe(Path(presenter.session.workspace.root), "trap_lifetime")
+    # A notebook's producer heading is not a name a node may take.
+    assert logic_name_problem("Calibration", "occupancy", {}, {"calibration"}) == (
+        "“Calibration” already names a signal producer; choose another name."
+    )

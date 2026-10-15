@@ -1219,6 +1219,122 @@ assert 'panel-1' not in handle._panel_publisher_editors
     )
 
 
+def test_a_logic_node_is_renamed_on_its_edit_page_and_called_by_its_name(run_qt) -> None:
+    run_qt(
+        """
+from PyQt5 import QtCore
+from zlc_ui.console import TaskConsoleHandle, TaskConsoleView
+from zlc_ui.fluent import FluentSettingRow
+from zlc_ui.form import FormFieldProps, FormSpec
+from zlc_ui.qt import ensure_qt_app
+app = ensure_qt_app(['logic-name'])
+view = TaskConsoleView()
+handle = TaskConsoleHandle(None, view)
+handle.set_panel_sizes(('2x2',), '2x2')
+# A row is made blank; what the node is called arrives by one channel.
+handle.add_logic_row('occupancy2', 'processor')
+row = handle._rows['occupancy2']
+assert row.name_label.text() == ''
+handle.set_logic_name('occupancy2', 'Loading')
+assert row.name_label.text() == 'Loading' and row.name_label.toolTip() == 'Loading'
+projection = {
+    'node_id': 'occupancy2', 'name': 'Loading', 'name_problem': '',
+    'api_name': 'occupancy', 'kind': 'processor',
+    'form_spec': FormSpec((FormFieldProps(key='repeat', kind='int', label='Repeat', default=0, minimum=0),)),
+    'form_values': {'repeat': 0},
+    'source_required': True, 'source_label': 'Frames', 'source_signal': '@logic/camera_measurement/frames',
+    'source_options': ('@logic/camera_measurement/frames',),
+    'source_labels': {'@logic/camera_measurement/frames': 'frames'},
+    'source_groups': {'@logic/camera_measurement/frames': 'Camera A'},
+    'device_options': {}, 'device_keys': {},
+    'preview_offered': False, 'auto_preview': False,
+    'running': True, 'pending': False, 'can_start': False, 'can_stop': True,
+    'issues': (), 'error': '', 'status': 'following Camera A/frames', 'state': 'running',
+}
+sent = []
+def answer(node_id, text):
+    # The presenter's part: refuse a slash, otherwise take the name.
+    sent.append((node_id, text))
+    if '/' in text:
+        projection['name_problem'] = 'A name is one line of text without “/”.'
+    else:
+        projection.update(name=text, name_problem='')
+    handle.update_logic_editor(node_id, projection)
+handle.logic_name_committed.connect(answer)
+handle.open_logic_editor('occupancy2', projection)
+editor = handle._logic_editors['occupancy2']
+view.resize(1000, 700)
+view.show()
+app.processEvents()
+tab = lambda: view.tabs.tabText(view.tabs.indexOf(editor))
+assert tab() == 'Edit · Loading'
+assert editor.title_label.text() == 'Loading'
+assert editor.kind_label.text() == '(occupancy · processor)'
+# The Name is the first row, in the one label column and the one control column.
+top = lambda widget: widget.mapTo(editor, QtCore.QPoint()).y()
+left = lambda widget: widget.mapTo(editor, QtCore.QPoint()).x()
+rows = sorted((r for r in editor.findChildren(FluentSettingRow) if r.isVisible()), key=top)
+box = editor.name_form.widget_for('name')
+assert rows[0].isAncestorOf(box), [r.layout().itemAt(0).widget().text() for r in rows]
+assert editor.name_form._labels['name'].text() == 'Name'
+assert left(box) == left(editor.source_combo) == left(editor.form.widget_for('repeat'))
+assert box.text() == 'Loading' and box.toolTip() == 'Internal ID: occupancy2'
+# Finishing the box (Return, then the focus leaving) sends the name once,
+# stripped; the page and its tab follow the presenter's answer.
+box.setText('  Counts ')
+box.editingFinished.emit()
+box.editingFinished.emit()
+assert sent == [('occupancy2', 'Counts')], sent
+assert tab() == 'Edit · Counts' and editor.title_label.text() == 'Counts'
+assert box.text() == 'Counts'
+# Leaving an unchanged box sends nothing.
+box.editingFinished.emit()
+assert sent == [('occupancy2', 'Counts')]
+# A refusal is one sentence under the line, from the control column; the box
+# goes back to the name the node still has, and the sentence stays.
+assert editor.name_problem_label.isHidden()
+below = top(editor.source_combo)
+box.setText('a/b')
+box.editingFinished.emit()
+app.processEvents()
+assert sent[-1] == ('occupancy2', 'a/b')
+assert editor.name_problem_label.isVisible()
+assert editor.name_problem_label.text() == 'A name is one line of text without “/”.'
+assert left(editor.name_problem_label) == left(box)
+assert top(box) < top(editor.name_problem_label) < top(editor.source_combo)
+assert top(editor.source_combo) > below, 'the sentence takes its own line'
+assert box.text() == 'Counts' and tab() == 'Edit · Counts'
+# Answering a standing refusal with the name the node has clears it.
+box.editingFinished.emit()
+app.processEvents()
+assert sent[-1] == ('occupancy2', 'Counts')
+assert editor.name_problem_label.isHidden() and tab() == 'Edit · Counts'
+box.setText('Loading')
+box.editingFinished.emit()
+app.processEvents()
+assert tab() == 'Edit · Loading'
+# A Task holding the console leaves the Name editable.
+handle.set_task_takeover('another_task')
+assert box.isEnabled() and not editor.form.isEnabled()
+handle.set_task_takeover('')
+# A panel publisher's page has nothing to rename.
+handle.set_panel_publishers((('panel-1', (('roi', '4', 'live · panel-1/roi'),)),))
+handle.open_panel_publisher_editor('panel-1', {
+    'node_id': 'panel-1', 'api_name': 'Camera A/frames outputs', 'kind': 'panel publisher',
+    'form_spec': FormSpec((FormFieldProps(key='roi_mean', kind='bool', label='Mean', default=True),)),
+    'form_values': {'roi_mean': True}, 'source_required': False,
+    'device_options': {}, 'device_keys': {},
+    'preview_offered': False, 'auto_preview': False,
+    'running': False, 'pending': False, 'can_start': False, 'can_stop': False,
+    'issues': (), 'error': '', 'status': '',
+})
+publisher = handle._panel_publisher_editors['panel-1']
+assert not publisher._name_frame.isVisibleTo(publisher)
+assert view.tabs.tabText(view.tabs.indexOf(publisher)) == 'Edit · Camera A/frames outputs'
+"""
+    )
+
+
 def test_panel_editor_and_setting_are_views_of_the_same_projection(run_qt) -> None:
     run_qt(
         """

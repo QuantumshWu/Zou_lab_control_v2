@@ -16,10 +16,11 @@ Loading never reuses a written identity: the console mints fresh ones and
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
+import unicodedata
 
 from zlc_atom.nodes import DatasetInputSpec, frame_claim_entries
 from zlc_durable import strict_json_loads, write_readable_json
@@ -35,6 +36,7 @@ from .logic import (
 )
 from .panel_catalog import task_console_panel_kind
 from .panel_state import PanelState
+from .topology import signal_text
 
 
 def experiment_recipes(workspace: Path) -> dict[str, Path]:
@@ -116,6 +118,49 @@ def _names_a_panel(producer: str) -> bool:
     )
 
 
+def logic_name_problem(
+    text: str,
+    node_id: str,
+    board: Mapping[str, str],
+    producers: Collection[str] = (),
+) -> str:
+    """"" when ``text`` (already stripped) may name ``node_id`` on a board
+    ``{node_id: name}``; otherwise one sentence saying why not.
+
+    The one rule for what may call a Logic node -- its name, and its id
+    when one is minted or written down.  Comparisons ignore case, and the
+    node's own id and own name are not "another".  A name never holds a
+    ``/``: a node's signals and sub-producers are read as
+    ``<name>/<output>``, which a slash inside the name would make ambiguous;
+    and it is never another node's id, so a string an operator says can
+    never call one node and address another.  ``producers`` are the other
+    signal producers on the session (a notebook's ``calibration``), whose
+    headings a name must not merge with.
+    """
+
+    if not text:
+        return "A node needs a name."
+    if "/" in text or any(unicodedata.category(char).startswith("C") for char in text):
+        return "A name is one line of text without “/”."
+    folded = text.casefold()
+    if _names_a_panel(folded):
+        return f"“{text}” is how a panel is named; choose another name."
+    others = tuple(
+        (other_id, other_name)
+        for other_id, other_name in board.items()
+        if other_id != node_id
+    )
+    for _other_id, other_name in others:
+        if other_name.casefold() == folded:
+            return f"Another node is already called “{other_name}”."
+    for other_id, _other_name in others:
+        if other_id.casefold() == folded:
+            return f"“{other_id}” is another node's internal ID; choose another name."
+    if any(str(producer).casefold() == folded for producer in producers):
+        return f"“{text}” already names a signal producer; choose another name."
+    return ""
+
+
 @dataclass(frozen=True, slots=True)
 class LogicLayoutEntry:
     node_id: str
@@ -129,6 +174,10 @@ class LogicLayoutEntry:
     #: Whether Start opens this node's declared preview.  Part of the board an
     #: operator arranged, like the panels themselves -- not of the measurement.
     auto_preview: bool = True
+    #: What the operator calls the node; every reference uses ``node_id``.
+    #: A file that names none reads as the id, which is what a node that was
+    #: never renamed is called.
+    name: str = ""
 
     def __post_init__(self) -> None:
         node_id = str(self.node_id).strip()
@@ -137,6 +186,7 @@ class LogicLayoutEntry:
             raise LayoutError("logic entries require node_id and api_name")
         object.__setattr__(self, "node_id", node_id)
         object.__setattr__(self, "api_name", api_name)
+        object.__setattr__(self, "name", str(self.name).strip() or node_id)
         object.__setattr__(self, "values", dict(self.values))
         object.__setattr__(self, "source_signal", str(self.source_signal).strip())
         object.__setattr__(
@@ -150,6 +200,7 @@ class LogicLayoutEntry:
     def to_tree(self) -> dict[str, Any]:
         return {
             "node_id": self.node_id,
+            "name": self.name,
             "api_name": self.api_name,
             "values": _authoring_tree(self.values),
             "source_signal": self.source_signal,
@@ -194,6 +245,16 @@ class LayoutDocument:
         ids = tuple(item.node_id for item in logic)
         if len(set(ids)) != len(ids):
             raise LayoutError("logic node_id values must be unique")
+        # The one naming rule the console applies, so a file cannot put up
+        # a board whose names an operator could not have typed: an id must
+        # obey it as well, or its signal keys and the panel grammar break.
+        board = {item.node_id: item.name for item in logic}
+        for index, item in enumerate(logic):
+            problem = logic_name_problem(
+                item.node_id, item.node_id, board
+            ) or logic_name_problem(item.name, item.node_id, board)
+            if problem:
+                raise LayoutError(f"logic entry {index + 1}: {problem}")
         panel_ids = tuple(str(item).strip() for item in self.panel_ids)
         if len(panel_ids) != len(panels):
             raise LayoutError("a layout names one panel_id per panel")
@@ -294,7 +355,7 @@ def resolve_layout(
             )
             options = device_key_options(descriptor, installation=installation, values=values)
         except Exception as error:
-            raise LayoutError(f"{entry.node_id}: {error}") from error
+            raise LayoutError(f"{entry.name}: {error}") from error
         required = tuple(
             requirement.argument_name
             for requirement in descriptor.device_requirements
@@ -304,10 +365,10 @@ def resolve_layout(
             available = options.get(name, ())
             key = entry.device_keys.get(name, available[0] if available else "")
             if not isinstance(key, str):
-                raise LayoutError(f"{entry.node_id}: device input {name!r} must be text")
+                raise LayoutError(f"{entry.name}: device input {name!r} must be text")
             if name in options and key in installed_keys and key not in available:
                 raise LayoutError(
-                    f"{entry.node_id}: {key!r} is incompatible with device input "
+                    f"{entry.name}: {key!r} is incompatible with device input "
                     f"{name!r}"
                 )
             selected[name] = key
@@ -319,11 +380,11 @@ def resolve_layout(
                 try:
                     artifacts[spec.name] = frame_claim_entries(value)
                 except ValueError as error:
-                    raise LayoutError(f"{entry.node_id}: {spec.name}: {error}") from error
+                    raise LayoutError(f"{entry.name}: {spec.name}: {error}") from error
             elif isinstance(value, str):
                 artifacts[spec.name] = value
             else:
-                raise LayoutError(f"{entry.node_id}: artifact input {spec.name!r} must be a path")
+                raise LayoutError(f"{entry.name}: artifact input {spec.name!r} must be a path")
         bindings.append(
             LogicBinding(
                 entry.node_id,
@@ -334,10 +395,12 @@ def resolve_layout(
                     selected,
                     artifacts,
                 ),
+                name=entry.name,
                 auto_preview=entry.auto_preview,
             )
         )
 
+    names = {binding.node_id: binding.name for binding in bindings}
     output_contracts = {str(signal): str(contract) for signal, contract in external_outputs}
     for binding in bindings:
         outputs = binding.descriptor.outputs_for(
@@ -350,7 +413,8 @@ def resolve_layout(
             previous = output_contracts.get(signal)
             if previous is not None and previous != contract:
                 raise LayoutError(
-                    f"{signal!r} is declared with both {previous!r} and {contract!r}"
+                    f"{signal_text(signal, names)!r} is declared with both "
+                    f"{previous!r} and {contract!r}"
                 )
             output_contracts[signal] = contract
     for binding in bindings:
@@ -358,7 +422,7 @@ def resolve_layout(
         source = binding.draft.source_signal
         if source and not any(isinstance(spec, DatasetInputSpec) for spec in binding.descriptor.input_specs):
             raise LayoutError(
-                f"{binding.node_id}: {binding.descriptor.api_name} has no dataset input"
+                f"{binding.name}: {binding.descriptor.api_name} has no dataset input"
             )
         actual = output_contracts.get(source) if source else None
         if input_specs and actual is not None and not any(
@@ -370,7 +434,7 @@ def resolve_layout(
                 if spec.contract_id is not None
             )
             raise LayoutError(
-                f"{binding.node_id}: {source!r} publishes {actual!r}, expected "
+                f"{binding.name}: {signal_text(source, names)!r} publishes {actual!r}, expected "
                 f"{', '.join(expected) if expected else 'a compatible Dataset'}"
             )
 
@@ -384,7 +448,7 @@ def resolve_layout(
     notes: list[str] = []
     panels: list[PanelState] = []
     for state in document.panels:
-        who = f"panel {state.title!r}"
+        who = f"panel {signal_text(state.title, names)!r}"
         signal = _respelled_reference(state.signal, renamed, who, notes)
         overlay_signal = _respelled_reference(
             state.overlay_signal, renamed, f"{who} overlay", notes
@@ -404,7 +468,7 @@ def resolve_layout(
                 source_signal=_respelled_reference(
                     binding.draft.source_signal,
                     renamed,
-                    f"logic {binding.node_id}",
+                    f"logic {binding.name}",
                     notes,
                 ),
             ),
@@ -482,6 +546,7 @@ def _logic_from_tree(value: object, index: int) -> LogicLayoutEntry:
         dict(device_keys),
         dict(artifact_inputs),
         _boolean(entry.get("auto_preview", True), f"{where} auto_preview"),
+        _string(entry.get("name", ""), f"{where} name"),
     )
 
 
@@ -519,6 +584,7 @@ __all__ = [
     "LayoutError",
     "LoadedLayout",
     "LogicLayoutEntry",
+    "logic_name_problem",
     "panel_id_for",
     "resolve_layout",
 ]

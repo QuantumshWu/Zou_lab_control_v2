@@ -1419,7 +1419,8 @@ def test_the_flow_projection_is_the_saved_exact_node_edge_graph(saved) -> None:
             "event": {"stream": "@logic/merge/value", "generation": "g", "sequence": 4},
             "parents": ["left", "right"],
             "signals": ["@logic/merge/value"],
-            "record": {"node": "merge", "parameters": {}},
+            # What the operator called the node when this run was built.
+            "record": {"node": "merge", "node_name": "Merged A", "parameters": {}},
             "event_record": {},
         },
     ]
@@ -1432,6 +1433,12 @@ def test_the_flow_projection_is_the_saved_exact_node_edge_graph(saved) -> None:
     }
     diamond = describe_archive(diamond_info, arrays).flow
     assert sum(node["kind"] == "logic" for node in diamond["nodes"]) == 4
+    # A run is shown by the name it was built under; one recorded before
+    # nodes had names, by its id.  The name is not one more record field.
+    titles = {node["id"]: node["title"] for node in diamond["nodes"]}
+    assert (titles["logic:merge"], titles["logic:left"]) == ("Merged A", "left")
+    logic_rows = dict(dict(describe_archive(diamond_info, arrays).tabs)["Logic"])
+    assert "node_name" not in logic_rows["Merged A"] and "node" not in logic_rows["Merged A"]
     assert sum(node["kind"] == "device" for node in diamond["nodes"]) == 1
     assert sum(edge["kind"] == "causal" for edge in diamond["edges"]) == 4
     diamond_devices = dict(describe_archive(diamond_info, arrays).tabs)["Devices"]

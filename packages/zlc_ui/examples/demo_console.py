@@ -59,6 +59,7 @@ class FakePresenter:
             "panel_edit_requested", "logic_start_requested",
             "logic_stop_requested", "logic_edit_requested",
             "logic_remove_requested", "logic_draft_changed",
+            "logic_name_committed",
             "panel_state_changed", "panel_snapshot_refresh_requested",
             "panel_save_figure_requested",
         ):
@@ -117,11 +118,13 @@ def populate(console, *, wire_intents: bool = True) -> None:
         console.set_panel_status(panel_id, "waiting for fake data", error=False)
 
     console.add_logic_row("measurement-1", "measurement")
+    console.set_logic_name("measurement-1", "Fake camera")
     console.set_logic_state("measurement-1", "running", "fake stream running")
     console.set_logic_publishes(
         "measurement-1", (("temperature", "1", "fake temperature"),)
     )
     console.add_logic_row("processor-1", "processor")
+    console.set_logic_name("processor-1", "Smoothing")
     console.set_logic_state("processor-1", "idle", "waiting")
     console.set_logic_publishes(
         "processor-1", (("smoothed", "1", "fake derived value"),)

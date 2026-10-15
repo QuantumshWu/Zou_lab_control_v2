@@ -28,18 +28,20 @@ from zlc_ui.fluent import (
     add_row_switch,
     FluentTreeComboBox,
     FONT,
+    error_note_label,
     fill_grouped_choice_combo,
     fluent_font_size,
     retire_widget,
     row_gap,
     section_gap,
     setting_label_width,
+    show_problem,
     status_dot_gap,
     window_pad,
 )
-from zlc_ui.form import FluentParameterForm, FormSpec, required_label
-from zlc_ui.form.qt_form import _form_label_width
-from zlc_ui.status import name_words
+from zlc_ui.form import FluentParameterForm, FormFieldProps, FormSpec, required_label
+from zlc_ui.form.qt_form import _form_label_width, being_edited
+from zlc_ui.status import SUMMARY_SEPARATOR, name_words
 from .logic_row_view import (
     STATE_COLOURS,
     STATUS_DOT,
@@ -60,6 +62,9 @@ class LogicEditorView(QtWidgets.QWidget):
     stop_requested = QtCore.pyqtSignal()
     remove_requested = QtCore.pyqtSignal()
     auto_preview_changed = QtCore.pyqtSignal(bool)
+    #: The operator finished typing a Name (Return, or leaving the box):
+    #: the stripped text, once, and only when it says something new.
+    name_committed = QtCore.pyqtSignal(str)
 
     def __init__(
         self,
@@ -165,6 +170,40 @@ class LogicEditorView(QtWidgets.QWidget):
         header_layout.addLayout(status_row)
         outer.addWidget(header)
 
+        # THE NAME, the first row: what the operator calls this node -- its
+        # row, this page and its tab, every picker and panel that names it.
+        # One line in the one label column, the panel's "Panel name" control;
+        # the internal id the node is addressed by is the box's tooltip and
+        # its empty-box hint.  Committed when the operator is done with it,
+        # never per keystroke; a refusal is one sentence under the line, in
+        # the control column.  A page with nothing to rename (a panel
+        # publisher's) shows none of it.
+        self._name_frame = QtWidgets.QWidget()
+        self._name_frame.setStyleSheet("background: transparent;")
+        name_layout = QtWidgets.QVBoxLayout(self._name_frame)
+        name_layout.setContentsMargins(0, 0, 0, 0)
+        name_layout.setSpacing(row_gap())
+        empty = FormSpec(())
+        self._name_spec = FormSpec((
+            FormFieldProps(
+                "name", "text", "Name", description=f"Internal ID: {self.node_id}"
+            ),
+        ))
+        self.name_form = FluentParameterForm(empty, {})
+        self.name_form.committed.connect(self._name_finished)
+        name_layout.addWidget(self.name_form)
+        self.name_problem_label = error_note_label()
+        self._name_problem_row = FluentSettingRow(
+            "", self.name_problem_label, label_width=self._label_width,
+            parent=self._name_frame,
+        )
+        self._name_problem_row.hide()
+        name_layout.addWidget(self._name_problem_row)
+        #: The Name last sent, so Return and the focus leaving afterwards
+        #: send it once; forgotten once the operator has left the box.
+        self._sent_name = ""
+        self._body_layout.addWidget(self._name_frame)
+
         # The source and device choices are rows of the form, in its label
         # column -- not a separately boxed card with its own label style.
         self._selector_frame = QtWidgets.QWidget()
@@ -175,7 +214,6 @@ class LogicEditorView(QtWidgets.QWidget):
         self.source_combo: FluentComboBox | None = None
         self._body_layout.addWidget(self._selector_frame)
 
-        empty = FormSpec(())
         self.artifact_form = FluentParameterForm(empty, {})
         self._body_layout.addWidget(self.artifact_form)
         self.artifact_form.changed.connect(self._artifact_changed)
@@ -292,10 +330,19 @@ class LogicEditorView(QtWidgets.QWidget):
             )
 
         self._projection = incoming
-        self.title_label.setText(str(incoming.get("api_name") or self.node_id))
-        self.title_label.setToolTip(str(incoming.get("description") or ""))
+        # The header calls the node by its name, and says beside it what the
+        # node IS -- its type and kind -- so a renamed node still reads as an
+        # Occupancy.  A page with no name (a panel publisher's) is its type.
+        name = str(incoming.get("name") or "")
+        api_name = str(incoming.get("api_name") or self.node_id)
         kind = str(incoming.get("kind") or "logic")
-        self.kind_label.setText(f"({kind})")
+        self.title_label.setText(name or api_name)
+        self.title_label.setToolTip(str(incoming.get("description") or ""))
+        self.kind_label.setText(
+            f"({api_name}{SUMMARY_SEPARATOR}{kind})" if name else f"({kind})"
+        )
+        # Decided before the rows are spaced below, which ask what is shown.
+        self._name_frame.setVisible("name" in incoming)
         managed_fields = self._reconcile_contributions(incoming)
         acquisition_key = str(incoming.get("acquisition_input") or "")
         visible_spec = FormSpec(
@@ -314,7 +361,7 @@ class LogicEditorView(QtWidgets.QWidget):
         # among them: it changes only when a run fails or recovers, and a
         # contribution shows a failure beside the row that caused it.
         volatile = ("running", "pending", "issues", "status", "state",
-                    "auto_preview", "can_start", "can_stop")
+                    "auto_preview", "can_start", "can_stop", "name", "name_problem")
         structure = {
             key: value for key, value in incoming.items() if key not in volatile
         }
@@ -339,6 +386,8 @@ class LogicEditorView(QtWidgets.QWidget):
                   if callable(getattr(widget, "set_label_width", None))),
             )
             self._label_width = label_width
+            self.name_form.set_label_width(label_width)
+            self._name_problem_row.set_label("", width=label_width)
             self.artifact_form.set_label_width(label_width)
             self.form.set_label_width(label_width)
             for widget in self._contributions.values():
@@ -356,6 +405,8 @@ class LogicEditorView(QtWidgets.QWidget):
             self._reconcile_selectors(incoming)
             self._rebuild_artifact_results(incoming.get("artifact_results", ()))
             self._space_sections()
+
+        self._project_name(incoming)
 
         offered = bool(incoming["preview_offered"])
         self.preview_switch.setVisible(offered)
@@ -395,11 +446,51 @@ class LogicEditorView(QtWidgets.QWidget):
                 f"color: {colours[1]}; background: transparent; border: none;"
             )
 
+    def _project_name(self, projection: Mapping[str, object]) -> None:
+        """The Name line and the sentence under it, from the projection.
+
+        A box the operator is typing in is theirs (the form's own rule); the
+        sentence is the presenter's last refusal, shown until the next
+        accepted name clears it.
+        """
+
+        if "name" not in projection:
+            return
+        self.name_form.reconcile(self._name_spec, {"name": str(projection["name"])})
+        problem = str(projection.get("name_problem") or "")
+        show_problem(self.name_problem_label, problem)
+        self._name_problem_row.setVisible(bool(problem))
+
+    def _name_finished(self, _key: str) -> None:
+        """Return, or the focus left the Name box: say the name, once.
+
+        Sent only when it says something new -- a name other than the current
+        one, or the current one while a refusal still stands under the line,
+        which it answers -- and not just sent: Return and then leaving the
+        box is one rename.  Once the operator has left, the box shows the
+        node's name as it stands: the accepted one, stripped, or the
+        unchanged one after a refusal.
+        """
+
+        box = self.name_form.widget_for("name")
+        text = box.text().strip()
+        current = str(self._projection.get("name") or "")
+        refused = bool(self._projection.get("name_problem"))
+        if (text != current or refused) and text != self._sent_name:
+            self._sent_name = text
+            self.name_committed.emit(text)
+        if not being_edited(box):
+            self._sent_name = ""
+            current = str(self._projection.get("name") or "")
+            if box.text() != current:
+                box.setText(current)
+
     def set_mutation_enabled(self, enabled: bool, *, owns_task: bool = False) -> None:
         """Disable authored and lifecycle commands while a Task owns the console.
 
         The owning Task's own page keeps its Stop, as its row does: the same
-        endpoint as the status strip's "Stop task".
+        endpoint as the status strip's "Stop task".  The Name stays editable:
+        a name is not part of what the Task runs.
         """
 
         self._mutation_enabled = bool(enabled)
@@ -521,7 +612,9 @@ class LogicEditorView(QtWidgets.QWidget):
         extra = section_gap() - row_gap()
         rows_above = any(
             not block.isHidden()
-            for block in (self._selector_frame, self.artifact_form, self.form)
+            for block in (
+                self._name_frame, self._selector_frame, self.artifact_form, self.form,
+            )
         )
         for factory, widget in self._contributions.items():
             opens = rows_above and not widget.isHidden() and _opens_section(widget)
@@ -851,7 +944,8 @@ def _draft_status(
 def _row_labels(projection: Mapping[str, object]) -> tuple[str, ...]:
     """Every label the editor shows outside its two forms."""
 
-    labels = [_device_label(name) for name in (projection.get("device_options") or {})]
+    labels = ["Name"] if "name" in projection else []
+    labels.extend(_device_label(name) for name in (projection.get("device_options") or {}))
     if projection.get("source_required"):
         labels.append(_source_row_label(projection))
     acquisition_key = str(projection.get("acquisition_input") or "")

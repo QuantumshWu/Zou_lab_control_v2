@@ -726,7 +726,7 @@ class DeviceControlView(QtWidgets.QWidget):
         desired = {key: fields[key]["desired"] for key in spec.keys}
         self.form.reconcile(spec, desired)
         self._prune_rows()
-        owners = tuple(str(value) for value in projection.get("owners", ()))
+        owners = tuple(str(value) for value in projection.get("owner_names", ()))
         self.owner_label.setText(f"Owner: {', '.join(owners) if owners else 'none'}")
         self.reason_label.setText(str(projection.get("reason", "")))
         with signals_blocked(self.risk_switch):

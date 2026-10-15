@@ -214,11 +214,13 @@ class PlotPanelPort:
         #: exactly like a panel whose data stopped arriving.
         self.last_error: BaseException | None = None
         self.last_error_publication: object | None = None
-        #: The signal this panel is presenting WITHOUT, named -- an overlay
-        #: whose producer has not published.  Read on the beat as a standing
-        #: card condition, because a frame with no rings and no explanation
-        #: is indistinguishable from a defect.
-        self.waiting_condition: str = ""
+        #: The signal this panel is presenting WITHOUT -- an overlay whose
+        #: producer has not published -- by its key.  Read on the beat, where
+        #: the console says it as a standing card condition in the words of
+        #: the moment (a renamed producer is called by its new name), because
+        #: a frame with no rings and no explanation is indistinguishable from
+        #: a defect.
+        self.waiting_for_signal: str = ""
 
     # ------------------------------------------------------------- identity
 
@@ -1184,7 +1186,7 @@ class PlotPanelPort:
             )
             self.last_error = None
             self.last_error_publication = None
-            self.waiting_condition = ""
+            self.waiting_for_signal = ""
 
         callback_error: BaseException | None = None
         if replacement is not None:
@@ -1504,6 +1506,4 @@ class PlotPanelPort:
         """
 
         with self._state_lock:
-            self.waiting_condition = (
-                f"waiting for {missing_signal!r} to publish"
-            )
+            self.waiting_for_signal = str(missing_signal)

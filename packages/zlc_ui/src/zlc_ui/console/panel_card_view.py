@@ -769,7 +769,7 @@ class PanelCardView(FluentGroupBox):
     ) -> None:
         previous_size = str(self._state_projection.get("size") or "")
         self._state_projection = dict(incoming)
-        self._base_title = incoming["title"] or "Panel"
+        self._base_title = self._panel_name()
         self._refresh_title_band()
         if incoming["size"] != previous_size:
             self._apply_card_size(str(incoming["size"]))
@@ -796,6 +796,8 @@ class PanelCardView(FluentGroupBox):
             "fit",
             "science_locked",
             "paints_images",
+            # What "Panel name" shows: a renamed node renames its panels.
+            "panel_name",
         )
         form_changed = any(
             projected.get(key) != self._parameter_surface.get(key)
@@ -809,6 +811,20 @@ class PanelCardView(FluentGroupBox):
                 or form_changed
                 or _shows_unrecorded_pick(self._settings_form, incoming)
             ),
+        )
+
+    def _panel_name(self) -> str:
+        """What the panel is called, as its presenter named it.
+
+        DISPLAY ONLY, like the caption: an automatic title is the signal's
+        key, which the presenter reads into the producer's name and output.
+        A card nothing has projected yet is called by its record's title.
+        """
+
+        return str(
+            self._parameter_surface.get("panel_name")
+            or self._state_projection.get("title")
+            or "Panel"
         )
 
     def _caption(self) -> str:
@@ -1201,7 +1217,7 @@ class PanelCardView(FluentGroupBox):
                 )
             )
         fields.extend([
-            FormFieldProps("title", "text", "Panel name", default=state["title"]),
+            FormFieldProps("title", "text", "Panel name", default=self._panel_name()),
             FormFieldProps(
                 "signal",
                 "keyed_choice",
@@ -1230,7 +1246,7 @@ class PanelCardView(FluentGroupBox):
     def _form_values(self) -> dict[str, object]:
         signal = str(self._state_projection.get("signal") or "") or None
         values: dict[str, object] = {
-            "title": str(self._state_projection.get("title") or "Panel"),
+            "title": self._panel_name(),
             "signal": signal,
             "size": str(self._state_projection.get("size") or self._default_size),
         }

@@ -62,6 +62,7 @@ from .console_layout import (
     LayoutDocument,
     LayoutError,
     LogicLayoutEntry,
+    logic_name_problem,
     panel_id_for,
     resolve_layout,
 )
@@ -119,7 +120,14 @@ from .selection import (
     plot_identity_matches_plot_input,
     attach_selection_bridge,
 )
-from .topology import format_signal_shape, project_signals, signal_label, signal_output_name
+from .topology import (
+    format_signal_shape,
+    producer_text,
+    project_signals,
+    signal_label,
+    signal_output_name,
+    signal_text,
+)
 
 __all__ = ["ConsolePresenter", "PanelBinding", "PanelState", "control_capabilities"]
 
@@ -379,7 +387,7 @@ def _error_text(error: BaseException) -> str:
     return str(error) or type(error).__name__
 
 
-def _panel_caption(panel_id: str, title: str) -> str:
+def _panel_caption(panel_id: str, title: str, names: Mapping[str, str]) -> str:
     """What a card's strip calls its panel: which card, showing what.
 
     DISPLAY ONLY.  The title is also the panel's editable name, and this
@@ -398,13 +406,13 @@ def _panel_caption(panel_id: str, title: str) -> str:
     before.
 
     The id is minted from a running serial and is never persisted, so it
-    names a card within this board session, not across saves.
+    names a card within this board session, not across saves.  The owner is
+    called what the operator calls it (``names``, {node id: name}), so a
+    renamed node's panels follow it on the same turn.
     """
 
-    parts = split_signal_key(title)
-    if parts is not None:
-        owner, output = parts
-        return f"{panel_id}@{owner}/{output}"
+    if split_signal_key(title) is not None:
+        return f"{panel_id}@{signal_text(title, names)}"
     if title.startswith("@"):
         return f"{panel_id}{title}"
     # A panel with no signal is named for its kind ("Image 2"), and an
@@ -733,10 +741,6 @@ class PanelBinding:
         return self.state.signal
 
     @property
-    def title(self) -> str:
-        return self.state.title
-
-    @property
     def kind(self) -> str:
         return self.state.kind
 
@@ -852,7 +856,7 @@ class ConsolePresenter:
         #: The Task id last projected as owning the console ("" for none);
         #: None until the first projection.
         self._shown_task_owner: str | None = None
-        self._shown_task_status: tuple[str, str] | None = None
+        self._shown_task_status: tuple[str, str, str] | None = None
         #: A whole board waiting to go up -- loaded or empty -- and the words
         #: for when it has, held until every node it replaces has stopped.
         self._pending_board: tuple[_LayoutCandidate, str] | None = None
@@ -950,6 +954,10 @@ class ConsolePresenter:
             self._paused = False
             self._deriving = True
         else:
+            # A device refusal or stop reason names the Logic owner holding
+            # the device: by the name the operator gave it, here, in the
+            # Pulse Editor and in Device Manager alike.
+            session.device_use.set_owner_spelling(self.logic_name)
             self._project_task_takeover()
 
     # ------------------------------------------------------------------ wiring
@@ -988,6 +996,7 @@ class ConsolePresenter:
             self.view.logic_stop_requested.connect(self._guarded(self.stop_logic))
             self.view.logic_edit_requested.connect(self._guarded(self.edit_logic))
             self.view.logic_remove_requested.connect(self._guarded(self.remove_logic))
+            self.view.logic_name_committed.connect(self._guarded(self.rename_logic))
             self.view.stop_task_requested.connect(self._guarded(self.stop_active_task))
         plot_error = getattr(self.view, "panel_plot_error", None)
         if plot_error is not None:
@@ -1095,7 +1104,7 @@ class ConsolePresenter:
             parameter_surface=self._unbound_panel_parameters(state),
         )
         self.panels[panel_id] = binding
-        self.view.add_panel(panel_id, state.title)
+        self.view.add_panel(panel_id, self._panel_name(binding))
         self.view.show_panel(panel_id, None)
         self.view.set_panel_selectors_enabled(panel_id, self._deriving)
         self._publish_panel_state(binding)
@@ -1205,7 +1214,7 @@ class ConsolePresenter:
         # and by the drop-order path, and asked what to caption itself by the
         # operator.  One argument for both meant every card in the real window
         # was captioned "Panel" and knew its own id as its title.
-        self.view.add_panel(panel_id, binding.state.title)
+        self.view.add_panel(panel_id, self._panel_name(binding))
         self.view.show_panel(panel_id, None)
         self.view.set_panel_selectors_enabled(panel_id, self._deriving)
         self._publish_panel_state(binding)
@@ -1903,7 +1912,7 @@ class ConsolePresenter:
             except Exception as error:
                 binding.snapshot_error = _error_text(error)
                 self._report(
-                    f"cannot refresh {binding.state.title} plot editor: "
+                    f"cannot refresh {self._panel_name(binding)} plot editor: "
                     f"{_error_text(error)}",
                     severity="error",
                 )
@@ -2090,7 +2099,7 @@ class ConsolePresenter:
                         }),
                     )
                 self._report(
-                    f"{state.title}: the region drawn here is not in the "
+                    f"{self._signal_text(state.title)}: the region drawn here is not in the "
                     "coordinates this Dataset now offers, so it is off the "
                     "panel",
                     severity="warning",
@@ -2244,7 +2253,7 @@ class ConsolePresenter:
                             # picture, and a silent one would look like the
                             # panel simply forgot.
                             late = (
-                                f"{panel_state.title}: its plot surface did "
+                                f"{self._signal_text(panel_state.title)}: its plot surface did "
                                 "not describe itself in time, so this mount "
                                 "carries no drawn region or viewport"
                             )
@@ -2291,7 +2300,7 @@ class ConsolePresenter:
                 # told, not a silence: the card keeps painting the region
                 # while this surface has none, and only this line explains it.
                 withheld = (
-                    f"{panel_state.title}: the region drawn on the card is not "
+                    f"{self._signal_text(panel_state.title)}: the region drawn on the card is not "
                     "in the coordinates this surface draws, so it is not on it"
                 )
                 self._enqueue_panel_interaction(
@@ -2472,7 +2481,7 @@ class ConsolePresenter:
             # so a panel that stops changing is never silent about why.
             binding.reported_condition = _error_text(error)
             self._report(
-                f"{binding.title}: {_error_text(error)}", severity="error"
+                f"{self._panel_name(binding)}: {_error_text(error)}", severity="error"
             )
             accepted = False
         if accepted:
@@ -2607,7 +2616,7 @@ class ConsolePresenter:
                     self._publish_panel_state(binding)
                 except Exception as error:
                     self._report(
-                        f"cannot update {binding.state.title} interaction: "
+                        f"cannot update {self._panel_name(binding)} interaction: "
                         f"{_error_text(error)}",
                         severity="error",
                     )
@@ -2727,7 +2736,7 @@ class ConsolePresenter:
         if errors:
             binding.reported_condition = _error_text(errors[0])
             self._report(
-                f"{binding.title}: {_error_text(errors[0])}",
+                f"{self._panel_name(binding)}: {_error_text(errors[0])}",
                 severity="error",
             )
         if not binding.state.selector and not self._task_science_locked(binding):
@@ -2846,9 +2855,12 @@ class ConsolePresenter:
         for name, label, _state, producer, _derived in rows:
             if panel_id and own(name):
                 continue
-            groups.setdefault(producer or "signals", []).append((label, name))
+            groups.setdefault(producer, []).append((label, name))
+        # Grouped by the producer's id; headed by what a person calls it.
+        names = self.logic_names()
         return tuple(
-            (producer, tuple(leaves)) for producer, leaves in groups.items()
+            (producer_text(producer, names) if producer else "signals", tuple(leaves))
+            for producer, leaves in groups.items()
         )
 
     def _publication_families(self, publication: object) -> frozenset[tuple]:
@@ -2883,9 +2895,11 @@ class ConsolePresenter:
             if descriptions[row.name].contract_id != IMAGE_POINT_OVERLAY_CONTRACT:
                 continue
             if families.get(row.name) == primary_families:
-                groups.setdefault(row.producer or "signals", []).append((row.label, row.name))
+                groups.setdefault(row.producer, []).append((row.label, row.name))
+        names = self.logic_names()
         return tuple(
-            (producer, tuple(leaves)) for producer, leaves in groups.items()
+            (producer_text(producer, names) if producer else "signals", tuple(leaves))
+            for producer, leaves in groups.items()
         )
 
     def _refresh_signal_choices(self) -> None:
@@ -2901,9 +2915,18 @@ class ConsolePresenter:
              binding.port is None, binding.vacancy)
             for panel_id, binding in self.panels.items()
         )
+        # A rename changes every heading and label below without changing
+        # the plane or the wiring, so the names are part of the context.
+        names_key = self._names_key()
         previous = self._signal_choice_context
-        if previous is not None and previous[0] is directory and previous[1] == wiring:
+        if (
+            previous is not None
+            and previous[0] is directory
+            and previous[1] == wiring
+            and previous[2] == names_key
+        ):
             return
+        names = self.logic_names()
         panel_publishers = tuple(
             (
                 panel_id,
@@ -2911,7 +2934,7 @@ class ConsolePresenter:
                     (
                         signal_output_name(row.name),
                         format_signal_shape(descriptions[row.name].schema),
-                        f"{row.state} · {row.name}",
+                        f"{row.state} · {signal_text(row.name, names)}",
                     )
                     for row in projected
                     if row.producer == panel_id
@@ -2963,7 +2986,7 @@ class ConsolePresenter:
             self._offered_overlays = overlay_offers
         for node_id in tuple(self.logic):
             self.refresh_logic_editor(node_id)
-        self._signal_choice_context = (directory, wiring)
+        self._signal_choice_context = (directory, wiring, names_key)
 
     def edit_panel(self, panel_id: str) -> bool:
         """Open or focus the panel's non-modal Edit projection.
@@ -3005,7 +3028,7 @@ class ConsolePresenter:
                     binding.snapshot_error = _error_text(error)
                     self._refresh_panel_snapshot_status(binding)
                     self._report(
-                        f"cannot mount {binding.state.title} plot editor: "
+                        f"cannot mount {self._panel_name(binding)} plot editor: "
                         f"{_error_text(error)}",
                         severity="error",
                     )
@@ -3406,8 +3429,8 @@ class ConsolePresenter:
             if candidate.overlay_signal not in offered:
                 self._report(
                     f"{panel_id}: this console publishes no "
-                    f"{candidate.overlay_signal!r} overlay that describes "
-                    f"{candidate.signal!r}",
+                    f"{self._signal_text(candidate.overlay_signal)!r} overlay that describes "
+                    f"{self._signal_text(candidate.signal)!r}",
                     severity="error",
                 )
                 # The unchanged record goes back to every view, as the other
@@ -3506,7 +3529,7 @@ class ConsolePresenter:
                 if (not _same_panel_plot_identity(candidate, current)
                         and binding.port is not None):
                     self._report(
-                        f"{panel_id}: {candidate.signal} has not published yet",
+                        f"{panel_id}: {self._signal_text(candidate.signal)} has not published yet",
                         severity="warning",
                     )
                     self._publish_panel_state(binding)
@@ -3519,7 +3542,8 @@ class ConsolePresenter:
                 self._publish_panel_state(binding)
                 self._refresh_console_projection()
                 self._report(
-                    f"{candidate.signal} has not published yet; {panel_id} remains ready",
+                    f"{self._signal_text(candidate.signal)} has not published yet; "
+                    f"{panel_id} remains ready",
                     severity="warning",
                 )
                 return True
@@ -3538,7 +3562,7 @@ class ConsolePresenter:
             # choice the next dataset gets refused against.
             if candidate.kind and fitting is not None and fitting != candidate.cell_kind:
                 self._report(
-                    f"{panel_id} draws {fitting} cells for {candidate.signal}",
+                    f"{panel_id} draws {fitting} cells for {self._signal_text(candidate.signal)}",
                     severity="task",
                 )
             if candidate.kind and fitting is None:
@@ -3548,7 +3572,7 @@ class ConsolePresenter:
                 if (not _same_panel_plot_identity(candidate, current)
                         and binding.port is not None):
                     self._report(
-                        f"{panel_id}: {candidate.signal} cannot be drawn as a "
+                        f"{panel_id}: {self._signal_text(candidate.signal)} cannot be drawn as a "
                         f"{drawn_as}",
                         severity="warning",
                     )
@@ -3562,7 +3586,7 @@ class ConsolePresenter:
                 self._publish_panel_state(binding)
                 self._refresh_console_projection()
                 self._report(
-                    f"{candidate.signal} cannot be drawn as a {drawn_as}; "
+                    f"{self._signal_text(candidate.signal)} cannot be drawn as a {drawn_as}; "
                     "the panel remains ready",
                     severity="warning",
                 )
@@ -3633,7 +3657,7 @@ class ConsolePresenter:
                 lambda _future: self.board.wake.request_owner_wake()
             )
             self._report(
-                f"{panel_id} is preparing {candidate.signal}", severity="task"
+                f"{panel_id} is preparing {self._signal_text(candidate.signal)}", severity="task"
             )
         else:
             # No mount means a port and a host: needs_mount holds whenever
@@ -4400,7 +4424,7 @@ class ConsolePresenter:
                                     binding.snapshot_error = _error_text(error)
                                     self._refresh_panel_snapshot_status(binding)
                                     self._report(
-                                        f"cannot update {binding.state.title} "
+                                        f"cannot update {self._panel_name(binding)} "
                                         f"plot editor: {_error_text(error)}",
                                         severity="error",
                                     )
@@ -4523,7 +4547,7 @@ class ConsolePresenter:
                     binding.snapshot_error = _error_text(error)
                     self._refresh_panel_snapshot_status(binding)
                     self._report(
-                        f"cannot update {binding.state.title} plot editor: "
+                        f"cannot update {self._panel_name(binding)} plot editor: "
                         f"{_error_text(error)}",
                         severity="error",
                     )
@@ -4610,10 +4634,16 @@ class ConsolePresenter:
                 self._overlay_basis(binding, binding.state.signal),
             ),
             "frozen_signal": None if frozen is None else frozen.signal,
+            # How the frozen signal reads to a person; the key above is what
+            # the stale check compares.
+            "frozen_signal_text": None if frozen is None else self._signal_text(frozen.signal),
             "frozen_publication": None if frozen is None else frozen.publication,
             "frozen_snapshot": None if frozen is None else frozen.snapshot,
             **self._panel_snapshot_status(binding),
             "producer_node_id": producer_node_id,
+            "producer_name": (
+                None if producer_node_id is None else self.logic_name(producer_node_id)
+            ),
             "producer_projection": self._producer_projection(producer_node_id),
             "save_directory": str(self.session.day_folder_path()),
         }
@@ -4726,7 +4756,7 @@ class ConsolePresenter:
         }
         return {
             "node_id": binding.panel_id,
-            "api_name": f"{binding.state.title} outputs",
+            "api_name": f"{self._panel_name(binding)} outputs",
             "kind": "panel publisher",
             "form_spec": FormSpec(
                 tuple(
@@ -4858,7 +4888,7 @@ class ConsolePresenter:
             binding.snapshot_error = _error_text(error)
             self._refresh_panel_snapshot_status(binding)
             self._report(
-                f"cannot mount {binding.state.title} plot editor: "
+                f"cannot mount {self._panel_name(binding)} plot editor: "
                 f"{_error_text(error)}",
                 severity="error",
             )
@@ -5106,7 +5136,9 @@ class ConsolePresenter:
         if surface is None and publication is None:
             # Nothing has ever been drawn and nothing is published: the
             # only honest refusal.
-            binding.snapshot_error = f"{binding.state.signal} has not published yet"
+            binding.snapshot_error = (
+                f"{self._signal_text(binding.state.signal)} has not published yet"
+            )
             self._report(
                 binding.snapshot_error,
                 severity="warning",
@@ -5192,7 +5224,7 @@ class ConsolePresenter:
                 binding.snapshot_error = _error_text(error)
                 self._refresh_panel_snapshot_status(binding)
                 self._report(
-                    f"cannot mount {binding.state.title} plot "
+                    f"cannot mount {self._panel_name(binding)} plot "
                     f"editor: {_error_text(error)}",
                     severity="error",
                 )
@@ -5209,7 +5241,7 @@ class ConsolePresenter:
                 # Say so.  A button that correctly does nothing and says
                 # nothing is indistinguishable from a broken one.
                 self._report(
-                    f"{binding.state.title or binding.state.signal}: "
+                    f"{self._signal_text(binding.state.title or binding.state.signal)}: "
                     "Edit already shows the latest picture",
                     severity="idle",
                 )
@@ -5235,7 +5267,7 @@ class ConsolePresenter:
             self._report("Console is closing; Panel Save was not started", severity="warning")
             return False
         if key in self._saving_panels:
-            self._report(f"{binding.state.title} is already saving", severity="warning")
+            self._report(f"{self._panel_name(binding)} is already saving", severity="warning")
             return False
         frozen = binding.frozen_data
         if frozen is None:
@@ -5270,8 +5302,10 @@ class ConsolePresenter:
         # surface is open, C builds and closes the temporary host there; Save
         # has never required opening Edit first, and process isolation must not
         # change that product behaviour.  Neither path executes Plot in B.
-        state = binding.state
-        title = state.title
+        # What the panel is called NOW is what the archive is titled: a
+        # saved figure is history, and the record keeps the address.
+        title = self._panel_name(binding)
+        state = replace(binding.state, title=title)
         self._saving_panels.add(key)
         self._report(f"saving {title}", severity="task")
         try:
@@ -5358,7 +5392,13 @@ class ConsolePresenter:
         science_locked = self._task_science_locked(binding)
         surface["science_locked"] = science_locked
         surface["paints_images"] = self._paints_image_surfaces(binding)
-        surface["caption"] = _panel_caption(binding.panel_id, binding.state.title)
+        names = self.logic_names()
+        surface["caption"] = _panel_caption(binding.panel_id, binding.state.title, names)
+        # What the panel is called -- the Panel name field, the Edit page and
+        # its tab -- composed here beside the caption and never written into
+        # the record: an automatic title stays the signal key it is, so
+        # retitling on retarget keeps working, and reads ``<name>/<output>``.
+        surface["panel_name"] = self._panel_name(binding, names)
         for section in ("semantic", "display", "fit"):
             declared = tuple(surface.get(section, ()))
             legal: dict[str, object] = {}
@@ -5489,7 +5529,7 @@ class ConsolePresenter:
         binding = self.add_blank_panel(str(kind or self._default_panel_kind))
         if binding is not None:
             self._report(
-                f"added {binding.title}; choose a signal in Setting",
+                f"added {self._panel_name(binding)}; choose a signal in Setting",
                 severity="task",
             )
         return binding
@@ -5730,6 +5770,7 @@ class ConsolePresenter:
                     binding.draft.device_keys,
                     binding.draft.artifact_inputs,
                     binding.auto_preview,
+                    binding.name,
                 )
                 for binding in self.logic.values()
             ),
@@ -5799,6 +5840,7 @@ class ConsolePresenter:
         missing: list[str] = []
         incompatible: list[tuple[str, str]] = []
         notes = list(loaded.notes)
+        names = {binding.node_id: binding.name for binding in loaded.logic}
         used_titles: set[str] = set()
         try:
             for panel_id, saved in zip(loaded.panel_ids, loaded.panels, strict=True):
@@ -5860,7 +5902,7 @@ class ConsolePresenter:
                         or binding.parameter_surface
                     )
                     notes.append(
-                        f"cannot draw {state.signal} as {state.kind}: "
+                        f"cannot draw {signal_text(state.signal, names)} as {state.kind}: "
                         f"{_error_text(error)}; that panel remains available "
                         "for rewiring"
                     )
@@ -5920,7 +5962,7 @@ class ConsolePresenter:
             )
         for binding in candidate.panels:
             self.panels[binding.panel_id] = binding
-            self.view.add_panel(binding.panel_id, binding.state.title)
+            self.view.add_panel(binding.panel_id, self._panel_name(binding))
             self.view.show_panel(binding.panel_id, None)
             self.view.set_panel_selectors_enabled(binding.panel_id, self._deriving)
             self._publish_panel_state(binding)
@@ -6059,16 +6101,21 @@ class ConsolePresenter:
             )
             return False
         self._replace_board(candidate, "layout loaded")
+        # Said in the names of the board being put up, which may still be
+        # waiting for the running one to stop.
+        names = {binding.node_id: binding.name for binding in candidate.logic}
         if candidate.missing_signals:
+            missing = sorted(
+                {signal_text(signal, names) for signal in candidate.missing_signals}
+            )
             self._report(
-                "nothing is publishing "
-                f"{', '.join(sorted(set(candidate.missing_signals)))}; "
+                f"nothing is publishing {', '.join(missing)}; "
                 "those panels remain available for rewiring",
                 severity="warning",
             )
         if candidate.incompatible_panels:
             descriptions = ", ".join(
-                f"{signal} as {kind}"
+                f"{signal_text(signal, names)} as {kind}"
                 for signal, kind in candidate.incompatible_panels
             )
             self._report(
@@ -6984,7 +7031,7 @@ class ConsolePresenter:
         value = self._publication_value(publication, signal)
         if value is None:
             raise RuntimeError(
-                f"{panel_id} selection publication does not contain {signal}"
+                f"{panel_id} selection publication does not contain {self._signal_text(signal)}"
             )
         snapshot = expected_snapshot
         if snapshot is None:
@@ -7185,10 +7232,15 @@ class ConsolePresenter:
                 if age > self.SURFACE_PATIENCE_SECONDS
                 else ""
             )
+            waiting_for = str(getattr(binding.port, "waiting_for_signal", "") or "")
             standing = (
                 unapplied
                 or str(getattr(binding.bridge, "last_condition", "") or "")
-                or str(getattr(binding.port, "waiting_condition", "") or "")
+                or (
+                    f"waiting for {self._signal_text(waiting_for)!r} to publish"
+                    if waiting_for
+                    else ""
+                )
                 or late
             )
             if error is None and standing:
@@ -7231,7 +7283,7 @@ class ConsolePresenter:
             if condition == binding.reported_condition:
                 continue
             binding.reported_condition = condition
-            self._report(f"{binding.title}: {condition}", severity="error")
+            self._report(f"{self._panel_name(binding)}: {condition}", severity="error")
             # A refused projection is a STATE, not a reason to have no form:
             # the semantic fates that fix it stay editable.
             self._degrade_panel_surface(binding)
@@ -7244,7 +7296,7 @@ class ConsolePresenter:
         """Report one refusal a mounted plot widget raised through its card."""
 
         binding = self.panels.get(str(panel_id))
-        title = binding.title if binding is not None else str(panel_id)
+        title = self._panel_name(binding) if binding is not None else str(panel_id)
         self._report(f"{title}: {message}", severity="warning")
 
     def _report(self, text: str, *, severity: str) -> None:
@@ -7318,6 +7370,7 @@ class ConsolePresenter:
             finalization = binding.finalization
             logic.append({
                 "node_id": binding.node_id,
+                "name": binding.name,
                 "api_name": binding.descriptor.api_name,
                 "kind": binding.descriptor.kind.value,
                 "draft_revision": binding.draft_revision,
@@ -7350,6 +7403,7 @@ class ConsolePresenter:
             frozen = binding.frozen_data
             panels.append({
                 "panel_id": binding.panel_id,
+                "name": self._panel_name(binding),
                 "state": (_control_plain(binding.state.document()) if details else {
                     "signal": binding.state.signal, "kind": binding.state.kind,
                     "cell_kind": binding.state.cell_kind, "title": binding.state.title,
@@ -7645,6 +7699,16 @@ class ConsolePresenter:
             elif action == "logic.add":
                 node_id = self.add_logic(**params)
                 accepted = bool(node_id)
+            elif action == "logic.rename":
+                if set(params) != {"node_id", "name"}:
+                    raise ValueError("logic.rename accepts node_id and name")
+                before_name = self.logic[node_id].name
+                accepted = self.rename_logic(node_id, str(params["name"]))
+                status = (
+                    "rejected" if not accepted
+                    else "unchanged" if self.logic[node_id].name == before_name
+                    else "renamed"
+                )
             elif action == "logic.update":
                 if set(params) - {"node_id", "values", "source_signal", "device_keys", "artifact_inputs"}:
                     raise ValueError("logic.update accepts only authored draft fields")
@@ -7722,6 +7786,102 @@ class ConsolePresenter:
                 "error": error, "state": state}
 
 
+    # ------------------------------------------------------------------- names
+
+    def logic_names(self) -> dict[str, str]:
+        """{node id: name}: what the operator calls each Logic node now.
+
+        Derived from the bindings on every call -- a name is kept on its
+        binding and nowhere else -- and read from a copy of the mapping, so a
+        caller on another thread (a device refusal) reads the names of a
+        moment ago, never a mapping changing under it.
+        """
+
+        return {
+            node_id: binding.name for node_id, binding in dict(self.logic).items()
+        }
+
+    def logic_name(self, owner: str) -> str:
+        """What a person calls a producer: a node by its name, what it owns
+        by its name and the owned part, anything else by its id."""
+
+        return producer_text(str(owner), self.logic_names())
+
+    def _signal_text(self, key: str, names: Mapping[str, str] | None = None) -> str:
+        """A signal as a person reads it: ``<producer>/<output>``."""
+
+        return signal_text(str(key), self.logic_names() if names is None else names)
+
+    def _panel_name(
+        self, binding: PanelBinding, names: Mapping[str, str] | None = None
+    ) -> str:
+        """What a panel is called: the title the operator typed, or -- while
+        the title is the signal's key, i.e. automatic -- that signal as a
+        person reads it."""
+
+        return self._signal_text(binding.state.title, names)
+
+    def _names_key(self) -> tuple[tuple[str, str], ...]:
+        """Every node's id and name, for a cache that a rename must expire."""
+
+        return tuple((binding.node_id, binding.name) for binding in self.logic.values())
+
+    def _other_producers(self) -> set[str]:
+        """Signal producers on the session that are not this board's nodes
+        or panels: a notebook's, whose heading a name must not take."""
+
+        return {
+            str(description.owner_id).partition("/")[0]
+            for description in self._signal_projection()[0]
+        } - set(self.logic) - set(self.panels)
+
+    def rename_logic(self, node_id: str, name: str) -> bool:
+        """Call one node something else; its identity does not move.
+
+        Nothing an address spells changes -- its signal keys, its run, its
+        leases, every reference to it -- so a rename is allowed while the
+        node runs, waits or follows, and while a Task holds the console.
+        What a person reads is composed from the name at display time, so
+        every place catches up on this turn (:meth:`_project_names`).  A
+        refused name stays a sentence under the Name line until the next
+        commit, and the name is unchanged.
+        """
+
+        binding = self.logic.get(str(node_id))
+        if binding is None or self._closing:
+            return False
+        text = str(name).strip()
+        problem = logic_name_problem(
+            text, binding.node_id, self.logic_names(), self._other_producers()
+        )
+        if problem:
+            binding.name_problem = problem
+            self._report(problem, severity="warning")
+            self.refresh_logic_editor(binding.node_id)
+            return False
+        binding.name_problem = ""
+        if text == binding.name:
+            self.refresh_logic_editor(binding.node_id)
+            return True
+        previous, binding.name = binding.name, text
+        self._report(f"renamed {previous} to {text}", severity="task")
+        self._project_names()
+        return True
+
+    def _project_names(self) -> None:
+        """Make every place that shows a node's name catch up, on this turn.
+
+        Rows, their statuses and the Task line; every editor's pickers (the
+        signal-choice context carries the names); every panel's caption and
+        name, which re-projects its editors.  Device Control windows follow
+        on the app's beat.
+        """
+
+        self._refresh_console_projection()
+        self._refresh_signal_choices()
+        for panel in tuple(self.panels.values()):
+            self._publish_panel_state(panel)
+
     # ------------------------------------------------------------------- logic
 
     @staticmethod
@@ -7773,7 +7933,7 @@ class ConsolePresenter:
         active = self._active_task()
         assert active is not None
         self._report(
-            f"{active.node_id}: preview science identity is frozen while "
+            f"{active.name}: preview science identity is frozen while "
             f"the Task runs; use Stop task before {action}",
             severity="task",
         )
@@ -7787,7 +7947,7 @@ class ConsolePresenter:
             return False
         _state, status = self._logic_state(active)
         self._report(
-            f"{active.node_id}: {status}; use Stop task before {action}",
+            f"{active.name}: {status}; use Stop task before {action}",
             severity="task",
         )
         return True
@@ -7845,10 +8005,10 @@ class ConsolePresenter:
             self._shown_task_status = None
         else:
             _state, status = self._logic_state(active)
-            shown = (active.node_id, status)
+            shown = (active.node_id, active.name, status)
             if shown != self._shown_task_status:
                 self._shown_task_status = shown
-                self._report(f"{active.node_id}: {status}", severity="task")
+                self._report(f"{active.name}: {status}", severity="task")
 
     def _begin_task_takeover(self, binding: LogicBinding) -> None:
         if not self._is_task(binding):
@@ -7964,7 +8124,7 @@ class ConsolePresenter:
             except Exception as error:
                 refused.add(signal)
                 self._report(
-                    f"{binding.node_id}: cannot open preview {signal!r}: "
+                    f"{binding.name}: cannot open preview {self._signal_text(signal)!r}: "
                     f"{_error_text(error)}",
                     severity="error",
                 )
@@ -8116,7 +8276,7 @@ class ConsolePresenter:
             if host is not None and host.running:
                 host.cancel(f"operator input failed: {_error_text(error)}")
             self._report(
-                f"{binding.node_id}: operator input failed: {_error_text(error)}",
+                f"{binding.name}: operator input failed: {_error_text(error)}",
                 severity="error",
             )
 
@@ -8132,7 +8292,7 @@ class ConsolePresenter:
         self._reconcile_task_previews(binding)
         self._active_task_id = None
         self._project_task_takeover()
-        self._report(f"{binding.node_id}: {status}", severity=severity)
+        self._report(f"{binding.name}: {status}", severity=severity)
 
     def _sync_task_takeover(self) -> None:
         binding = self._active_task()
@@ -8181,8 +8341,14 @@ class ConsolePresenter:
         device_keys: Mapping[str, str] | None = None,
         artifact_inputs: Mapping[str, Any] | None = None,
         open_editor: bool = True,
+        name: str = "",
     ) -> str:
-        """Create one stopped row draft; Start is the first build boundary."""
+        """Create one stopped row draft; Start is the first build boundary.
+
+        ``node_id`` is minted from the type unless given; ``name`` is what
+        the operator calls the node, its id unless given.  Both obey the one
+        naming rule (``logic_name_problem``).
+        """
 
         if self._task_command_blocked("adding a Logic Node"):
             return ""
@@ -8194,6 +8360,18 @@ class ConsolePresenter:
         selected_id = str(node_id).strip() or self._free_logic_id(descriptor.api_name)
         if selected_id in self.logic:
             self._report(f"logic row {selected_id!r} already exists", severity="error")
+            return ""
+        names = self.logic_names()
+        selected_name = str(name).strip() or selected_id
+        problem = logic_name_problem(selected_id, selected_id, names) or (
+            logic_name_problem(
+                selected_name, selected_id, names, self._other_producers()
+            )
+            if selected_name != selected_id
+            else ""
+        )
+        if problem:
+            self._report(problem, severity="error")
             return ""
         drafted_values = {
             field.name: field.default for field in descriptor.authoring_schema.fields
@@ -8241,6 +8419,7 @@ class ConsolePresenter:
                 device_keys=selected_devices,
                 artifact_inputs=selected_artifacts,
             ),
+            name=selected_name,
         )
         self.logic[selected_id] = binding
         for other_id in self.logic:
@@ -8249,7 +8428,7 @@ class ConsolePresenter:
         if open_editor:
             self._open_logic_editor(binding)
         self._refresh_console_projection()
-        self._report(f"added {selected_id}", severity="task")
+        self._report(f"added {binding.name}", severity="task")
         return selected_id
 
     def _logic_finalization_key(
@@ -8290,6 +8469,8 @@ class ConsolePresenter:
             ),
             armed,
             acquisition_options,
+            # An issue naming another node says its name: a rename re-words it.
+            self._names_key(),
         )
 
     def _finalize_logic_binding(
@@ -8328,6 +8509,7 @@ class ConsolePresenter:
                 acquisition_options=acquisition_options,
                 previous=None if force else binding.finalization,
                 source_frames=source_frames,
+                node_names=self.logic_names(),
             )
             binding.finalization_key = key
         return binding.finalization
@@ -8448,6 +8630,10 @@ class ConsolePresenter:
                     )
         return {
             "node_id": binding.node_id,
+            # What the operator calls the node, and why their last rename was
+            # refused: the Name line and the sentence under it.
+            "name": binding.name,
+            "name_problem": binding.name_problem,
             "api_name": str(binding.descriptor.api_name),
             "description": binding.descriptor.description,
             "kind": str(
@@ -8460,6 +8646,7 @@ class ConsolePresenter:
                 acquisition_options=self._acquisition_options(binding.node_id),
                 acquisition_selected=str(binding.draft.values.get(binding.descriptor.acquisition_input) or ""),
                 acquisition_enabled=acquisition_enabled,
+                acquisition_labels=self.logic_names(),
             ),
             "form_values": form_values,
             "acquisition_input": binding.descriptor.acquisition_input,
@@ -8649,7 +8836,7 @@ class ConsolePresenter:
         if not finalization.can_start:
             error = finalization.issues[0]
             binding.draft_error = error
-            self._report(f"{node_id}: {error}", severity="error")
+            self._report(f"{binding.name}: {error}", severity="error")
             self._refresh_console_projection()
             self.refresh_logic_editor(binding.node_id)
             return False
@@ -8663,7 +8850,8 @@ class ConsolePresenter:
             self._refresh_console_projection()
             self.refresh_logic_editor(binding.node_id)
             self._report(
-                f"{node_id} following {finalization.source_signal}"
+                f"{binding.name} following "
+                f"{self._signal_text(finalization.source_signal)}"
                 " (waiting for the signal)",
                 severity="task",
             )
@@ -8681,7 +8869,7 @@ class ConsolePresenter:
             candidate = self._build_logic_candidate(binding, finalization)
         except Exception as error:
             binding.draft_error = _error_text(error)
-            self._report(f"{node_id}: {_error_text(error)}", severity="error")
+            self._report(f"{binding.name}: {_error_text(error)}", severity="error")
             self._refresh_console_projection()
             self.refresh_logic_editor(binding.node_id)
             return False
@@ -8699,14 +8887,14 @@ class ConsolePresenter:
         except DeviceUseBusy as error:
             self._discard_candidate(binding, candidate)
             binding.draft_error = _error_text(error)
-            self._report(f"{node_id}: {_error_text(error)}", severity="error")
+            self._report(f"{binding.name}: {_error_text(error)}", severity="error")
             self._refresh_console_projection()
             self.refresh_logic_editor(binding.node_id)
             return False
         except Exception as error:
             self._discard_candidate(binding, candidate)
             binding.draft_error = _error_text(error)
-            self._report(f"{node_id}: {_error_text(error)}", severity="error")
+            self._report(f"{binding.name}: {_error_text(error)}", severity="error")
             self._refresh_console_projection()
             self.refresh_logic_editor(binding.node_id)
             return False
@@ -8718,7 +8906,8 @@ class ConsolePresenter:
             self._refresh_console_projection()
             self.refresh_logic_editor(binding.node_id)
             self._report(
-                f"{node_id} queued while {', '.join(sorted(blockers))} stops",
+                f"{binding.name} queued while "
+                f"{', '.join(sorted(self.logic_name(label) for label in blockers))} stops",
                 severity="task",
             )
             return True
@@ -8876,7 +9065,7 @@ class ConsolePresenter:
             binding.host.poll()
         if binding.host is not None and binding.host.running:
             self._refresh_console_projection()
-            self._report(f"{node_id} is stopping", severity="task")
+            self._report(f"{binding.name} is stopping", severity="task")
             return False
         return self._retire_logic(binding)
 
@@ -8887,7 +9076,7 @@ class ConsolePresenter:
         if binding.host is not None:
             if binding.host.running:
                 self._report(
-                    f"{binding.node_id} is still stopping",
+                    f"{binding.name} is still stopping",
                     severity="warning",
                 )
                 return False
@@ -8897,7 +9086,7 @@ class ConsolePresenter:
                 self.session.signal_plane.retire(binding.host)
             except Exception as error:
                 self._report(
-                    f"{binding.node_id}: {_error_text(error)}", severity="error"
+                    f"{binding.name}: {_error_text(error)}", severity="error"
                 )
                 return False
         if binding.lease is not None:
@@ -8909,12 +9098,10 @@ class ConsolePresenter:
         if callable(close_editor):
             close_editor(binding.node_id)
         self.view.remove_logic_row(binding.node_id)
-        for other_id in self.logic:
-            self.refresh_logic_editor(other_id)
-        for panel_id in self.panels:
-            self.refresh_panel_editor(panel_id)
-        self._refresh_console_projection()
-        self._report(f"removed {binding.node_id}", severity="task")
+        # A removed node's name leaves the map: every reference to it is read
+        # by its id again, everywhere at once.
+        self._project_names()
+        self._report(f"removed {binding.name}", severity="task")
         return True
 
     def poll_logic(self) -> None:
@@ -8931,7 +9118,7 @@ class ConsolePresenter:
                     binding.host.poll()
                 except Exception as error:
                     self._report(
-                        f"{binding.node_id}: {_error_text(error)}",
+                        f"{binding.name}: {_error_text(error)}",
                         severity="error",
                     )
                 if binding.host.terminal or binding.host.cancel_requested:
@@ -9053,7 +9240,9 @@ class ConsolePresenter:
             if binding.following and not error and not issues:
                 signal = getattr(binding.finalization, "source_signal", "")
                 state = "running"
-                status = f"following {signal} (waiting for the signal)"
+                status = (
+                    f"following {self._signal_text(signal)} (waiting for the signal)"
+                )
         else:
             observed = host.observation
             if observed.error:
@@ -9075,14 +9264,16 @@ class ConsolePresenter:
                         binding.finalization, "source_signal", ""
                     )
                     state = "running"
-                    status = f"following {signal} (source stopped)"
+                    status = f"following {self._signal_text(signal)} (source stopped)"
                 else:
                     state, status = "idle", self._observation_status(observed)
             warnings = tuple(getattr(observed, "warnings", ()))
             if warnings:
                 status = f"{status}; warning: {'; '.join(warnings)}"
         if binding.pending is not None:
-            waiting = ", ".join(sorted(binding.pending.waiting_for))
+            waiting = ", ".join(
+                sorted(self.logic_name(label) for label in binding.pending.waiting_for)
+            )
             state = "running"
             if waiting:
                 status = f"waiting for {waiting}"
@@ -9132,6 +9323,7 @@ class ConsolePresenter:
         )
         if descriptions is None:
             descriptions = self._signal_projection()[1]
+        node_names = self.logic_names()
         names = tuple(dict.fromkeys(direct_names))
         published = []
         for name in names:
@@ -9146,7 +9338,7 @@ class ConsolePresenter:
                     format_signal_shape(
                         None if description is None else description.schema
                     ),
-                    f"{lifecycle} · {name}",
+                    f"{lifecycle} · {self._signal_text(name, node_names)}",
                 )
             )
         published = tuple(published)
@@ -9158,6 +9350,7 @@ class ConsolePresenter:
         )
         pending = binding.pending is not None
         shown = (
+            binding.name,
             state,
             status,
             published,
@@ -9170,6 +9363,9 @@ class ConsolePresenter:
         if shown == binding.shown:
             return
         binding.shown = shown
+        # The row's name arrives by this one channel, like its state: the
+        # row is made blank and told what it is called on the same turn.
+        self.view.set_logic_name(binding.node_id, binding.name)
         self.view.set_logic_state(binding.node_id, state, status)
         self.view.set_logic_commands(
             binding.node_id,
@@ -9267,6 +9463,7 @@ class ConsolePresenter:
         """
 
         descriptions, _by_name, projected, _families = self._signal_projection()
+        node_names = self.logic_names()
         compatible = set(options)
         labels = {key: signal_output_name(key) for key in options}
         # Which producer each compatible source belongs under: the plane's
@@ -9299,9 +9496,22 @@ class ConsolePresenter:
             for members in bundles.values():
                 anchor = selected if selected in members else members[0]
                 names = ", ".join(signal_output_name(key) for key in members)
-                bundled[anchor] = f"{groups.get(anchor, anchor)} · {names}"
+                heading = producer_text(groups.get(anchor, anchor), node_names)
+                bundled[anchor] = f"{heading} · {names}"
             return tuple(bundled), bundled, {}
-        return options, labels, groups
+        # The draft's own source when nothing offers it any more (its node
+        # renamed an output, or went): still filed under what its producer
+        # is called, and named by its output, never as a bare key.
+        selected = "" if consumer is None else consumer.draft.source_signal
+        parts = split_signal_key(selected)
+        if parts is not None and selected not in compatible:
+            groups[selected] = parts[0]
+            labels[selected] = parts[1]
+        # Grouped by the raw producer above, so two owners are never merged;
+        # only the heading a person reads is the producer's name.
+        return options, labels, {
+            key: producer_text(owner, node_names) for key, owner in groups.items()
+        }
 
     def _build_logic_candidate(
         self,
@@ -9329,6 +9539,7 @@ class ConsolePresenter:
             values=finalization.values,
             devices=finalization.devices,
             request_owner_wake=self.board.wake.request_owner_wake,
+            display_name=binding.name,
         )
         claims = tuple(
             DeviceClaim(
@@ -9401,7 +9612,7 @@ class ConsolePresenter:
                     )
                 )
         except Exception as error:
-            self._report(f"{binding.node_id}: {_error_text(error)}", severity="error")
+            self._report(f"{binding.name}: {_error_text(error)}", severity="error")
 
     def _activate_candidate(
         self,
@@ -9439,7 +9650,7 @@ class ConsolePresenter:
                 self._discard_candidate(binding, candidate)
                 binding.draft_error = _error_text(error)
                 self._report(
-                    f"{binding.node_id}: {_error_text(error)}", severity="error"
+                    f"{binding.name}: {_error_text(error)}", severity="error"
                 )
                 self._refresh_console_projection()
                 return False
@@ -9458,7 +9669,7 @@ class ConsolePresenter:
         except Exception as error:
             self._discard_candidate(binding, candidate)
             binding.draft_error = _error_text(error)
-            self._report(f"{binding.node_id}: {_error_text(error)}", severity="error")
+            self._report(f"{binding.name}: {_error_text(error)}", severity="error")
             self._refresh_console_projection()
             return False
         candidate.reservation = None
@@ -9487,7 +9698,7 @@ class ConsolePresenter:
             lease.release()
             binding.lease = None
             binding.draft_error = _error_text(error)
-            self._report(f"{binding.node_id}: {_error_text(error)}", severity="error")
+            self._report(f"{binding.name}: {_error_text(error)}", severity="error")
             self._refresh_console_projection()
             return False
         # The run makes the values it starts with the producer's own: a
@@ -9497,7 +9708,7 @@ class ConsolePresenter:
         binding.selection_restore.clear()
         binding.draft_error = ""
         self._refresh_console_projection()
-        self._report(f"{binding.node_id} started", severity="task")
+        self._report(f"{binding.name} started", severity="task")
         return True
 
     def _fitting_cell_kind(self, subject: object, kind: str, declared: str) -> str | None:
@@ -9627,30 +9838,31 @@ class ConsolePresenter:
                         continue
                     producer, output = parts
                     panel = self.panels.get(producer)
+                    said = self._signal_text(name)
                     if panel is not None:
                         if not panel.state.published_outputs.get(output, True):
-                            raise RuntimeError(f"{name}: output publication is disabled")
+                            raise RuntimeError(f"{said}: output publication is disabled")
                         if name == signal and not panel.state.fit.get("model"):
-                            raise RuntimeError(f"{name}: the Fit model is no longer enabled")
+                            raise RuntimeError(f"{said}: the Fit model is no longer enabled")
                         if getattr(panel, "configuration", None) is None:
                             refusal = getattr(panel, "vacancy", "") or getattr(panel, "unapplied_display", "")
                             if refusal:
-                                raise RuntimeError(f"{name}: settings not applied -- {refusal}")
+                                raise RuntimeError(f"{said}: settings not applied -- {refusal}")
                         for owner in (panel.port, panel.bridge):
                             if owner is None:
                                 continue
                             error = owner.last_error
                             if error is not None and belongs(owner.last_error_publication):
-                                raise RuntimeError(f"{name}: {_error_text(error)}") from error
+                                raise RuntimeError(f"{said}: {_error_text(error)}") from error
                     else:
                         source = self.logic.get(producer)
                         if source is None:
                             if not any(item.name == name for item in plane.describe_signals()):
-                                raise RuntimeError(f"{name}: the input producer was removed")
+                                raise RuntimeError(f"{said}: the input producer was removed")
                             continue
                         host = source.host
                         if host is not None and host.observation.error and belongs(host.source_publication):
-                            raise RuntimeError(f"{name}: {host.observation.error}")
+                            raise RuntimeError(f"{said}: {host.observation.error}")
                 answer.set_result(None)
             except BaseException as error:
                 answer.set_exception(error)
@@ -9687,7 +9899,7 @@ class ConsolePresenter:
             self._discard_pending(binding)
         elif binding.host is host and (generation is None or host.generation == generation):
             self._stop_acquisition(binding)
-            host.cancel(f"{parent.node_id} finished using this acquisition")
+            host.cancel(f"{parent.name} finished using this acquisition")
 
     def _restart_acquisition(
         self, node_id: str, context: object, *, completion: str = "ready",
@@ -9716,18 +9928,23 @@ class ConsolePresenter:
                 ):
                     raise ValueError("the Task did not select this acquisition")
                 if node_id not in self._acquisition_options(str(context.instance_id)):
-                    raise ValueError(f"{node_id!r} is not an available acquisition Measurement")
+                    raise ValueError(
+                        f"{self.logic_name(node_id)!r} is not an available acquisition Measurement"
+                    )
                 if completion == "terminal" and parent.draft.source_signal and not any(
                     parts is not None and parts[0] == node_id
                     for signal in self._signal_input_chain(parent.draft.source_signal)
                     for parts in (split_signal_key(signal),)
                 ):
                     raise ValueError(
-                        f"{parent.draft.source_signal!r} does not derive from "
-                        f"the selected acquisition {node_id!r}"
+                        f"{self._signal_text(parent.draft.source_signal)!r} does not derive from "
+                        f"the selected acquisition {self.logic_name(node_id)!r}"
                     )
                 if not self.start_logic(node_id, _acquisition=True):
-                    raise RuntimeError(self.logic[node_id].draft_error or f"could not restart {node_id}")
+                    raise RuntimeError(
+                        self.logic[node_id].draft_error
+                        or f"could not restart {self.logic_name(node_id)}"
+                    )
                 binding = self.logic[node_id]
                 host = binding.pending.host if binding.pending is not None else binding.host
                 parent.acquisition_run = (node_id, host, host.generation)
@@ -9751,7 +9968,9 @@ class ConsolePresenter:
                 elif host.wait_terminal(0.05):
                     observed = host.observation
                     if observed.phase != "done" or observed.error:
-                        raise RuntimeError(observed.error or f"{node_id} ended as {observed.phase}")
+                        raise RuntimeError(
+                            observed.error or f"{self.logic_name(node_id)} ended as {observed.phase}"
+                        )
                     publications = {
                         name: self.session.signal_plane.latest_publication(name)
                         for name in host.published_signals()
@@ -9761,7 +9980,9 @@ class ConsolePresenter:
                         or publication.event_ref.stream_id.value != host.instance_id
                         for publication in publications.values()
                     ):
-                        raise RuntimeError(f"{node_id} finished without retained output from this run")
+                        raise RuntimeError(
+                            f"{self.logic_name(node_id)} finished without retained output from this run"
+                        )
                     return publications
             raise InterruptedError("stopped while waiting for acquisition")
         finally:
@@ -9886,10 +10107,20 @@ class ConsolePresenter:
         return drafted
 
     def _free_logic_id(self, api_name: str) -> str:
-        if api_name not in self.logic:
+        """The type's name, numbered from 2, skipping every id and every name
+        on the board: a minted id is never what another node is called."""
+
+        names = self.logic_names()
+
+        def free(candidate: str) -> bool:
+            return candidate not in self.logic and not logic_name_problem(
+                candidate, candidate, names
+            )
+
+        if free(api_name):
             return api_name
         index = 2
-        while f"{api_name}{index}" in self.logic:
+        while not free(f"{api_name}{index}"):
             index += 1
         return f"{api_name}{index}"
 
@@ -9987,6 +10218,8 @@ class ConsolePresenter:
         ready = owners_ready and render_processes_closed
         if ready:
             self._closed = True
+            if not self._panel_only:
+                self.session.device_use.set_owner_spelling(None)
             if self._request_close is not None and not self._close_retry_sent:
                 self._close_retry_sent = True
                 self._request_close()

@@ -138,7 +138,6 @@ class LogicRowView(FluentFrame):
 
     def __init__(self, title: str = "Logic", kind: str = "logic", parent=None) -> None:
         super().__init__(parent)
-        self.title = str(title)
         self.kind = str(kind)
         self._status_text = "idle"
         self._status_colour = ""
@@ -159,7 +158,7 @@ class LogicRowView(FluentFrame):
         top = QtWidgets.QHBoxLayout()
         top.setSpacing(row_gap())
         self.dot = FluentStatusDot(size=STATUS_DOT, color=GREY)
-        self.name_label = ElidedLabel(self.title)
+        self.name_label = ElidedLabel(str(title))
         # Name and kind are fixed columns: every row's kind and status start
         # at the same x, instead of floating with the length of the name.
         self.name_label.setFixedWidth(scaled_px(200, minimum=150))
@@ -213,6 +212,12 @@ class LogicRowView(FluentFrame):
         self.publishes_label = PublishedItemsLegend()
         outer.addWidget(self.publishes_label)
         self._project_commands()
+
+    def set_name(self, text: str) -> None:
+        """Show what the node is called; elided in its column, whole in the
+        tooltip.  The row is not where it is renamed: its Edit page is."""
+
+        self.name_label.setText(str(text))
 
     def set_preview_offered(self, offered: bool) -> None:
         """Show the switch only for a node that declares something to open.

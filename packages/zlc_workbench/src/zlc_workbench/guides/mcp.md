@@ -7,6 +7,17 @@ Start with `lab_catalog()` for installed capabilities; use `lab_catalog(api_name
 for one node's actual parameters. Neither needs device Init. Once a node or panel
 exists, use its ID for live choices, units, revisions and compatible models.
 
+A Logic node has a stable `node_id` and an operator `name`. Every action,
+`lab_wait`, signal key (`@logic/<node_id>/<output>`), AxisId, layout and recipe uses
+`node_id`, which never changes. `name` is what the operator sees everywhere; they may
+change it at any time, even while the node runs. Address nodes only by `node_id`;
+when the operator names a node, find its `node_id` in
+`lab_state().console.logic[].name`. Reports and draft issues name a node by its
+`name` and a signal as `<name>/<output>`.
+`lab_action('logic.rename', {'node_id': ..., 'name': ...})` changes only the name; a
+name is one line, without `/`, not `panel-<n>`, and differs (ignoring case) from every
+other node's name and ID.
+
 Read `lab_guide('setup')` and this workspace's `EXPERIMENT_CONTEXT.md` before
 operating hardware. Use `lab_recipes()` to discover reusable native Layouts.
 Use `lab_results(panel_id)` for native fitted parameters; do not recreate existing
@@ -443,7 +454,7 @@ sufficient precision or significant differences between sites.
 ## errors
 
 Use the original owner reason and state. Unknown fields: query that node/panel's
-catalog. No data: distinguish following/waiting, incompatible source, stale
+catalog. A refused rename returns the reason as `error`; the name is unchanged. No data: distinguish following/waiting, incompatible source, stale
 generation and a genuinely failed run. Device operation pending: wait rather
 than starting a second session. Failed/unknown Start, Fire or Send: inspect the
 same generation/receipt; do not replay a partially completed batch.

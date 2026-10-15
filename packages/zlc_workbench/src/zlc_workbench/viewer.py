@@ -1553,16 +1553,28 @@ def _lineage_nodes(value: object) -> tuple[str | None, dict[str, Mapping[str, An
     return root, nodes
 
 
+def _record_text(record: Mapping[str, object], key: str) -> str:
+    """One canonical text field of a run record, "" when it has none."""
+
+    raw = record.get(key)
+    if raw is not None and not isinstance(raw, str):
+        raise TypeError(f"figure Logic {key} must be text")
+    text = str(raw or "").strip()
+    if raw is not None and text != raw:
+        raise ValueError(f"figure Logic {key} must be canonical text")
+    return text
+
+
 def _logic_name(node: Mapping[str, Any]) -> str:
-    """Return one operator-facing Logic identity, never an archive node ID."""
+    """Return one operator-facing Logic identity, never an archive node ID.
+
+    The name the operator had given the node when the run was built
+    (``node_name``), else its id (``node``) -- an archive written before
+    nodes had names reads by its id -- else the stream's producer.
+    """
 
     record = node["record"]
-    raw_explicit = record.get("node")
-    if raw_explicit is not None and not isinstance(raw_explicit, str):
-        raise TypeError("figure Logic node identity must be text")
-    explicit = str(raw_explicit or "").strip()
-    if raw_explicit is not None and explicit != raw_explicit:
-        raise ValueError("figure Logic node identity must be canonical text")
+    explicit = _record_text(record, "node_name") or _record_text(record, "node")
     if explicit:
         return explicit
     stream = str(node["event"]["stream"])
@@ -1600,7 +1612,7 @@ def _source_run_record(
         raise ValueError("Task Figure Logic identity must be canonical text")
     if source_task and record_node and source_task != record_node:
         raise ValueError("Figure source task differs from its run-record Logic")
-    task = source_task or record_node
+    task = _record_text(record, "node_name") or source_task or record_node
     if not task:
         raise ValueError("Task Figure run record has no Logic identity")
     raw_output = source.get("report") or source.get("artifact") or source.get("signal")
@@ -1678,7 +1690,7 @@ def _logic_rows(
                 **{
                     str(key): item
                     for key, item in projected.items()
-                    if key != "node"
+                    if key not in {"node", "node_name"}
                 },
             },
         ))
@@ -1692,7 +1704,7 @@ def _logic_rows(
         record = {
             str(key): item
             for key, item in projected.items()
-            if key != "node"
+            if key not in {"node", "node_name"}
         }
         rows.append(
             (

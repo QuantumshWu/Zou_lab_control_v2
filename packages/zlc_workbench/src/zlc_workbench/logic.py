@@ -30,6 +30,7 @@ from zlc_runtime import NodeHost
 from zlc_ui.status import name_words
 
 from .device_use import DeviceClaim, DeviceLease, LogicReservation
+from .topology import producer_text, signal_text
 
 
 __all__ = [
@@ -139,6 +140,11 @@ class LogicBinding:
     It used to carry its ROW as well -- a widget, held by the layer that is
     not allowed to hold one.  The row lives in the window now, and this side
     names the node instead.
+
+    ``node_id`` is the node's identity, minted once and never changed: every
+    signal key, reference, lease, layout and MCP address spells it.
+    ``name`` is what the operator calls it, and the one place that is kept;
+    everything a person reads derives it from here at display time.
     """
 
     node_id: str
@@ -189,6 +195,15 @@ class LogicBinding:
     #: draft remains the only current value; manual edits, not passive numeric
     #: normalization, cancel undo. A newer panel takes ownership without stacking.
     selection_restore: dict[str, tuple[str, Any]] = field(default_factory=dict)
+    #: What the operator calls this node; the id until they rename it.  Like
+    #: ``auto_preview`` it belongs to the board, never to the draft.
+    name: str = ""
+    #: Why the operator's last rename was refused, until the next one is
+    #: accepted.  Presentation only: never saved.
+    name_problem: str = ""
+
+    def __post_init__(self) -> None:
+        self.name = str(self.name).strip() or self.node_id
 
 
 def task_input_summary(
@@ -347,6 +362,7 @@ def finalize_logic_draft(
     acquisition_options: Sequence[str] = (),
     previous: LogicDraftFinalization | None = None,
     source_frames: int | None = None,
+    node_names: Mapping[str, str] = MappingProxyType({}),
 ) -> LogicDraftFinalization:
     """Resolve every Start admission fact without building or acquiring a run.
 
@@ -359,6 +375,9 @@ def finalize_logic_draft(
 
     ``source_frames`` is how many frames a cycle of the source carries, when
     that is known: frame claims are then checked against it as well.
+
+    ``node_names`` is the board's {node id: name}: an issue about another
+    node calls it what the operator calls it.
     """
 
     from zlc_atom.nodes import ResolvedArtifact
@@ -385,7 +404,10 @@ def finalize_logic_draft(
     acquisition_field = descriptor.acquisition_input
     acquisition = str(draft.values.get(acquisition_field) or "") if descriptor.authoring_schema.is_enabled(acquisition_field, raw_values) else ""
     if acquisition and acquisition not in acquisition_options:
-        issues.append(f"{acquisition!r} is not an available acquisition Measurement")
+        issues.append(
+            f"{producer_text(acquisition, node_names)!r} is not an available "
+            "acquisition Measurement"
+        )
 
     active_requirements = descriptor.active_device_requirements(raw_values)
     options = device_key_options(descriptor, installation=installation, values=raw_values)
@@ -490,7 +512,8 @@ def finalize_logic_draft(
                     if spec.contract_id is not None
                 ) or "a compatible"
                 issues.append(
-                    f"{source!r} is not declared as {contracts} Dataset"
+                    f"{signal_text(source, node_names)!r} is not declared as "
+                    f"{contracts} Dataset"
                 )
             else:
                 # Nothing on the plane under that name yet: a processor
@@ -881,12 +904,14 @@ def make_host(
     values: Mapping[str, Any],
     devices: Mapping[str, object],
     request_owner_wake: Callable[[], None] | None = None,
+    display_name: str | None = None,
 ) -> NodeHost:
     """One node under the runtime's own lifecycle, named for its instance.
 
     The descriptor's output declarations for this draft, on the devices it
     bound, are the sole signal vocabulary; the plane refuses a node whose
-    own declarations differ.
+    own declarations differ.  ``display_name`` is what the operator called
+    the node when this run was built, kept with the run as history.
     """
 
     inputs = dataset_inputs(descriptor, values)
@@ -924,4 +949,5 @@ def make_host(
             for output in descriptor.artifact_outputs
         },
         task_name=str(descriptor.api_name),
+        display_name=display_name,
     )
