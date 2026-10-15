@@ -2247,10 +2247,13 @@ def future_public_probe(self, note: str, outcome: dict | None = None):
         panel = flow.console_presenter.panels[outcome['panel_id']]
         editor = panel.editor_host
         assert editor is not None and panel.editor_configuration is None
-        editor_gate.update(host=editor, original=editor.update_data, pending=[])
+        editor_gate.update(host=editor, original=editor.update_data, pending=[], failing=False)
         def hold(*args, **kwargs):
             answer = Future()
-            editor_gate['pending'].append((args, kwargs, answer))
+            if editor_gate['failing']:
+                answer.set_exception(RuntimeError('Rejected snapshot update'))
+            else:
+                editor_gate['pending'].append((args, kwargs, answer))
             return answer
         editor.update_data = hold
         return {'generation':panel.frozen_data.snapshot.ref.stream_generation.value}
@@ -2261,10 +2264,16 @@ def future_public_probe(self, note: str, outcome: dict | None = None):
         return {'released':True}
     if note == 'fail-editor':
         assert editor_gate['pending'], 'Refresh never reached the editor'
+        # Refresh adopts the card's picture at once and, when a newer
+        # publication is still being drawn, that one as well: both fail.
+        editor_gate['failing'] = True
         pending, editor_gate['pending'] = editor_gate['pending'], []
         for _args, _kwargs, answer in pending:
             answer.set_exception(RuntimeError('Rejected snapshot update'))
         return {'failed':True}
+    if note == 'hold-editor-again':
+        editor_gate['failing'] = False
+        return {'holding':True}
     if note == 'request-review':
         binding = flow.console_presenter.logic[outcome['node_id']]
         host = binding.host
@@ -2539,6 +2548,7 @@ async def client():
                     'path':['console','panels',0,'saving'],'equals':False,'timeout_seconds':20}))['matched']
                 old_archive = await call('lab_artifact', {'path':'data/retained-old.npz','limit':64000})
                 assert old_archive['datasets']['data']['ref']['stream_generation'] == old['result']['generation']
+                await call('lab_call', {'handle':'devices','method':'future_public_probe','arguments':{'note':'hold-editor-again'}})
                 saving = asyncio.create_task(call('lab_save', {'panel_id':panel_id,'path':'data/pending-refresh.png','refresh':True}))
                 retry_pending = await call('lab_wait_for', {'tool_name':'lab_state','arguments':{'panel_id':panel_id},
                     'path':['console','panels',0,'configuration_pending'],'equals':True,'timeout_seconds':10})
