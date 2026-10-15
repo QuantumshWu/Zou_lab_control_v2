@@ -1864,6 +1864,14 @@ popup = edit._popup
 app.processEvents()
 assert popup.isVisible()
 assert edit.config_name_label.isVisible() and edit.config_name.isVisible()
+# One label column, a form's: the widest label and its pad, so the Source
+# choice stands where a Subpulse's source popup puts it.
+from zlc_ui.pulse.scan_line_edit import popup_label_width
+layout = popup.layout()
+column = layout.contentsMargins().left() + popup_label_width() + layout.horizontalSpacing()
+assert edit.config_name_label.width() == popup_label_width()
+assert edit.config_name.mapTo(popup, QtCore.QPoint()).x() == column
+assert edit.source_switch.mapTo(popup, QtCore.QPoint()).x() == column
 assert not edit.config_name.isEnabled() and edit.config_name.currentText() == ''
 assert edit.default_value.text() == '12'
 assert edit.effective_value.text() == '12 · default'
@@ -2164,6 +2172,10 @@ card.source_button.click(); app.processEvents()
 from zlc_ui.fluent import FluentButton, FluentSegmentedButtons
 assert card._source_popup.isVisible() and card.source_switch.current() == "config"
 assert isinstance(card.source_switch, FluentSegmentedButtons), "the same Source control as a value slot's"
+from zlc_ui.pulse.scan_line_edit import popup_label_width
+margins = card._source_popup.layout().contentsMargins()
+assert card.source_switch.mapTo(card._source_popup, QtCore.QPoint()).x() == (
+    margins.left() + popup_label_width() + card._source_popup.layout().spacing()), "and at a value slot's x"
 assert not card._source_popup.findChildren(QtWidgets.QLineEdit), "source popup only selects Default/Config"
 assert not card._source_popup.findChildren(FluentButton), "a choice, not commands"
 popup_size = card._source_popup.size()

@@ -48,7 +48,7 @@ from .models import (
 
 #: The address the pulse server prints for a client on the same machine.  One
 #: constant so the seeded field, the tooltip and any host default agree.
-from .scan_line_edit import FluentScanLineEdit, _BindingButton
+from .scan_line_edit import FluentScanLineEdit, _BindingButton, popup_label_width
 from zlc_ui.status import counted
 
 
@@ -1147,8 +1147,11 @@ class ComponentCard(FluentGroupBox):
             layout = QtWidgets.QHBoxLayout(self._source_popup)
             layout.setContentsMargins(px(10), px(10), px(10), px(10))
             layout.setSpacing(px(6))
-            layout.addWidget(FluentLabel("Source"))
-            # The same choice, in the same control, as a value slot's Source.
+            # The same choice, in the same control and at the same x, as a
+            # value slot's Source: the two popups share one label column.
+            label = FluentLabel("Source")
+            label.setFixedWidth(popup_label_width())
+            layout.addWidget(label)
             self.source_switch = FluentSegmentedButtons((("default", "Default"), ("config", "Config")))
             layout.addWidget(self.source_switch)
             self.source_switch.activated.connect(self._commit_source)
