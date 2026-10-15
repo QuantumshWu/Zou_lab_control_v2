@@ -14,6 +14,7 @@ from data_factory import (
 )
 from zlc_data import OwnedSnapshot, REPEAT, SPATIAL_X, SPATIAL_Y
 from zlc_plot import AxisRef, ImagePlot, PlotSession
+from zlc_plot.primitives import ImagePointOverlay, PointStatus
 from zlc_plot.selectors import NumericRange
 
 def _square_field_snapshot() -> OwnedSnapshot:
@@ -124,3 +125,97 @@ def test_unequal_scan_steps_still_draw_square_cells_and_keep_the_zoom_box() -> N
         assert after == pytest.approx(before, abs=1.0e-9)
     finally:
         session.close()
+
+def _camera_window_snapshot(rows: int, columns: int) -> OwnedSnapshot:
+    """A camera ROI: whole-pixel coordinates starting at the window's corner."""
+
+    y = 1116.0 + np.arange(rows, dtype=float)
+    x = 2076.0 + np.arange(columns, dtype=float)
+    schema = make_dataset_schema(
+        repeat_domain(size=1),
+        mapped_domain_from_columns({"sample": [0.0]}),
+        cell_axes=(
+            axis("y", values=y, unit="m", role=SPATIAL_Y),
+            axis("x", values=x, unit="m", role=SPATIAL_X),
+        ),
+        dtype=np.float64,
+        value_unit="1",
+    )
+    # One bright spot on a noisy floor: something a radial fit finds.
+    spot = np.exp(
+        -(
+            (x[None, :] - x[columns // 3]) ** 2
+            + (y[:, None] - y[rows // 2]) ** 2
+        )
+        / (2.0 * 3.0**2)
+    )
+    noise = 0.05 * np.random.default_rng(7).random((rows, columns))
+    return make_snapshot(schema, (spot + noise)[None, None], revision=0)
+
+def _site_overlay(x: np.ndarray, y: np.ndarray) -> ImagePointOverlay:
+    """Sites on the picture's corner pixels and two standing outside it."""
+
+    sites = (
+        (x[0], y[0]),
+        (x[-1], y[-1]),
+        (x[0] - 30.0, y[0] - 25.0),
+        (x[-1] + 40.0, y[-1] + 35.0),
+    )
+    return ImagePointOverlay(
+        revision=1,
+        coordinates=np.asarray(sites, dtype=float),
+        point_ids=tuple(f"s{index}" for index in range(len(sites))),
+        static_statuses=(PointStatus.OCCUPIED,) * len(sites),
+    )
+
+@pytest.mark.parametrize(("rows", "columns"), ((80, 88), (64, 64)))
+def test_a_site_overlay_never_moves_the_image_limits(rows: int, columns: int) -> None:
+    """The limits are the picture's pixel edges, letterboxed to the square.
+
+    The longer side ends exactly at its outermost pixel edges; the shorter
+    one gains the same letterbox on both sides, and a square picture none.
+    Site rings, their labels, sites outside the picture and a fitted ring
+    are drawn on that frame and take no part in it -- neither in the limits
+    the axes show nor in the data limits an autoscale would read.
+    """
+
+    snapshot = _camera_window_snapshot(rows, columns)
+    spec = ImagePlot(AxisRef.cell_data("x"), AxisRef.cell_data("y"))
+    x = 2076.0 + np.arange(columns, dtype=float)
+    y = 1116.0 + np.arange(rows, dtype=float)
+    span = float(max(rows, columns))
+    x_pad = (span - columns) / 2.0
+    y_pad = (span - rows) / 2.0
+    expected_x = (x[0] - 0.5 - x_pad, x[-1] + 0.5 + x_pad)
+    expected_y = (y[0] - 0.5 - y_pad, y[-1] + 0.5 + y_pad)
+
+    bare = PlotSession(snapshot, spec, size="4x4")
+    marked = PlotSession(snapshot, spec, size="4x4")
+    try:
+        bare.rgba()
+        marked.set_parameter("show_point_labels", True)
+        marked.update_image_overlay(_site_overlay(x, y))
+        assert marked.fit("radial_gaussian_center", live=False).success
+        marked.rgba()
+        renderer = marked._renderer
+        assert renderer._artists["image:points"].get_visible()
+        assert renderer._fit_topologies[(None, ())][3]["ring"].get_visible()
+        for session in (bare, marked):
+            axes = session._renderer.primary_axes
+            assert tuple(sorted(map(float, axes.get_xlim()))) == pytest.approx(
+                expected_x, abs=1.0e-9
+            )
+            assert tuple(sorted(map(float, axes.get_ylim()))) == pytest.approx(
+                expected_y, abs=1.0e-9
+            )
+            data = axes.dataLim
+            assert expected_x[0] - 1.0e-9 <= data.x0 and data.x1 <= expected_x[1] + 1.0e-9
+            assert expected_y[0] - 1.0e-9 <= data.y0 and data.y1 <= expected_y[1] + 1.0e-9
+        bare_axes = bare._renderer.primary_axes
+        marked_axes = marked._renderer.primary_axes
+        assert marked_axes.get_xlim() == bare_axes.get_xlim()
+        assert marked_axes.get_ylim() == bare_axes.get_ylim()
+        assert marked_axes.bbox.bounds == bare_axes.bbox.bounds
+    finally:
+        marked.close()
+        bare.close()

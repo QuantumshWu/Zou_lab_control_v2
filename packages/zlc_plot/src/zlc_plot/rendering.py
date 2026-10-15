@@ -12287,7 +12287,10 @@ class MatplotlibRenderer:
                     facecolors="none", edgecolors=colours, linewidths=widths,
                     linestyles=["--" if value else "-" for value in dashed],
                     zorder=self.style.artists.point_zorder, clip_on=True)
-                axis.add_collection(collection)
+                # The picture's pixel edges (and their square letterbox) are
+                # the image's limits; a site ring or path drawn on top of it,
+                # even one standing outside the picture, never widens them.
+                axis.add_collection(collection, autolim=False)
                 self._artists[f"{key}:points"] = collection
             else:
                 collection.set_offsets(points)
@@ -12312,7 +12315,7 @@ class MatplotlibRenderer:
                 joined.set_snap(False)
                 joined._zlc_point_path_inputs = (points, paths, radii, colours, widths, dashed)
                 joined._zlc_point_path_signature = None
-                axis.add_collection(joined)
+                axis.add_collection(joined, autolim=False)
                 self._artists[f"{key}:point-paths"] = joined
             joined._zlc_point_path_inputs = (points, paths, radii, colours, widths, dashed)
             joined._zlc_point_path_signature = None
@@ -13342,7 +13345,9 @@ class MatplotlibRenderer:
             )
             center.set_visible(False)
             ring.set_visible(False)
-            axis.add_patch(ring)
+            # An artist, not a patch: the fitted ring sits on the picture and
+            # takes no part in the image's limits.
+            axis.add_artist(ring)
             self._fit_slots.update(center=center, ring=ring)
             self._fit_artists.extend((center, ring))
         elif family.startswith("components:"):
