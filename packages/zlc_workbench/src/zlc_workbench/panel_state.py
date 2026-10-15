@@ -89,7 +89,7 @@ def panel_data_shape(
 
     def declared_label(field: object, coordinate: object) -> str | None:
         """The producer's own name for a pinned coordinate -- a Frame
-        Survival pair is ``0-5``, not its position ``3`` on the pair axis."""
+        Survival pair is ``0→5``, not its position ``3`` on the pair axis."""
 
         domain, _colon, axis_id = str(field.name).removeprefix(FATE_PREFIX).partition(":")
         resolved = resolve_axis(schema, AxisRef(AxisDomain(domain), axis_id))
