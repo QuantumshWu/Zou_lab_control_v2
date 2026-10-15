@@ -135,11 +135,17 @@ def _file_name(path: Path) -> str:
 
 
 def _named_with_parent(path: Path) -> str:
-    """The name one folder further up: ``<day>/<run>`` for a run's artifact,
-    ``<folder>/<stem>`` for any other file."""
+    """The name with the nearest folder above it that adds a word:
+    ``<day>/<run>`` for a run's artifact, ``<folder>/<stem>`` for any other
+    file.  A folder named like the name itself (``calibration/calibration.json``)
+    or the run's ``final`` folder tells nothing apart and is passed over."""
 
-    named = path.parent.parent if path.parent.name == RUN_FINAL_FOLDER else path.parent
-    return f"{named.parent.name}/{_file_name(path)}" if named.parent.name else _file_name(path)
+    base = _file_name(path)
+    start = path.parent.parent.parent if path.parent.name == RUN_FINAL_FOLDER else path.parent
+    for folder in (start, *start.parents):
+        if folder.name and folder.name not in (base, RUN_FINAL_FOLDER):
+            return f"{folder.name}/{base}"
+    return base
 
 
 def claim_names(entries: Sequence[Mapping[str, object]]) -> tuple[str, ...]:
