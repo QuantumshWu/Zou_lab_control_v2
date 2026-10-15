@@ -60,6 +60,7 @@ from zlc_ui.fluent import (
     signals_blocked,
     window_pad,
 )
+from zlc_ui.status import sentence
 
 
 #: The editor's fixed row labels.  Its label column is the widest of these
@@ -595,6 +596,13 @@ class _DataEditorView(QtWidgets.QWidget):
         self._table_fit.setSingleShot(True)
         self._table_fit.setInterval(0)
         self._table_fit.timeout.connect(self._fit_table_to_page)
+        # A horizontal bar that comes or goes -- columns widened to their
+        # measured values, a window narrowed -- is a row the page loses or
+        # gains.
+        for table, _card in self._page_tables.values():
+            table.horizontalScrollBar().rangeChanged.connect(
+                lambda _low, _high: self._table_fit.start()
+            )
 
         self.name_edit.editingFinished.connect(lambda: self._dataset_field("name", self.name_edit.text()))
         self.dtype_combo.activated.connect(lambda _index: self._dataset_field("dtype", self.dtype_combo.currentData()))
@@ -699,9 +707,13 @@ class _DataEditorView(QtWidgets.QWidget):
         below = card.layout().contentsMargins().bottom()
         rows = table.verticalHeader()
         pitch = rows.sectionSize(0) if rows.count() else rows.defaultSectionSize()
+        # The horizontal bar only while the columns overflow, as the table
+        # counts it in its own height: one stretched Value column never
+        # shows it, and the row it was held for is a row of values.
+        bar = table.horizontalScrollBar()
         chrome = (
             table.horizontalHeader().sizeHint().height()
-            + table.horizontalScrollBar().sizeHint().height()
+            + (bar.sizeHint().height() if bar.maximum() > bar.minimum() else 0)
             + 2 * table.frameWidth()
         )
         fit = max(_LEAST_TABLE_ROWS, (viewport - above - below - chrome) // max(1, pitch))
@@ -723,7 +735,9 @@ class _DataEditorView(QtWidgets.QWidget):
         self._show_message(message)
 
     def _show_message(self, message: object) -> None:
-        text = str(message)
+        # One sentence, whoever words it: this editor's own refusals and
+        # what its presenter says alike.
+        text = sentence(str(message))
         self.message_label.setText(text)
         self.message_label.setVisible(bool(text))
         # A line over the commands is room the page no longer has.

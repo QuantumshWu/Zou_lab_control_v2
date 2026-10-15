@@ -705,6 +705,12 @@ for page, table, card in (('dataset', editor.axis_value_table, editor.axes_group
     assert page_bar.maximum() == 0 and not page_bar.isVisible(), page
     assert table.verticalScrollBar().maximum() > 0
     assert box(card, viewport)[3] <= viewport.height(), (page, box(card, viewport), viewport.height())
+    # Every row the room holds is a row of values: under the card, less
+    # than one more -- no room kept for a horizontal bar the axis's one
+    # stretched column never shows.
+    spare = viewport.height() - box(card, viewport)[3]
+    assert spare < table.verticalHeader().sectionSize(0), (page, spare)
+assert editor.axis_value_table.horizontalScrollBar().maximum() == 0
 # A value is never shown in part: the table scrolls by whole columns, and
 # the column the viewport's right edge cuts shows nothing.
 table = editor.value_table
