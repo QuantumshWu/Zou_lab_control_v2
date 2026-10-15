@@ -580,9 +580,12 @@ def _project_value(
     if declared == "int":
         return _project_integer(value, label=field.label)
     if declared == "float":
-        if isinstance(value, bool):
-            raise TypeError(f"{field.label} must be a finite number")
-        result = float(value)
+        try:
+            if isinstance(value, bool):
+                raise TypeError
+            result = float(value)
+        except (TypeError, ValueError):
+            raise TypeError(f"{field.label} must be a finite number") from None
         if not math.isfinite(result):
             raise ValueError(f"{field.label} must be finite")
         return result

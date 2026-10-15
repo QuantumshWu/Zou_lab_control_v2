@@ -22,7 +22,6 @@ from pathlib import Path
 from typing import Any
 import unicodedata
 
-from zlc_atom.authoring import project_field
 from zlc_atom.nodes import DatasetInputSpec, frame_claim_entries
 from zlc_durable import strict_json_loads, write_readable_json
 from zlc_runtime import split_signal_key, stable_signal_key
@@ -34,6 +33,7 @@ from .logic import (
     dataset_inputs,
     device_key_options,
     draft_devices,
+    logic_draft_value,
 )
 from .panel_catalog import task_console_panel_kind
 from .panel_state import PanelState
@@ -392,7 +392,7 @@ def resolve_layout(
             saved = _current_authoring_values(schema.fields, entry.values)
             for field in (field for field in schema.fields if field.name in saved):
                 try:
-                    project_field(field, saved[field.name])
+                    logic_draft_value(field, saved[field.name])
                 except (TypeError, ValueError) as refusal:
                     del saved[field.name]
                     notes.append(

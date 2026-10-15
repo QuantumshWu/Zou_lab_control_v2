@@ -56,7 +56,6 @@ from zlc_runtime import (
     stable_signal_key,
 )
 from zlc_ui import FormFieldProps, FormSpec
-from zlc_atom.authoring import project_field
 
 from .board import LiveBoard, _guarded_slot
 from .console_layout import (
@@ -82,6 +81,7 @@ from .logic import (
     device_key_options,
     draft_devices,
     finalize_logic_draft,
+    logic_draft_value,
     make_host,
     source_label,
     task_input_summary,
@@ -300,33 +300,38 @@ def _same_draft_value(previous: object, proposed: object) -> bool:
     return type(previous) is type(proposed) and previous == proposed
 
 
-def _values_refusal(
+def _drafted_values(
     subject: str, descriptor: Any, values: Mapping[str, Any]
-) -> str:
-    """Why ``values`` may not enter the node's draft, in one sentence, or "".
+) -> tuple[dict[str, Any], str]:
+    """``values`` as the node's draft keeps them and "", or why they may not
+    enter it, in one sentence.
 
     A name the schema does not declare is no setting of the node: kept, it
     would ride along in every later draft, Start and comparison with the
     running configuration, and no edit could take it out again.  A value
-    its field refuses (``project_field``) is one no Edit page can show.
-    Adding a row and changing its draft refuse both; an incomplete draft or
-    one a cross-field rule refuses stays a draft issue.
+    ``logic_draft_value`` refuses is one no Edit page can show.  Adding a
+    row and changing its draft refuse both; an incomplete draft, one a
+    cross-field rule refuses, and a number list's text still being typed
+    stay draft issues.
     """
 
     fields = {field.name: field for field in descriptor.authoring_schema.fields}
     unknown = sorted(str(name) for name in values if name not in fields)
     if unknown:
-        return (
+        return {}, (
             f"{subject} has no field "
             f"{', '.join(repr(name) for name in unknown)}; "
             f"its fields are {', '.join(fields)}"
         )
+    kept = dict(values)
     for name, value in values.items():
+        if str(fields[name].value_type) == "numeric_tuple" and isinstance(value, str):
+            continue
         try:
-            project_field(fields[name], value)
+            kept[name] = logic_draft_value(fields[name], value)
         except (TypeError, ValueError) as error:
-            return str(error)
-    return ""
+            return {}, str(error)
+    return kept, ""
 
 
 def _same_draft(draft: LogicDraft, other: LogicDraft) -> bool:
@@ -8555,20 +8560,21 @@ class ConsolePresenter:
             return ""
         names = self.logic_names()
         selected_name = logic_name_text(name) or selected_id
+        supplied, refusal = _drafted_values(descriptor.api_name, descriptor, values or {})
         problem = logic_name_problem(selected_id, selected_id, names) or (
             logic_name_problem(
                 selected_name, selected_id, names, self._reserved_headings()
             )
             if selected_name != selected_id
             else ""
-        ) or _values_refusal(descriptor.api_name, descriptor, dict(values or {}))
+        ) or refusal
         if problem:
             self._report(problem, severity="error")
             return ""
         drafted_values = {
             field.name: field.default for field in descriptor.authoring_schema.fields
         }
-        drafted_values.update(dict(values or {}))
+        drafted_values.update(supplied)
         options = device_key_options(
             descriptor,
             installation=self.session.installation,
@@ -8946,7 +8952,7 @@ class ConsolePresenter:
         if binding is None:
             return False
         if values is not None:
-            refusal = _values_refusal(binding.name, binding.descriptor, values)
+            values, refusal = _drafted_values(binding.name, binding.descriptor, values)
             if refusal:
                 self._report(refusal, severity="error")
                 return False

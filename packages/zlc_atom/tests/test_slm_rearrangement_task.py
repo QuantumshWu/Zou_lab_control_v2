@@ -1232,7 +1232,7 @@ def test_real_period_form_preserves_choice_identity_and_updates_disabled_nominal
         assert form.read_value("max_camera_step") == .75
         assert form.read_value("nominal_playback_seconds") == pytest.approx(32/60, abs=1e-6)
         assert form.read_value("intensity_error_percent") == 1.
-        with pytest.raises(ValueError, match="max_camera_step"):
+        with pytest.raises(ValueError, match="Maximum camera step must be at least"):
             SLM_REARRANGEMENT_SCHEMA.draft_values({**values, "frame_mode": "camera_step", "max_camera_step": 0.})
         resource = replace(resource, value=replace(sequence, periods=tuple(
             replace(period, name="Renamed first image") if period.period_id == "before" else period
