@@ -42,7 +42,7 @@ for _name in (
     _EXPORTS[_name] = ("zlc_ui.fluent.fluent", _name)
 for _name in (
     "COLUMN_KINDS", "FluentColumnSet", "FluentColumnLine", "hold_place", "error_note_label",
-    "show_note",
+    "show_note", "show_problem",
 ):
     _EXPORTS[_name] = ("zlc_ui.fluent.column_set", _name)
 for _name in (

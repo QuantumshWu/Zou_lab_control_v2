@@ -254,6 +254,28 @@ def _artifact_draft_value(value: object) -> object:
         return value
 
 
+def _shown_resource_path(value: object, directory: Path) -> str:
+    """A workspace resource's path as its field shows it.
+
+    A file inside the resource's own directory is named from there
+    (``imaging_template.json``): the name is what tells two pulses apart,
+    and as the end of a long absolute path it was the part a narrow field
+    pushed out of view.  Anything else is shown whole.  The field's tooltip
+    names the whole path either way (``FluentPathEdit`` reads a relative
+    text against its ``base_dir``, the same directory), and the draft keeps
+    what was written: finalization reads a relative name in this same
+    directory, so the shown text is a value it takes as it is.
+    """
+
+    selected = Path(str(value)).expanduser()
+    if not selected.is_absolute():
+        selected = directory / selected
+    selected = selected.resolve()
+    if directory in selected.parents:
+        return str(selected.relative_to(directory))
+    return str(selected)
+
+
 def _claims_projection(
     spec: Any,
     raw: object,
@@ -8344,10 +8366,7 @@ class ConsolePresenter:
             else:
                 value = binding.draft.values.get(field.name, field.default)
             if field.name in resource_fields and value:
-                selected = Path(str(value)).expanduser()
-                if not selected.is_absolute():
-                    selected = resource_directories[field.name] / selected
-                value = str(selected.resolve())
+                value = _shown_resource_path(value, resource_directories[field.name])
             form_values[field.name] = display_value(value)
         can_start = finalization.can_start and binding.pending is None
         can_stop = bool(

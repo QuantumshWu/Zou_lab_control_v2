@@ -10,7 +10,8 @@ stage's word) in the lead column, the operand under the operand, ``at`` under
 ``at``, the card's add commands in fixed slots and every × on one x, so a
 card reads as a row of a table rather than a sentence packed from its own
 left edge.  A problem or a result stands under its line, from the operand's
-text.
+text; a code card's example, status and error stand under its code box,
+from the code's text.  A problem reads as one sentence (``show_problem``).
 """
 
 from __future__ import annotations
@@ -25,9 +26,8 @@ from zlc_ui.fluent import (
     AXIS_GROUP_COLORS, FluentButton, FluentCheckBox, FluentCodeEdit, FluentColumnLine, FluentColumnSet,
     FluentComboBox, FluentFrame, FluentLabel, FluentLineEdit, FluentSegmentedButtons, card_pad,
     error_note_label, field_text_inset, fluent_scrollbar_thickness, hold_place, muted_note_label, popup_gap,
-    retire_widget, row_gap, scaled_px, section_gap, show_note, signals_blocked,
+    retire_widget, row_gap, scaled_px, section_gap, show_problem, signals_blocked,
 )
-from zlc_ui.status import sentence
 from zlc_ui.fluent.column_set import section_header
 from zlc_ui.fluent.fluent import _FluentRoundedMenu
 
@@ -115,10 +115,13 @@ def _card_column(card: QtWidgets.QWidget) -> tuple[QtWidgets.QVBoxLayout, QtWidg
     return lines, notes
 
 
-def _under_lines(columns: FluentColumnSet, label: QtWidgets.QLabel) -> QtWidgets.QLabel:
-    """A note under a card's lines, from the operand's text to the card's edge."""
+def _under_lines(columns: FluentColumnSet, label: QtWidgets.QLabel, column: str = "operand") -> QtWidgets.QLabel:
+    """A note under a card's lines, from the text of the field in ``column``
+    to the card's edge: the operand's under a structured card's lines, the
+    lead's under a code box, which starts there and reaches across the
+    card -- a note under a field starts where the field's text does."""
 
-    columns.follow(label, "operand", inset=field_text_inset())
+    columns.follow(label, column, inset=field_text_inset())
     return label
 
 
@@ -174,9 +177,11 @@ class _OutputCard(FluentFrame):
         self.mask = FluentComboBox()
         self.mask.activated.connect(lambda _index: self._edit(where=self.mask.currentData()))
         where.place("operand", self.mask, fill=True)
-        self.where_at = FluentComboBox()
+        # A mask with no frames leaves its pin's place empty, as the value's does.
+        self.where_at_label = hold_place(FluentLabel("at"))
+        self.where_at = hold_place(FluentComboBox())
         self.where_at.activated.connect(lambda _index: self._edit(where_at=self.where_at.currentData()))
-        where.place("at", FluentLabel("at"))
+        where.place("at", self.where_at_label)
         where.place("at", self.where_at, fill=True)
         self.where_is = FluentSegmentedButtons(((True, "true"), (False, "false")), self)
         self.where_is.activated.connect(lambda keep: self._edit(where_is=keep))
@@ -210,7 +215,11 @@ class _OutputCard(FluentFrame):
         # The options stand a section gap apart, twice a box's own gap to its
         # word, so each word reads as its own box's and not the next one's.
         self.over_host.setSpacing(section_gap())
-        statistic.place("operand", self.statistic, FluentLabel("over"), over, to="actions")
+        # "over" stands only before axes to reduce: a value with none yet
+        # (its source has not published, an earlier stage failed) ends the
+        # line at the statistic, not at a word with nothing after it.
+        self.over_word = FluentLabel("over")
+        statistic.place("operand", self.statistic, self.over_word, over, to="actions")
         self.over: dict[str, QtWidgets.QCheckBox] = {}
 
         self.preview = _under_lines(editor.columns, muted_note_label(""))
@@ -332,7 +341,10 @@ class _OutputCard(FluentFrame):
         self._fill(self.mask, context["booleans"], row["where"])
         mask_labels = (_labels_of(schema_of(row["where"])) or context["frames_of"].get(row["where"])
                        or ((row["where_at"],) if row["where_at"] else ()))
-        self._fill(self.where_at, ("", *mask_labels), row["where_at"])
+        self.where_at_label.setVisible(bool(mask_labels))
+        self.where_at.setVisible(bool(mask_labels))
+        if mask_labels:
+            self._fill(self.where_at, ("", *mask_labels), row["where_at"])
         self.where_is.set_current(bool(row["where_is"]))
 
         self.op.set_current(row["op"] or None)
@@ -368,6 +380,7 @@ class _OutputCard(FluentFrame):
         for name, box in self.over.items():
             with signals_blocked(box):
                 box.setChecked(name in chosen)
+        self.over_word.setVisible(bool(offered))
 
         # A run's failure names a row the schemas could not type; a row they
         # did type answers for itself.
@@ -378,9 +391,9 @@ class _OutputCard(FluentFrame):
             _output, stage, detail = context["failure"]
         else:
             stage, detail = None, ""
-        show_note(self.value_error, sentence(detail) if stage in ("name", "value") else "")
+        show_problem(self.value_error, detail if stage in ("name", "value") else "")
         for name, label in self.errors.items():
-            show_note(label, sentence(detail) if stage == name else "")
+            show_problem(label, detail if stage == name else "")
         # The draft's own problem, when it stands under a line shown here.
         stated = stage in ("name", "value") or (stage in self.lines and not self.lines[stage].isHidden())
         self.problem = str(error) if error is not None and stated else ""
@@ -450,14 +463,16 @@ class _CodeCard(FluentFrame):
         self.code.horizontalScrollBar().rangeChanged.connect(lambda _low, _high: self._fit_height())
         column.addWidget(self.code)
         self._inserts: tuple[str, ...] = ()
-        self.example = _under_lines(editor.columns, muted_note_label(""))
+        # The example, the status and the error are about the code box
+        # above them, so they start where its code does.
+        self.example = _under_lines(editor.columns, muted_note_label(""), "lead")
         self.example.setWordWrap(True)
         self.example.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
         notes.addWidget(self.example)
-        self.status = _under_lines(editor.columns, muted_note_label(""))
+        self.status = _under_lines(editor.columns, muted_note_label(""), "lead")
         self.status.setWordWrap(True)
         notes.addWidget(self.status)
-        self.error = _under_lines(editor.columns, error_note_label())
+        self.error = _under_lines(editor.columns, error_note_label(), "lead")
         notes.addWidget(self.error)
         self._fit_height()
 
@@ -519,7 +534,7 @@ class _CodeCard(FluentFrame):
         error = "" if not row["code"].strip() else (
             answer["error"].detail if answer["error"] is not None
             else failure[2] if failure is not None else "")
-        show_note(self.error, sentence(error))
+        show_problem(self.error, error)
         self.problem = str(answer["error"]) if row["code"].strip() and answer["error"] is not None else ""
         published = context["published"]
         self.status.setText(
@@ -802,7 +817,7 @@ class DeriveEditor(QtWidgets.QWidget):
         if cell is not None:
             expression += f".mean({cell!r})"
         return tuple(inserts), (f"e.g. result = {expression}   ·   isel/sel select, where masks, "
-                                "mean sum count min max std any all reduce named axes")
+                                "mean sum count min max std any all reduce named axes.")
 
 
 __all__ = ["DeriveEditor"]

@@ -2717,7 +2717,8 @@ class FluentPathEdit(QtWidgets.QWidget):
     opens a folder chooser; ``mode="file"`` an open-file chooser filtered by
     ``file_filter``.  Quacks like a line edit (``text`` / ``setText`` /
     ``setPlaceholderText`` / ``setToolTip``) and emits ``changed(str)`` so a form can
-    treat it exactly like a ``FluentLineEdit``.
+    treat it exactly like a ``FluentLineEdit``.  A relative text names a file in
+    ``base_dir`` (:meth:`named_path`); the tooltip names the whole path.
 
     ``refreshable=True`` adds a Refresh button that emits ``refresh_requested``
     without changing the path.  A file field points at something that is edited
@@ -2784,13 +2785,22 @@ class FluentPathEdit(QtWidgets.QWidget):
             self.edit.setText(picked)   # fires textChanged -> changed
             self.selected.emit(picked)
 
-    def _dialog_start(self) -> str:
-        """Where the Browse dialog opens: the current path if it's a real file/dir or sits in
-        a real directory the user typed; otherwise ``base_dir`` (the folder these files live
-        in, when it exists) so a BARE default like ``mot_field_template.json`` still lands in
-        the configured base directory rather than the CWD; otherwise the CWD."""
+    def named_path(self) -> str:
+        """The path the field names: a relative text is a name in ``base_dir``, the folder
+        these files live in (``imaging_template.json`` in a workspace's pulses), so the
+        field may show just the name while this -- and the tooltip -- is the whole path."""
         import os
-        cur = self.edit.text().strip()
+        text = self.edit.text().strip()
+        if text and self._base_dir and not os.path.isabs(os.path.expanduser(text)):
+            return os.path.normpath(os.path.join(os.path.abspath(self._base_dir), text))
+        return text
+
+    def _dialog_start(self) -> str:
+        """Where the Browse dialog opens: the named path if it's a real file/dir or sits in
+        a real directory; otherwise ``base_dir`` (the folder these files live in, when it
+        exists); otherwise the CWD."""
+        import os
+        cur = self.named_path()
         if cur and os.path.exists(cur):
             return cur
         parent = os.path.dirname(cur)
@@ -2820,7 +2830,7 @@ class FluentPathEdit(QtWidgets.QWidget):
         self.browse.setToolTip(self._hint)
 
     def _show_tooltip(self) -> None:
-        self.edit.setToolTip("\n".join(part for part in (self.edit.text(), self._hint) if part))
+        self.edit.setToolTip("\n".join(part for part in (self.named_path(), self._hint) if part))
 
 
 class FluentSectionLabel(FluentLabel):
@@ -8488,17 +8498,28 @@ class _SelectionGridModel(QtCore.QAbstractTableModel):
 
 
 def _grid_gutter() -> int:
-    """The gutter between a grid card and its cell's edge, on every side."""
+    """The gutter between a grid card and its cell's left and right edges."""
 
     return scaled_px(2, minimum=1)
 
 
+def _grid_row_insets() -> tuple[int, int]:
+    """``(above, below)`` a grid card in its row: one row gap shared between
+    them, so a row is a control high and a row gap -- the pitch of every
+    row of the form the grid stands in, its rows and the row after the grid
+    one rhythm.  An odd gap leaves its extra pixel below the card."""
+
+    gap = row_gap()
+    return gap // 2, gap - gap // 2
+
+
 def _grid_card_band(surface: QtWidgets.QWidget, cell: QtCore.QRect) -> tuple[float, float]:
     """``(top, bottom)`` of the cards of the row ``cell`` is in: the cell
-    less the gutter, snapped to device pixels.  The row label is centred on
-    the same band as the cards beside it."""
+    less its row insets, snapped to device pixels.  The row label is
+    centred on the same band as the cards beside it."""
 
-    raw = QtCore.QRectF(cell).adjusted(0, _grid_gutter(), 0, -_grid_gutter())
+    above, below = _grid_row_insets()
+    raw = QtCore.QRectF(cell).adjusted(0, above, 0, -below)
     return device_snap(surface, raw.top(), axis="y"), device_snap(surface, raw.bottom(), axis="y")
 
 
@@ -8529,7 +8550,8 @@ def _paint_grid_card(
     """One small card in a grid cell, and the rect its label goes in.
 
     Every card -- chosen, empty, derived, held -- has the SAME outer extent:
-    the cell inset by the gutter, snapped to device pixels, rounded like
+    the cell inset by the gutter across and its row insets down
+    (:func:`_grid_row_insets`), snapped to device pixels, rounded like
     every other face.  The face fills that extent.  An ``edge`` is drawn
     only where it says something, and always DASHED (a rule reached it,
     nobody has it, another row holds it): a whole-device-pixel stroke laid
@@ -8537,9 +8559,10 @@ def _paint_grid_card(
     large as its plain neighbours and the gutters stay even."""
 
     inset = _grid_gutter()
+    above, below = _grid_row_insets()
     # QRectF(QRect) is exclusive at the right and bottom already: the cell's
     # far edges are right() and bottom(), with no QRect "+ 1".
-    raw = QtCore.QRectF(cell).adjusted(inset, inset, -inset, -inset)
+    raw = QtCore.QRectF(cell).adjusted(inset, above, -inset, -below)
     left = device_snap(surface, raw.left())
     top = device_snap(surface, raw.top(), axis="y")
     right = device_snap(surface, raw.right())
@@ -8637,9 +8660,9 @@ class _SelectionGridDelegate(QtWidgets.QStyledItemDelegate):
         object as FluentButton's ghost ×: no face and no edge at rest, its
         glyph in MUTED_INK; under the pointer the RED_TINT face and RED_DARK
         ink, held down one shade deeper -- red at rest belongs to problems.
-        Its face is a square as tall as a control, centred in its cell like
-        a glyph button beside a field: the whole cell of a two-line row made
-        it a tall bar.  The glyph is centred on its ink."""
+        Its face is a square as tall as a control, on its row's band like
+        the cards beside it: the whole cell of a two-line row made it a
+        tall bar.  The glyph is centred on its ink."""
 
         grid = self.parent()
         cell = (index.row(), index.column())
@@ -8647,8 +8670,8 @@ class _SelectionGridDelegate(QtWidgets.QStyledItemDelegate):
         hovered = live and grid.hovered_action() == cell
         pressed = live and grid.pressed_action() == cell
         hover_face, pressed_face = _destructive_glyph_faces()
-        side = grid.row_height()
-        square = QtCore.QRect(0, 0, side, side)
+        # A one-line row's cell, insets and all, centred in this one.
+        square = QtCore.QRect(0, 0, grid.action_width(), grid.row_height())
         square.moveCenter(grid._card_cell(option.rect, index.row()).center())
         painter.save()
         rect = _paint_grid_card(
@@ -8703,6 +8726,16 @@ class _SelectionGridRowHeader(QtWidgets.QHeaderView):
     def _left(self) -> bool:
         return bool(self.defaultAlignment() & QtCore.Qt.AlignLeft)
 
+    def _insets(self) -> tuple[int, int]:
+        """``(left, right)`` of a label in its section.  A label ends a row
+        gap before the first card, where a form's label column ends before
+        its fields (the section ends a gutter short of the card, the label
+        the rest of the gap short of that); a left-aligned one starts on
+        the grid's own edge, the edge the content above and below it
+        shares, and a right-aligned one keeps a pad off it."""
+
+        return 0 if self._left() else scaled_px(8, minimum=5), self.parent()._label_offset()
+
     def sectionSizeFromContents(self, section: int) -> QtCore.QSize:  # noqa: N802 - Qt API
         label, note = self._texts(section)
         label_font, note_font = self._fonts()
@@ -8710,8 +8743,7 @@ class _SelectionGridRowHeader(QtWidgets.QHeaderView):
             QtGui.QFontMetrics(label_font).horizontalAdvance(label),
             QtGui.QFontMetrics(note_font).horizontalAdvance(note),
         )
-        pad = scaled_px(8, minimum=5)
-        return QtCore.QSize(width + pad * (1 if self._left() else 2), self.defaultSectionSize())
+        return QtCore.QSize(width + sum(self._insets()), self.defaultSectionSize())
 
     def paintSection(self, painter, rect, section: int) -> None:  # noqa: N802 - Qt API
         if not rect.isValid():
@@ -8720,10 +8752,8 @@ class _SelectionGridRowHeader(QtWidgets.QHeaderView):
         label_font, note_font = self._fonts()
         hovered = section == self._hovered and self.isEnabled()
         rect = self.parent()._card_cell(rect, section)
-        # Left-aligned labels start on the grid's own edge, the edge the
-        # content above and below it shares; right-aligned ones sit off it.
-        pad = scaled_px(8, minimum=5)
-        inner = rect.adjusted(0 if self._left() else pad, 0, -pad, 0)
+        left, right = self._insets()
+        inner = rect.adjusted(left, 0, -right, 0)
         align = QtCore.Qt.AlignLeft if self._left() else QtCore.Qt.AlignRight
         surface = self.viewport()
         band = _grid_card_band(surface, rect)
@@ -8922,31 +8952,39 @@ class FluentSelectionGrid(QtWidgets.QTableView):
         trailing = self._grid_model.action_columns()
         for column in trailing:
             # An action's column holds its square face and the gutters.
-            horizontal.resizeSection(column, gap if column == trailing.start else self.row_height())
+            horizontal.resizeSection(column, gap if column == trailing.start else self.action_width())
         rows_header = self.verticalHeader()
         height = max(self.row_height(), rows_header.two_line_height() if any(row_notes) else 0)
         rows_header.setDefaultSectionSize(height)
         if rows:
             # The grid ends where its last cards end: whatever follows it
-            # stands the layout's own gap away, not that and a gutter.
-            rows_header.resizeSection(len(rows) - 1, height - _grid_gutter())
+            # stands the layout's own gap away, not that and a row inset.
+            rows_header.resizeSection(len(rows) - 1, height - _grid_row_insets()[1])
         self.updateGeometry()
 
     @staticmethod
     def row_height() -> int:
-        """A one-line row: a card whose face is as tall as every control
-        beside the grid, and its gutters."""
+        """A one-line row's pitch: a card whose face is as tall as every
+        control beside the grid, and a row gap shared above and below it
+        (:func:`_grid_row_insets`) -- the pitch of the form's own rows."""
+
+        return control_height() + row_gap()
+
+    @staticmethod
+    def action_width() -> int:
+        """A row action's column: its square face, as wide as a control is
+        tall, and the gutters either side."""
 
         return control_height() + 2 * _grid_gutter()
 
     def _card_cell(self, rect: QtCore.QRect, row: int) -> QtCore.QRect:
         """The cell ``rect`` of ``row`` that its cards and label are laid
         in: the last row's section stops at its cards' bottom edge (the
-        grid has no gutter below it), so its cell is that section and the
-        gutter beneath it, and its cards are as tall as every other row's."""
+        grid has no inset below it), so its cell is that section and the
+        inset beneath it, and its cards are as tall as every other row's."""
 
         if row == self._grid_model.rowCount() - 1:
-            return QtCore.QRect(rect).adjusted(0, 0, 0, _grid_gutter())
+            return QtCore.QRect(rect).adjusted(0, 0, 0, _grid_row_insets()[1])
         return QtCore.QRect(rect)
 
     def set_label_width(self, width: int) -> None:

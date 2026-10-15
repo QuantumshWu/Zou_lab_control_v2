@@ -19,11 +19,12 @@ at which point it becomes the uniform grid the spins describe.
 
 Every row is a line of one column set, so the axes read as a table: the
 axis (a port, or a manual axis's name) starts on the editor's field edge,
-with "by hand" in the label column before a manual one; from, to, points,
+with "By hand" in the label column before a manual one; from, to, points,
 the unit, Range|Values and × stand at one x on every row.  What a row's
 values are ("custom values", a conversion running) and what is wrong with
 them stand under the row, from the axis's text, instead of in a column
-every row reserved for them.
+every row reserved for them.  A problem -- a row's, the plan's, the API
+values' -- reads as one sentence (:func:`show_problem`).
 """
 
 from __future__ import annotations
@@ -56,6 +57,7 @@ from zlc_ui.fluent import (
     scaled_px,
     section_gap,
     show_note,
+    show_problem,
     signals_blocked,
 )
 from zlc_ui.fluent.column_set import section_header
@@ -88,10 +90,10 @@ from .plan import (
 
 
 #: The word a manual axis carries in the label column: a hand moves it.
-_BY_HAND = "by hand"
+_BY_HAND = "By hand"
 #: Design px of label column an API value's name gets (see label_width_floor).
 _API_LABEL_ROOM = 180
-#: The columns of every axis row: "by hand" or nothing (the editor's label
+#: The columns of every axis row: "By hand" or nothing (the editor's label
 #: column), the axis, its values (the Range bank or the Values list), their
 #: unit, which of the two it plays, and its ×.
 _ROW_COLUMNS = (("kind", "fit"), ("axis", "stretch"), ("values", "fit"), ("unit", "fit"),
@@ -351,14 +353,14 @@ class _AxisRow(QtWidgets.QWidget):
                 if reject_unrepresentable:
                     for restored, (low, high, value, old_unit) in zip(spins[:index], previous[:index]):
                         restored.setRange(low, high, value=value, unit=old_unit)
-                    show_note(self.error_label, str(error))
+                    show_problem(self.error_label, str(error))
                     return False
         if self.manual:
             self.unit_label.setText("" if unit in ("", "1") else unit)
         else:
             self._mount_unit_picker(unit)
         if error:
-            show_note(self.error_label, str(error))
+            show_problem(self.error_label, str(error))
         return not error
 
     def _mount_unit_picker(self, unit: str) -> None:
@@ -441,7 +443,7 @@ class _AxisRow(QtWidgets.QWidget):
         try:
             explicit = parse_scan_values(entry["value_text"]) if entry["value_text"].strip() else ()
         except ValueError as error:
-            show_note(self.error_label, f"Cannot convert unit: {error}")
+            show_problem(self.error_label, f"cannot convert unit: {error}")
             return
         if entry["port"].startswith(DEVICE_PARAM_FAMILY):
             self.unit_change_requested.emit(self, entry, symbol)
@@ -481,7 +483,7 @@ class _AxisRow(QtWidgets.QWidget):
         error = (self.start_spin.property("numericError") or self.stop_spin.property("numericError")
                  or self.points_spin.property("numericError"))
         if error:
-            show_note(self.error_label, str(error))
+            show_problem(self.error_label, str(error))
             return
         if self._custom_values is not None:
             if len(self._custom_values) == 1:
@@ -633,7 +635,7 @@ class ScanPlanEditor(QtWidgets.QWidget):
     # ------------------------------------------------------- host contract
 
     def row_labels(self) -> tuple[str, ...]:
-        """The labels that set the editor's label column: "by hand" before
+        """The labels that set the editor's label column: "By hand" before
         a manual axis.  The API values' names stand in the column too, in
         the room :meth:`label_width_floor` keeps for them, never setting it:
         they come with the pulse, and the column -- and every field after
@@ -762,7 +764,7 @@ class ScanPlanEditor(QtWidgets.QWidget):
                 self._start_port_read()
                 return
             self._apply_projection(template_ports, sequence, plan_text, values_text)
-            show_note(self.problem, "Device range reads require the console's device worker.")
+            show_problem(self.problem, "device range reads require the console's device worker")
             return
         self._port_read_request = None
         self._apply_projection(template_ports, sequence, plan_text, values_text)
@@ -792,7 +794,7 @@ class ScanPlanEditor(QtWidgets.QWidget):
                 return
             if error is not None:
                 owner._refresh_summary()
-                show_note(owner.problem, f"Cannot read device ranges: {error}")
+                show_problem(owner.problem, f"cannot read device ranges: {error}")
                 return
             owner._port_read_request = None
             owner._device_scan_ports = (key, tuple(ports))
@@ -834,7 +836,7 @@ class ScanPlanEditor(QtWidgets.QWidget):
         key, field = device_port_parts(entry["port"])
         device = self._tunable_devices.get(key)
         if device is None or not callable(self._run_device_read):
-            show_note(row.error_label, "Device unit conversion is unavailable")
+            show_problem(row.error_label, "device unit conversion is unavailable")
             return
         request = object()
         row._unit_request = request
@@ -864,7 +866,7 @@ class ScanPlanEditor(QtWidgets.QWidget):
                 return
             if error is not None:
                 show_note(current.custom_label, "")
-                show_note(current.error_label, f"Cannot convert unit: {error}")
+                show_problem(current.error_label, f"cannot convert unit: {error}")
                 return
             values, port = result
             (port,) = label_device_scan_ports((port,), owner._device_labels)
@@ -982,7 +984,7 @@ class ScanPlanEditor(QtWidgets.QWidget):
         self._show_values(shown)
         # A pulse that cannot be read says so in the error line; the muted
         # note is for what the rows set.
-        show_note(self.values_error, broken)
+        show_problem(self.values_error, broken)
         self.values_note.setVisible(shown and not broken)
         if broken:
             return
@@ -1255,7 +1257,7 @@ class ScanPlanEditor(QtWidgets.QWidget):
     def _say(self, *, summary: str = "", problem: str = "") -> None:
         """Under the rows: what the plan is, or why it cannot be read."""
 
-        show_note(self.problem, problem)
+        show_problem(self.problem, problem)
         show_note(self.summary, summary)
 
     def _refresh_summary(self) -> None:

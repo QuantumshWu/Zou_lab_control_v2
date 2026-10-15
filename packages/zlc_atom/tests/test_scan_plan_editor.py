@@ -854,3 +854,27 @@ def test_an_api_axis_in_the_plan_locks_that_parameters_value_box() -> None:
     assert form.widget_for("dac:p0:dac").isEnabled(), "its axis left the plan"
     assert "swept" not in editor.values_note.text()
     editor.close()
+
+
+def test_a_problem_under_the_plan_reads_as_one_sentence_and_a_hand_axis_is_labelled() -> None:
+    """Whatever words it -- the plan, a row, the bench -- a problem under
+    the rows is one sentence ending in a full stop, as in every editor; and
+    a manual axis's word in the label column is a label like the others."""
+
+    editor = _editor()
+    try:
+        editor._add_manual_axis()
+        assert editor.row_labels() == ("By hand",)
+        # Two rows on one port: the plan says why it cannot be read.
+        editor._add_axis()
+        editor._add_axis()
+        assert editor.problem.text() == "a port may appear on one axis only."
+        row = editor._rows[-1]
+        editor._convert_axis_unit(row, {"port": "device:rf:ch1_power", "unit": "dBm",
+                                        "values": [0.0], "value_text": ""}, "mW")
+        assert row.error_label.text() == "device unit conversion is unavailable."
+        editor.update_projection({"form_values": {"plan": ""},
+                                  "bench_extras": {"tunable_devices": {"rf": object()}}})
+        assert editor.problem.text() == "device range reads require the console's device worker."
+    finally:
+        editor.deleteLater()
