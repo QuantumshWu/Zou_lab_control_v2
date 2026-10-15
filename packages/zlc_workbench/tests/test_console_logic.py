@@ -521,6 +521,7 @@ def test_editing_a_running_row_changes_only_its_shared_draft(presenter, session)
     # A value its field refuses never reaches the draft: no Edit page could show it.
     below = presenter.control_action("logic.update", {"node_id": node_id, "values": {"repeat": -1}})
     assert not below["accepted"] and below["error"] == "Repeat must be at least 0", below
+    assert edited() == (False, False, False) and presenter.edit_logic(node_id) is True
     assert presenter.update_logic_draft(node_id, values={"repeat": 9}) is True
     assert presenter.edit_logic(node_id) is True
     assert presenter.logic[node_id].draft.values["repeat"] == 9
@@ -670,6 +671,7 @@ def test_revert_restores_a_following_processors_source_and_calibration_rows(
     refused = presenter.control_action("logic.add", {"api_name": "occupancy", "values": {"nope": 1}})
     assert not refused["accepted"] and refused["node_id"] is None, refused
     assert refused["error"] == f"occupancy has no field 'nope'; its fields are {names}"
+    assert not presenter.logic and not presenter.view._rows, "a refused add left a row"
     node_id = presenter.add_logic("occupancy")
     presenter.update_logic_draft(
         node_id,
@@ -2694,6 +2696,8 @@ def test_a_renamed_node_is_called_by_its_name_and_addressed_by_its_id(presenter,
     renamed = presenter.control_action("logic.rename", {"node_id": occupancy_id, "name": "Loading"})
     assert (renamed["accepted"], renamed["status"]) == (True, "renamed")
     assert renamed["state"]["logic"][0]["name"] == "Loading"
+    same = presenter.control_action("logic.rename", {"node_id": occupancy_id, "name": "Loading"})
+    assert (same["accepted"], same["status"]) == (True, "unchanged"), same
     # A draft's issues name no node -- the acquisition's picker beside them
     # says which, by its name now -- so the refusal a Start leaves on the
     # row, a copy of the first, never keeps a name a rename changed.
