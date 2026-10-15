@@ -158,7 +158,7 @@ class _OutputCard(FluentFrame):
         # stay where the operator last found them.
         self.add = {}
         for stage in ("where", "combine", "statistic"):
-            button = hold_place(FluentButton(f"+ {stage}", self))
+            button = hold_place(FluentButton(f"+ {stage.capitalize()}", self))
             button.clicked.connect(lambda _checked=False, stage=stage: self._open(stage))
             self.add[stage] = button
         line.place("actions", *self.add.values())
@@ -206,7 +206,9 @@ class _OutputCard(FluentFrame):
         over = QtWidgets.QWidget(self)
         self.over_host = QtWidgets.QHBoxLayout(over)
         self.over_host.setContentsMargins(0, 0, 0, 0)
-        self.over_host.setSpacing(row_gap())
+        # The options stand a section gap apart, twice a box's own gap to its
+        # word, so each word reads as its own box's and not the next one's.
+        self.over_host.setSpacing(section_gap())
         statistic.place("operand", self.statistic, FluentLabel("over"), over, to="actions")
         self.over: dict[str, QtWidgets.QCheckBox] = {}
 

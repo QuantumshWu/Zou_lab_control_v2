@@ -1087,23 +1087,25 @@ class ScanPlanEditor(QtWidgets.QWidget):
         self._refresh_values_note()
 
     def _refresh_values_note(self) -> None:
-        """The note reads the rows for what the plan sweeps, every time.
+        """The note reads the rows and the plan afresh on every call.
 
-        Handed the swept set by its callers, one of them -- the one a box's
-        own normalization reaches -- handed it nothing, and the note lost
-        the plan's parameters the moment a box settled.
+        The count is of the free rows only: a row an ``api:`` axis walks is
+        the plan's, so it is named among what the plan sweeps and never
+        counted as one that runs what the pulse carries.
         """
 
         parts = []
-        offered = len(self.values_form.keys)
-        if offered:
+        walked = self._walked_parameters()
+        free = sum(1 for name in self.values_form.keys if name not in walked)
+        if free:
+            set_here = len(self._overrides())
             parts.append(
-                f"{len(self._overrides())} of {offered} set for this run; "
-                "the rest run what the pulse carries."
+                f"{set_here} of {free} set for this run"
+                + ("; the rest run what the pulse carries." if set_here < free else ".")
             )
-        swept = (self._scanned_parameters() | self._walked_parameters()) & set(self._authored)
+        swept = (self._scanned_parameters() | walked) & set(self._authored)
         if swept:
-            parts.append(f"swept by the plan: {', '.join(sorted(swept))}.")
+            parts.append(f"Swept by the plan: {', '.join(sorted(swept))}.")
         self.values_note.setText(" ".join(parts))
 
     def set_mutation_enabled(self, enabled: bool) -> None:

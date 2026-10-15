@@ -24,6 +24,7 @@ from dataclasses import dataclass
 
 from zlc_plot.semantics import schema_structure
 from zlc_runtime import split_signal_key
+from zlc_ui import SUMMARY_SEPARATOR
 
 
 __all__ = [
@@ -78,9 +79,10 @@ def project_signals(
 
 
 def signal_label(name: str, schema: object) -> str:
-    """What to call one signal for a person: its readable name and its shape."""
+    """What to call one signal for a person: its readable name and its shape,
+    parted by the one summary separator (``frames · (1) × (3) × (96 × 128)``)."""
 
-    return f"{signal_output_name(name)}  [{format_signal_shape(schema)}]"
+    return f"{signal_output_name(name)}{SUMMARY_SEPARATOR}{format_signal_shape(schema)}"
 
 
 def format_signal_shape(schema: object) -> str:

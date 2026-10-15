@@ -299,8 +299,9 @@ def test_starting_a_node_runs_it_and_the_row_says_so(presenter, session) -> None
     assert state["signals"][0]["publication"] is not None
     json.dumps(state, allow_nan=False)
     occupancy_id = presenter.add_logic("occupancy")
+    # The source picker names the output; its shape is the editor's to show.
     assert presenter.logic_editor_projection(occupancy_id)["source_labels"] == {
-        frames_signal: f"frames  [{expected}]"
+        frames_signal: "frames"
     }
 
 
@@ -1253,6 +1254,14 @@ def test_a_processor_adds_with_an_unresolved_source_and_no_modal(
     assert presenter.view.logic_editors[node_id]["source_options"] == (
         stable_signal_key(camera_id, "frames"),
     )
+    # Declared and not yet published, it is named in the words it will
+    # keep once it publishes: its producer, then its output.
+    assert presenter.view.logic_editors[node_id]["source_labels"] == {
+        stable_signal_key(camera_id, "frames"): "frames"
+    }
+    assert presenter.view.logic_editors[node_id]["source_groups"] == {
+        stable_signal_key(camera_id, "frames"): camera_id
+    }
 
     presenter.view.logic_draft_changed.emit(
         node_id,

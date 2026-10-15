@@ -17,7 +17,8 @@ frame pairs as ONE labelled point axis.  The selection is a rule resolved
 against the frames a cycle actually carries -- every forward pair, the
 consecutive ones, those from the first frame or those to the last -- or an
 explicit list of pairs.  Every forward pair of a three-frame cycle is the pair
-entries "0-1", "0-2", "1-2" straight from the data -- one identity per
+entries "0→1", "0→2", "1→2" straight from the data (:func:`pair_label`, the
+one spelling of a pair; a dash is a range of frames) -- one identity per
 pair, the calibration model-axis pattern (numeric identity, readable
 labels).  A pair is WHICH sub-measurement of the cycle is being asked
 about, exactly as the frames it was derived from are: the frames sit on
@@ -70,6 +71,14 @@ SURVIVAL_OUTPUTS = (
         "survival", "frame_survival.survival", index_by_source=True
     ),
 )
+
+
+def pair_label(start: object, end: object) -> str:
+    """How a pair of frames is written everywhere -- the editor's grid cells,
+    its tooltips and notes, and the published pair axis: ``0→2``.  A dash is
+    kept for a range of frames (``0-2``), so the two never read alike."""
+
+    return f"{start}→{end}"
 
 
 def _forward_pairs(frames: int) -> tuple[tuple[int, int], ...]:
@@ -272,7 +281,7 @@ class FrameSurvivalProcessor:
             len(pairs),
             tuple(range(len(pairs))),
             coordinate_labels=tuple(
-                f"{frame_names[condition]}-{frame_names[value]}"
+                pair_label(frame_names[condition], frame_names[value])
                 for condition, value in pairs
             ),
         )
@@ -438,4 +447,4 @@ class FrameSurvivalProcessor:
         }
 
 
-__all__ = ["PAIR_RULES", "SURVIVAL_OUTPUTS", "FrameSurvivalProcessor"]
+__all__ = ["PAIR_RULES", "SURVIVAL_OUTPUTS", "FrameSurvivalProcessor", "pair_label"]

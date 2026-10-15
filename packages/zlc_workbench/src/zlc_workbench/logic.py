@@ -590,20 +590,6 @@ def finalize_logic_draft(
     )
 
 
-def claim_names(entries: Sequence[Mapping[str, Any]]) -> tuple[str, ...]:
-    """What each frame-claims row is called in a problem sentence.
-
-    The file's stem, as the editor's rows show it, or "row N" for a row with
-    no file yet.  The draft issues and the claims projection both name rows
-    through here: the console matches one against the other by equality.
-    """
-
-    return tuple(
-        Path(entry["path"]).stem or f"row {index + 1}"
-        for index, entry in enumerate(entries)
-    )
-
-
 def _resolve_frame_claims(
     descriptor: Any,
     spec: Any,
@@ -620,7 +606,7 @@ def _resolve_frame_claims(
     None only when the value is not rows of claims at all, or has none.
     """
 
-    from zlc_atom.nodes import FrameClaim, check_claims, frame_claim_entries, frame_problems
+    from zlc_atom.nodes import FrameClaim, check_claims, claim_names, frame_claim_entries, frame_problems
 
     try:
         entries = frame_claim_entries(raw)

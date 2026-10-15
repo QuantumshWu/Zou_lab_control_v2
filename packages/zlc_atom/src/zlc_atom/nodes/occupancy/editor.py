@@ -25,8 +25,8 @@ editor's label column, shared with the form, so the first card, the model
 choice and the form's fields start on one edge.  The column is set by the
 labels that stay ("Readout model", the form's) and a fixed room for file
 names, never by a file name itself, so it does not move as files come and
-go.  A row names its file by its stem --
-every calibration is a .json, so the extension tells no row from another --
+go.  A row is named as every sentence about it names it
+(:func:`claim_names`: the file's stem, or "row N" before it has a file),
 elided in the middle when it is wider than the column; the tooltip reads
 the whole path.  The console resolves the
 files and projects how the source's frames read them; this widget only
@@ -34,8 +34,6 @@ draws that and writes the edits back.
 """
 
 from __future__ import annotations
-
-from pathlib import Path
 
 from PyQt5 import QtCore, QtGui, QtWidgets
 
@@ -50,6 +48,7 @@ from zlc_ui.fluent import (
     fluent_font_size,
     fluent_open_path,
     muted_note_label,
+    retire_widget,
     row_gap,
     scaled_px,
     setting_label_width,
@@ -57,7 +56,7 @@ from zlc_ui.fluent import (
 )
 from zlc_ui.fluent.column_set import section_header
 
-from zlc_atom.nodes._framework.frames import FIRST, LAST, REST, canonical_frames, reach_frames
+from zlc_atom.nodes._framework.frames import FIRST, LAST, REST, canonical_frames, claim_names, reach_frames
 from zlc_atom.nodes.calibration import DEFAULT_READOUT_MODEL_CHOICE, READOUT_MODEL_CHOICES
 
 #: The artifact input this editor manages.
@@ -97,8 +96,15 @@ class CalibrationsEditor(QtWidgets.QWidget):
         self.grid.selection_edited.connect(self._marked)
         self.grid.row_action.connect(self.row_action)
         layout.addWidget(self.grid, 0, QtCore.Qt.AlignLeft)
-        self.note = error_note_label()
-        layout.addWidget(self.note)
+        # One red block per problem, half a row gap apart: a problem that
+        # wraps is still told from the next one.
+        self.problems = QtWidgets.QWidget(self)
+        self._problem_layout = QtWidgets.QVBoxLayout(self.problems)
+        self._problem_layout.setContentsMargins(0, 0, 0, 0)
+        self._problem_layout.setSpacing(row_gap() // 2)
+        self._problem_labels: list[QtWidgets.QLabel] = []
+        self.problems.hide()
+        layout.addWidget(self.problems)
         self.model_row = QtWidgets.QWidget(self)
         model_layout = QtWidgets.QHBoxLayout(self.model_row)
         model_layout.setContentsMargins(0, 0, 0, 0)
@@ -195,7 +201,7 @@ class CalibrationsEditor(QtWidgets.QWidget):
         selected: list[tuple[int, int]] = []
         states: dict[tuple[int, int], str] = {}
         tips: dict[tuple[int, int], str] = {}
-        names = tuple(_name(entry) for entry in entries)
+        names = claim_names(entries)
         for row, entry in enumerate(entries):
             for column, token in enumerate(self._columns):
                 if token is _GAP:
@@ -240,7 +246,7 @@ class CalibrationsEditor(QtWidgets.QWidget):
             ) if part)
             for index, (entry, item) in enumerate(zip(entries, files))
         )
-        fitted = tuple(_fitted(_stem(entry), self._label_width) for entry in entries)
+        fitted = tuple(_fitted(name, self._label_width) for name in names)
         shown = (fitted, labels, tuple(sorted(cells.items())), row_tips)
         if shown != self._shown:
             self._shown = shown
@@ -264,7 +270,21 @@ class CalibrationsEditor(QtWidgets.QWidget):
             self.summary.setText(f"{names[0]} reads every frame")
         else:
             self.summary.setText(f"{count} frames · each read once")
-        show_note(self.note, "\n".join(problems))
+        self._show_problems(problems)
+
+    def _show_problems(self, problems) -> None:
+        """Each problem as its own sentence in its own block, ending in a full
+        stop.  Not capitalised: a problem may start with a file's stem."""
+
+        labels = self._problem_labels
+        while len(labels) > len(problems):
+            retire_widget(labels.pop())
+        while len(labels) < len(problems):
+            labels.append(error_note_label())
+            self._problem_layout.addWidget(labels[-1])
+        for label, problem in zip(labels, problems):
+            show_note(label, problem if problem.endswith(".") else f"{problem}.")
+        self.problems.setVisible(bool(problems))
 
     # ---------------------------------------------------------------- editing
 
@@ -342,14 +362,6 @@ class CalibrationsEditor(QtWidgets.QWidget):
 
     def set_mutation_enabled(self, enabled: bool) -> None:
         self.setEnabled(bool(enabled))
-
-
-def _name(entry) -> str:
-    return Path(entry["path"]).name if entry["path"] else "(no file)"
-
-
-def _stem(entry) -> str:
-    return Path(entry["path"]).stem if entry["path"] else "(no file)"
 
 
 def _fitted(name: str, width: int | None) -> str:

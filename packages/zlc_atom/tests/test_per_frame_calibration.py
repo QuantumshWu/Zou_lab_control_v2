@@ -298,9 +298,9 @@ def test_a_calibration_arms_its_camera_with_the_longest_window_and_shows_it() ->
 def _claims_projection(entries, frames):
     """What the console projects for the calibrations editor."""
 
-    from zlc_atom.nodes import check_claims, frame_problems, reach_frames
+    from zlc_atom.nodes import check_claims, claim_names, frame_problems, reach_frames
 
-    names = tuple(Path(entry["path"]).stem for entry in entries)
+    names = claim_names(entries)
     claimed = tuple(entry["frames"] for entry in entries)
     problems, reads = (), None
     try:
@@ -324,10 +324,10 @@ def _claims_projection(entries, frames):
 
 
 def test_the_calibrations_editor_gives_frames_to_files_by_clicking(monkeypatch) -> None:
-    from PyQt5 import QtCore, QtTest
+    from PyQt5 import QtCore, QtTest, QtWidgets
 
     from zlc_atom.nodes.occupancy import editor as editor_module
-    from zlc_ui.fluent import scaled_px, setting_label_width
+    from zlc_ui.fluent import row_gap, scaled_px, setting_label_width
     from zlc_ui.qt import ensure_qt_app
 
     app = ensure_qt_app(["zlc-calibrations-editor-test"])
@@ -354,6 +354,10 @@ def test_the_calibrations_editor_gives_frames_to_files_by_clicking(monkeypatch) 
                                 grid.visualRect(index).center())
         app.processEvents()
         return drafts[-1]["artifact_inputs"]["calibrations"]
+
+    def problems():
+        return [label.text() for label in editor.problems.findChildren(QtWidgets.QLabel)
+                if not label.isHidden()] if editor.problems.isVisible() else []
 
     def click(row, column):
         assert grid.model().index(row, column).flags() & QtCore.Qt.ItemIsSelectable, (row, column)
@@ -406,7 +410,9 @@ def test_the_calibrations_editor_gives_frames_to_files_by_clicking(monkeypatch) 
         assert grid.selected_cells() == ((0, 0), (0, 5), (1, 2))
         project((middle, readout))
         assert header(5) == "2" and state(0, 5) == "warning"
-        assert "load names middle frame 2" in editor.note.text()
+        assert problems() == [
+            "load names middle frame 2, but the source carries 3 frames (0-2); "
+            "a numbered middle frame never stands for the first or the last."]
         assert state(1, 1) == "derived", "the new last frame is read as rest, not as middle 2"
         assert click(0, 5)[0] == {"path": load["path"], "frames": ("first",)}
         # Each row ends, after a gap, with its own remove cell: never a claim.
@@ -431,6 +437,22 @@ def test_the_calibrations_editor_gives_frames_to_files_by_clicking(monkeypatch) 
         editor.add_file("C:/data/extra.json")
         assert drafts[-1]["artifact_inputs"]["calibrations"][-1] == {
             "path": "C:/data/extra.json", "frames": ()}, "Rest is taken; the new file starts with no frame"
+        # Each problem is its own block and its own sentence, so where one
+        # ends and the next begins reads at once.
+        project(({"path": load["path"], "frames": (4, "first")},
+                 {"path": readout["path"], "frames": ("last",)}))
+        assert problems() == [
+            "load names middle frame 4, but the source carries 3 frames (0-2); "
+            "a numbered middle frame never stands for the first or the last.",
+            "frame 1 has no file: give it to one, or let one read the rest."]
+        blocks = [label for label in editor.problems.findChildren(QtWidgets.QLabel) if not label.isHidden()]
+        assert blocks[1].y() - blocks[0].geometry().bottom() - 1 == row_gap() // 2
+        # A row is named as every sentence about it names it: by its stem,
+        # or "row N" before it has a file.
+        project(({"path": "", "frames": ()}, readout))
+        assert grid.model().headerData(0, QtCore.Qt.Vertical) == "row 1"
+        project((readout,))
+        assert editor.summary.text() == "readout reads every frame"
         project(())
         assert not grid.isVisible() and editor.summary.text() == "No calibration yet"
         assert not editor.model_row.isVisible() and editor.add_button.isVisible()

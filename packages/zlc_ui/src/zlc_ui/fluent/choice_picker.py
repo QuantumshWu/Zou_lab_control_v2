@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from ..status import SUMMARY_SEPARATOR
 from .fluent import FluentTreeComboBox, signals_blocked as _signals_blocked
 
 
@@ -47,7 +48,8 @@ def grouped_choice_items(
     A choice is listed once, under the first source that names it: the tree
     picker keys its leaves by choice and refuses a key listed twice, so a
     signal two producers publish would otherwise fill the flat combo and
-    raise out of the tree one.
+    raise out of the tree one.  A leaf's description and state follow its
+    label after the one summary separator (``count · int · ready``).
     """
 
     names = sorted({str(name) for name in (names or [])})
@@ -66,10 +68,8 @@ def grouped_choice_items(
         for key in by_source[source]:
             short = _choice_short_label(key, labels)
             description = metadata.get(key)
-            detail = f"  [{description}]" if description else ""
-            state = choice_state(key, metadata, sources, state_labels=state_labels)
-            suffix = f"  {state}" if state else ""
-            items.append((f"    {short}{detail}{suffix}", key))
+            parts = (short, description, choice_state(key, metadata, sources, state_labels=state_labels))
+            items.append(("    " + SUMMARY_SEPARATOR.join(str(part) for part in parts if part), key))
     return items
 
 
