@@ -142,11 +142,8 @@ class LogicCandidate:
 
 @dataclass
 class LogicBinding:
-    """One stable TaskConsole row and its current or pending run.
-
-    It used to carry its ROW as well -- a widget, held by the layer that is
-    not allowed to hold one.  The row lives in the window now, and this side
-    names the node instead.
+    """One stable TaskConsole row and its current or pending run; the row
+    widget lives in the window.
 
     ``node_id`` is the node's identity, minted once and never changed: every
     signal key, reference, lease, layout and MCP address spells it.
@@ -401,11 +398,8 @@ def finalize_logic_draft(
 
     ``previous`` is this row's last finalization: a file it read is taken
     from it again, decoded or not, while the draft still names the same
-    path.  Files are read
-    at the explicit boundaries -- opening Edit, Refresh, Start -- which pass
-    none; a keystroke in an unrelated field re-decoded an SLM-sized context
-    and every calibration the row names, and quietly picked up whatever had
-    changed on disk.
+    path.  Files are read only at the explicit boundaries -- opening Edit,
+    Refresh, Start -- which pass none, never on a keystroke.
 
     ``source_frames`` is how many frames a cycle of the source carries, when
     that is known: frame claims are then checked against it as well.
@@ -689,13 +683,10 @@ def _resolve_frame_claims(
 ) -> tuple | None:
     """A frame-claims input's rows, each with its file resolved where it could be.
 
-    The claims are checked as far as what is known allows: among themselves
-    always, against the source's cycle once its frame count is known.  The
-    processor makes the same check against the frames that actually arrive.
-    A row reading no frame is parked: kept with whatever its file is, and
-    refused for nothing -- not a missing or unreadable file, not being the
-    same file as a row that reads.  None only when the value is not rows of
-    claims at all, or has none.
+    The claims are checked (:mod:`zlc_atom.nodes._framework.frames`) among
+    themselves always, against the source's cycle once its frame count is
+    known; a parked row is refused for nothing, not even a missing file.
+    None only when the value is not rows of claims at all, or has none.
     """
 
     from zlc_atom.nodes import (

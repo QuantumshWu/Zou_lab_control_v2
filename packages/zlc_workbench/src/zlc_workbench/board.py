@@ -202,9 +202,7 @@ class LiveBoard:
         """Owe these panels a staging pass regardless of their cadence.
 
         The display interval paces what the bench PUBLISHES; it must not
-        pace what the operator ASKS for.  Refresh used to hope the next
-        natural beat covered the panel, which cost a whole cadence when
-        the beat was not due.  Owed panels stage on the next tick whatever
+        pace what the operator ASKS for.  Owed panels stage on the next tick whatever
         the clock says -- the same debt a held component already uses.
         """
 
@@ -367,11 +365,9 @@ def attach_qt(
 ) -> Any:
     """Drive one beat from a Qt event loop.
 
-    It takes the beat rather than the board, and that is the whole point.  This
-    used to tick and commit the board itself, which is most of a beat and not
-    all of it -- so the shipped window ran a different beat from the one every
-    test exercises, and Pause, node polling and panel-error reporting were dead
-    on screen while passing headlessly.
+    It takes the beat rather than the board, so the shipped window runs the
+    same whole beat (Pause, node polling, panel-error reporting) every test
+    exercises.
 
     A timer callback IS the GUI thread, and it is therefore also the boundary
     where an exception stops being reportable.  ``_guarded_slot`` owns that

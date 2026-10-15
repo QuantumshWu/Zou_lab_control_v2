@@ -122,10 +122,7 @@ __all__ = [
 
 
 #: What a legal time unit is belongs to zlc_pulse, which enforces it on every
-#: period it accepts.  This window used to declare its own four and leave out
-#: the one zlc_pulse also takes, so a pulse authored in ticks raised KeyError
-#: inside the projection -- from a Qt slot, which ends the process rather than
-#: drawing anything.  Offered shortest first, which is presentation and is all
+#: period it accepts.  Offered shortest first, which is presentation and is all
 #: this line decides.
 _TIME_UNITS = TIME_UNIT_CHOICES
 
@@ -208,13 +205,9 @@ def _bound_text(number: float, unit: str, binding_unit: str) -> str:
 
 
 def _readable(nanoseconds: float) -> str:
-    """One duration, in the scale a person would have written it in.
-
-    This used to pick a unit by walking the table until one fitted and then
-    print ``%g``, which is a third number formatter with its own idea of how
-    many digits a value has.  There is one now, it knows the whole prefix
-    ladder rather than four rows of it, and what it prints can be typed back.
-    """
+    """One duration, in the scale a person would have written it in, by the
+    one number formatter (the whole prefix ladder; what it prints can be
+    typed back)."""
 
     seconds = float(Fraction(str(float(nanoseconds))) / nanoseconds_per("s"))
     return format_quantity(seconds, "s")
@@ -819,9 +812,7 @@ def _analog_mode(period: PulsePeriod, port: Any) -> str:
     """What this period does to one DAC: step to a value, ramp, or hold.
 
     No entry means HOLD -- the output keeps whatever the period before it left
-    there.  This used to answer "edge", which says "step to a value" beside a
-    box with no value in it, so every DAC nobody had touched read as a
-    half-filled row rather than as an output sitting where it was put.
+    there.
     """
 
     step = next((item for item in period.analog_steps if item.port == port.key), None)
@@ -1146,8 +1137,7 @@ def preview_candidate(
     """The one timeline/size/status value every drawing of a pulse uses.
 
     The editor's Preview page and the Figure viewer's Pulse tab both draw
-    through it: the viewer used to repeat the size rule beside its own copy
-    of the timeline call, and never said how long the pulse played.
+    through it.
     """
 
     data = timeline_of(sequence, include_off=include_off)
@@ -2284,8 +2274,8 @@ class PulseEditorPresenter:
         """Replace what is being edited with one ``zlc.pulse`` JSON file.
 
         Attached, a pulse written for other wiring is moved onto the board
-        exactly as Connect moves the one already open: the file's own wiring
-        was a target the board then refused to load.  One written for this
+        exactly as Connect moves the one already open, since the board would
+        refuse to load the file's own wiring.  One written for this
         board's wiring and clock opens as its file has it.
         """
 
@@ -3430,11 +3420,8 @@ class PulseEditorPresenter:
 
         Everything in ``board``/``pins``/``_board_state`` is something the
         sequencer said about ITSELF -- a fact of the connection, not a property
-        of this editor.  Keeping it after hanging up left the editor believing
-        it was still attached forever after its first connection: the Target
-        page went on reporting "wiring read from the attached board" and stayed
-        read-only, so Offline -- the one mode whose entire point is authoring a
-        target -- could never author one again.
+        of this editor, and goes with the connection, so Offline can author a
+        target again.
 
         An injected sequencer is left alone, and so is its description: this
         editor did not open that connection and does not get to end it.
@@ -3491,10 +3478,8 @@ class PulseEditorPresenter:
 
         That is what Sync means, and the direction it has to run: a notebook or
         a raw API call changes the device behind this window's back, and
-        nothing else lets the window catch up.  It used to push the other way
-        -- editor onto board -- which is what On Pulse does anyway, so the
-        button both duplicated one action and left the one nobody else
-        performs undone.
+        nothing else lets the window catch up.  (Editor onto board is On
+        Pulse.)
 
         The board keeps the sequence it was handed, so this is a read: what
         comes back is the pulse the hardware will actually play, not this
@@ -4062,17 +4047,12 @@ class PulseEditorPresenter:
         repeats complete table sweeps.  A bracket remains an internal timeline
         loop and never chooses either count.
 
-        NOTHING here waits for the board.  A run is started and the display
-        beat says what the board is doing, which is how the forever path always
-        worked -- the finite path used to block the GUI thread on wait_done()
-        instead, and the one control that would have helped, Stop, is the one a
-        blocked event loop cannot deliver.
-
-        There is nothing left for that wait to protect.  Firing over an
-        unfinished shot cannot happen: ``load`` and ``fire`` both call
-        ``_require_idle()`` and
-        raise, and On Pulse stops a running board before loading anyway.  The
-        invariant lives with the device that owns it.
+        NOTHING here waits for the board: a run is started and the display
+        beat says what the board is doing, so Stop is always deliverable.
+        Firing over an unfinished shot cannot happen: ``load`` and ``fire``
+        both call ``_require_idle()`` and raise, and On Pulse stops a running
+        board before loading anyway.  The invariant lives with the device
+        that owns it.
         """
 
         if self.sequence is None:
@@ -4437,11 +4417,8 @@ class PulseEditorPresenter:
         """Ask the board what it is doing; show the answer when it comes.
 
         The asking is device I/O: a socket round trip to the pulse server,
-        which answers only once whatever it is doing on the UART lets it.  The
-        window's timer used to make that round trip ON the GUI thread every
-        100 ms, and the experiment machine's main thread spent a third of its
-        time blocked in that socket -- up to a second at a stretch -- while
-        clicks, tabs and paints waited behind it.  With a device worker the
+        which answers only once whatever it is doing on the UART lets it, so
+        it never runs on the GUI thread's timer.  With a device worker the
         question goes there and the answer comes back through the owner turn;
         without one it is asked here and answered before this returns.
         ``then`` runs after the answer has been shown.  Returns whether an
@@ -4465,11 +4442,9 @@ class PulseEditorPresenter:
         and every button ask through ``ask_run_state`` instead, so that
         an answer the board is slow to give never holds the GUI.
 
-        It used to be called from every redraw, and every edit redraws, so
-        ticking a checkbox or typing a digit made an RPyC round trip to the
-        pulse server.  A local edit cannot change what the board is doing; it
-        can only change whether what the board is doing still matches what is
-        on screen, and that comparison is local.
+        Never called from a redraw: a local edit cannot change what the board
+        is doing, only whether it still matches what is on screen, and that
+        comparison is local.
         """
 
         self._adopt_board_state(self.board_state())
@@ -5098,9 +5073,7 @@ class PulseEditorPresenter:
             return self._scan_program_refused("The scan program did not assign scan_table", present=present)
         if self.sequence is None:
             return False
-        # Through zlc_pulse, which owns what a legal table is.  This window
-        # used to decide it here and again on the file-load path, and the two
-        # did not agree: the loader skipped the width check entirely.  Checked
+        # Through zlc_pulse, which owns what a legal table is, checked
         # against the fields marked Scan NOW, which is what the table drives.
         try:
             scanned, rows = scan_table_for(self.sequence, table)
@@ -5551,12 +5524,10 @@ class PulseEditorPresenter:
         Both halves, because each can outlive the other: unbinding the last
         field leaves yesterday's rows in memory, and a bound field can exist
         before any table is generated.  The upload gate and the run-length
-        decision read THIS, together -- they used to disagree, so a stale
-        table changed what On Pulse MEANS: a pulse with no scan left in it
-        played once and stopped, its own repeat overwritten by a ghost.
-        Scan repeats is a statement about a scan; without one it governs
-        nothing.  The fields are the TABLE's: other Scan fields it does not
-        drive play their own values and arm nothing.
+        decision read THIS, together, so a stale table never changes what On
+        Pulse means.  Scan repeats is a statement about a scan; without one
+        it governs nothing.  The fields are the TABLE's: other Scan fields
+        it does not drive play their own values and arm nothing.
         """
 
         if not self._state.scan_rows or self.sequence is None:
@@ -5985,11 +5956,10 @@ class PulseEditorPresenter:
             return None
         try:
             candidate = replace_sequence(self.sequence, **changes)
-            # A binding cannot outlive the field it is about.  Clearing a port
-            # and choosing Hold both take a DAC step away, and the binding on
-            # it used to stay: every later read raised on a pulse that looked
-            # fine.  Pruning here covers every gesture that changes shape,
-            # including ones written after this one.
+            # A binding cannot outlive the field it is about (clearing a port
+            # and choosing Hold both take a DAC step away).  Pruning here
+            # covers every gesture that changes shape, including ones written
+            # after this one.
             pruned, dropped = prune_orphaned_bindings(candidate)
             if dropped:
                 self._warn(
@@ -6279,17 +6249,12 @@ def replace_sequence(sequence: PulseSequence, **changes: Any) -> PulseSequence:
     this safe: an edit that would produce something the hardware cannot play
     raises here rather than surviving to compile time.
 
-    It raises, and the presenter catches it in one place -- see ``_rebuilt``.
-    Every call site used to test the result for None, which this never returned,
-    so a refused value escaped through a Qt slot instead: PyQt5 ends the process
-    on an exception out of a slot, so typing a duration the model rejects closed
-    the window with no message at all.
+    It raises, and the presenter catches it in one place -- see ``_rebuilt`` --
+    since PyQt5 ends the process on an exception out of a slot.
 
     ``dataclasses.replace`` carries every field the model has, so the model is
-    the one list of what a pulse is made of.  A list written here forgets the
-    field added after it was written -- the config parameters were -- and a
-    rename or a typed duration then rebuilt the pulse without them: a board
-    calibration silently unbound by an edit that never mentioned it.
+    the one list of what a pulse is made of; a list written here would forget
+    a field added after it.
     """
 
     return replace(sequence, **changes)

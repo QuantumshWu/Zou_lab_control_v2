@@ -1,9 +1,9 @@
 """Editing the apparatus: which devices this bench has, and how each is set up.
 
-An apparatus is the one thing a session cannot start without, and until now the
-only way to write one was by hand.  ``apparatus.json`` is plain data on purpose
--- it survives a session, it can be diffed, it can be mailed to whoever is
-debugging the bench tomorrow -- and this is the window that authors it.
+An apparatus is the one thing a session cannot start without.
+``apparatus.json`` is plain data on purpose -- it survives a session, it can
+be diffed, it can be mailed to whoever is debugging the bench tomorrow --
+and this is the window that authors it.
 
 The presenter decides nothing about devices.  What device types exist, what each
 one needs told, and what a legal value is all belong to zlc_atom, which already
@@ -197,11 +197,8 @@ class DeviceManagerPresenter:
         #: How the slow, Qt-free half of a button runs.  Synchronously here,
         #: which is what every headless test drives and what a notebook wants;
         #: a GUI composition passes one that runs the work on a worker thread
-        #: and delivers the result back on the GUI thread.  Without it, both
-        #: buttons ran vendor bring-up inside their click slot: the event loop
-        #: never turned, so the busy state and the "scanning hardware" line
-        #: below were never painted, and the window was a frozen rectangle for
-        #: however long the hardware took.
+        #: and delivers the result back on the GUI thread, so the event loop
+        #: turns while vendor bring-up runs.
         self._run_off_thread = _run_inline if run_off_thread is None else run_off_thread
         self._close_worker = (lambda: True) if close_worker is None else close_worker
         self.view = view
@@ -209,7 +206,7 @@ class DeviceManagerPresenter:
         # The real catalog, not a copy of it: a window that listed its own
         # device types would drift from the ones that can actually be built.
         #: Families this machine cannot build today, named so the picker can
-        #: say why rather than leaving a hole where a type used to be.
+        #: say why.
         self.catalog = catalog if catalog is not None else discover_device_catalog()
         if not isinstance(self.catalog, DeviceCatalogSnapshot):
             raise TypeError("catalog must be DeviceCatalogSnapshot or None")
@@ -295,9 +292,7 @@ class DeviceManagerPresenter:
         self.view.device_remote_toggled.connect(self._guarded(self.toggle_remote))
         self.view.device_close_requested.connect(self._guarded(self.close_device))
         self.view.device_log_requested.connect(self._guarded(self.show_device_log))
-        # What this machine cannot offer is named too, with the reason: a
-        # family that will not import used to be simply absent, which reads
-        # exactly like a family that does not exist.
+        # What this machine cannot offer is named too, with the reason.
         self.view.set_device_choices(
             tuple(
                 (
@@ -568,15 +563,12 @@ class DeviceManagerPresenter:
     def _scan_families(self):
         """Ask every family at once, and let none of them hold the others up.
 
-        One unreachable thing used to cost its whole timeout before the next
-        family was even asked, sequentially, with no way to give up: a dialled
-        sequencer that answers nothing is five seconds, and a vendor
-        enumeration that hangs is forever.  A family that has not answered by
-        the deadline is reported as such and the scan goes on; its thread is
-        left to finish on its own, because a blocked vendor call cannot be
-        cancelled and pretending otherwise would misreport what stopped.
-        That thread is a daemon: a vendor call that never returns must not
-        also keep the process from exiting once every window is closed.
+        A family that has not answered by the deadline is reported as such
+        and the scan goes on; its thread is left to finish on its own,
+        because a blocked vendor call cannot be cancelled and pretending
+        otherwise would misreport what stopped.  That thread is a daemon: a
+        vendor call that never returns must not also keep the process from
+        exiting once every window is closed.
 
         Nothing here touches the view: this half is what runs off the GUI
         thread, and the deliver callback above is what runs back on it.
@@ -1027,9 +1019,8 @@ class DeviceManagerPresenter:
                     f"the bench fabric could not start: {error}", severity="error"
                 )
                 return False
-        # The server this machine holds for the device has answered nobody
-        # else until now: on offer means reachable, so the door opens
-        # before the announcement that sends peers to it.
+        # On offer means reachable, so the device server admits peers
+        # before the announcement that sends them to it.
         if leaf.admit_peers is not None:
             leaf.admit_peers(True)
         self._announcer.publish(record)
@@ -1362,15 +1353,12 @@ class DeviceManagerPresenter:
     def _outcome(self, session: object, config: InstallationConfig) -> tuple[str, bool]:
         """What an Init or Apply left unopened or unused, for its status line.
 
-        A COUNT IS NOT A REASON.  The session hands over the exception that
-        stopped each declared leaf, and reporting only how many there were
-        threw away the one thing an operator needs: a bench that says "2
-        failed" and nothing else leaves them to guess which two, and why.
-        Each reason is put on the status line, and the whole traceback goes
-        to the log, where a long one can be read without fighting a
-        single-line strip.  A card whose type this machine cannot build is
-        one of them; a card the Apply removed is none of them.  Simulation
-        settings no virtual device reads are kept, and said.
+        A COUNT IS NOT A REASON: each leaf's reason is put on the status
+        line, and the whole traceback goes to the log, where a long one
+        can be read without fighting a single-line strip.  A card whose
+        type this machine cannot build is one of them; a card the Apply
+        removed is none of them.  Simulation settings no virtual device
+        reads are kept, and said.
         """
 
         failures = dict(session.failures)

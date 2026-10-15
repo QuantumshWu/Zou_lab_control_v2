@@ -382,9 +382,7 @@ def fit_expression_refusal(description: object) -> str:
     Distinct from a section having nothing to offer yet -- "choose a
     compatible signal", "fit models resolve when the plot surface mounts" --
     which are states of the panel and not refusals of anything anybody
-    wrote.  Both used to be spelled into the same ``*_unavailable`` string,
-    so a reader could not tell them apart without matching the words; the
-    refusal is asked for by name here instead.
+    wrote; the refusal is asked for by name here.
     """
 
     error = getattr(description, "fit_expression_error", None)
@@ -417,10 +415,8 @@ def fit_output_fields(
                 getattr(parameter, "symbol", None)
                 or name_words(name)
             )
-            # ONE switch per parameter.  There used to be a second, for a
-            # separately published "<name>_err" signal; a parameter now
-            # carries its own uncertainty, so there is one thing to publish
-            # and one thing to switch.
+            # ONE switch per parameter: a parameter carries its own
+            # uncertainty, so there is one thing to publish and to switch.
             fit_outputs.append((name, label))
         break
     return tuple(fit_outputs)
@@ -499,9 +495,8 @@ def _plain_state(values: Mapping[str, Any]) -> Mapping[str, Any]:
 def _validated_crosshair(value: Mapping[str, Any]) -> Mapping[str, Any]:
     """A crosshair marker is empty, or exactly one finite (x, y).
 
-    Judged at the record's door like every other field.  A marker with a
-    missing or non-finite coordinate used to pass here and fail at the
-    host, when the panel mounted -- far from the layout that carried it.
+    Judged at the record's door like every other field, not at the host
+    when the panel mounts.
     """
 
     marker = dict(value)
@@ -620,11 +615,8 @@ def project_panel_state(
     do not apply; current fields still reject illegal values. The strict
     runtime edit APIs are not involved in restoring obsolete UI fields.
 
-    THE projection, for every consumer.  It used to exist only at the mount,
-    and only for the appearance bag: the semantic bag was handed over whole,
-    so a curve cell's ``group`` reached a histogram cell that has no such
-    field, ``updated_spec`` raised ``KeyError('group')``, and the cell kind
-    simply did not change -- the operator saw nothing happen at all.
+    THE projection, for every consumer and every bag (a curve cell's
+    ``group`` must not reach a histogram cell that has no such field).
     """
 
     from zlc_plot.config import DEFAULTS

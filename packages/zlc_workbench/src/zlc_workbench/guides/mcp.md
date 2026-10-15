@@ -157,22 +157,15 @@ remain requires_human and cannot be answered by the scientific review tool.
 
 Occupancy reads Camera frames plus the chosen Calibrations and publishes counts,
 occupied and judgement validity. Its `calibrations` artifact input is a list of
-rows, each a Calibration file and the frames it reads: `first` (frame 0; a 0 is
-stored as `first`), `last`, positive numbers for middle frames between them, and
-`rest` (every frame no other row names). One row with `["rest"]` reads every
-frame; frames taken at another exposure get their own row, e.g.
+rows, each a Calibration file and the frames it reads; the claim rules are
+`lab_catalog(api_name='occupancy').logic[0].artifact_inputs[0].frames_rule`.
+One row with `["rest"]` reads every frame; frames taken at another exposure get
+their own row, e.g.
 `lab_action('logic.update', {'node_id': OCC, 'artifact_inputs': {'calibrations':
 [{'path': LOAD, 'frames': ['first']}, {'path': READOUT, 'frames': ['rest']}]}})`.
-Each frame is read by exactly one row; a collision or a frame nobody reads is
-reported by name, never resolved silently, and the rows are never rewritten
-when the frame count changes. A middle index the source does not carry stays in
-the draft, reads nothing and is listed in `notes`: it does not stop a run, and
-it cannot become the new last frame. Clicking the last column authors `last`,
-not its temporary numeric index. A row with `"frames": []` is parked: kept in
-the draft, the layout and the run record, reading nothing, and its file is not
-checked against the other rows (it may even be missing). The operator keeps
-such rows on purpose -- never delete one, or give it frames, to make Start
-work; only a list in which no row reads a frame is refused.
+Clicking the last column authors `last`, not its temporary numeric index. A row
+with `"frames": []` is parked: the operator keeps such rows on purpose -- never
+delete one, or give it frames, to make Start work.
 `lab_catalog(node_id=OCC).node.artifact_claims.calibrations` returns the rows,
 the frames each actually reads (`reads`), the parked rows (`unused`), what each
 file is or why it was not read (`files[i].summary`, `files[i].unread`), the

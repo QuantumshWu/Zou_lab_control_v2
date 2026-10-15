@@ -2,8 +2,7 @@
 
 An archive already carries everything: the datasets with their axes, the
 apparatus state, what was asked of it, which pulse drove it, which panel showed
-what.  Until now it carried them for nobody -- `read_archive` returned a nested
-JSON document, and reading a run six months later meant reading that document.
+what.
 
 Two jobs, kept apart:
 
@@ -1420,9 +1419,8 @@ def read_figure_archive(
     """Everything opening one archive reads: its description, each Dataset
     with its plot recipe, and the lineage and source it was saved with.
 
-    The one body behind the viewer's open and ``figure_viewer --check``.  The
-    check used to read the description alone, so an archive whose overlay
-    would not restore printed "figure ready" and then failed to open.
+    The one body behind the viewer's open and ``figure_viewer --check``, so
+    the check reads everything the open does.
     """
 
     resolved = Path(path).resolve()

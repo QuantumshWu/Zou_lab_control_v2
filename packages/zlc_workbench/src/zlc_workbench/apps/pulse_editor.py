@@ -503,8 +503,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if arguments.check:
         # The same composition, through the same entry: a smoke test, not
-        # acceptance.  It used to build the body class directly, which is the
-        # one shape this layer must not know.
+        # acceptance.  Never the body class directly.
         def run_immediately(work, delivered, failed) -> None:
             try:
                 result = work()
