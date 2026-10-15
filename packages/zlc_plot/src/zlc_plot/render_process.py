@@ -2296,7 +2296,12 @@ class RenderProcess:
                     # what a block being filled a second time cannot survive.
                     destination = memoryview(transport.buf)
                     if nbytes:
-                        destination[offset:offset + nbytes] = source
+                        # numpy copies with the GIL released; a memoryview
+                        # slice assignment holds it for the whole plane.
+                        np.copyto(
+                            np.frombuffer(destination, np.uint8, nbytes, offset),
+                            np.frombuffer(source, np.uint8),
+                        )
                     descriptors.append((transport.name, offset, nbytes))
                     offset += nbytes
                 finally:
