@@ -1410,6 +1410,7 @@ def test_component_instances_and_subpulse_files_share_edits_not_ownership(sequen
         assert presenter._subpulse_draft == exported
         _run_scan(view, "import numpy as np\nscan_table = np.array([[0.002], [0.004]])\n")
         assert len(presenter.state.scan_rows) == 2
+        table = presenter.state.scan_rows, presenter.state.scan_fields
         copies = []
         for _ in range(2):
             view.insert_component_before = ("period", before.period_id)
@@ -1420,8 +1421,10 @@ def test_component_instances_and_subpulse_files_share_edits_not_ownership(sequen
             assert presenter.sequence.periods[0].period_id == copies[0].period_ids[0]
             assert tuple(p.period_id for p in presenter.sequence.periods).index(copies[-1].period_ids[-1]) < tuple(
                 p.period_id for p in presenter.sequence.periods).index(before.period_id)
-            assert presenter.state.scan_rows == ()
-            assert presenter.state.scan_source_dirty
+            # Each copy brings its own Scan field; the table keeps driving the
+            # field it was made for, and the copies play their own values.
+            assert (presenter.state.scan_rows, presenter.state.scan_fields) == table
+        assert len(presenter.sequence.scan_bindings) == 3
         assert len({component.component_id for component in presenter.sequence.components}) == 3
         ids = tuple(period.period_id for period in presenter.sequence.periods)
         assert len(ids) == len(set(ids))
@@ -3075,9 +3078,9 @@ def test_the_starter_program_matches_the_bound_fields(presenter, sequence) -> No
     presenter.view.binding_committed.emit('duration', period_id, None, True, 'default')
     presenter.view.binding_committed.emit('analog', period_id, dac.key, True, 'default')
 
-    presenter.view.scan_template_requested.emit("column_stack")
+    presenter.view.scan_template_requested.emit("columns")
 
-    assert "np.column_stack" in scan.page.source_text
+    assert "scan_table = {" in scan.page.source_text
     # One column per bound slot, each seeded by its own kind.
     assert scan.page.source_text.count("np.linspace") == 2
     assert "DAC code" in scan.page.source_text
@@ -3142,20 +3145,31 @@ def test_the_table_is_uploaded_with_the_pulse(presenter, sequence) -> None:
     board.events.clear()
     period_id = sequence.periods[3].period_id
     presenter.view.duration_committed.emit(period_id, 1.0, "s")
-    presenter.view.binding_committed.emit('duration', period_id, None, True, 'default')
+    for marked in (sequence.periods[1], sequence.periods[3], sequence.periods[2]):
+        presenter.view.binding_committed.emit('duration', marked.period_id, None, True, 'default')
+    field = f"duration:{period_id}"
+    # Three fields are marked Scan and the table names one: only that one is
+    # a slot, and the other two play their own values.
     # A whole-second span still fits the row counter at one-tick resolution.
     # The board receives absolute tick counts, while Sync must report the
     # exact values those ticks play rather than the unquantized requests.
     _run_scan(
         presenter.view,
         "import numpy as np\n"
-        "scan_table = np.array([0.500000004, 1.0, 1.499999996]).reshape(-1, 1)\n"
+        f"scan_table = {{'{field}': np.array([0.500000004, 1.0, 1.499999996])}}\n"
     )
 
     assert presenter.fire() is True
     assert uploaded == [((25_000_000,), (50_000_000,), (75_000_000,))]
+    assert [binding.field_id for binding in board._applied.source.scan_bindings] == [field]
     assert presenter.sync_from_sequencer() is True
     assert presenter._state.scan_rows == ((0.5,), (1.0,), (1.5,))
+    assert presenter._state.scan_fields == ((field, "s"),)
+    assert len(presenter.sequence.scan_bindings) == 3
+    # Marking one more field Scan does not touch a table that does not name it.
+    presenter.view.binding_committed.emit('duration', sequence.periods[0].period_id, None, True, 'default')
+    assert presenter._state.scan_rows == ((0.5,), (1.0,), (1.5,))
+    assert presenter.control_state()["scan"]["fields"] == [field]
 
 
 def test_the_status_dot_says_what_the_board_is_doing(presenter, sequence) -> None:
@@ -3307,12 +3321,14 @@ def test_a_loaded_scan_file_is_checked_the_way_a_generated_one_is(presenter, tmp
     assert validate_scan_table(np.full((4, len(columns)), 0.001), columns)
 
     authored = ((0.0041,), (0.0052,), (0.0063,))
-    presenter._take_scan_rows(authored)
+    field, = (binding.field_id for binding in presenter.sequence.scan_bindings)
+    presenter._take_scan_rows(presenter.sequence, authored)
     presenter.path = str(tmp_path / "pulse.json")
     saved = presenter.save_scan_array()
-    np.testing.assert_allclose(np.load(saved), authored)
+    # Saved with its field's id, so it finds its field again.
+    np.testing.assert_allclose(np.load(saved)[field], [row[0] for row in authored])
 
-    presenter._take_scan_rows(((0.01,),))
+    presenter._take_scan_rows(presenter.sequence, ((0.01,),))
     presenter.view.open_answer = saved
     assert presenter.load_scan_array() is True
     assert presenter._state.scan_rows == authored
@@ -3325,10 +3341,28 @@ def test_a_loaded_scan_file_is_checked_the_way_a_generated_one_is(presenter, tmp
     flat = tmp_path / "sweep.npy"
     np.save(flat, np.asarray([row[0] for row in authored]))
     for path in (one_column, flat):
-        presenter._take_scan_rows(((0.01,),))
+        presenter._take_scan_rows(presenter.sequence, ((0.01,),))
         presenter.view.open_answer = str(path)
         assert presenter.load_scan_array() is True, presenter.view.warnings
         assert presenter._state.scan_rows == authored
+
+    # With a second Scan field the unnamed one-column files no longer say
+    # which field they sweep, but a file that names its column -- a header
+    # line, or the .npy Save array wrote -- drives that field alone.
+    presenter.view.binding_committed.emit('duration', presenter.sequence.periods[1].period_id, None, True, 'default')
+    named = tmp_path / "named.csv"
+    named.write_text(f"{field}\n0.0041\n0.0052\n0.0063\n", encoding="utf-8")
+    for path in (one_column, named, Path(saved)):
+        presenter.view.open_answer = str(path)
+        assert presenter.load_scan_array() is (path != one_column)
+        if path == one_column:
+            assert "2 field(s)" in presenter.view.warnings[-1]
+            continue
+        assert presenter._state.scan_rows == authored
+        assert presenter._state.scan_fields == ((field, presenter.sequence.scan_bindings[0].unit),)
+    # Unmarking the field the table does not drive leaves the table alone.
+    presenter.view.binding_committed.emit('duration', presenter.sequence.periods[1].period_id, None, False, 'default')
+    assert presenter._state.scan_rows == authored
 
     # The public API uses the same file/table owner and its existing workers,
     # without the view's picker or a message dialog after the call returned.
@@ -3346,7 +3380,7 @@ def test_a_loaded_scan_file_is_checked_the_way_a_generated_one_is(presenter, tmp
         destination = tmp_path / "explicit.npy"
         assert api.invoke_public("save_scan_array", {"path": str(destination)}) is True
         worker.deliver_until(lambda: not api.control_state()["pending"])
-        np.testing.assert_array_equal(np.load(destination), authored)
+        np.testing.assert_array_equal(np.load(destination)[field], [row[0] for row in authored])
         assert str(destination) in api.control_state()["scan"]["progress"]
 
         program = tmp_path / "scan.py"

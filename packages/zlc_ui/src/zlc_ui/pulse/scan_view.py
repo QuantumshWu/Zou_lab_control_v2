@@ -118,10 +118,10 @@ class PulseScanView(QtWidgets.QWidget):
         template_buttons = QtWidgets.QHBoxLayout()
         template_buttons.setSpacing(row_gap())
         self.scan_load_program_button = FluentButton("Open program…")
-        self.scan_column_template_button = FluentButton("Template: column_stack")
+        self.scan_column_template_button = FluentButton("Template: columns")
         self.scan_grid_template_button = FluentButton("Template: grid")
         self.scan_load_program_button.clicked.connect(self.load_program_requested)
-        self.scan_column_template_button.clicked.connect(lambda: self.template_requested.emit("column_stack"))
+        self.scan_column_template_button.clicked.connect(lambda: self.template_requested.emit("columns"))
         self.scan_grid_template_button.clicked.connect(lambda: self.template_requested.emit("grid"))
         for button in (self.scan_load_program_button, self.scan_column_template_button, self.scan_grid_template_button):
             button.setFixedHeight(row_height())

@@ -89,9 +89,17 @@ Browsing or editing the file path does not change the main-card source choice.
 Save Pulse writes embedded defaults; Save writes the selected file. Only applied
 Config sources get green cards/boundaries on the main timeline.
 
-Saved scan arrays retain ordered field IDs and units. A source update that changes
-this schema requires regeneration or an explicit Clear array; that action keeps
-the Python draft and emits `scan_array_clear_requested` through the handle.
+A scan table drives the fields it names, which need not be every field marked
+Scan: the program assigns `scan_table` as a mapping from field id (or the label
+the editor shows) to its column -- the Template: columns / grid starters write
+one entry per Scan field, and deleting an entry leaves that field playing its
+own value -- or as an array with one column per Scan field. The editor keeps the
+table's ordered field IDs and units; Save array writes them as the .npy's column
+names, and Open array reads names from such a file or from a CSV/text first line.
+Marking another field Scan, or unmarking one the table does not drive, keeps the
+table. An edit that takes one of its own fields off Scan or changes its unit
+requires regeneration or an explicit Clear array; that action keeps the Python
+draft and emits `scan_array_clear_requested` through the handle.
 
 ```python
 view = PulseScheduleView()

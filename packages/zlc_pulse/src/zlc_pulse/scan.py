@@ -15,11 +15,17 @@ a duration's nanosecond range and every point came back clamped.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from fractions import Fraction
 from dataclasses import dataclass, replace
 
-from .binding import field_label, pulse_field_value, replace_pulse_field, resolve_subpulse_sources
+from .binding import (
+    field_label,
+    normalize_binding_values,
+    pulse_field_value,
+    replace_pulse_field,
+    resolve_subpulse_sources,
+)
 from .model import (
     FIELD_BRACKET_COUNT,
     FIELD_DAC,
@@ -37,6 +43,7 @@ __all__ = [
     "prepare_scan_application",
     "resolve_scan_point",
     "scan_columns_for",
+    "scan_table_for",
     "scan_table_template",
     "validate_scan_table",
 ]
@@ -439,19 +446,67 @@ def validate_scan_table(
     )
 
 
+def scan_table_for(
+    sequence: PulseSequence,
+    table: object,
+) -> tuple[PulseSequence, tuple[tuple[float, ...], ...]]:
+    """One table as its author wrote it, and the pulse it drives.
+
+    A table is either an array with one column per Scan field, in slot
+    order, or a mapping from the Scan fields it drives -- each by its id or
+    by the label the editor shows -- to their columns, one value per point.
+    A Scan mark only makes a field scannable: a field the mapping leaves out
+    plays its own value, as it does in a Scan plan that does not walk it.
+
+    The pulse that comes back carries Scan only on the fields the table
+    drives, so its slots ARE the table's columns, and the rows are checked
+    against them by :func:`validate_scan_table`.
+    """
+
+    import numpy as np  # noqa: PLC0415 -- numpy is this package's dependency
+
+    if not isinstance(sequence, PulseSequence):
+        raise TypeError("sequence must be PulseSequence")
+    sequence = resolve_subpulse_sources(sequence)
+    if isinstance(table, Mapping):
+        named = normalize_binding_values(sequence, table, source="scan")
+        if not named:
+            raise ValueError("the scan table names no Scan field")
+        sequence = replace(sequence, bindings=tuple(
+            replace(binding, scan=False) if binding.scan and binding.field_id not in named else binding
+            for binding in sequence.bindings
+        ))
+        columns = []
+        for binding in sequence.scan_bindings:
+            column = np.asarray(named[binding.field_id], dtype=float)
+            if column.ndim != 1:
+                raise ValueError(
+                    f"the scan table's column for {field_label(sequence, binding.field_ref)} "
+                    "must hold one value per point"
+                )
+            columns.append(column)
+        if len({len(column) for column in columns}) != 1:
+            raise ValueError("every column of the scan table must have the same number of points")
+        table = np.column_stack(columns)
+    return sequence, validate_scan_table(table, scan_columns_for(sequence))
+
+
 def scan_table_template(kind: str, columns: Sequence[ScanColumnSpec]) -> str:
     """Starter Python that builds one scan table.
 
-    ``column_stack`` gives every slot its own independent column; ``grid``
-    sweeps every combination of the per-slot axes and reports the shape so the
-    result can be read as a map.  Both assign ``scan_table``; that name is the
-    contract with whoever runs the program.
+    ``columns`` gives every Scan field its own independent column; ``grid``
+    sweeps every combination of the per-field axes and reports the shape so
+    the result can be read as a map.  Both assign ``scan_table``, a mapping
+    from each field's id to its column; that name is the contract with
+    whoever runs the program, and a field whose line is deleted plays its
+    own value (:func:`scan_table_for`).
 
-    The per-slot axes are the program's own names, ``a0``, ``a1``, ... in slot
-    order, with the slot id in the comment above each.  A slot id lives in the
-    pulse's namespace, not Python's: ``np``, ``N`` and ``for`` are all legal
-    ids, and a program that spelled its axes after them shadowed its import,
-    its point count or its syntax.
+    The per-field axes are the program's own names, ``a0``, ``a1``, ... in
+    slot order, with the field's label in the comment above each.  A field
+    id lives in the pulse's namespace, not Python's: ``np``, ``N`` and
+    ``for`` are all legal ids, and a program that spelled its axes after
+    them shadowed its import, its point count or its syntax -- so ids
+    appear only as the mapping's quoted keys.
     """
 
     cols = list(columns)
@@ -477,19 +532,24 @@ def scan_table_template(kind: str, columns: Sequence[ScanColumnSpec]) -> str:
         # are only a starting bracket around what the field holds now.
         legal = f"{spec.limit_lo:g} .. {spec.limit_hi:g}"
         if spec.is_dac:
-            return f"{spec.name}: {spec.unit}, {legal}"
-        return (
-            f"{spec.name}: duration in the binding's {spec.unit} "
-            f"({legal})"
-        )
+            return f"{spec.label}: {spec.unit}, {legal}"
+        return f"{spec.label}: duration in the binding's {spec.unit} ({legal})"
+
+    def _table(values: Sequence[str]) -> list[str]:
+        return [
+            "scan_table = {",
+            *(f'    "{spec.name}": {value},' for spec, value in zip(cols, values, strict=True)),
+            "}",
+        ]
 
     if str(kind) == "grid":
         sizes = [5, 4, 3] + [2] * max(0, count - 3)
         lines = [
             "import numpy as np",
             "",
-            f"# Grid scan over {count} slot(s) {cols[0].name}..{cols[-1].name}:",
-            "# every combination of the per-slot axes.",
+            "# Grid scan: every combination of the per-field axes.  scan_table maps",
+            "# each Scan field to its column; delete a field's axis and its entry and",
+            "# it plays its own value.",
         ]
         for index, spec in enumerate(cols):
             # The note ABOVE the line it describes.  Trailing it pushed the
@@ -500,10 +560,10 @@ def scan_table_template(kind: str, columns: Sequence[ScanColumnSpec]) -> str:
             lines.append(f"a{index} = {_sweep(spec, sizes[index])}")
         mesh = ", ".join(f"A{index}" for index in range(count))
         axes = ", ".join(f"a{index}" for index in range(count))
-        ravel = ", ".join(f"A{index}.ravel()" for index in range(count))
         shape = ", ".join(f"len(a{index})" for index in range(count))
+        lines.append("")
         lines.append(f'{mesh}, = np.meshgrid({axes}, indexing="ij")')
-        lines.append(f"scan_table = np.column_stack([{ravel}])")
+        lines.extend(_table([f"A{index}.ravel()" for index in range(count)]))
         lines.append(
             f"scan_shape = ({shape},)" if count == 1 else f"scan_shape = ({shape})"
         )
@@ -512,10 +572,10 @@ def scan_table_template(kind: str, columns: Sequence[ScanColumnSpec]) -> str:
     lines = [
         "import numpy as np",
         "",
-        f"# {count} bound slot(s), {cols[0].name}..{cols[-1].name}.",
-        f"# scan_table is (N x {count}): one row per scan point, one column per slot,",
-        "# each column in the unit the editor shows for the field it scans.",
-        "# The columns advance together.",
+        "# scan_table maps each Scan field this scan drives to its column: one",
+        "# value per point, in the unit the editor shows for the field.  The",
+        "# columns advance together.  Delete a field's entry and it plays its",
+        "# own value.",
         "",
         "# number of scan points",
         "N = 21",
@@ -525,9 +585,5 @@ def scan_table_template(kind: str, columns: Sequence[ScanColumnSpec]) -> str:
         lines.append(f"# {_note(spec)}")
         lines.append(f"a{index} = {_sweep(spec, 'N')}")
     lines.append("")
-    lines.append(
-        "scan_table = np.column_stack(["
-        + ", ".join(f"a{index}" for index in range(count))
-        + "])"
-    )
+    lines.extend(_table([f"a{index}" for index in range(count)]))
     return "\n".join(lines) + "\n"

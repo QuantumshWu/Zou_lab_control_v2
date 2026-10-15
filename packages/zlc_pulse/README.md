@@ -41,7 +41,10 @@ The binding stores independent Scan capability and a Default/API/Config source.
 Scan may coexist with API or Config; API and Config are mutually exclusive.
 The editor always permits editing the default. A Plan activates only its explicit
 Scan fields; omitted Scan capabilities become constants using their selected base
-source. An explicit scan point overrides the base source for that execution.
+source. The editor's scan table works the same way: `scan_table_for` reads a
+mapping from the Scan fields a table drives to their columns (or an array with
+one column per Scan field) and returns the pulse with Scan on those fields only.
+An explicit scan point overrides the base source for that execution.
 
 Scan and API are addressed by stable physical field identity internally and by
 readable paths such as `MOT.duration` in authoring. They have no user-assigned

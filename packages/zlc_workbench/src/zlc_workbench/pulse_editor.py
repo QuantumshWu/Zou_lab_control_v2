@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import logging
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, replace
 from fractions import Fraction
 from pathlib import Path
@@ -492,7 +492,7 @@ def project_period(
     visible_ports: Sequence[str] | None = None,
     bindings: Mapping[tuple, PulseBinding] | None = None,
     config_values: Mapping[str, tuple[float, str]] | None = None,
-    scan_active: bool = False,
+    scanned: Collection[str] = frozenset(),
     authored_sequence: PulseSequence | None = None,
 ) -> PeriodVM:
     """One period as its card.
@@ -535,7 +535,7 @@ def project_period(
             field_id=PulseFieldRef("duration", period_id=period.period_id).key,
             config_names=tuple(config_values or ()),
             **_binding_field_state(
-                duration_binding, config_values, scan_active,
+                duration_binding, config_values, scanned,
                 config_enabled=sequence.config_enabled,
                 default_text=f"{format_quantity(float(default_period.duration), '1')} {default_period.unit}",
                 actual_text=f"{format_quantity(float(period.duration), '1')} {period.unit}",
@@ -568,7 +568,7 @@ def project_period(
             (
                 port.key,
                 _analog_mode(period, port),
-                replace(_analog_field(sequence, period, port, bindings, config_values, scan_active,
+                replace(_analog_field(sequence, period, port, bindings, config_values, scanned,
                                       authored_sequence=authored), binding_editable=not readonly),
             )
             for port in offered
@@ -619,7 +619,7 @@ def project_schedule(
     pins: Mapping[str, str] | None = None,
     scan_points: int = 0,
     config_values: Mapping[str, tuple[float, str]] | None = None,
-    scan_active: bool = False,
+    scanned: Collection[str] = frozenset(),
     authored_sequence: PulseSequence | None = None,
     config_error: str = "",
 ) -> ScheduleVM:
@@ -649,7 +649,7 @@ def project_schedule(
     periods = tuple(
         project_period(
             sequence, period, visible_ports=visible_ports, bindings=bindings,
-            config_values=config_values, scan_active=scan_active,
+            config_values=config_values, scanned=scanned,
             authored_sequence=authored_sequence,
         )
         for period in (() if sequence is None else sequence.periods)
@@ -767,7 +767,7 @@ def _binding_for(
 def _binding_field_state(
     binding: PulseBinding | None,
     config_values: Mapping[str, tuple[float, str]] | None,
-    scan_active: bool = False,
+    scanned: Collection[str] = frozenset(),
     *,
     config_enabled: bool = False,
     default_text: str = "",
@@ -784,7 +784,7 @@ def _binding_field_state(
         return state
     effective = ""
     active = False
-    if binding.scan and scan_active:
+    if binding.field_id in scanned:
         effective = "Scan table"
         status = "The Scan table supplies this field; the default remains editable."
     elif binding.source == "config":
@@ -848,7 +848,7 @@ def _analog_field(
     port: Any,
     bindings: Mapping[tuple, PulseBinding],
     config_values: Mapping[str, tuple[float, str]] | None = None,
-    scan_active: bool = False,
+    scanned: Collection[str] = frozenset(),
     *,
     authored_sequence: PulseSequence | None = None,
 ) -> FieldVM:
@@ -871,7 +871,7 @@ def _analog_field(
         text=str(value),
         field_id=PulseFieldRef("dac", period_id=period.period_id, port=port.key).key,
         config_names=tuple(config_values or ()),
-        **_binding_field_state(binding, config_values, scan_active,
+        **_binding_field_state(binding, config_values, scanned,
                               config_enabled=sequence.config_enabled, default_text=str(default_value),
                               actual_text=str(value)),
         editable=step is not None,
@@ -1518,6 +1518,8 @@ class PulseEditorPresenter:
             )
         result["validation"] = validation
         result["scan"] = {"rows": len(self._state.scan_rows), "repeats": self._state.scan_repeats,
+                          # The fields the table drives; other Scan fields play their values.
+                          "fields": [field for field, _unit in self._state.scan_fields],
                           "source_dirty": self._state.scan_source_dirty,
                           "pending": self._scan_running, "progress": self._scan_progress}
         result["config"] = {"draft_path": self._config_path, "draft_dirty": self._config_dirty(),
@@ -1740,9 +1742,14 @@ class PulseEditorPresenter:
 
     def _edit_state(self, **changes: Any) -> None:
         sequence = changes.get("sequence")
-        if sequence is not None and "scan_rows" not in changes:
-            before_slots = () if self.sequence is None else tuple(b.field_id for b in self.sequence.scan_bindings)
-            if tuple(b.field_id for b in sequence.scan_bindings) != before_slots:
+        if sequence is not None and "scan_rows" not in changes and self._state.scan_rows:
+            # The table drives the fields it was made for.  Marking another
+            # field Scan, or unmarking one it does not drive, leaves it as it
+            # is; an edit that takes one of ITS fields off Scan or changes its
+            # unit leaves the table driving nothing it was written for.
+            before = set() if self.sequence is None else {(b.field_id, b.unit) for b in self.sequence.scan_bindings}
+            after = {(b.field_id, b.unit) for b in sequence.scan_bindings}
+            if any(pair in before and pair not in after for pair in self._state.scan_fields):
                 changes.update(scan_rows=(), scan_fields=(), scan_source_dirty=bool(self._state.scan_source))
         if "scan_rows" in changes and not changes["scan_rows"]:
             changes["scan_fields"] = ()
@@ -1806,7 +1813,7 @@ class PulseEditorPresenter:
                                  PulseFieldRef("bracket_count", bracket_id=str(args[0])) if action == "bracket" else
                                  PulseFieldRef("dac", period_id=str(args[0]), port=str(args[1])))
                     if any(b.field_ref == reference and b.config_key in self._active_config_values()
-                           and not (b.scan and self._scan_armed()) for b in self.sequence.config_bindings):
+                           and b.field_id not in self._scanned_fields() for b in self.sequence.config_bindings):
                         raise ValueError("This value is supplied by Config. Edit the Config file, or switch to Default.")
             candidate, dropped = prune_orphaned_bindings(_sequence_edited(self.sequence, action, args))
             if dropped:
@@ -2385,7 +2392,7 @@ class PulseEditorPresenter:
 
     def _refresh_config_page(self) -> None:
         active = self._active_config_values()
-        scan_active = self._scan_armed()
+        scanned = self._scanned_fields()
         bindings = []
         binding_groups = []
         parked = []
@@ -2407,7 +2414,7 @@ class PulseEditorPresenter:
                     f"{'API' if b.source == 'api' else 'Default'} (Config name kept)" if b.source != "config" else
                     "Config off" if not self.sequence.config_enabled else
                     "Not applied — Config error" if self._config_error else
-                    "Scan table" if b.scan and scan_active else
+                    "Scan table" if b.field_id in scanned else
                     "Default" if effective is None else "Applied",
                 ))
                 binding_groups.append((
@@ -2580,7 +2587,7 @@ class PulseEditorPresenter:
         if sequence.config_enabled and self._config_read_error:
             raise ValueError(self._config_read_error)
         sequence = resolve_subpulse_sources(sequence, base_directory=Path(self.path).parent if self.path else None)
-        base = sequence if self._scan_armed() else resolve_scan_point(sequence)
+        base = self._played_scan(sequence)
         effective = apply_config_values(sequence, self._active_config_values(), current=base)[0]
         # Capability marks remain visible when this preview uses defaults.
         return effective if effective.bindings == sequence.bindings else replace(effective, bindings=sequence.bindings)
@@ -3390,13 +3397,7 @@ class PulseEditorPresenter:
                 "edit it to fit, save it and open it again", present=present
             )
             return
-        state_changes: dict[str, Any] = {"sequence": candidate}
-        if len(candidate.scan_bindings) != len(current.scan_bindings):
-            state_changes.update(
-                scan_rows=(),
-                scan_source_dirty=bool(self._state.scan_source),
-            )
-        self._edit_state(**state_changes)
+        self._edit_state(sequence=candidate)
         if lost or dropped_ports or dropped_bindings:
             missing = ", ".join(lost + dropped_ports + dropped_bindings)
             self._warn(
@@ -3588,9 +3589,7 @@ class PulseEditorPresenter:
                             for item in execution.components
                         ))
                 if execution is not None:
-                    execution = resolve_api_parameters(execution)
-                    if execution.scan_bindings and not self._scan_armed():
-                        execution = resolve_scan_point(execution)
+                    execution = self._played_scan(resolve_api_parameters(execution))
             except Exception:  # noqa: BLE001 -- a failed comparison cannot replace the board's data
                 execution = None
             if adopted == self.sequence or adopted == execution:
@@ -3623,9 +3622,15 @@ class PulseEditorPresenter:
             # editor holding one reported "not synchronized" -- and pressing
             # Sync could not fix it, because the comparison read a field the
             # adoption never wrote.
+            # The rows drive the fields the board's copy scans -- the fields
+            # the table was made for, which need not be every Scan field.
             self._edit_state(
                 sequence=adopted,
                 scan_rows=authored_rows,
+                scan_fields=tuple(
+                    (binding.field_id, binding.unit)
+                    for binding in resolve_subpulse_sources(source).scan_bindings
+                ) if authored_rows else (),
                 scan_source_dirty=bool(self._state.scan_source),
                 scan_repeats=int(getattr(state, "scan_repeats", 0) or 0),
             )
@@ -3760,18 +3765,39 @@ class PulseEditorPresenter:
         """One executable document prepared from the current authoring state.
 
         API parameters are always replaced by the values currently shown in
-        the editor.  Scan bindings remain dynamic only when a real table is
-        armed; without a table their authored nominal values become an ordinary
-        static pulse.  Both On Pulse and synchronization digest this same
-        document, so there is only one definition of what the button runs.
+        the editor.  Scan bindings remain dynamic only for the fields an armed
+        table drives; every other Scan field -- all of them, without a table --
+        plays its authored value as an ordinary static field.  Both On Pulse
+        and synchronization digest this same document, so there is only one
+        definition of what the button runs.
         """
 
         if self.sequence is None:
             raise RuntimeError("no pulse is open")
-        source = resolve_api_parameters(resolve_subpulse_sources(self.sequence))
-        if source.scan_bindings and not self._scan_armed():
-            source = resolve_scan_point(source)
-        return source
+        return self._played_scan(resolve_api_parameters(resolve_subpulse_sources(self.sequence)))
+
+    def _played_scan(self, source: PulseSequence) -> PulseSequence:
+        """``source`` with Scan only on the fields the armed table drives.
+
+        A Scan mark makes a field scannable; the table says which fields this
+        run scans.  The rest compile at their own values (and their Config,
+        where they have one), as a Scan plan compiles the fields it does not
+        walk.
+        """
+
+        scanned = self._scanned_fields()
+        bindings = tuple(
+            replace(binding, scan=False) if binding.scan and binding.field_id not in scanned else binding
+            for binding in source.bindings
+        )
+        return source if bindings == source.bindings else replace(source, bindings=bindings)
+
+    def _scanned_fields(self) -> frozenset[str]:
+        """The fields the armed table drives; none when no table is armed."""
+
+        if not self._scan_armed():
+            return frozenset()
+        return frozenset(field for field, _unit in self._state.scan_fields)
 
     def request_fire(self, *, present: bool = True) -> bool:
         """Submit the same nonblocking On Pulse action as the editor button.
@@ -4838,12 +4864,7 @@ class PulseEditorPresenter:
         candidate = self._edited_candidate("binding", (field_kind, period_id, port_key, scan, source))
         if candidate is None:
             return
-        state_changes: dict[str, Any] = {"sequence": candidate}
-        if tuple(b.field_id for b in candidate.scan_bindings) != tuple(
-            b.field_id for b in self.sequence.scan_bindings
-        ):
-            state_changes.update(scan_rows=(), scan_fields=(), scan_source_dirty=bool(self._state.scan_source))
-        self._edit_state(**state_changes)
+        self._edit_state(sequence=candidate)
         self.refresh()
 
     def _has_scan_slots(self, *, present: bool = True) -> bool:
@@ -4888,16 +4909,21 @@ class PulseEditorPresenter:
             view.set_scan_page(ScanPageRecord(slots_text="No pulse is open."))
             self._render_run_state()
             return
+        rows = self._state.scan_rows
         try:
             columns = scan_columns_for(self.sequence)
             binding_records = self._binding_records()
+            stale = bool(rows) and self._scan_table_stale()
+            # The table's own columns: the fields it drives, which need not
+            # be every field marked Scan.
+            table_columns = () if stale or not rows else scan_columns_for(
+                self._played_scan(resolve_subpulse_sources(self.sequence))
+            )
         except (ValueError, TypeError, KeyError, OSError) as error:
             view.set_scan_page(ScanPageRecord(slots_text=f"Config error: {error}", busy=True))
             self._config_error = str(error)
             self._render_run_state()
             return
-        rows = self._state.scan_rows
-        stale = bool(rows) and self._state.scan_fields != self._scan_fields()
         view.set_scan_page(
             ScanPageRecord(
                 slots_text=(
@@ -4914,7 +4940,7 @@ class PulseEditorPresenter:
                     )
                 ),
                 bindings=binding_records,
-                table_text="" if stale or not rows else _scan_table_text(rows, columns),
+                table_text="" if stale or not rows else _scan_table_text(rows, table_columns),
                 table_note=("Scan fields or units changed. Generate or open the scan table again."
                             if stale else "" if rows else
                             "No scan table yet: write a program and press Run."),
@@ -4966,7 +4992,10 @@ class PulseEditorPresenter:
         process on purpose: a scan table is a small array and the alternative
         -- a restricted expression language -- is a second language to learn
         for no safety anyone here needs.  What it must produce is checked:
-        ``scan_table``, two-dimensional, one column per bound slot.
+        ``scan_table``, either a two-dimensional array with one column per
+        Scan field or a mapping from the Scan fields it drives to their
+        columns (:func:`zlc_pulse.scan_table_for`); a Scan field it leaves
+        out plays its own value.
 
         In this process, not on its GUI thread.  A window runs it on its
         preview worker, so a program that loops, or builds a table one Python
@@ -5028,7 +5057,7 @@ class PulseEditorPresenter:
     def _take_scan_program_table(self, source: str, table: object, fields=None, *, present: bool = True) -> bool:
         """Keep the table a scan program produced, if it is one."""
 
-        from zlc_pulse import scan_columns_for, validate_scan_table
+        from zlc_pulse import scan_table_for
 
         if table is None:
             return self._scan_program_refused("The scan program did not assign scan_table", present=present)
@@ -5037,23 +5066,18 @@ class PulseEditorPresenter:
         # Through zlc_pulse, which owns what a legal table is.  This window
         # used to decide it here and again on the file-load path, and the two
         # did not agree: the loader skipped the width check entirely.  Checked
-        # against the fields bound NOW, which is what the table will drive.
+        # against the fields marked Scan NOW, which is what the table drives.
         try:
-            columns = scan_columns_for(self.sequence)
-            current_fields = self._scan_fields()
-            if fields is not None and fields != current_fields:
+            if fields is not None and fields != self._scan_fields():
                 raise ValueError("Scan fields or units changed while generating the table. Generate it again.")
-            rows = validate_scan_table(
-                table,
-                columns,
-            )
+            scanned, rows = scan_table_for(self.sequence, table)
         except Exception as error:
             return self._scan_program_refused(str(error), present=present)
         self._accept_state(
             replace(
                 self._state,
                 scan_rows=tuple(tuple(value for value in row) for row in rows),
-                scan_fields=current_fields,
+                scan_fields=tuple((binding.field_id, binding.unit) for binding in scanned.scan_bindings),
                 # Typed over while it ran: what is in the box now is not what
                 # made this table.
                 scan_source_dirty=self._state.scan_source != source,
@@ -5072,13 +5096,17 @@ class PulseEditorPresenter:
     def load_scan_array(self, path: str | None = None, *, present: bool = True) -> bool:
         """Load an explicit .npy/.csv/.txt scan table, or show the GUI picker.
 
+        A file's columns are named when it says so -- a .npy saved by Save
+        array carries its fields' ids, and a .csv/.txt whose first line is
+        not numbers names its columns there -- and then drive only those
+        fields; an unnamed file has one column per Scan field, in order.
         With the window's command worker, True means submitted; inspect
         control_state().pending and scan.progress for completion or refusal.
         """
 
         import numpy as np
 
-        from zlc_pulse import scan_columns_for, validate_scan_table
+        from zlc_pulse import scan_table_for
 
         # Asked BEFORE the dialog: picking a file and then being told the
         # slots were never bound wastes the choice that was just made.
@@ -5094,45 +5122,56 @@ class PulseEditorPresenter:
         if not chosen:
             return False
         selected = Path(chosen)
-        columns = scan_columns_for(self.sequence)
+        sequence = self.sequence
         fields = self._scan_fields()
 
         def work(_operation: int):
             if selected.suffix == ".npy":
                 data = np.load(selected)
-                if data.ndim == 1 and len(columns) == 1:
+                if data.dtype.names:
+                    data = {name: data[name] for name in data.dtype.names}
+                elif data.ndim == 1 and len(fields) == 1:
                     # One field, one value per point, however it was saved.
                     data = data.reshape(-1, 1)
             else:
+                with selected.open(encoding="utf-8") as file:
+                    header = [cell.strip() for cell in file.readline().split(",")]
+                try:
+                    [float(cell) for cell in header]
+                    names = None
+                except ValueError:
+                    names = header
                 # A one-column file is one field's points, not one point of
                 # many fields: without ndmin the reader squeezed it flat, and
                 # the commonest sweep file was refused on its column count.
-                data = np.loadtxt(selected, delimiter=",", ndmin=2)
-            return validate_scan_table(data, columns)
+                data = np.loadtxt(selected, delimiter=",", ndmin=2, skiprows=0 if names is None else 1)
+                if names is not None:
+                    data = {name: data[:, index] for index, name in enumerate(names)}
+            return scan_table_for(sequence, data)
 
-        def delivered(rows, error):
+        def delivered(table, error):
             if error is None:
                 try:
                     if fields != self._scan_fields():
                         raise ValueError("Scan fields or units changed while loading the table. Open it again.")
-                    self._take_scan_rows(rows)
+                    self._take_scan_rows(*table)
                 except Exception as caught:
                     error = caught
             if error is not None:
                 self._scan_program_refused(f"Cannot read {selected.name}: {error}", present=present)
                 return
-            self._scan_progress = f"Loaded {counted(len(rows), 'scan point')} from {selected}"
+            self._scan_progress = f"Loaded {counted(len(table[1]), 'scan point')} from {selected}"
             self._done(self._scan_progress, present=present)
             self._refresh_scan_page()
 
         if self._run_device_work is not None:
             return self._run_device_command(work, delivered, summary="Loading scan array...")
         try:
-            rows = work(0)
+            table = work(0)
         except Exception as error:
             delivered(None, error)
             return False
-        delivered(rows, None)
+        delivered(table, None)
         return True
 
     def load_scan_program(self, path: str | None = None, *, present: bool = True) -> bool:
@@ -5179,6 +5218,9 @@ class PulseEditorPresenter:
     def save_scan_array(self, path: str | None = None, *, present: bool = True) -> str | bool:
         """Save authored fractional scan values to an explicit .npy path.
 
+        One named column per field the table drives (a structured array,
+        ``array[field_id]``), so Open array gives each column back to its own
+        field even when the table drives only some of the Scan fields.
         No path retains the GUI's unique-name save beside the Pulse. With a
         command worker, True is submission and scan.progress reports the saved
         path; without a worker the completed path is returned. Never fires.
@@ -5195,7 +5237,10 @@ class PulseEditorPresenter:
         if selected is not None and selected.suffix != ".npy":
             self._warn("save_scan_array requires a .npy path", present=present)
             return False
-        values = np.asarray(self._state.scan_rows, dtype=float)
+        columns = np.asarray(self._state.scan_rows, dtype=float).T
+        values = np.zeros(columns.shape[1], dtype=[(field, float) for field, _unit in self._state.scan_fields])
+        for (field, _unit), column in zip(self._state.scan_fields, columns, strict=True):
+            values[field] = column
         folder = self._save_folder()
         name = f"{(self.sequence.name if self.sequence else 'scan')}-scan"
 
@@ -5291,7 +5336,7 @@ class PulseEditorPresenter:
             # its DAC segments were never re-applied while the digital edges
             # kept playing.  So resolve the row into the document and load a
             # plain pulse, which is the state the board is designed to hold.
-            source = resolve_api_parameters(self.sequence)
+            source = self._played_scan(resolve_api_parameters(self.sequence))
             effective_rows, _wire = self._prepared_scan(source)
         except Exception as error:
             held = self._clamp_scan_point(point, count)
@@ -5428,8 +5473,9 @@ class PulseEditorPresenter:
         self._adopt_board_state(state)
         self._refresh_scan_page()
 
-    def _take_scan_rows(self, rows: Sequence[Sequence[float]]) -> None:
-        """Hold a new table, and tell both pages that show it.
+    def _take_scan_rows(self, scanned: PulseSequence, rows: Sequence[Sequence[float]]) -> None:
+        """Hold a new table for the fields ``scanned`` scans, and tell both
+        pages that show it.
 
         The Scan page shows the table; the EDIT page shows how many points it
         has, beside the slots that will carry them -- which is the number an
@@ -5439,7 +5485,7 @@ class PulseEditorPresenter:
 
         self._edit_state(
             scan_rows=tuple(tuple(value for value in row) for row in rows),
-            scan_fields=self._scan_fields(),
+            scan_fields=tuple((binding.field_id, binding.unit) for binding in scanned.scan_bindings),
         )
         self.refresh()
 
@@ -5459,15 +5505,29 @@ class PulseEditorPresenter:
         table changed what On Pulse MEANS: a pulse with no scan left in it
         played once and stopped, its own repeat overwritten by a ghost.
         Scan repeats is a statement about a scan; without one it governs
-        nothing.
+        nothing.  The fields are the TABLE's: other Scan fields it does not
+        drive play their own values and arm nothing.
         """
 
         if not self._state.scan_rows or self.sequence is None:
             return False
+        held = {field for field, _unit in self._state.scan_fields}
         try:
-            return bool(resolve_subpulse_sources(self.sequence).scan_bindings)
+            return any(binding.field_id in held
+                       for binding in resolve_subpulse_sources(self.sequence).scan_bindings)
         except (ValueError, TypeError, KeyError, OSError):
             return False  # The Config error is shown by refresh; execution still refuses it.
+
+    def _scan_table_stale(self) -> bool:
+        """Whether the held table no longer fits the fields it was made for.
+
+        It drives ``scan_fields``, in slot order, and the pulse may mark more
+        fields Scan than that.  It is stale when one of ITS fields is no
+        longer Scan in that unit, or the order they play in changed.
+        """
+
+        held = self._state.scan_fields
+        return not held or tuple(pair for pair in self._scan_fields() if pair in held) != held
 
     def _scan_progress_from_view(self) -> None:
         """The Scan page asking where the board is, answered when the board does."""
@@ -5571,7 +5631,7 @@ class PulseEditorPresenter:
                 pins=self.pins,
                 scan_points=len(self._state.scan_rows),
                 config_values=self._active_config_values(),
-                scan_active=self._scan_armed(),
+                scanned=self._scanned_fields(),
             )
         )
         self.view.set_title(f"PulseGUI{SUMMARY_SEPARATOR}{self.sequence.name}")
@@ -5841,7 +5901,7 @@ class PulseEditorPresenter:
                 self.sequence, self.sequence.period_by_id[str(period_id)],
                 visible_ports=self._state.visible_ports,
                 config_values=self._active_config_values(),
-                scan_active=self._scan_armed(),
+                scanned=self._scanned_fields(),
             ))
             return
         self._apply_value(
@@ -5929,7 +5989,7 @@ class PulseEditorPresenter:
                         visible_ports=self._state.visible_ports,
                         bindings=bindings,
                         config_values=self._active_config_values(),
-                        scan_active=self._scan_armed(),
+                        scanned=self._scanned_fields(),
                     )
                 )
         if port_key is not None:
@@ -5962,7 +6022,7 @@ class PulseEditorPresenter:
             pins=self.pins,
             scan_points=len(self._state.scan_rows),
             config_values=self._active_config_values(),
-            scan_active=self._scan_armed(),
+            scanned=self._scanned_fields(),
         )
         if shown.components:
             self._push_schedule(shown)

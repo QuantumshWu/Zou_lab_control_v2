@@ -83,6 +83,7 @@ from .scan import (
     scan_columns_for,
     scan_rows_from_wire,
     scan_rows_to_wire,
+    scan_table_for,
     scan_table_template,
     validate_scan_table,
 )
@@ -168,6 +169,7 @@ __all__ = [
     "api_parameter_columns_for",
     "prepare_scan_application",
     "scan_columns_for",
+    "scan_table_for",
     "scan_table_template",
     "validate_scan_table",
     "scan_rows_to_wire",
