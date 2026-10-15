@@ -309,8 +309,8 @@ def artifact_input_specs(descriptor: Any) -> tuple[Any, ...]:
 def logic_draft_value(field: AuthoringField, value: object) -> object:
     """What a logic draft keeps for ``value``, or one sentence naming ``field``, raised.
 
-    ``project_field`` refuses what the field refuses; a number or switch with a
-    default is edited in a box that cannot be left blank
+    ``project_field`` refuses what the field refuses; a number, switch or
+    choice with a default is edited in a box that cannot be left blank
     (``FormFieldProps.blank_allowed``), so it refuses None too.  A number or
     switch is kept as its field reads it -- "5" is the 5 its box shows -- and
     any other value as given, so a number list keeps the spelling it was
@@ -318,11 +318,10 @@ def logic_draft_value(field: AuthoringField, value: object) -> object:
     """
 
     projected = project_field(field, value)
-    if str(field.value_type) not in ("int", "float", "bool"):
-        return value
-    if projected is None and field.default is not None:
+    kind = str(field.value_type)
+    if kind in ("int", "float", "bool", "choice") and projected is None and field.default is not None:
         raise ValueError(f"{field.label} must have a value")
-    return projected
+    return projected if kind in ("int", "float", "bool") else value
 
 
 def device_key_options(
