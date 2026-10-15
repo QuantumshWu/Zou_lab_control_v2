@@ -5586,10 +5586,17 @@ class FluentSwitch(QtWidgets.QAbstractButton):
     its row.  The whole width, label included, takes the click.  In a row
     of commands a switch and its label are their own group:
     :func:`add_row_switch` puts the air of two button gaps either side.
+
+    A switch whose words say its state -- an Auto row's ``Auto`` and
+    ``Manual`` -- names every word it may say in ``room_for`` and is as wide
+    as the widest of them, so the control after it stays where it is when
+    the switch is flipped.
     """
 
-    def __init__(self, text: str = "", parent=None):
+    def __init__(self, text: str = "", parent=None, *, room_for: tuple[str, ...] = ()):
         super().__init__(parent)
+        #: Every word this switch may come to say (see the class).
+        self._room_for = tuple(str(word) for word in room_for)
         self.setText(text)
         self.setCheckable(True)
         self.setCursor(QtCore.Qt.PointingHandCursor)
@@ -5612,8 +5619,10 @@ class FluentSwitch(QtWidgets.QAbstractButton):
         return scaled_px(4, minimum=3)
 
     def _apply_metrics(self) -> None:
-        # A control's height, the same number a FluentButton takes.
-        self.setMinimumSize(fluent_switch_width(self.text()), control_height())
+        # A control's height, the same number a FluentButton takes; as wide
+        # as the widest word it says or may say.
+        width = max(fluent_switch_width(word) for word in (self.text(), *self._room_for))
+        self.setMinimumSize(width, control_height())
 
     def setText(self, text: str) -> None:  # noqa: N802 - Qt API
         value = str(text)

@@ -1,10 +1,11 @@
 """The panel Setting popup lays out from measured truth, not guesses.
 
-Two defects are pinned here, both found by measuring real geometry:
+Two rules are pinned here, both found by measuring real geometry:
 
-* the Auto switch's painted track was sized by a second, disagreeing width
-  formula in the form (a hand padding constant), so it drew and hit-tested
-  underneath the editor control beside it;
+* an Auto row's words stand at the label edge with every other row's, and
+  its switch is the first cell of the control column, as wide as the one
+  switch-width authority says it paints, so it never draws or hit-tests
+  underneath the editor after it;
 * the popup's width was guessed with a magic pad while the scroll body was
   pinned to the form's minimum width -- when the guess undershot the real
   chrome (left pad + frame + scrollbar), the body sat wider than the viewport
@@ -112,16 +113,27 @@ for index, rect in enumerate(rects):
     for other in rects[index + 1:]:
         assert not rect.intersects(other), (rect, other)
 
-# One width authority: the column reserved for an Auto switch is what the
-# switch itself will paint, and the paint never exceeds the widget's cell.
+# One label edge and one control column.  An Auto row's words stand at the
+# label edge with every other row's, and its switch is the first cell of
+# the control column, before the editor it governs: the switch is at least
+# as wide as it paints (the one width authority), and its paint ends before
+# the editor starts.
+assert form._auto_switches, 'the surface declares Auto rows'
+label_lefts = {
+    key: form._labels[key].mapTo(body, QtCore.QPoint(0, 0)).x() for key in form.spec.keys
+}
+assert len(set(label_lefts.values())) == 1, label_lefts
+plain = next(key for key in form.spec.keys if key not in form._auto_switches)
+control_left = form.cell_for(plain).mapTo(body, QtCore.QPoint(0, 0)).x()
 for key, switch in form._auto_switches.items():
-    row = form._rows[key]
-    control = form._widgets[key]
-    assert switch.width() >= fluent_switch_width(switch.text()), (
-        key, switch.width(), fluent_switch_width(switch.text()))
-    switch_right = switch.mapTo(row, QtCore.QPoint(fluent_switch_width(switch.text()), 0)).x()
-    control_left = control.mapTo(row, QtCore.QPoint(0, 0)).x()
-    assert switch_right <= control_left, (key, switch_right, control_left)
+    assert switch.text() in ('Auto', 'Manual'), (key, switch.text())
+    assert form._labels[key].text() == form.shown_labels()[form.spec.keys.index(key)]
+    assert switch.mapTo(body, QtCore.QPoint(0, 0)).x() == control_left, key
+    assert switch.width() >= max(fluent_switch_width('Auto'), fluent_switch_width('Manual')), (
+        key, switch.width())
+    switch_right = switch.mapTo(body, QtCore.QPoint(fluent_switch_width(switch.text()), 0)).x()
+    editor_left = form._widgets[key].mapTo(body, QtCore.QPoint(0, 0)).x()
+    assert switch_right < editor_left, (key, switch_right, editor_left)
 
 # A live projection replacement while the popup is open (the beat does this)
 # re-measures and re-presents through the card's one placement call.
@@ -1297,6 +1309,84 @@ assert pairs.read_all() == {'pairs': ({'start': 1},)}, pairs.read_all()
 print('ok')
 """
     )
+
+
+def test_an_auto_row_puts_its_switch_in_the_control_column() -> None:
+    """Every label of a form starts at one x: an Auto row's words are in the
+    label column like any other row's, and its switch -- which says
+    ``Auto`` or ``Manual`` -- is the first cell of the control column, a row
+    gap before the editor it governs.  The switch is as wide as its widest
+    state, so flipping it moves nothing; a number box after it ends on the
+    form's one number edge."""
+
+    from PyQt5 import QtCore, QtWidgets
+
+    from zlc_ui import ensure_qt_app
+    from zlc_ui.fluent import fluent_switch_width, row_gap, setting_label_width
+    from zlc_ui.form import FormFieldProps, FormSpec
+    from zlc_ui.form.qt_form import FluentParameterForm, _form_label_width
+
+    app = ensure_qt_app(["zlc-ui-tests"])
+    spec = FormSpec((
+        FormFieldProps("name", "text", "Panel name", default="x"),
+        FormFieldProps("title", "text", "Title", automatic=True),
+        FormFieldProps("x_label", "text", "X label", automatic=True),
+        FormFieldProps("offset", "float", "Offset", automatic=True),
+        FormFieldProps("gain", "float", "Gain", default=1.0),
+    ))
+    form = FluentParameterForm(
+        spec, {"name": "x", "title": None, "x_label": None, "offset": None, "gain": 1.0}
+    )
+    host = QtWidgets.QWidget()
+    QtWidgets.QVBoxLayout(host).addWidget(form)
+    host.resize(640, 320)
+    host.show()
+    app.processEvents()
+    try:
+        def left(widget):
+            return widget.mapTo(host, QtCore.QPoint(0, 0)).x()
+
+        assert form.shown_labels() == ("Panel name", "Title", "X label", "Offset", "Gain")
+        assert {left(form._labels[key]) for key in spec.keys} == {left(form._labels["name"])}
+        assert [form._labels[key].text() for key in spec.keys] == list(form.shown_labels())
+        assert _form_label_width(spec.fields) == setting_label_width(form.shown_labels()), (
+            "the label column holds words only"
+        )
+        column = left(form.widget_for("name"))
+        widest = max(fluent_switch_width("Auto"), fluent_switch_width("Manual"))
+        for key in ("title", "x_label", "offset"):
+            switch = form.auto_switch_for(key)
+            assert switch.text() == "Auto" and switch.isChecked()
+            assert left(switch) == column, key
+            assert switch.width() == widest, (key, switch.width(), widest)
+            assert left(form.widget_for(key)) == column + widest + row_gap(), key
+        offset, gain = form.widget_for("offset"), form.widget_for("gain")
+        assert left(offset) + offset.width() == left(gain) + gain.width(), (
+            "a number after a switch ends on the form's number edge"
+        )
+        assert form.number_edge_hint() == left(gain) + gain.width() - column
+        # In a column too narrow for the numbers to reach that edge they
+        # still end together: the switch's cell shares the row's width the
+        # way a plain number does.
+        host.resize(column + 420, 320)
+        app.processEvents()
+        assert left(gain) == column and gain.width() < gain.maximumWidth()
+        assert left(offset) + offset.width() == left(gain) + gain.width()
+        host.resize(640, 320)
+        app.processEvents()
+
+        before = left(form.widget_for("title"))
+        form.auto_switch_for("title").setChecked(False)
+        app.processEvents()
+        assert form.auto_switch_for("title").text() == "Manual"
+        assert left(form.widget_for("title")) == before, "flipping the switch moves nothing"
+        assert form.widget_for("title").isEnabled()
+        form.populate({"name": "x", "title": None, "x_label": "Time", "offset": None, "gain": 1.0})
+        assert form.auto_switch_for("title").text() == "Auto"
+        assert form.auto_switch_for("x_label").text() == "Manual"
+    finally:
+        host.close()
+        host.deleteLater()
 
 
 def test_a_pair_is_a_number_wide() -> None:

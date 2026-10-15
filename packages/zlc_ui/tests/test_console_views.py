@@ -1306,13 +1306,24 @@ for key, row in card._settings_form._rows.items():
         f'Setting row {key!r} was vertically cut off: '
         f'{row.height()} < {row.minimumSizeHint().height()}'
     )
+# One control column: an Auto row's cell (its switch, then its editor)
+# starts where every other row's control does, and every row's words start
+# at the one label edge.
 parameter_left_edges = {
-    key: card._settings_form.widget_for(key).mapTo(
+    key: card._settings_form.cell_for(key).mapTo(
         card._settings_form, QtCore.QPoint(0, 0)
     ).x()
     for key in ('display__title', 'display__x_label', 'display__colormap')
 }
 assert len(set(parameter_left_edges.values())) == 1, parameter_left_edges
+assert card._settings_form.cell_for('display__title').isAncestorOf(
+    card._settings_form.auto_switch_for('display__title')
+)
+label_left_edges = {
+    key: card._settings_form._labels[key].mapTo(card._settings_form, QtCore.QPoint(0, 0)).x()
+    for key in ('display__title', 'display__x_label', 'display__colormap')
+}
+assert len(set(label_left_edges.values())) == 1, label_left_edges
 label_slot_widths = {
     key: card._settings_form._rows[key].layout().itemAt(0).widget().width()
     for key in ('display__title', 'display__x_label', 'display__colormap')
@@ -1382,7 +1393,7 @@ app.processEvents()
 card._open_settings()
 app.processEvents()
 compact_left_edges = {
-    key: card._settings_form.widget_for(key).mapTo(
+    key: card._settings_form.cell_for(key).mapTo(
         card._settings_form, QtCore.QPoint(0, 0)
     ).x()
     for key in ('display__title', 'display__x_label', 'display__colormap')
@@ -1693,10 +1704,11 @@ assert editor.open_producer_button.isEnabled()
 handle.set_panel_projection('panel-1', state, surface)
 assert handle.update_panel_editor('panel-1', projection)
 assert editor.parameter_forms['semantic'].isEnabled()
-title_auto = editor.parameter_forms['display'].auto_switch_for('title')
-title_edit = editor.parameter_forms['display'].widget_for('title')
+display_form = editor.parameter_forms['display']
+title_auto = display_form.auto_switch_for('title')
+title_edit = display_form.widget_for('title')
 assert title_auto.isChecked()
-assert title_auto.text() == 'Auto Title'
+assert title_auto.text() == 'Auto'
 switch_image = QtGui.QImage(
     title_auto.sizeHint(), QtGui.QImage.Format_ARGB32_Premultiplied
 )
@@ -1710,12 +1722,21 @@ assert any(
     for x in range(track_right + 1, switch_image.width())
     for y in range(switch_image.height())
 ), 'the Auto/Manual words are painted beside the track, inside the switch'
-title_row = editor.parameter_forms['display']._rows['title']
-assert title_row.layout().itemAt(0).widget() is title_auto
-assert title_row.layout().itemAt(1).widget() is title_edit
+# The row's words are in the label column; the switch is the first cell of
+# the control column, before the editor it governs.
+title_row = display_form._rows['title']
+title_label = title_row.layout().itemAt(0).widget()
+assert title_label is display_form._labels['title'] and title_label.text() == 'Title'
+title_cell = title_row.layout().itemAt(1).widget()
+assert title_cell is display_form.cell_for('title')
+assert title_cell.layout().itemAt(0).widget() is title_auto
+assert title_cell.layout().itemAt(1).widget() is title_edit
 assert not title_edit.isEnabled()
+edit_left = title_edit.x()
 title_auto.setChecked(False)
-assert title_auto.text() == 'Manual Title'
+app.processEvents()
+assert title_auto.text() == 'Manual'
+assert title_edit.x() == edit_left, 'flipping the switch moves nothing after it'
 assert title_edit.isEnabled()
 title_edit.setText('Camera image')
 title_edit.editingFinished.emit()

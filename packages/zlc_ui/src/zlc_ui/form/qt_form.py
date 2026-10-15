@@ -1138,33 +1138,36 @@ def _fit_label(label: QtWidgets.QLabel, text: str, width: int) -> None:
     label.setFixedWidth(int(width))
 
 
-def _automatic_label(field: FormFieldProps, checked: bool) -> str:
-    return f"{'Auto' if checked else 'Manual'} {_shown_label(field)}"
+#: What an Auto row's switch says: the state it is in, on and off.
+_AUTOMATIC_STATES = ("Auto", "Manual")
+
+
+def _automatic_state(checked: bool) -> str:
+    """The words on an Auto row's switch: ``Auto`` while it is on."""
+
+    return _AUTOMATIC_STATES[0] if checked else _AUTOMATIC_STATES[1]
+
+
+def _automatic_lead() -> int:
+    """The room an Auto row's switch takes in the control column, before
+    the editor: the switch at its widest state (the one switch-width
+    authority, :func:`fluent_switch_width`) and the row gap after it."""
+
+    return max(fluent_switch_width(word) for word in _AUTOMATIC_STATES) + row_gap()
 
 
 def _form_label_width(fields) -> int:
-    """The label column: wide enough for every text label AND every switch.
+    """The label column: wide enough for every row's words.
 
     Measured from the words the rows SHOW (:func:`_shown_label`): measured
     from the declared labels, a picker row's unit it does not show pushed
     every control of the page right of a column nobody's words filled.  An
-    automatic field's label IS a :class:`FluentSwitch`, so its column need
-    is the switch's own painted width -- asked from the one switch-width
-    authority, never re-derived here with a padding constant.  Two independent
-    formulas drifted apart and the switch's track painted underneath the
-    editor beside it.
+    Auto row's switch is the first cell of its control column, so the label
+    column holds words and nothing else, and every label of a form starts
+    at one x.
     """
 
-    fields = tuple(fields)
-    width = setting_label_width(_shown_label(field) for field in fields if not field.automatic)
-    for field in fields:
-        if field.automatic:
-            width = max(
-                width,
-                fluent_switch_width(_automatic_label(field, False)),
-                fluent_switch_width(_automatic_label(field, True)),
-            )
-    return width
+    return setting_label_width(_shown_label(field) for field in fields)
 
 
 def _same_typed_value(left: object, right: object) -> bool:
@@ -1228,11 +1231,11 @@ def _reconfigure_widget(
     elif isinstance(widget, FluentDoubleSpinBox):
         handler = _IntHandler if field.kind == "int" else _FloatHandler
         handler._configure_spin(field, widget, widget.decimalValue() if being_edited(widget) else value)
+        if old_field.step != field.step:
+            _declare_step(field, widget)
     elif isinstance(widget, _RowsEditor):
         widget.reconfigure(field)
     elif isinstance(widget, FluentComboBox):
-        if old_field.step != field.step:
-            _declare_step(field, widget)
         if old_field.choices != field.choices:
             _ChoiceHandler._fill(field, widget)
         elif (
@@ -1353,8 +1356,8 @@ class FluentParameterForm(QtWidgets.QWidget):
         #: leaves the picker orphaned in the row, painted wherever it was.
         self._cells: dict[str, QtWidgets.QWidget] = {}
         self._auto_switches: dict[str, FluentSwitch] = {}
-        #: Each row's words, by field key, for every row not named by an
-        #: Auto switch: fitted to the label column (:func:`_fit_label`).
+        #: Each row's words, by field key, fitted to the label column
+        #: (:func:`_fit_label`).
         self._labels: dict[str, QtWidgets.QLabel] = {}
         #: Rows the host has locked (set_editable): a device another owner
         #: holds may not be edited, whatever its field declares.
@@ -1542,22 +1545,17 @@ class FluentParameterForm(QtWidgets.QWidget):
     def shown_labels(self) -> tuple[str, ...]:
         """The words in this form's label column, row by row: what a host
         sharing the column with other rows measures it by.  A picker row's
-        label has no unit (:func:`_shown_label`); an Auto row's is its
-        switch's words."""
+        label has no unit (:func:`_shown_label`)."""
 
-        return tuple(
-            self._auto_switches[field.key].text()
-            if field.key in self._auto_switches
-            else _shown_label(field)
-            for field in self._spec.fields
-        )
+        return tuple(_shown_label(field) for field in self._spec.fields)
 
     def cell_for(self, key: str) -> QtWidgets.QWidget:
-        """What sits in this row's control column: editor, or editor + picker.
+        """What sits in this row's control column: the editor, with its Auto
+        switch before it and its unit picker after it when it has them.
 
         ``widget_for`` is the editor -- what is read, written and enabled.
-        A host that lays a row out for itself must place THIS, or the picker
-        the form built beside the editor is left behind in the row.
+        A host that lays a row out for itself must place THIS, or the switch
+        and picker the form built beside the editor are left behind.
         """
 
         return self._cells.get(key, self.widget_for(key))
@@ -1582,8 +1580,25 @@ class FluentParameterForm(QtWidgets.QWidget):
             # a form ends at ONE edge (see _align_number_column); this is
             # the box's own need until the row is installed.
             widget.setMaximumWidth(_number_cap(widget))
+        if field.automatic:
+            # The row's words stay in the label column, at the label edge
+            # with every other row's; the switch that says whether Auto
+            # holds the value is the first cell of the control column, the
+            # row gap before the editor it governs.  It says its state and
+            # is as wide as its widest state, so the editor never moves
+            # when it is flipped.
+            automatic = FluentSwitch(
+                _automatic_state(automatic_checked), self, room_for=_AUTOMATIC_STATES
+            )
+            with signals_blocked(automatic):
+                automatic.setChecked(automatic_checked)
+            automatic.toggled.connect(
+                lambda checked, key=field.key: self._automatic_toggled(
+                    key, checked
+                )
+            )
         cell = widget
-        if picker is not None:
+        if picker is not None or automatic is not None:
             holder = QtWidgets.QWidget(self)
             holder.setSizePolicy(
                 QtWidgets.QSizePolicy.Expanding,
@@ -1592,27 +1607,22 @@ class FluentParameterForm(QtWidgets.QWidget):
             beside = QtWidgets.QHBoxLayout(holder)
             beside.setContentsMargins(0, 0, 0, 0)
             beside.setSpacing(row_gap())
+            if automatic is not None:
+                beside.addWidget(automatic, 0)
             beside.addWidget(widget, 1)
-            beside.addWidget(picker, 0)
-            if capped:
+            if picker is not None:
+                beside.addWidget(picker, 0)
+            if capped and picker is None:
+                # A switch and a number: the cell is capped where the number
+                # is, so the row shares its width with the trailing stretch
+                # exactly as a plain number row does, and the number ends
+                # where theirs do in a narrow column too.
+                holder.setMaximumWidth(_automatic_lead() + widget.maximumWidth())
+            elif capped:
                 beside.addStretch(1)
             cell = holder
-        text_label = None
-        if field.automatic:
-            automatic = FluentSwitch("", self)
-            with signals_blocked(automatic):
-                automatic.setChecked(automatic_checked)
-            automatic.setText(_automatic_label(field, automatic_checked))
-            automatic.toggled.connect(
-                lambda checked, key=field.key: self._automatic_toggled(
-                    key, checked
-                )
-            )
-            label = automatic
-        else:
-            text_label = FluentLabel("")
-            _fit_label(text_label, _shown_label(field), label_width)
-            label = text_label
+        label = FluentLabel("")
+        _fit_label(label, _shown_label(field), label_width)
         before, after = self._row_cells(field)
         row = FluentSettingRow(
             label,
@@ -1630,23 +1640,30 @@ class FluentParameterForm(QtWidgets.QWidget):
             # control of its height puts its text.
             label.setFixedHeight(widget.first_line_height())
             row.layout().setAlignment(label, QtCore.Qt.AlignTop)
-        return row, automatic, cell, picker, text_label
+        return row, automatic, cell, picker, label
 
-    def _capped_numbers(self) -> list[QtWidgets.QWidget]:
-        """The number boxes this form caps to a number's width."""
+    def _capped_numbers(self) -> list[tuple[str, QtWidgets.QWidget, int]]:
+        """The number boxes this form caps to a number's width, by key, each
+        with the room before it in its control column: an Auto row's switch
+        and its gap (:func:`_automatic_lead`), nothing for any other row."""
 
         if not self._caps_numbers:
             return []
         return [
-            widget for key, widget in self._widgets.items()
+            (key, widget, _automatic_lead() if self._fields[key].automatic else 0)
+            for key, widget in self._widgets.items()
             if key in self._fields and self._fields[key].kind in _CAPPED_KINDS
         ]
 
     def number_edge_hint(self) -> int:
-        """How wide this form's number boxes need to be: the widest box's
-        own need, or 0 when the form caps no number."""
+        """How far into the control column this form's number boxes need to
+        reach: the widest box's own need plus the room before it, or 0 when
+        the form caps no number."""
 
-        return max((_number_cap(widget) for widget in self._capped_numbers()), default=0)
+        return max(
+            (lead + _number_cap(widget) for _key, widget, lead in self._capped_numbers()),
+            default=0,
+        )
 
     def set_number_edge(self, edge: int) -> None:
         """End this form's number boxes on an editor's shared edge.
@@ -1667,15 +1684,22 @@ class FluentParameterForm(QtWidgets.QWidget):
         need, or the edge its editor shares across its forms when that is
         wider, so a page of mixed numbers is one straight column.  A
         decimal box's step chip has one reserved room whatever its step, so
-        the column does not move when a step changes."""
+        the column does not move when a step changes.  The edge is measured
+        from the control column's start: a box after an Auto switch is the
+        switch's room narrower and ends on the same edge."""
 
         capped = self._capped_numbers()
         if not capped:
             return
-        edge = max(self._number_edge, *(_number_cap(widget) for widget in capped))
-        for widget in capped:
-            if widget.maximumWidth() != edge:
-                widget.setMaximumWidth(edge)
+        edge = max(
+            self._number_edge, *(lead + _number_cap(widget) for _key, widget, lead in capped)
+        )
+        for key, widget, lead in capped:
+            if widget.maximumWidth() != edge - lead:
+                widget.setMaximumWidth(edge - lead)
+            cell = self._cells.get(key, widget)
+            if lead and key not in self._unit_pickers and cell.maximumWidth() != edge:
+                cell.setMaximumWidth(edge)
 
     def _install_row(self, field, widget, row, automatic, cell, picker, label) -> None:
         """Record every part of one built row, in the one place that does."""
@@ -1689,20 +1713,12 @@ class FluentParameterForm(QtWidgets.QWidget):
             self._unit_pickers[key] = picker
         if automatic is not None:
             self._auto_switches[key] = automatic
-        if label is not None:
-            self._labels[key] = label
+        self._labels[key] = label
 
     def _label_row(self, field: FormFieldProps, width: int) -> None:
-        """Write one row's label for a ``width`` label column: an Auto row's
-        switch says its words, any other row's are fitted to the column."""
+        """Fit one row's words to a ``width`` label column."""
 
-        switch = self._auto_switches.get(field.key)
-        if switch is not None:
-            self._rows[field.key].set_label(
-                _automatic_label(field, switch.isChecked()), width=width
-            )
-        else:
-            _fit_label(self._labels[field.key], _shown_label(field), width)
+        _fit_label(self._labels[field.key], _shown_label(field), width)
 
     def _retire_row(self, key: str) -> None:
         """Take one row off the form and forget every part of it."""
@@ -1722,7 +1738,7 @@ class FluentParameterForm(QtWidgets.QWidget):
     def _automatic_toggled(self, key: str, automatic: bool) -> None:
         field = self._fields[key]
         widget = self._widgets[key]
-        self._set_automatic_label(key)
+        self._show_automatic_state(key)
         self._project_enabled(key)
         if not automatic and self._handlers[key].is_empty(field, widget):
             if field.kind == "choice" and field.choices:
@@ -1738,14 +1754,11 @@ class FluentParameterForm(QtWidgets.QWidget):
                 self._handlers[key].write(field, widget, value)
         self.changed.emit(key)
 
-    def _set_automatic_label(self, key: str) -> None:
-        field = self._fields[key]
+    def _show_automatic_state(self, key: str) -> None:
+        """Write on an Auto row's switch the state it is in."""
+
         switch = self._auto_switches[key]
-        row = self._rows[key]
-        label = _automatic_label(field, switch.isChecked())
-        width = self._label_width or _form_label_width(self._spec.fields)
-        if switch.text() != label or switch.width() != width:
-            row.set_label(label, width=width)
+        switch.setText(_automatic_state(switch.isChecked()))
 
     @property
     def spec(self) -> FormSpec:
@@ -1868,7 +1881,7 @@ class FluentParameterForm(QtWidgets.QWidget):
                     )
                 if switch is not None:
                     switch.setChecked(selected)
-                    self._set_automatic_label(field.key)
+                    self._show_automatic_state(field.key)
         self._project_enabled_all()
 
     def adopt_projection(
@@ -2152,7 +2165,7 @@ class FluentParameterForm(QtWidgets.QWidget):
                     automatic = self._auto_switches.get(field.key)
                     if automatic is not None and not editing:
                         automatic.setChecked(selected)
-                        automatic.setText(_automatic_label(field, selected))
+                        automatic.setText(_automatic_state(selected))
 
             replaced_keys = set(replacements)
             for key in tuple(self._rows):
@@ -2244,7 +2257,7 @@ class FluentParameterForm(QtWidgets.QWidget):
                     self._runtime,
                 )
                 if field.key in self._auto_switches:
-                    self._set_automatic_label(field.key)
+                    self._show_automatic_state(field.key)
         self._project_enabled_all()
 
     def _field_for(self, key: str) -> FormFieldProps:

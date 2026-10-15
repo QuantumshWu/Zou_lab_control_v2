@@ -298,6 +298,20 @@ def test_switches_and_ticks_are_solid_fills(app, host) -> None:
     assert brightest == QtGui.QColor(SURFACE).lightness(), "a white tick, not a grey one"
 
 
+def test_a_switch_that_says_its_state_keeps_the_width_of_its_widest_state(app, host) -> None:
+    from zlc_ui.fluent import FluentSwitch, fluent_switch_width
+
+    switch = FluentSwitch("Auto", host, room_for=("Auto", "Manual"))
+    widest = fluent_switch_width("Manual")
+    assert fluent_switch_width("Auto") < widest
+    assert switch.sizeHint().width() == widest
+    switch.setText("Manual")
+    assert switch.sizeHint().width() == widest
+    switch.setText("Auto")
+    assert switch.sizeHint().width() == widest, "what follows it never moves"
+    assert FluentSwitch("Auto", host).sizeHint().width() == fluent_switch_width("Auto")
+
+
 def test_the_current_segment_and_an_active_cycle_are_the_selected_fill(app, host) -> None:
     from zlc_ui.fluent import FluentCycleComboBox, FluentSegmentedButtons
     from zlc_ui.fluent.style import ACCENT_TINT, PLACEHOLDER, SELECTED
