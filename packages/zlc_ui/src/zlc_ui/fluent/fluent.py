@@ -7818,7 +7818,10 @@ class _TableRules(QtWidgets.QWidget):
     pixels, so the cross and both joints with the frame are exact.
 
     The widget is transparent to the pointer and masked to the two rules,
-    so it covers no cell and the viewport still scrolls by blitting.
+    so it covers no cell and the viewport still scrolls by blitting.  The
+    header rule always runs into the right edge: the vertical bar stands
+    beside the rows, under the header (``FluentTableView``), so nothing
+    stands between the header's end and the frame.
     """
 
     def __init__(self, table: "FluentTableView"):
@@ -7848,9 +7851,7 @@ class _TableRules(QtWidgets.QWidget):
         header = table.horizontalHeader()
         if not header.isHidden():
             y = device_snap(table, header.geometry().bottom() + 1, axis="y") - edge
-            right = device_snap(table, viewport.right() + 1)
-            right = outer_right if right >= inner.right() else right
-            rules.append(QtCore.QRectF(outer_left, y, right - outer_left, edge))
+            rules.append(QtCore.QRectF(outer_left, y, outer_right - outer_left, edge))
         side = table.verticalHeader()
         if not side.isHidden():
             x = device_snap(table, side.geometry().right() + 1) - edge
@@ -7912,6 +7913,9 @@ class FluentTableView(QtWidgets.QTableView):
     #: The header rules' layer; None until __init__ makes it (Qt resizes
     #: the view while its base constructor runs).
     _rules = None
+    #: The blank over the vertical bar, the column header's height; None
+    #: until __init__ makes it, for the same reason.
+    _header_room = None
     #: Rows read per fit, from the top of the view: a fit is a sample of what
     #: is on screen, coalesced to one per turn, never a scan of the model.
     _FIT_SAMPLE_ROWS = 8
@@ -8017,6 +8021,12 @@ class FluentTableView(QtWidgets.QTableView):
             """
         )
         apply_fluent_scrollbars(self)
+        # The vertical bar scrolls the rows, so it stands beside them: a
+        # blank the column header's height stands over it, in the header's
+        # row.  Spanning the header too, its resting handle sat beside the
+        # column names at the table's top and read as a stray grey bar.
+        self._header_room = QtWidgets.QWidget()
+        self.addScrollBarWidget(self._header_room, QtCore.Qt.AlignTop)
         self._rules = _TableRules(self)
         for bar in (self.horizontalScrollBar(), self.verticalScrollBar()):
             bar.valueChanged.connect(self._schedule_value_fit)
@@ -8150,6 +8160,11 @@ class FluentTableView(QtWidgets.QTableView):
     def updateGeometries(self) -> None:  # noqa: N802
         super().updateGeometries()
         self._fit_content_height()
+        if self._header_room is not None:
+            header = self.horizontalHeader()
+            room = 0 if header.isHidden() else header.height()
+            if self._header_room.maximumHeight() != room:
+                self._header_room.setFixedHeight(room)
         if self._rules is not None:
             self._rules.place()
 
