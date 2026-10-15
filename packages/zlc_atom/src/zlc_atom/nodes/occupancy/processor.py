@@ -30,7 +30,7 @@ from zlc_plot import (
     image_point_overlay_geometry,
 )
 
-from zlc_atom.nodes._framework.frames import REST, assign_frames, canonical_frames, check_claims
+from zlc_atom.nodes._framework.frames import REST, assign_frames, canonical_frames, check_claims, claim_names
 from zlc_atom.nodes.calibration import ReadoutModelKind, TrapCalibration
 from zlc_atom.nodes.calibration.calibration import classify_threshold, reads_photoelectrons
 
@@ -133,16 +133,19 @@ class OccupancyProcessor:
         if any(not isinstance(reading, CalibrationReading) for reading in readings):
             raise TypeError("occupancy calibrations must be CalibrationReading")
         self.readings = readings
-        #: How a refusal names each calibration: its file's stem, as the
-        #: editor's rows show it, when it has one.
+        #: How a refusal names each calibration: as the editor's rows name
+        #: it (claim_names) when it has a file.
+        filed = claim_names([{"path": "" if reading.path is None else str(reading.path)}
+                             for reading in readings])
         self._names = tuple(
-            reading.path.stem if reading.path is not None
+            filed[index] if reading.path is not None
             else "the calibration" if len(readings) == 1
             else f"calibration {index + 1}"
             for index, reading in enumerate(readings)
         )
-        paths = [reading.path for reading in readings if reading.path is not None]
-        repeated = sorted({path.stem for path in paths if paths.count(path) > 1})
+        paths = [reading.path for reading in readings]
+        repeated = sorted({name for name, path in zip(self._names, paths)
+                           if path is not None and paths.count(path) > 1})
         if repeated:
             raise ValueError(f"{repeated[0]} is listed twice: give it every frame it reads in one row")
         check_claims(tuple(reading.frames for reading in readings), self._names)

@@ -29,7 +29,7 @@ choice and the form's fields start on one edge.  The column is set by the
 labels that stay ("Readout model", the form's) and a fixed room for file
 names, never by a file name itself, so it does not move as files come and
 go.  A row is named as every sentence about it names it
-(:func:`claim_names`: the file's stem, or "row N" before it has a file),
+(:func:`claim_names`: a Calibration run's folder, any other file's stem, or "row N" before it has a file),
 elided in the middle when it is wider than the column; the tooltip reads
 the whole path.  The console resolves the
 files and projects how the source's frames read them; this widget only
@@ -141,7 +141,7 @@ class CalibrationsEditor(QtWidgets.QWidget):
         self._drawn = None
 
     def label_width_floor(self) -> int:
-        """The room a file name gets in the label column: a stem the way
+        """The room a file name gets in the label column: a name the way
         calibrations are named (``background_5ms``, ``readout_50ms``) shows
         whole; a longer one is elided in the middle.  Fixed, so the column
         is the same with no file, one or ten."""

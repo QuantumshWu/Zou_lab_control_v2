@@ -116,20 +116,54 @@ def describe_frames(frames: Sequence[FrameToken]) -> str:
     return ", ".join(str(token) for token in frames) or "no frame"
 
 
+#: The folder a run keeps its finished artifact in: ``<run>/final/<file>``.
+RUN_FINAL_FOLDER = "final"
+
+
+def _file_name(path: Path) -> str:
+    """A claimed file as the operator knows it.
+
+    A run's own artifact is named by its RUN FOLDER: every Calibration run
+    saves ``<run>/final/calibration.json``, so the file's own stem is the
+    same word on every row and tells none of them apart -- the folder is
+    the name the run was given.  Any other file is named by its stem.
+    """
+
+    if path.parent.name == RUN_FINAL_FOLDER and path.parent.parent.name:
+        return path.parent.parent.name
+    return path.stem
+
+
+def _named_with_parent(path: Path) -> str:
+    """The name one folder further up: ``<day>/<run>`` for a run's artifact,
+    ``<folder>/<stem>`` for any other file."""
+
+    named = path.parent.parent if path.parent.name == RUN_FINAL_FOLDER else path.parent
+    return f"{named.parent.name}/{_file_name(path)}" if named.parent.name else _file_name(path)
+
+
 def claim_names(entries: Sequence[Mapping[str, object]]) -> tuple[str, ...]:
     """What each frame-claims row is called, wherever a row is named.
 
-    The file's stem -- every calibration is a .json, so the extension tells
-    no row from another -- or "row N" for a row with no file yet.  The
-    editor's rows, its summary and tooltips, the draft issues and the claims
-    projection all name rows through here, so a row reads one way on screen
-    and in every sentence about it.
+    The run folder of a run's artifact, the stem of any other file (every
+    calibration is a .json, so the extension tells no row from another), or
+    "row N" for a row with no file yet.  Two different files that would
+    read alike -- runs of one name on two days -- are told apart by the
+    folder above them.  The editor's rows, its summary and tooltips, the
+    draft issues and the claims projection all name rows through here, so a
+    row reads one way on screen and in every sentence about it.
     """
 
-    return tuple(
-        Path(str(entry["path"])).stem or f"row {index + 1}"
-        for index, entry in enumerate(entries)
-    )
+    paths = [Path(str(entry["path"])) if entry["path"] else None for entry in entries]
+    short = [_file_name(path) if path is not None else "" for path in paths]
+    names = [
+        _named_with_parent(path)
+        if path is not None and len({other for other, name in zip(paths, short)
+                                     if other is not None and name == short[index]}) > 1
+        else short[index]
+        for index, path in enumerate(paths)
+    ]
+    return tuple(name or f"row {index + 1}" for index, name in enumerate(names))
 
 
 def check_claims(

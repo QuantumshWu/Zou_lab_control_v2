@@ -137,3 +137,21 @@ def test_a_draft_value_is_rows_of_path_and_frames() -> None:
                 [{"path": 1, "frames": []}], [{"path": "a", "frames": [], "x": 1}]):
         with pytest.raises(ValueError):
             frame_claim_entries(bad)
+
+
+def test_a_row_is_named_by_its_run_folder_and_told_apart_by_the_day() -> None:
+    """Every Calibration run saves <run>/final/calibration.json, so a row is
+    named by its run folder, not the file's stem every row would share; runs
+    of one name on two days carry the day; any other file keeps its stem."""
+
+    from zlc_atom.nodes import claim_names
+
+    names = claim_names((
+        {"path": "C:/ws/data/2026_10_13/load_cal/final/calibration.json", "frames": ("first",)},
+        {"path": "C:/ws/data/2026_10_14/load_cal/final/calibration.json", "frames": (1,)},
+        {"path": "C:/ws/data/2026_10_14/readout_cal/final/calibration.json", "frames": ("last",)},
+        {"path": "C:/ws/calibrations/background_5ms.json", "frames": ("rest",)},
+        {"path": "", "frames": (2,)},
+    ))
+    assert names == ("2026_10_13/load_cal", "2026_10_14/load_cal", "readout_cal", "background_5ms", "row 5")
+    assert "calibration" not in names
