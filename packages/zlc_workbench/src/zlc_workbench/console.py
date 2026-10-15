@@ -2986,7 +2986,8 @@ class ConsolePresenter:
         )
         # A rename changes every heading and label below without changing
         # the plane or the wiring, so the names are part of the context.
-        names_key = self._names_key()
+        names = self.logic_names()
+        names_key = tuple(names.items())
         previous = self._signal_choice_context
         if (
             previous is not None
@@ -2995,7 +2996,6 @@ class ConsolePresenter:
             and previous[2] == names_key
         ):
             return
-        names = self.logic_names()
         panel_publishers = tuple(
             (
                 panel_id,
@@ -7875,11 +7875,6 @@ class ConsolePresenter:
         person reads it."""
 
         return self._signal_text(binding.state.title, names)
-
-    def _names_key(self) -> tuple[tuple[str, str], ...]:
-        """Every node's id and name, for a cache that a rename must expire."""
-
-        return tuple((binding.node_id, binding.name) for binding in self.logic.values())
 
     def _reserved_headings(self) -> set[str]:
         """The headings a node's name must not take, so no picker files two
