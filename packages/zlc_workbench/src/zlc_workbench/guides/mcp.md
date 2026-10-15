@@ -286,6 +286,10 @@ If the metadata exceeds limit, it is paged as JSON text with next_offset/total_b
 continue only as needed, or request one named metadata section.
 Use the native Figure Viewer to reopen; a custom np.savez array file is not a
 Figure archive. `layout.save` preserves reusable node and panel authoring.
+`layout.load` keeps a row whose device or source no longer fits today's board
+(a warning report names it) and that row's `logic.validate` says what to choose;
+the board may hold rows the operator is not using today. Fix only the rows the
+task runs; do not delete the others.
 
 ## recipes
 
