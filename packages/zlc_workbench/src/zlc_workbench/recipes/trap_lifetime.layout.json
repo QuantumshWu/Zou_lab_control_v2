@@ -33,7 +33,7 @@
       "api_name": "frame_survival",
       "values": {
         "selection": "custom",
-        "pairs": [{"start": "0", "end": "last", "selected": true}]
+        "custom_pairs": [{"start": "0", "end": "last", "selected": true}]
       },
       "source_signal": "@logic/occupancy/occupied",
       "device_keys": {},

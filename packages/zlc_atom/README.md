@@ -367,8 +367,17 @@ or Selected, marked on a start × end matrix with ordinary table selection
 (drag a rectangle, Ctrl to add or remove, a row or column header for every pair
 from or to that frame). Grid edits retain the rule with sparse pair overrides:
 excluding `0` to `last` from From first still selects newly added middle frames.
+Selected keeps a list of its own (`custom_pairs`) while a rule or None is
+picked, so picking it again brings the list back; a pair marked under None
+joins it. A pair the list keeps unselected is parked: kept as written, never
+checked (it may repeat a selected pair or stand unfinished), never published,
+and recorded with the run (`parked_pairs`). A list the grid cannot read is
+named in red and the grid is locked rather than written over.
 Endpoint text `0`/`last` follows the first/last identity; middle indices never
-become a new endpoint when the count shrinks. The editor follows declared source
+become a new endpoint when the count shrinks: a selected pair whose middle frame
+the source does not carry is kept, named in an amber note and in the run record
+(`absent_pairs`), and left out of the published pairs -- the run fails only when
+none of its selected pairs is in the source. The editor follows declared source
 draft frames immediately, while published data uses the actual acquired schema.
 The `slm_feedback` Task takes one ordinary camera/readout Calibration and one
 strict Science Context. Calibration has no SLM or Science Context input.
