@@ -126,6 +126,11 @@ CALIBRATION_SCHEMA = AuthoringSchema(
                 AuthoringChoice("gaussian", "Gaussian"),
                 AuthoringChoice("empirical", "Empirical"),
             ),
+            description=(
+                "Gaussian: fit Empty/Occupied populations separately using agreeing "
+                "reference frames, then use their weighted crossing. Empirical: "
+                "maximize correct classifications on those labelled samples."
+            ),
             segmented=True,
         ),
         AuthoringField(

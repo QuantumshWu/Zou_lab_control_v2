@@ -18,7 +18,9 @@ from zlc_durable import strict_json_loads, write_readable_json
 
 from zlc_atom.authoring import AuthoringChoice
 
-from .bimodal import fit_bimodal, per_site_fidelity
+from .bimodal import (
+    fit_bimodal, gaussian_fidelity, optimal_gaussian_threshold, per_site_fidelity,
+)
 from .psf import extract_psf_window, gaussian_psf_kernel
 
 
@@ -2479,7 +2481,12 @@ def _fit_readout_model(
     model_parameters: Mapping[str, Any],
     diagnostics: Mapping[str, Any] | None = None,
 ) -> tuple[ReadoutModel, dict[str, Any]]:
-    """Fit one feature model and evaluate it on the complete labelled run."""
+    """Fit each reference-labelled population and evaluate its threshold.
+
+    For a known state, the Gaussian maximum-likelihood solution is its sample
+    mean and population standard deviation. The short frame cannot relabel
+    its own overlapping populations; only agreeing long references label it.
+    """
 
     centers = site_map.centers_xy
     thresholds = np.full(len(centers), np.nan, dtype=float)
@@ -2513,20 +2520,28 @@ def _fit_readout_model(
             dark_sample_count[site] = dark_reference.size
             dark_sample_variance[site] = float(np.var(dark_reference, ddof=1))
         gaussian_threshold = float("nan")
-        mixture = fit_bimodal(short_signals[finite, site])
-        # The fit's own threshold and fidelity are already the weighted
-        # crossing and its weighted fidelity; ``ok`` includes that the
-        # crossing exists between the two means.
-        if mixture.ok:
-            gaussian_threshold = mixture.threshold
-            gaussian_thresholds[site] = mixture.threshold
-            gaussian_dark_means[site] = mixture.dark_mean
-            gaussian_dark_sigmas[site] = mixture.dark_sigma
-            gaussian_bright_means[site] = mixture.bright_mean
-            gaussian_bright_sigmas[site] = mixture.bright_sigma
-            gaussian_dark_weights[site] = 1.0 - mixture.bright_fraction
-            gaussian_bright_weights[site] = mixture.bright_fraction
-            site_gaussian_fidelity[site] = mixture.fidelity
+        if (dark.size >= 2 and bright_values.size >= 2
+                and np.ptp(dark) > 0.0 and np.ptp(bright_values) > 0.0):
+            dark_mean, bright_mean = float(np.mean(dark)), float(np.mean(bright_values))
+            dark_sigma, bright_sigma = float(np.std(dark)), float(np.std(bright_values))
+            total = dark.size + bright_values.size
+            dark_weight, bright_weight = dark.size / total, bright_values.size / total
+            gaussian_threshold = optimal_gaussian_threshold(
+                dark_mean, dark_sigma, bright_mean, bright_sigma,
+                dark_weight, bright_weight,
+            )
+            if np.isfinite(gaussian_threshold):
+                gaussian_thresholds[site] = gaussian_threshold
+                gaussian_dark_means[site] = dark_mean
+                gaussian_dark_sigmas[site] = dark_sigma
+                gaussian_bright_means[site] = bright_mean
+                gaussian_bright_sigmas[site] = bright_sigma
+                gaussian_dark_weights[site] = dark_weight
+                gaussian_bright_weights[site] = bright_weight
+                site_gaussian_fidelity[site] = gaussian_fidelity(
+                    dark_mean, dark_sigma, bright_mean, bright_sigma,
+                    gaussian_threshold, dark_weight, bright_weight,
+                )[2]
         threshold = gaussian_threshold
         if threshold_method == "empirical" or not np.isfinite(gaussian_threshold):
             threshold = (
@@ -2546,8 +2561,8 @@ def _fit_readout_model(
                 short_values,
                 np.full(short_values.shape, threshold, dtype=float),
             )
-    # Labels enter only here (and the empirical path above): they evaluate the
-    # final operating point but never determine a Gaussian fit or its threshold.
+    # This is the observed agreement on the calibration samples, not held-out
+    # validation: the same reference labels also trained the two populations.
     confusion = per_site_fidelity(
         short_signals,
         labels_occupied,
