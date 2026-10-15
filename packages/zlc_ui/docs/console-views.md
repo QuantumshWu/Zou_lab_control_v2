@@ -219,8 +219,11 @@ everything falls north-west.
   swapped first, the one further up and left (in reading order) keeping its
   place, then every other card in the reading order of where it stands.  A
   card that overlaps one already settled moves right just clear of it if
-  its row has the room -- on the board, passing no card on the way --
-  otherwise straight down its own column to the first clear place.  Then
+  its row has the room -- on the board, passing no card on the way, and
+  never across a card it makes way for -- otherwise down its own column to
+  the first clear place, the cards below it in that column moving down
+  with it so a column keeps its order (a card its column carried down makes
+  way further down only).  Then
   every card falls north-west until nothing moves.  Put back where it was
   picked up, the card leaves every card where it stood.
 

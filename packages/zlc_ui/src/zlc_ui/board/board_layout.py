@@ -176,20 +176,27 @@ def min_board_width(configs: Sequence, metrics: BoardMetrics) -> int:
     return widest + 2 * metrics.gap
 
 
-def _make_way(cfg, settled, order, board_w: int, metrics: BoardMetrics) -> None:
+def _make_way(cfg, settled, order, board_w: int, metrics: BoardMetrics, carried_down: set) -> None:
     """Move ``cfg`` clear of the ``settled`` cards it overlaps.
 
-    RIGHT, just clear of them, when its row has the room: the place is on the
-    board, clear of every settled card, and the way there passes no card -- it
-    meets none that neither its start nor that place touches.  Otherwise
-    straight DOWN its own column, to the first row clear of every settled card.
-    A card that place touches and that has not settled yet makes way in its
-    own turn.
+    RIGHT, just clear of them, when its row has the room: every card it
+    overlaps starts at or left of it (moving right never carries it across a
+    card it makes way for), the place is on the board and clear of every
+    settled card, and the way there passes no card -- it meets none that
+    neither its start nor that place touches.
+
+    Otherwise DOWN its own column, to the first row clear of every settled
+    card -- and every card not settled yet that stands below it in its column
+    moves down with it, by as much: a column makes way as one, so no card
+    lands past one that stood under it.  Those cards (``carried_down``, by
+    id) then make way in their own turn from where the column put them, and
+    only further down: a card its column moved stays in that column.
     """
 
     gap = metrics.gap
     start = _aabb(cfg)
-    x = max(p.col + p.width for p in settled if _overlaps_with_gap(start, [p], metrics)) + gap
+    hit = [p for p in settled if _overlaps_with_gap(start, [p], metrics)]
+    x = max(p.col + p.width for p in hit) + gap
     place = (x, cfg.row, x + cfg.width, cfg.row + cfg.height)
     way = (cfg.col, cfg.row, x + cfg.width, cfg.row + cfg.height)
     passed = [
@@ -200,10 +207,28 @@ def _make_way(cfg, settled, order, board_w: int, metrics: BoardMetrics) -> None:
         and not _overlaps_with_gap(start, [p], metrics)
         and not _overlaps_with_gap(place, [p], metrics)
     ]
-    if x <= board_w - gap - cfg.width and not passed and not _overlaps_with_gap(place, settled, metrics):
+    if (
+        id(cfg) not in carried_down
+        and all(p.col <= cfg.col for p in hit)
+        and x <= board_w - gap - cfg.width
+        and not passed
+        and not _overlaps_with_gap(place, settled, metrics)
+    ):
         cfg.col = x
-    else:
-        cfg.row = _below(cfg.col, cfg.row, cfg.width, cfg.height, [_aabb(p) for p in settled], gap)
+        return
+    row = _below(cfg.col, cfg.row, cfg.width, cfg.height, [_aabb(p) for p in settled], gap)
+    down = row - cfg.row
+    for p in order:
+        if (
+            p is not cfg
+            and all(p is not s for s in settled)
+            and p.row >= cfg.row
+            and p.col < cfg.col + cfg.width + gap
+            and cfg.col < p.col + p.width + gap
+        ):
+            p.row += down
+            carried_down.add(id(p))
+    cfg.row = row
 
 
 def pack(order: Sequence, metrics: BoardMetrics, board_w: int, *, first: Sequence = ()) -> None:
@@ -216,13 +241,13 @@ def pack(order: Sequence, metrics: BoardMetrics, board_w: int, *, first: Sequenc
     1. Overlaps settle in priority: the cards of ``first``, then every other
        card, each group in the reading order of where its cards stand.  A card
        that overlaps one already settled moves RIGHT just clear of it if its
-       row has the room -- on the board, passing no card -- otherwise straight
-       DOWN its own column to the first clear place.  A card a narrower board
-       squeezed onto another makes way the same way.
+       row has the room -- on the board, across no card -- otherwise DOWN its
+       own column with every card below it there (:func:`_make_way`).  A card
+       a narrower board squeezed onto another makes way the same way.
     2. Every card falls north-west (:func:`gravity_slot`), every other card an
-       obstacle, until nothing moves.  No card passes through another or
-       searches the board for a hole, and a card stopped by a card above it
-       stays below it.
+       obstacle, until nothing moves.  No card is carried past one it does
+       not overlap or searches the board for a hole, and a card stopped by a
+       card above it stays below it.
     """
 
     order = list(order)
@@ -238,9 +263,10 @@ def pack(order: Sequence, metrics: BoardMetrics, board_w: int, *, first: Sequenc
         return (cfg.row, cfg.col, rank[id(cfg)])
 
     settled: list = []
+    carried_down: set = set()
     for cfg in sorted(order, key=lambda cfg: (id(cfg) not in ahead, *reading(cfg))):
         if _overlaps_with_gap(_aabb(cfg), settled, metrics):
-            _make_way(cfg, settled, order, board_w, metrics)
+            _make_way(cfg, settled, order, board_w, metrics, carried_down)
         settled.append(cfg)
     moved = True
     while moved:

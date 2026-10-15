@@ -65,8 +65,9 @@ class ConsoleBoardView(QtWidgets.QWidget):
     let go onto -- that card takes the place the carried one left, the
     carried one takes the slot -- or, let go on empty space, takes the slot;
     where their new places overlap, the card further up and left keeps its
-    place, the other cards make way for both (right if the row has room,
-    else straight down), and then everything falls.  Put back where it was
+    place, the other cards make way for both (right if the row has room and
+    the move crosses none of them, else down with the rest of their column),
+    and then everything falls.  Put back where it was
     picked up, it leaves every card where it stood.  While it is carried the
     other cards already stand where the drop will leave them -- preview and
     drop are one computation -- and the slot is drawn under it as an

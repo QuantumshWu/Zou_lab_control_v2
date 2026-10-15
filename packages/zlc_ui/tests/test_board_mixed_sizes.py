@@ -282,6 +282,50 @@ def _centre(c, place) -> tuple[int, int]:
     return (place[0] + c.width // 2, place[1] + c.height // 2)
 
 
+def test_the_users_case_a_card_let_go_on_a_bigger_card_takes_its_place() -> None:
+    """The case the user drew: a 2x2 top-left, a 4x4 beside it, a 2x2 under
+    the first.  The bottom-left card let go on the 4x4 takes the 4x4's place
+    and the 4x4 takes the place it left; the top-left card stays."""
+
+    board_w = 2 * GAP + SIZES["2x2"][0] + GAP + SIZES["4x4"][0] + 35
+    board = _tiled(("2x2", "4x4", "2x2"), board_w)
+    top_left, big, bottom_left = board
+    assert places(board) == [(GAP, GAP), (2 * GAP + SIZES["2x2"][0], GAP), (GAP, 2 * GAP + SIZES["2x2"][1])]
+    for drawn in ((big.col + 10, big.row + 10), (big.col + 200, big.row + 150), (big.col + 320, big.row + 40)):
+        for hold in ((14, STRIP), (bottom_left.width - 60, STRIP), (bottom_left.width // 2, bottom_left.height // 2)):
+            slot = _slot(board, bottom_left, drawn, hold, board_w)
+            after = _let_go(board, bottom_left, slot, board_w)
+            assert places(after) == [(top_left.col, top_left.row), (bottom_left.col, bottom_left.row),
+                                     (big.col, big.row)], (drawn, hold, places(after))
+
+
+def test_a_card_in_the_way_is_never_carried_across_the_card_it_makes_way_for() -> None:
+    """A wide card swapped into a narrow card's place that overlaps the card
+    let go beside it makes way DOWN, under it -- never rightward across it,
+    which read as an insert and could fling a card that was not touched."""
+
+    board = [card("1x2", GAP, GAP), card("2x4", 2 * GAP + SIZES["1x2"][0], GAP),
+             card("2x2", GAP, 2 * GAP + SIZES["1x2"][1])]
+    small, wide, carried = board
+    after = _let_go(board, carried, (wide.col, wide.row), 1900)
+    assert places(after) == [(small.col, small.row), (GAP, 2 * GAP + SIZES["2x2"][1]), (wide.col, wide.row)], (
+        places(after))
+
+
+def test_a_column_makes_way_as_one_so_its_cards_keep_their_order() -> None:
+    """Making way down carries the cards below in that column along: a card
+    that stood above another in its column still stands above it."""
+
+    right = 2 * GAP + SIZES["4x2"][0]
+    board = [card("4x2", GAP, GAP), card("2x4", right, GAP), card("1x2", right, 2 * GAP + SIZES["2x4"][1]),
+             card("1x2", GAP, 674), card("2x4", right, 711), card("4x2", GAP, 963)]
+    pack(board, METRICS, 1400)
+    upper, lower = board[1], board[2]
+    assert upper.row < lower.row
+    after = _let_go(board, board[4], (board[0].col, board[0].row), 1400)
+    assert after[1].row < after[2].row, places(after)
+
+
 def test_random_mixed_drags_keep_every_rule(monkeypatch) -> None:
     """Random mixed boards, widths and drags -- onto a card, anywhere, held by
     either end of the strip or by the body:
@@ -293,8 +337,8 @@ def test_random_mixed_drags_keep_every_rule(monkeypatch) -> None:
       again: what was previewed is what stays;
     - every card is at north-west rest among the others;
     - every card but the two that swapped makes way only right along its row
-      or straight down its column, then falls only up and left; making way
-      rightward and falling pass no card the drop left untouched.  (Making
+      or straight down its column, then falls only up and left; making way,
+      either way, and falling pass no card the drop left untouched.  (Making
       way along its row and then rising up an empty column is two moves;
       their sum is no L.)
     """
@@ -358,8 +402,7 @@ def test_random_mixed_drags_keep_every_rule(monkeypatch) -> None:
                     or (way[0] == start[0] and way[1] > start[1])
                 ), ("made way neither right nor down", places(board), places(after), moves[id(a)])
                 assert end[0] <= way[0] and end[1] <= way[1], ("fell other than north-west", moves[id(a)])
-                runs = ((start, way), (way, end)) if way[1] == start[1] else ((way, end),)
-                for run in runs:
+                for run in ((start, way), (way, end)):
                     assert not _passed(_centre(a, run[0]), _centre(a, run[1]), untouched), (
                         places(board), places(after), moves[id(a)],
                     )
