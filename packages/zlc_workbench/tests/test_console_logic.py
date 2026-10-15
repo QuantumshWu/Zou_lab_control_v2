@@ -1631,6 +1631,19 @@ def test_calibration_pulse_is_a_workspace_file_picker(
     assert projection["can_start"] is False
     assert any("not-calibration.json" in issue for issue in projection["issues"])
 
+    # Calibrating saved frames reads no pulse and holds no device: the
+    # broken pulse it still names stays in the draft and refuses nothing,
+    # no camera or sequencer is offered or claimed, and New frames brings
+    # the refusal back with the pulse.
+    presenter.update_logic_draft(node_id, values={"frame_source": "saved"})
+    projection = presenter.logic_editor_projection(node_id)
+    assert projection["can_start"] is True, projection["issues"]
+    assert projection["device_options"] == {}
+    assert presenter.logic[node_id].draft.values["pulse_template"] == str(invalid)
+    presenter.update_logic_draft(node_id, values={"frame_source": "new"})
+    projection = presenter.logic_editor_projection(node_id)
+    assert any("not-calibration.json" in issue for issue in projection["issues"])
+
 
 def test_slm_feedback_form_shows_a_numeric_exposure_blank_for_the_current_camera_setting(presenter) -> None:
     node_id = presenter.add_logic("slm_feedback")
