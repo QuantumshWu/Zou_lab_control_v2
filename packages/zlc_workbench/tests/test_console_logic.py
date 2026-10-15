@@ -501,13 +501,16 @@ def test_editing_a_running_row_changes_only_its_shared_draft(presenter, session)
     assert presenter.start_logic(node_id) is False
     assert presenter.logic[node_id].host is current_host
     assert current_host.running, "invalid Restart stopped the valid current run"
-    # A refused Restart left the run -- and the configuration it uses -- alone.
+    # A refused Restart left the run -- and the configuration it uses -- alone,
+    # and says why where it was pressed: on the row, not only in the log.
     assert presenter.view.logic_editors[node_id]["edited"] is True
+    assert row.state[0] == "running" and " · edited; Restart refused: " in row.state[1], row.state
     reverted = presenter.control_action("logic.revert", {"node_id": node_id})
     assert reverted["accepted"], reverted
     assert presenter.logic[node_id].draft == started
     assert presenter.view.logic_editors[node_id]["form_values"]["repeat"] == 0
     assert edited() == (False, False, False)
+    assert "Restart refused" not in row.state[1], "Revert is an edit: the refusal was the old draft's"
     assert presenter.logic[node_id].host is current_host and current_host.running
     # The run keeps declaring what IT shows.  A half-typed draft is not even a
     # valid request -- asking it what to plot raised out of the console's poll.
@@ -1513,6 +1516,67 @@ def test_task_acquisition_waits_for_its_own_scan_and_stops_nested_ready_source(p
     assert camera_stops
     if ending == "failed":
         assert "scan hardware failed" in presenter.logic[task_id].host.observation.error
+
+
+def test_a_task_restarting_its_acquisition_runs_the_configuration_that_ran(presenter) -> None:
+    """A restart the operator did not press -- a Task restarting the
+    Measurement it acquires -- runs that Measurement's current configuration;
+    an edit nobody restarted stays an edit, as for a follow restart."""
+    from threading import Event
+    from zlc_atom.authoring import AuthoringField, AuthoringSchema
+    from zlc_atom.nodes import LogicNodeDescriptor, NodeKind
+
+    built, acquired = [], Event()
+
+    def camera_build(*, level):
+        def execute(context):
+            built.append(level)
+            context.report_ready()
+            while not context.cancel_requested():
+                time.sleep(.001)
+        return SimpleNamespace(execute=execute)
+
+    def task_build(*, acquisition_logic, restart_logic):
+        def execute(context):
+            restart_logic(acquisition_logic, context)
+            acquired.set()
+            while not context.cancel_requested():
+                time.sleep(.001)
+        return SimpleNamespace(execute=execute)
+
+    camera = LogicNodeDescriptor("ready_source", NodeKind.MEASUREMENT,
+        AuthoringSchema((AuthoringField("level", "int", "Level", 1),)),
+        description="Report readiness at a level and hold until cancelled.",
+        build=camera_build, reports_ready=True)
+    task = LogicNodeDescriptor("feedback", NodeKind.TASK,
+        AuthoringSchema((AuthoringField("acquisition_logic", "str", "Acquisition", ""),)),
+        description="Acquire the selected ready source once.", build=task_build,
+        acquisition_input="acquisition_logic", node_previews=())
+    presenter.catalog = LogicCatalog((camera, task))
+    camera_id = presenter.add_logic("ready_source")
+    task_id = presenter.add_logic("feedback", values={"acquisition_logic": camera_id})
+    assert presenter.start_logic(camera_id)
+    deadline = time.monotonic() + 5
+    while built != [1] and time.monotonic() < deadline:
+        presenter.beat()
+        time.sleep(.002)
+    assert presenter.update_logic_draft(camera_id, values={"level": 7})
+    assert presenter.control_state(node_id=camera_id)["logic"][0]["edited_since_start"]
+
+    assert presenter.start_logic(task_id)
+    deadline = time.monotonic() + 5
+    while not acquired.is_set() and time.monotonic() < deadline:
+        presenter.beat()
+        time.sleep(.002)
+    assert acquired.is_set() and built == [1, 1], built
+    row = presenter.control_state(node_id=camera_id)["logic"][0]
+    assert row["edited_since_start"], "the Task's restart applied an edit nobody restarted"
+    presenter.stop_logic(task_id)
+    deadline = time.monotonic() + 5
+    while any(b.host is not None and b.host.running for b in presenter.logic.values()) and time.monotonic() < deadline:
+        presenter.beat()
+        presenter.stop_logic(camera_id)
+        time.sleep(.002)
 
 
 def test_saved_artifact_paths_are_visible_and_seed_matching_input_drafts(

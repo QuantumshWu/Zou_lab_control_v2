@@ -9246,6 +9246,7 @@ class ConsolePresenter:
         following = binding.following and (
             not draft_issues() or _edited_since_start(binding)
         )
+        refused = ""
         followed = (
             _running_configuration(binding).source_signal.strip()
             if following else ""
@@ -9269,6 +9270,10 @@ class ConsolePresenter:
                     status = f"failed; restarts with the source's next run: {observed.error}"
             elif observed.running:
                 state, status = "running", self._observation_status(observed)
+                if binding.draft_error:
+                    # A refused Restart leaves the run going; the refusal is
+                    # said where the operator pressed it, not only in the log.
+                    refused = binding.draft_error
             elif binding.draft_error:
                 state, status = "error", binding.draft_error
             else:
@@ -9318,6 +9323,8 @@ class ConsolePresenter:
             # The run goes on with the configuration it started with; the
             # draft on the page is for the next one.
             status = f"{status} · edited"
+        if refused:
+            status = f"{status}; Restart refused: {refused}"
         return state, str(status)
 
     def _show_logic(
@@ -9929,27 +9936,34 @@ class ConsolePresenter:
                 parent_host = parent.host
                 if parent_host is None or parent_host.generation != context.generation or not parent_host.running:
                     raise RuntimeError("the acquisition caller's run is no longer active")
+                # The caller's run is read as it was started: an edit to the
+                # caller nobody restarted is the next run's, not this one's.
+                running = _running_configuration(parent) or parent.draft
                 descriptor = parent.descriptor
                 field = descriptor.acquisition_input
                 if completion != descriptor.acquisition_completion or not field:
                     raise ValueError("acquisition must match this run's declared selection and completion")
                 if self._active_task() is not None and (
-                    not descriptor.authoring_schema.is_enabled(field, parent.draft.values)
-                    or str(parent.draft.values.get(field) or "") != node_id
+                    not descriptor.authoring_schema.is_enabled(field, running.values)
+                    or str(running.values.get(field) or "") != node_id
                 ):
                     raise ValueError("the Task did not select this acquisition")
                 if node_id not in self._acquisition_options(str(context.instance_id)):
                     raise ValueError(f"{node_id!r} is not an available acquisition Measurement")
-                if completion == "terminal" and parent.draft.source_signal and not any(
+                if completion == "terminal" and running.source_signal and not any(
                     parts is not None and parts[0] == node_id
-                    for signal in self._signal_input_chain(parent.draft.source_signal)
+                    for signal in self._signal_input_chain(running.source_signal)
                     for parts in (split_signal_key(signal),)
                 ):
                     raise ValueError(
-                        f"{parent.draft.source_signal!r} does not derive from "
+                        f"{running.source_signal!r} does not derive from "
                         f"the selected acquisition {node_id!r}"
                     )
-                if not self.start_logic(node_id, _acquisition=True):
+                # A restart the operator did not press runs the acquisition's
+                # current configuration when it has one -- an unrestarted
+                # edit stays an edit -- and its draft when it is not running.
+                child = _running_configuration(self.logic[node_id])
+                if not self.start_logic(node_id, _acquisition=True, _draft=child):
                     raise RuntimeError(self.logic[node_id].draft_error or f"could not restart {node_id}")
                 binding = self.logic[node_id]
                 host = binding.pending.host if binding.pending is not None else binding.host

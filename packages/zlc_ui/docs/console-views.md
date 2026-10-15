@@ -279,9 +279,11 @@ named goes too -- without restarting; Restart wears the dirty star and the
 primary role (`set_dirty`, the On Pulse rule) with the tooltip "Restart to run
 the edited configuration".  A Restart of an unedited run is a standard
 command; Start, with nothing running, is the page's primary.  The presenter
-also ends the row's and the header's status with `· edited`.  Only Restart
-or Revert ends an edit: a following processor whose source restarts rebuilds
-the configuration it was started with, so the cue stays, and while it
+also ends the row's and the header's status with `· edited`, and a Restart
+it refused while the run goes on adds `; Restart refused: <why>` there until
+the next edit.  Only Restart or Revert ends an edit: a following processor
+whose source restarts, or a Measurement a Task restarts to acquire from,
+rebuilds the configuration it was started with, so the cue stays, and while it
 follows its status names that configuration's source even when the edit has
 issues -- those are the next run's.  A queued Restart's configuration is the
 one the node runs only until the Restart is discarded (Stop, another node
