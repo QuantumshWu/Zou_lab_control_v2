@@ -1,4 +1,4 @@
-"""One non-modal TaskConsole Panel Edit tab.
+"""One non-modal Panel Edit tab, in the TaskConsole or the FigureViewer.
 
 The widget consumes a plain Workbench projection.  It deliberately knows
 nothing about signal publications, plot specs, measurement descriptors, or
@@ -30,11 +30,14 @@ from zlc_ui.fluent import (
     FluentSwitch,
     MUTED_INK,
     ORANGE_DARK,
+    card_pad,
     row_gap,
     scaled_px,
+    section_gap,
     setting_label_width,
     stamped_file_name,
     retire_widget,
+    window_pad,
 )
 from zlc_ui.form import (
     FluentParameterForm,
@@ -76,7 +79,19 @@ class PanelEditorView(QtWidgets.QWidget):
     #: the one plot error the console never heard.
     plot_error = QtCore.pyqtSignal(str)
 
-    def __init__(self, panel_id: str, projection: Mapping[str, object], parent=None) -> None:
+    def __init__(
+        self,
+        panel_id: str,
+        projection: Mapping[str, object],
+        parent=None,
+        *,
+        page_inset: int | None = None,
+    ) -> None:
+        """``page_inset`` is where the host's tab pages start their content
+        (its tab widget's page inset): the Task Console's window pad unless
+        the host says otherwise -- the Figure Viewer lays its pages on one
+        card pad."""
+
         super().__init__(parent)
         self.panel_id = str(panel_id)
         self._science_locked = False
@@ -107,17 +122,25 @@ class PanelEditorView(QtWidgets.QWidget):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
         self.scroll = FluentScrollArea()
-        self.scroll.setWidgetResizable(True)
         # Opaque, so a scroll blits the page instead of repainting it whole.
         body = FluentPageBody()
         body_layout = QtWidgets.QVBoxLayout(body)
-        margin = scaled_px(14, minimum=8)
-        body_layout.setContentsMargins(margin, margin, margin, margin)
-        body_layout.setSpacing(scaled_px(10, minimum=6))
+        # The host's page inset on every side, so this page starts where the
+        # host's other pages and its first tab's underline start.  The bar's
+        # gutter is held whether or not the bar shows (a width-bounded
+        # mount) and stands inside the right inset: the cards end on the
+        # host's right edge with or without a bar.
+        inset = window_pad() if page_inset is None else int(page_inset)
+        gutter = self.scroll.verticalScrollBar().sizeHint().width()
+        body_layout.setContentsMargins(inset, inset, max(0, inset - gutter), inset)
+        # The cards stack a row gap apart, a section gap under the header.
+        body_layout.setSpacing(row_gap())
+        pad = card_pad()
 
         header = FluentFrame(bordered=False)
         header_layout = QtWidgets.QHBoxLayout(header)
         header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.setSpacing(row_gap())
         self.title_label = FluentLabel(self.panel_id)
         self.kind_label = FluentLabel("")
         self.kind_label.setStyleSheet(
@@ -127,10 +150,12 @@ class PanelEditorView(QtWidgets.QWidget):
         header_layout.addWidget(FluentLabel("Plot kind (fixed):"))
         header_layout.addWidget(self.kind_label)
         body_layout.addWidget(header)
+        body_layout.addSpacing(section_gap() - row_gap())
 
         panel_group = FluentGroupBox("Panel")
         panel_layout = QtWidgets.QVBoxLayout(panel_group)
-        panel_layout.setContentsMargins(margin, margin, margin, margin)
+        panel_layout.setContentsMargins(pad, pad, pad, pad)
+        panel_layout.setSpacing(row_gap())
         self.panel_form = FluentParameterForm(
             FormSpec(()), {}, runtime=self._signal_runtime
         )
@@ -149,7 +174,8 @@ class PanelEditorView(QtWidgets.QWidget):
         ):
             group = FluentGroupBox(title)
             layout = QtWidgets.QVBoxLayout(group)
-            layout.setContentsMargins(margin, margin, margin, margin)
+            layout.setContentsMargins(pad, pad, pad, pad)
+            layout.setSpacing(row_gap())
             unavailable = FluentLabel("")
             unavailable.setWordWrap(True)
             unavailable.setStyleSheet(
@@ -172,7 +198,8 @@ class PanelEditorView(QtWidgets.QWidget):
         snapshot_group = FluentGroupBox("Frozen snapshot")
         self.snapshot_group = snapshot_group
         snapshot_layout = QtWidgets.QVBoxLayout(snapshot_group)
-        snapshot_layout.setContentsMargins(margin, margin, margin, margin)
+        snapshot_layout.setContentsMargins(pad, pad, pad, pad)
+        snapshot_layout.setSpacing(row_gap())
         self.surface_holder = FluentFrame(bordered=False)
         self.surface_holder.setMinimumHeight(scaled_px(360, minimum=280))
         self.surface_layout = QtWidgets.QVBoxLayout(self.surface_holder)
@@ -186,6 +213,7 @@ class PanelEditorView(QtWidgets.QWidget):
         self.snapshot_label.setWordWrap(True)
         snapshot_layout.addWidget(self.snapshot_label)
         snapshot_actions = QtWidgets.QHBoxLayout()
+        snapshot_actions.setSpacing(row_gap())
         self.refresh_button = FluentButton("Refresh snapshot")
         self.refresh_button.clicked.connect(self.snapshot_refresh_requested.emit)
         snapshot_actions.addWidget(self.refresh_button)
@@ -195,7 +223,8 @@ class PanelEditorView(QtWidgets.QWidget):
 
         self.producer_group = FluentGroupBox("Direct producer")
         producer_layout = QtWidgets.QVBoxLayout(self.producer_group)
-        producer_layout.setContentsMargins(margin, margin, margin, margin)
+        producer_layout.setContentsMargins(pad, pad, pad, pad)
+        producer_layout.setSpacing(row_gap())
         self.producer_summary = FluentLabel(
             "This signal has no editable direct producer."
         )
@@ -209,6 +238,7 @@ class PanelEditorView(QtWidgets.QWidget):
         producer_layout.addWidget(self.producer_form)
         self._producer_contributions: dict[object, QtWidgets.QWidget] = {}
         producer_actions = QtWidgets.QHBoxLayout()
+        producer_actions.setSpacing(row_gap())
         producer_actions.addStretch(1)
         self.open_producer_button = FluentButton("Open producer")
         self.open_producer_button.setToolTip(
@@ -222,7 +252,7 @@ class PanelEditorView(QtWidgets.QWidget):
         save_group = FluentGroupBox("Save figure")
         self.save_group = save_group
         save_layout = QtWidgets.QVBoxLayout(save_group)
-        save_layout.setContentsMargins(margin, margin, margin, margin)
+        save_layout.setContentsMargins(pad, pad, pad, pad)
         save_layout.setSpacing(row_gap())
         label_width = setting_label_width(("Directory", "Name", "Format", "File"))
         self.save_directory = FluentPathEdit(
@@ -261,6 +291,7 @@ class PanelEditorView(QtWidgets.QWidget):
             "File", self.save_preview, label_width=label_width, parent=save_group
         ))
         actions = QtWidgets.QHBoxLayout()
+        actions.setSpacing(row_gap())
         actions.addStretch(1)
         self.save_button = FluentButton("Save figure", role="primary")
         actions.addWidget(self.save_button)
@@ -273,7 +304,7 @@ class PanelEditorView(QtWidgets.QWidget):
         self.save_button.clicked.connect(self._save_figure)
         body_layout.addStretch(1)
 
-        self.scroll.setWidget(body)
+        self.scroll.set_width_bounded_widget(body)
         outer.addWidget(self.scroll)
         self.update_projection(projection)
 
@@ -625,9 +656,9 @@ class PanelEditorView(QtWidgets.QWidget):
                 signal = str(state.get("signal") or "")
             frozen_signal = str(projection.get("frozen_signal") or "")
             pieces.append(
-                "STALE: this panel now shows another signal; refresh before Save figure"
+                "STALE: this panel now shows another signal; refresh before saving"
                 if signal and frozen_signal and signal != frozen_signal
-                else "STALE: panel configuration changed; refresh before Save figure"
+                else "STALE: panel configuration changed; refresh before saving"
             )
         elif projection.get("source_status") == "earlier_run":
             pieces.append("Frozen from an earlier run; Refresh to update; Save keeps this snapshot")
@@ -651,15 +682,24 @@ def panel_editor_projection(owner: Any, projection: object) -> dict[str, object]
     return incoming
 
 
-def new_panel_editor(owner: Any, panel_id: str, projection: object) -> PanelEditorView:
+def new_panel_editor(
+    owner: Any,
+    panel_id: str,
+    projection: object,
+    *,
+    page_inset: int | None = None,
+) -> PanelEditorView:
     """One Edit page with its intents relayed to ``owner``'s panel signals.
 
     The console handle and the FigureViewer both open these; made and wired
-    here, once, the two Edit pages stay one page.
+    here, once, the two Edit pages stay one page.  ``page_inset`` is the
+    host's tab-page inset (:class:`PanelEditorView`).
     """
 
     key = str(panel_id)
-    editor = PanelEditorView(key, panel_editor_projection(owner, projection))
+    editor = PanelEditorView(
+        key, panel_editor_projection(owner, projection), page_inset=page_inset
+    )
     editor.state_changed.connect(
         lambda patch, pid=key: owner.panel_state_changed.emit(pid, patch)
     )

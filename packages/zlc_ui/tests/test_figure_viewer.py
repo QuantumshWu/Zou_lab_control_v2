@@ -282,7 +282,11 @@ view.panel_editor_closed.connect(panel_closed.append)
 view.open_data_editor('manual-1', projection, 'Data · manual image')
 editor = view._data_editors['manual-1']
 view.resize(1500, 900); view.show(); app.processEvents()
-assert editor.dataset_group.width() == editor.axes_group.width() == editor.data_group.width()
+# The editor opens on its Dataset and Axes page; the Data card is the
+# other page of the choice at its top.
+assert editor.page_choice.current() == 'dataset'
+assert editor.axes_group.isVisible() and not editor.data_group.isVisible()
+assert editor.dataset_group.width() == editor.axes_group.width()
 for first, second in ((editor.name_edit, editor.axis_name_edit),
                       (editor.unit_edit, editor.axis_unit_edit),
                       (editor.dtype_combo, editor.axis_size_spin)):
@@ -317,6 +321,12 @@ def right(widget):
 from zlc_ui.fluent import CARD_PAD, scaled_px
 assert editor.add_axis_button.mapTo(editor.axes_group, QtCore.QPoint()).y() == scaled_px(CARD_PAD)
 assert right(editor.axis_value_table) == right(editor.axis_name_edit)
+card_width = editor.axes_group.width()
+QtTest.QTest.mouseClick(editor.page_choice.button('data'), QtCore.Qt.LeftButton)
+app.processEvents()
+assert editor.page_choice.current() == 'data'
+assert editor.data_group.isVisible() and not editor.axes_group.isVisible()
+assert editor.data_group.width() == card_width
 assert editor.value_model.rowCount() == 100_000
 assert editor.value_model.columnCount() == 1_000
 assert editor.value_table.verticalScrollBar().maximum() > 0
@@ -371,6 +381,8 @@ assert intents[-1] == (
     {'op': 'set_cells', 'component': 'values', 'cells': ((1, 0, ''),)},
 )
 
+QtTest.QTest.mouseClick(editor.page_choice.button('dataset'), QtCore.Qt.LeftButton)
+app.processEvents()
 editor.axis_name_edit.setText('detuning')
 editor.axis_size_spin.setValue(3)
 editor.axis_unit_edit.setText('MHz')
@@ -449,6 +461,10 @@ assert intents[-1] == (
      'domain': 'repeat'},
 )
 editor.update_projection(projection)
+# A projection keeps the page the operator chose.
+assert editor.page_choice.current() == 'dataset'
+QtTest.QTest.mouseClick(editor.page_choice.button('data'), QtCore.Qt.LeftButton)
+app.processEvents()
 
 # One rectangular paste remains one presenter intent.
 editor.value_table.setCurrentIndex(editor.value_model.index(2, 3))
@@ -512,10 +528,12 @@ app.processEvents()
 
 def test_the_right_surface_has_one_left_edge_one_right_edge_and_one_page_gap(run_qt) -> None:
     """The data bar, the tab strip and every tab page of the right surface
-    start on one card-pad edge and end on one right edge; a tab page starts
-    one card pad under its strip in both panes; the axis values stand under
-    a whole heading cell a section gap below the fields; and a value table,
-    scrolled into view with its card, is whole."""
+    -- the board, the data editor and a panel's Edit page -- start on one
+    card-pad edge and end on one right edge; a tab page starts one card pad
+    under its strip in both panes, and the data editor's first card stands
+    where the board's does; the axis values stand under a whole heading
+    cell a section gap below the fields; and each page of the data editor
+    scrolls only its value table, which is whole."""
 
     run_qt(
         """
@@ -608,12 +626,21 @@ assert box(view.kind_combo, surface)[1] - strip_bottom == pad
 card = view._cards['panel-1']
 assert box(card, surface)[0] == edge
 assert box(card, surface)[1] - box(view.kind_combo, surface)[3] == pad
+board_commands, board_card = box(view.kind_combo, surface), box(card, surface)
 view.tabs.setCurrentWidget(editor); settle()
-for widget in (editor.dataset_group, editor.axes_group, editor.data_group, editor.discard_button):
-    assert box(widget, surface)[0] == edge, widget
-for widget in (editor.dataset_group, editor.axes_group, editor.data_group, editor.save_button):
-    assert box(widget, surface)[2] == end, widget
-assert box(editor.dataset_group, surface)[1] - strip_bottom == pad
+for page, cards in (('dataset', (editor.dataset_group, editor.axes_group)),
+                    ('data', (editor.data_group,))):
+    editor.page_choice.button(page).click(); settle()
+    for widget in (*cards, editor.discard_button):
+        assert box(widget, surface)[0] == edge, widget
+    for widget in (*cards, editor.save_button):
+        assert box(widget, surface)[2] == end, widget
+    # The page's choice heads it where the board's commands head the
+    # board, and its first card stands where the board's first card does.
+    assert box(editor.page_choice, surface)[:2] == board_commands[:2]
+    assert box(cards[0], surface)[1] == board_card[1]
+editor.page_choice.button('dataset').click(); settle()
+assert box(editor.page_choice, surface)[1] - strip_bottom == pad
 # The left pane's pages start as far under their own strip.
 pane = view.info_pane
 page = pane.info_tabs.currentWidget()
@@ -627,7 +654,7 @@ def centre(widget):
     return (top[1] + top[3]) / 2.0
 assert box(pane.status, view)[3] == box(surface, view)[3]
 assert centre(pane.status.message) == centre(pane.status.dot) == centre(editor.discard_button)
-assert box(filter_edit, view)[1] == box(editor.dataset_group, view)[1]
+assert box(filter_edit, view)[1] == box(editor.page_choice, view)[1]
 # File names its path as Data names its chooser: a row label, one gap from it.
 header = pane.path_edit.parentWidget().layout()
 assert isinstance(header.itemAt(0).widget(), FluentLabel)
@@ -642,12 +669,17 @@ unit_row = editor._axis_rows['unit']
 assert box(heading, editor)[1] - box(unit_row, editor)[3] == section_gap()
 assert box(editor.axis_value_table, editor)[1] - box(heading, editor)[3] == row_gap()
 
-# Each long table scrolls itself; with its card scrolled into view, the card
-# -- and so the table, its column names and its horizontal bar -- is whole.
-# The editor opens on the Axes card: it ends above the fold as the page opens.
+# Each page scrolls one thing, its long value table: the page has nothing
+# to scroll, and its card -- and so the table, its column names and its
+# horizontal bar -- is whole.
 viewport = editor.editor_scroll.viewport()
-assert editor.editor_scroll.verticalScrollBar().value() == 0
-assert box(editor.axes_group, viewport)[3] <= viewport.height()
+page_bar = editor.editor_scroll.verticalScrollBar()
+for page, table, card in (('dataset', editor.axis_value_table, editor.axes_group),
+                          ('data', editor.value_table, editor.data_group)):
+    editor.page_choice.button(page).click(); settle()
+    assert page_bar.maximum() == 0 and not page_bar.isVisible(), page
+    assert table.verticalScrollBar().maximum() > 0
+    assert box(card, viewport)[3] <= viewport.height(), (page, box(card, viewport), viewport.height())
 # A value is never shown in part: the table scrolls by whole columns, and
 # the column the viewport's right edge cuts shows nothing.
 table = editor.value_table
@@ -658,15 +690,42 @@ if cut is not None:
     ratio = image.devicePixelRatio() or 1.0
     assert not any(image.pixelColor(x, y).lightness() < 150
                    for x in range(int(cut * ratio), image.width()) for y in range(image.height()))
-for table, card in ((editor.axis_value_table, editor.axes_group),
-                    (editor.value_table, editor.data_group)):
-    assert table.verticalScrollBar().maximum() > 0
-    assert card.height() <= viewport.height(), (card.height(), viewport.height())
-# A taller window gives the tables the rows it gains.
+# A taller window gives the table the rows it gains, and the page still
+# has nothing to scroll.
 before = editor.value_table.height()
 view.resize(1200, 900); settle()
 assert editor.value_table.height() > before
-assert editor.data_group.height() <= viewport.height()
+assert page_bar.maximum() == 0
+assert box(editor.data_group, viewport)[3] <= viewport.height()
+
+# A panel's Edit page lays its content on this surface's page inset, as
+# the board and the data editor do: its first line one card pad under the
+# strip, its cards on the left and right edges and padded by a card pad.
+view.resize(1200, 640); settle()
+state ={'signal': '@figure/1/data', 'kind': 'image', 'cell_kind': '', 'size': '2x2',
+         'interval_ms': 400, 'title': 'Camera frame', 'semantic': {}, 'display': {},
+         'fit': {}, 'overlay_signal': ''}
+panel_surface = {'semantic': (), 'display': (), 'fit': (), 'data_structure': (),
+                 'data_scope': (), 'paints_images': True}
+view.set_panel_intervals((100, 400), 400)
+view.set_panel_projection('panel-1', state, panel_surface)
+view.open_panel_editor('panel-1', {
+    'state': state, 'parameter_surface': panel_surface,
+    'signal_options': (('this archive', (('Camera frame', 'data'),)),),
+    'overlay_signal_options': (), 'frozen_signal': '@figure/1/data',
+    'frozen_snapshot': None, 'save_directory': '.',
+}, 'Edit · Camera frame')
+settle()
+panel_editor = view._editors['panel-1']
+assert view.tabs.currentWidget() is panel_editor
+assert box(panel_editor.title_label, surface)[0] == edge
+assert box(panel_editor.title_label, surface)[1] - strip_bottom == pad
+for group in (panel_editor.snapshot_group, panel_editor.save_group):
+    assert box(group, surface)[0] == edge and box(group, surface)[2] == end, group.title()
+assert box(panel_editor.refresh_button, panel_editor.snapshot_group)[0] == pad
+saved = panel_editor.save_group
+assert box(panel_editor.save_button, saved)[2] == saved.width() - pad
+assert box(panel_editor.save_button, saved)[3] == saved.height() - pad
 view.finish_close()
 """
     )
