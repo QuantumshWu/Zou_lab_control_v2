@@ -132,6 +132,20 @@ assert set(flow._flow_node_rects) == {
 }
 rects = tuple(flow._flow_node_rects.values())
 assert all(not left.intersects(right) for i, left in enumerate(rects) for right in rects[i + 1:])
+# Badges in sentence case, the root named in words; every Logic card wears
+# one hairline DIVIDER edge -- no accent outline that reads as a selection.
+from zlc_ui.fluent.style import DIVIDER
+items = flow.scene().items()
+words = [item for item in items if isinstance(item, QtWidgets.QGraphicsSimpleTextItem)]
+# A badge is the smallest words on a card.
+smallest = min(item.font().pointSizeF() for item in words)
+badges = sorted(item.text() for item in words if item.font().pointSizeF() == smallest)
+assert badges == ['Device'] * 3 + ['Logic'] * 3 + ['Logic · this figure'], badges
+edges = {item.data(0): item.pen() for item in items
+         if isinstance(item, QtWidgets.QGraphicsPathItem) and item.data(0) is not None}
+for node_id in ('logic:camera', 'logic:left', 'logic:right', 'logic:fit'):
+    assert edges[node_id].color().name() == QtGui.QColor(DIVIDER).name(), node_id
+    assert edges[node_id].widthF() == edges['logic:camera'].widthF(), node_id
 scene = flow.sceneRect()
 assert all(scene.contains(rect) for rect in rects)
 for source, target, path in flow._flow_edge_paths:
