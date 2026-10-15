@@ -646,7 +646,7 @@ class ChannelPanel(FluentGroupBox):
     """The pulse's clock, scan and repeat count, then one delay row per port.
 
     The rows are a form: ONE label column (its widest shown label, a port's
-    or "Repeat", and the air after it) and ONE control column, where the
+    or "Repeats", and the air after it) and ONE control column, where the
     clock and scan readouts start their text, the repeat box and the Config
     switch start, and every delay field starts.  The delay rows had a
     second column of their own ten pixels to the left, under labels
@@ -683,10 +683,13 @@ class ChannelPanel(FluentGroupBox):
         # Control group beside it holds.  Reading it directly under the scan
         # summary says the one sentence they make together: what will be
         # played, and how many times.
+        # A count of 0 runs forever, and the box says so where it is typed:
+        # it shows ∞.
         self.run_repeats_spin = fluent_count_box()
+        self.run_repeats_spin.setSpecialValueText("∞")
         self.run_repeats_spin.setToolTip(
             "Complete Pulse runs per scan point (or per On Pulse without a "
-            "scan); 0 runs indefinitely"
+            "scan); ∞ (0) runs indefinitely"
         )
         # A count, not a stretch of the column: as wide as every repeat box
         # (its stepper beside its digits), from the column's left edge, and
@@ -713,7 +716,7 @@ class ChannelPanel(FluentGroupBox):
         self._labels = [
             add_labeled_widget(top_layout, text, widget)
             for text, widget in (("Clock", self.clock_label), ("Scan", self.scan_summary_label),
-                                 ("Repeat", self.run_repeats_spin), ("Config", mode_row))
+                                 ("Repeats", self.run_repeats_spin), ("Config", mode_row))
         ]
         top_layout.addStretch(1)
         self._layout.addWidget(top)

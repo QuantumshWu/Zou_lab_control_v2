@@ -6834,8 +6834,11 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
         super().setValue(float(number))
         # Qt only rewrites the text when the double changed; a decimal that
         # differs in a digit the double cannot hold would otherwise be shown
-        # from the float.
-        self.lineEdit().setText(self.textFromValue(float(number)))
+        # from the float.  At the minimum a special value text ("∞" for a
+        # count whose 0 runs forever) is shown, as Qt's own edit shows it.
+        special = self.specialValueText()
+        self.lineEdit().setText(special if special and float(number) == self.minimum()
+                                else self.textFromValue(float(number)))
         # The chip shows only beside a number it leaves room for.
         self._place_step_chip()
         if notify_normalized and number != requested:

@@ -431,6 +431,10 @@ assert scan.scan_clear_array_button.isEnabled()
 scan.set_repeats((1 << 32) - 1)
 assert int(scan.scan_repeats_spin.maximum()) == (1 << 32) - 1
 assert scan.scan_repeats_spin.text() == str((1 << 32) - 1)
+scan.set_repeats(0)
+assert scan.scan_repeats_spin.text() == "∞", "0 walks the table forever, and the box says so"
+scan.set_repeats_range(1, 1)
+assert scan.scan_repeats_spin.text() == "1", "a range starting above 0 has no forever"
 target = PulseTargetView(); target.set_width_rules(TargetWidthRule(1, 1, 1), TargetWidthRule(1, 2, 4))
 target.set_ports((TargetPortRecord("d0", "digital", "Gate", ("d0",)),), True, "ready")
 events = []; target.apply_requested.connect(events.append)
@@ -981,13 +985,16 @@ bracketed = replace(
 assert view.set_schedule(bracketed)
 view.show(); app.processEvents()
 
-# The persisted outer count is its own full-range control, including 0=∞.
+# The persisted outer count is its own full-range control, including 0=∞,
+# named with the one noun every run count wears.
+assert [label.text() for label in view.channel_panel._labels] == ["Clock", "Scan", "Repeats", "Config"]
 assert int(view.channel_panel.run_repeats_spin.maximum()) == (1 << 32) - 1
 assert int(view.channel_panel.run_repeats_spin.value()) == (1 << 32) - 1
 assert view.channel_panel.run_repeats_spin.text() == str((1 << 32) - 1)
 run_requests = []
 view.run_repeats_committed.connect(run_requests.append)
 view.channel_panel.run_repeats_spin.setValue(0)
+assert view.channel_panel.run_repeats_spin.text() == "∞", "0 runs forever, and the box says so"
 view.channel_panel.run_repeats_spin.editingFinished.emit()
 assert run_requests == [0]
 assert view._schedule.run_repeats == (1 << 32) - 1, "the view only proposes"
@@ -2306,7 +2313,7 @@ def test_the_scan_pages_bound_fields_list_has_one_pitch(run_qt) -> None:
     run_qt(r'''
 from PyQt5 import QtCore, QtGui
 from zlc_ui.qt import ensure_qt_app
-from zlc_ui.fluent import row_gap
+from zlc_ui.fluent import FluentGroupBox
 from zlc_ui.pulse import BindingRecord, PulseScanView, ScanPageRecord
 from zlc_ui.pulse._layout import row_height
 app = ensure_qt_app(["pulse-scan-pitch"])
@@ -2343,9 +2350,14 @@ def ink_top(line):
 offsets = {line.text(): ink_top(line) for line in lines}
 assert len(set(offsets.values())) == 1, offsets
 
-# The run row follows the list at the row gap.
-run_top = scan.scan_repeats_spin.mapTo(scan, QtCore.QPoint()).y()
-assert run_top - (tops[-1] + row_height()) == row_gap()
+# The list ends its card: the run controls are the Playback card's, whose
+# first row stands as far under its title as the intro under this one.
+cards = {card.title(): card for card in scan.findChildren(FluentGroupBox)}
+assert cards["Playback"].isAncestorOf(scan.scan_repeats_spin)
+assert not cards["Bound fields"].isAncestorOf(scan.scan_hold_button)
+def first_row(widget, card):
+    return widget.mapTo(card, QtCore.QPoint()).y()
+assert first_row(scan.scan_repeats_spin, cards["Playback"]) == first_row(scan.scan_slots_label, cards["Bound fields"])
 # A long intro (a Config error) wraps, whole, rather than being cut.
 scan.set_slots_text("Config error: " + "the named value file could not be read; " * 8)
 app.processEvents()
@@ -2843,9 +2855,9 @@ scan = PulseScanView()
 scan.resize(900, 600); scan.show(); app.processEvents()
 cards = scan.findChildren(FluentGroupBox)
 assert sorted(box.title() for box in cards) == sorted(
-    ("Bound fields", "Generate the scan table (Python)", "Scan table")), [box.title() for box in cards]
+    ("Bound fields", "Playback", "Generate the scan table (Python)", "Scan table")), [box.title() for box in cards]
 first = next(box for box in cards if box.title() == "Bound fields")
-assert first.isAncestorOf(scan.scan_slots_label) and first.isAncestorOf(scan.scan_repeats_spin)
+assert first.isAncestorOf(scan.scan_slots_label) and not first.isAncestorOf(scan.scan_repeats_spin)
 
 def edge(widget):
     image = widget.grab().toImage()
