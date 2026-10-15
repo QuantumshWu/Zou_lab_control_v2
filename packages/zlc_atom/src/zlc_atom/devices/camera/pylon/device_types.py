@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from zlc_atom.authoring import AuthoringField, AuthoringSchema
+from zlc_atom.devices.camera import EXPOSURE_STEP_SECONDS
 from zlc_atom.devices.camera.roi_grid import authored_roi_xywh
 from zlc_atom.install.configuration import DeviceInstanceConfig
 from zlc_atom.install.descriptors import DeviceTypeDescriptor, InstalledLeaf, bind_leaf
@@ -15,7 +16,10 @@ from .adapter import PylonCameraAdapter, PylonCameraConfig
 PYLON_CAMERA_SCHEMA = AuthoringSchema(
     (
         AuthoringField("serial", "str", "Serial number", "", required=True),
-        AuthoringField("exposure_seconds", "float", "Exposure seconds", 0.1, minimum=1e-9),
+        AuthoringField(
+            "exposure_seconds", "float", "Exposure seconds", 0.1,
+            minimum=1e-9, step=EXPOSURE_STEP_SECONDS,
+        ),
         # No bounds written down: the sensor's own gain limits differ by model
         # and pixel format, and the camera refuses what it cannot do.
         AuthoringField("gain_db", "float", "Gain (dB)", 0.0),

@@ -5661,10 +5661,17 @@ class FluentSwitch(QtWidgets.QAbstractButton):
     its row.  The whole width, label included, takes the click.  In a row
     of commands a switch and its label are their own group:
     :func:`add_row_switch` puts the air of two button gaps either side.
+
+    A switch whose words say its state -- an Auto row's ``Auto`` and
+    ``Manual`` -- names every word it may say in ``room_for`` and is as wide
+    as the widest of them, so the control after it stays where it is when
+    the switch is flipped.
     """
 
-    def __init__(self, text: str = "", parent=None):
+    def __init__(self, text: str = "", parent=None, *, room_for: tuple[str, ...] = ()):
         super().__init__(parent)
+        #: Every word this switch may come to say (see the class).
+        self._room_for = tuple(str(word) for word in room_for)
         self.setText(text)
         self.setCheckable(True)
         self.setCursor(QtCore.Qt.PointingHandCursor)
@@ -5687,8 +5694,10 @@ class FluentSwitch(QtWidgets.QAbstractButton):
         return scaled_px(4, minimum=3)
 
     def _apply_metrics(self) -> None:
-        # A control's height, the same number a FluentButton takes.
-        self.setMinimumSize(fluent_switch_width(self.text()), control_height())
+        # A control's height, the same number a FluentButton takes; as wide
+        # as the widest word it says or may say.
+        width = max(fluent_switch_width(word) for word in (self.text(), *self._room_for))
+        self.setMinimumSize(width, control_height())
 
     def setText(self, text: str) -> None:  # noqa: N802 - Qt API
         value = str(text)
@@ -7477,10 +7486,15 @@ class FluentCheckBox(QtWidgets.QCheckBox):
     fill whose edge is that fill, never an outline: unticked it is
     NEUTRAL_FILL, dark enough to read on a white card and on the BG face of
     a Spacer card; ticked it is ACCENT with a white tick.  Under the pointer
-    the fill steps one shade toward blue.  Disabled, unticked it is DIVIDER
-    and ticked it is DISABLED_INK with the same white tick (3.5:1, and 2.9:1
-    against the unticked box), so a read-only card still says which boxes
-    are on.  The tick is centred on the box's device-pixel centre.
+    the fill steps one shade toward blue.  Disabled, the label is
+    DISABLED_INK, an unticked box stays NEUTRAL_FILL and a ticked one is
+    DISABLED_INK with the same white tick.  The box has no edge to carry it,
+    so its fill must read on every face a read-only box sits on -- 1.7:1 on
+    a white card, 1.5:1 on BG and on the ACCENT_TINT body of a selected or
+    expanded block, where DIVIDER was 1.1:1 and the unticked boxes vanished
+    -- and the ticked fill stays 2.1:1 darker than it (3.5:1 on white), so
+    a read-only card still says which boxes are on.  The tick is centred on
+    the box's device-pixel centre.
     """
 
     def __init__(self, text: str = "", parent=None):
@@ -7507,7 +7521,7 @@ class FluentCheckBox(QtWidgets.QCheckBox):
             QCheckBox::indicator:checked {{ border-color: {ACCENT}; background: {ACCENT}; }}
             QCheckBox::indicator:checked:hover {{ border-color: {ACCENT_HOVER}; background: {ACCENT_HOVER}; }}
             QCheckBox:disabled {{ color: {DISABLED_INK}; }}
-            QCheckBox::indicator:disabled {{ border-color: {DIVIDER}; background: {DIVIDER}; }}
+            QCheckBox::indicator:disabled {{ border-color: {NEUTRAL_FILL}; background: {NEUTRAL_FILL}; }}
             QCheckBox::indicator:checked:disabled {{
                 border-color: {DISABLED_INK}; background: {DISABLED_INK};
             }}

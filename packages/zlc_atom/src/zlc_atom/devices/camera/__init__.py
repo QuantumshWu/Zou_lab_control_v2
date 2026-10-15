@@ -2,6 +2,7 @@
 
 from .contract import (
     CAMERA_PROTECTED_FIELDS,
+    EXPOSURE_STEP_SECONDS,
     CameraAcquisitionMode,
     CameraAdapter,
     CameraCaptureTerminalRecord,
@@ -11,6 +12,7 @@ from .contract import (
 
 __all__ = [
     "CAMERA_PROTECTED_FIELDS",
+    "EXPOSURE_STEP_SECONDS",
     "CameraAcquisitionMode",
     "CameraAdapter",
     "CameraCaptureTerminalRecord",

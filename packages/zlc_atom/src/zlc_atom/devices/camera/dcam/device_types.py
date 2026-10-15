@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from zlc_atom.authoring import AuthoringField, AuthoringSchema
+from zlc_atom.devices.camera import EXPOSURE_STEP_SECONDS
 from zlc_atom.devices.camera.roi_grid import authored_roi_xywh
 from zlc_atom.install.configuration import DeviceInstanceConfig
 from zlc_atom.install.descriptors import DeviceTypeDescriptor, InstalledLeaf, bind_leaf
@@ -18,7 +19,10 @@ from .adapter import DcamCameraAdapter, DcamCameraConfig
 DCAM_CAMERA_SCHEMA = AuthoringSchema(
     (
         AuthoringField("device_index", "int", "Device index", 0, minimum=0),
-        AuthoringField("exposure_seconds", "float", "Exposure seconds", 0.02, minimum=1e-9),
+        AuthoringField(
+            "exposure_seconds", "float", "Exposure seconds", 0.02,
+            minimum=1e-9, step=EXPOSURE_STEP_SECONDS,
+        ),
         AuthoringField("readout_speed", "int", "Readout speed", 1, minimum=1),
         AuthoringField("roi_x", "int", "ROI x", None, required=False, minimum=0, blank_label="full sensor"),
         AuthoringField("roi_y", "int", "ROI y", None, required=False, minimum=0, blank_label="full sensor"),

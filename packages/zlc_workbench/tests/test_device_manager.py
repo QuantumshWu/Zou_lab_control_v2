@@ -457,6 +457,9 @@ def test_an_edited_value_comes_back_in_the_type_its_device_declared() -> None:
     assert form_field.kind == "text"
     assert form_field.default == "0.5, 2.0"
     assert form_field.description == "comma-separated finite numbers"
+    # A pair is its own kind: text its owner reads, in a box a number wide.
+    pair = project_schema(schema).fields[2]
+    assert (pair.kind, pair.description) == ("pair", "two integers as y, x")
     with pytest.raises(ValueError):
         schema.project_values({"n": 1, "x": 1.0, "s": "3"})
     with pytest.raises(TypeError):
@@ -1739,3 +1742,40 @@ def test_a_published_device_is_not_rebuilt_under_its_peer(tmp_path) -> None:
         assert current.value == 9, "published again, the fabric serves the new device"
     finally:
         manager.close()
+
+
+def test_a_camera_exposure_steps_by_its_owners_millisecond() -> None:
+    """How far one notch moves a number is declared where the knob is and
+    carried to the form unchanged: every camera's Exposure seconds steps by
+    a millisecond, where the box's own step of 1 turned 0.02 s into 1.02 s.
+    A frame shape is a pair, labelled with its axes as "(Y, X)"."""
+
+    from zlc_atom.authoring import AuthoringField
+    from zlc_atom.devices.camera import EXPOSURE_STEP_SECONDS
+    from zlc_atom.devices.camera.authoring import CAMERA_MEASUREMENT_SCHEMA
+    from zlc_atom.devices.camera.dcam.device_types import DCAM_CAMERA_SCHEMA
+    from zlc_atom.devices.camera.pylon.device_types import PYLON_CAMERA_SCHEMA
+    from zlc_atom.devices.simulation.camera.device_types import (
+        VIRTUAL_CAMERA_SCHEMA,
+        VIRTUAL_MOT_CAMERA_SCHEMA,
+    )
+
+    assert EXPOSURE_STEP_SECONDS == 1e-3
+    for schema in (
+        DCAM_CAMERA_SCHEMA,
+        PYLON_CAMERA_SCHEMA,
+        VIRTUAL_CAMERA_SCHEMA,
+        VIRTUAL_MOT_CAMERA_SCHEMA,
+        CAMERA_MEASUREMENT_SCHEMA,
+    ):
+        fields = {field.key: field for field in project_schema(schema).fields}
+        assert fields["exposure_seconds"].step == EXPOSURE_STEP_SECONDS
+    shape = project_schema(VIRTUAL_MOT_CAMERA_SCHEMA).fields[0]
+    assert (shape.key, shape.kind, shape.label) == ("frame_shape_yx", "pair", "Frame shape (Y, X)")
+
+    with pytest.raises(ValueError, match="step"):
+        AuthoringField("name", "str", "Name", step=1)
+    with pytest.raises(ValueError, match="step"):
+        AuthoringField("x", "float", "X", step=float("nan"))
+    with pytest.raises(TypeError, match="step"):
+        AuthoringField("n", "int", "N", step=0.5)

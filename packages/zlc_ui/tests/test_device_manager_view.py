@@ -712,3 +712,50 @@ assert isinstance(card.name_label, FluentLabel)
 assert card.name_label.toolTip() == 'Internal ID: c1'
 """
     )
+
+
+def test_a_device_pair_ends_with_the_numbers_and_steps_by_its_owner(run_qt) -> None:
+    """A virtual MOT camera's card: its frame shape is two integers, so its
+    box ends on the card's number edge with Exposure and the ROI boxes, not
+    across the card; and Exposure steps by the millisecond its owner
+    declares, not by a whole second."""
+
+    run_qt(
+        """
+from PyQt5 import QtCore
+from zlc_ui.device_manager import DeviceManagerView
+from zlc_ui.form import FormFieldProps, FormSpec
+from zlc_ui.qt import ensure_qt_app
+app = ensure_qt_app(['device-manager-pair'])
+view = DeviceManagerView()
+view.set_device_choices((('MOT camera', 'camera.virtual_mot', 'camera'),))
+view.set_devices((('c1', 'mot', 'camera.virtual_mot', 'camera'),))
+spec = FormSpec((
+    FormFieldProps('frame_shape_yx', 'pair', 'Frame shape (Y, X)', default='1200, 1920',
+                   description='two integers as y, x'),
+    FormFieldProps('exposure_seconds', 'float', 'Exposure seconds', default=0.1,
+                   minimum=1e-9, step=0.001),
+    FormFieldProps('roi_x', 'int', 'ROI x', minimum=0, allow_blank=True, blank_label='full sensor'),
+))
+view.set_form_spec('c1', spec, (('frame_shape_yx', '1200, 1920'), ('exposure_seconds', 0.1), ('roi_x', None)))
+view.resize(1100, 700); view.show()
+for _ in range(3):
+    app.processEvents()
+card = view._cards['c1']
+form = card.form
+
+def right(widget):
+    return widget.mapTo(view, QtCore.QPoint(widget.width(), 0)).x()
+
+shape = form.widget_for('frame_shape_yx')
+exposure = form.widget_for('exposure_seconds')
+assert right(shape) == right(exposure) == right(form.widget_for('roi_x')) == right(card.role_edit), (
+    right(shape), right(exposure), right(card.role_edit))
+assert card.number_edge() == exposure.maximumWidth() == shape.maximumWidth()
+assert exposure.singleStep() == 0.001 and exposure._step_chip_text() == '±0.001'
+exposure.stepBy(1)
+assert form.read_value('exposure_seconds') == 0.101
+assert view.read_values('c1')[0] == ('frame_shape_yx', '1200, 1920')
+view.close()
+"""
+    )

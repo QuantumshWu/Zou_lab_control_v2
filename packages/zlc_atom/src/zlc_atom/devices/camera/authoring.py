@@ -6,6 +6,7 @@ from numbers import Integral
 from zlc_data import SPATIAL_X, SPATIAL_Y
 from zlc_runtime import SelectionRange, SelectionState
 from zlc_atom.authoring import AuthoringField, AuthoringSchema
+from zlc_atom.devices.camera.contract import EXPOSURE_STEP_SECONDS
 from zlc_atom.devices.camera.photoelectrons import photoelectron_switch
 from zlc_atom.nodes._framework.descriptor import SelectionMapping
 
@@ -139,6 +140,7 @@ CAMERA_MEASUREMENT_SCHEMA = AuthoringSchema(
         # Blank keeps the camera's current setting.
         AuthoringField(
             "exposure_seconds", "float", "Exposure seconds", None, required=False, minimum=1e-9,
+            step=EXPOSURE_STEP_SECONDS,
             description="Blank keeps the camera's current exposure.",
             blank_label="camera's current",
         ),

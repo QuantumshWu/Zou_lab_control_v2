@@ -6,7 +6,7 @@ from zlc_pulse import PulseSequence
 
 from zlc_atom.authoring import AuthoringField, AuthoringSchema
 from zlc_atom.devices.slm.rearrangement import REARRANGEMENT_FIELDS, rearrangement_defaults as _resolve_defaults
-from zlc_atom.devices.camera import CAMERA_PROTECTED_FIELDS
+from zlc_atom.devices.camera import CAMERA_PROTECTED_FIELDS, EXPOSURE_STEP_SECONDS
 from zlc_atom.devices.slm.solver import (
     SCIENCE_CONTEXT_ARTIFACT_CONTRACT,
     load_science_context,
@@ -70,6 +70,7 @@ SLM_REARRANGEMENT_SCHEMA = AuthoringSchema(
         AuthoringField("before_period", "text", "Before imaging Period", "", required=True),
         AuthoringField("after_period", "text", "After imaging Period", "", required=True),
         AuthoringField("exposure_seconds", "float", "Camera exposure", None, required=False, minimum=1e-9, unit="s",
+                       step=EXPOSURE_STEP_SECONDS,
                        description="Blank keeps the camera's current exposure; the Task does not compare it with Pulse Period lengths."),
         AuthoringField("shots", "int", "Shots", 1, minimum=1,
                        description="Pulses fired one after another, each photographed, rearranged and verified on its own. "

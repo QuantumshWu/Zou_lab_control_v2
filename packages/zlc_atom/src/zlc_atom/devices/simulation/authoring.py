@@ -25,13 +25,13 @@ SIMULATION_WORLD_SCHEMA = AuthoringSchema(
         AuthoringField(
             "image_shape_yx",
             "pair",
-            "Image shape (Y,X)",
+            "Image shape (Y, X)",
             DEFAULT_SIMULATION_IMAGE_SHAPE_YX,
         ),
         AuthoringField(
             "grid_shape_yx",
             "pair",
-            "Grid shape (Y,X)",
+            "Grid shape (Y, X)",
             DEFAULT_SIMULATION_GRID_SHAPE_YX,
         ),
         AuthoringField("seed", "int", "Seed", 0, minimum=0),

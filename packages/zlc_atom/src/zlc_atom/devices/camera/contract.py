@@ -302,8 +302,16 @@ CAMERA_PROTECTED_FIELDS = (
 )
 
 
+#: One notch of a camera's exposure box: a millisecond.  Exposures here are
+#: tens of milliseconds, and the box's own step of 1 turned 0.02 s into
+#: 1.02 s in one notch; a millisecond is a useful move at every one of them,
+#: and its grid stops above the 1 ns floor (a notch never lands off it).
+EXPOSURE_STEP_SECONDS = 1e-3
+
+
 __all__ = [
     "CAMERA_PROTECTED_FIELDS",
+    "EXPOSURE_STEP_SECONDS",
     "CameraAcquisitionMode",
     "CameraAdapter",
     "CameraCaptureTerminalRecord",

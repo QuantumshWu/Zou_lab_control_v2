@@ -17,8 +17,12 @@ from typing import Literal, TypeAlias
 from zlc_data.units import resolve_unit
 
 
+#: ``pair`` is two integers written as the text ``"y, x"`` -- a frame
+#: shape -- whose owner reads the text; it is one field because it is one
+#: fact, and its box is a number's width, not a line of prose's.
 FormFieldKind: TypeAlias = Literal[
     "text",
+    "pair",
     "rows",
     "int",
     "float",
@@ -31,6 +35,7 @@ FormFieldKind: TypeAlias = Literal[
 _FORM_FIELD_KINDS = frozenset(
     {
         "text",
+        "pair",
         "rows",
         "int",
         "float",
@@ -128,6 +133,14 @@ class FormFieldProps:
     blank_label: str = ""
     minimum: int | float | None = None
     maximum: int | float | None = None
+    #: The owner's step: how far one notch of the wheel, an arrow key or the
+    #: stepper moves the number, in the unit it is read in (the field's own
+    #: until the operator picks another spelling) -- declared where the knob
+    #: is, because only its owner knows what a useful move is (a camera
+    #: exposure of 0.02 s moved by 1 s is fifty times longer).  None leaves
+    #: the control's own step of 1.  Only a spin box steps: a blank-or-number
+    #: edit has no stepper.
+    step: int | float | None = None
     choices: tuple[FormChoice, ...] = ()
     #: Optional lazy sub-domain behind one extra popup action.  Popup rows stay
     #: small (for example, one ``Scope`` fate); while that action is current,
@@ -339,7 +352,7 @@ class FormFieldProps:
                     raise TypeError(f"number field {self.key!r} {name} must be numeric")
                 if not math.isfinite(float(value)):
                     raise ValueError(f"number field {self.key!r} {name} must be finite")
-        elif self.kind == "text":
+        elif self.kind in {"text", "pair"}:
             if self.default is not None and not isinstance(self.default, str):
                 raise TypeError(
                     f"{self.kind} field {self.key!r} default must be str or None"
@@ -373,6 +386,18 @@ class FormFieldProps:
             raise ValueError(
                 f"non-path field {self.key!r} cannot declare path metadata"
             )
+        if self.step is not None:
+            if self.kind not in {"int", "float", "number"}:
+                raise ValueError(f"non-numeric field {self.key!r} cannot declare a step")
+            if (
+                not isinstance(self.step, (int, float))
+                or isinstance(self.step, bool)
+                or not math.isfinite(self.step)
+                or self.step <= 0
+            ):
+                raise ValueError(f"field {self.key!r} step must be a positive finite number")
+            if self.kind == "int" and not isinstance(self.step, int):
+                raise TypeError(f"int field {self.key!r} step must be int")
         if self.minimum is not None and self.maximum is not None:
             if self.minimum > self.maximum:
                 raise ValueError(f"field {self.key!r} minimum exceeds maximum")

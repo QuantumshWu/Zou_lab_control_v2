@@ -84,10 +84,27 @@ class AuthoringField:
     #: short enough to sit on one line (it declares those labels too); a
     #: form never infers it from how many choices there are.
     segmented: bool = False
+    #: How far one notch of the wheel, an arrow key or the stepper moves the
+    #: number, in the field's unit, or None for the control's own 1.  A fact
+    #: about the KNOB, like its unit and bounds: a camera exposure of 0.02 s
+    #: stepped by 1 s became fifty times longer in one notch.
+    step: float | None = None
 
     def __post_init__(self) -> None:
         if not self.name or not self.value_type or not self.label:
             raise ValueError("authoring fields require name, value_type, and label")
+        if self.step is not None:
+            if str(self.value_type) not in {"int", "float"} or self.choices:
+                raise ValueError(f"only a number field can declare a step, not {self.name!r}")
+            if (
+                not isinstance(self.step, (int, float))
+                or isinstance(self.step, bool)
+                or not math.isfinite(self.step)
+                or self.step <= 0
+            ):
+                raise ValueError(f"field {self.name!r} step must be a positive finite number")
+            if str(self.value_type) == "int" and not isinstance(self.step, int):
+                raise TypeError(f"int field {self.name!r} step must be a whole number")
         if not isinstance(self.segmented, bool):
             raise TypeError("authoring field segmented must be bool")
         if self.segmented and not self.choices:
