@@ -256,7 +256,9 @@ class LogicEditorView(QtWidgets.QWidget):
         # are always there, so nothing on this row moves when a run begins.
         # Revert stands left of them, always there too: it answers the one
         # question a page edited under a running node leaves -- what does
-        # the run use? -- by putting that configuration back.
+        # the run use? -- by putting that configuration back.  It throws the
+        # edits away, so it is red, one click, like every command that takes
+        # something away.
         # Remove keeps to the far side, away from the buttons pressed most,
         # and takes two clicks like the row's x: it removes the same node.
         # The bar is the page's foot, on the body's left and right edges and
@@ -273,8 +275,11 @@ class LogicEditorView(QtWidgets.QWidget):
         self.remove_button.confirmed.connect(self.remove_requested.emit)
         actions.addWidget(self.remove_button)
         actions.addStretch(1)
-        self.revert_button = FluentButton("Revert")
-        self.revert_button.setToolTip("Restore the configuration the running node uses")
+        self.revert_button = FluentButton("Revert", role="destructive")
+        self.revert_button.setToolTip(
+            "Discard this page's edits and put back the configuration the running node "
+            "uses; the edits do not come back"
+        )
         self.revert_button.clicked.connect(self.revert_requested.emit)
         self.start_button = FluentButton("Start", role="primary")
         # Restart wears the dirty star while the draft differs from the run.
@@ -727,10 +732,13 @@ class LogicEditorView(QtWidgets.QWidget):
             options = tuple(str(item) for item in projection.get("source_options", ()))
             source_labels = projection.get("source_labels") or {}
             source_groups = projection.get("source_groups") or {}
+            source_texts = projection.get("source_texts") or {}
             if not isinstance(source_labels, Mapping):
                 raise TypeError("logic editor source labels must be a mapping")
             if not isinstance(source_groups, Mapping):
                 raise TypeError("logic editor source groups must be a mapping")
+            if not isinstance(source_texts, Mapping):
+                raise TypeError("logic editor source texts must be a mapping")
             bundle = bool(projection.get("source_bundle"))
             combo_type = FluentComboBox if bundle else FluentTreeComboBox
             if self.source_combo is not None and type(self.source_combo) is not combo_type:
@@ -745,6 +753,7 @@ class LogicEditorView(QtWidgets.QWidget):
                 self._add_selector_row(_source_row_label(projection), self.source_combo, first=True)
             # The one grouped signal chooser every other picker already uses:
             # a producer tree with keyed leaves, not a second flat list.
+            # Closed, it reads the signal as every status and row reads it.
             if bundle:
                 self._fill_combo(
                     self.source_combo, current, options, blank=True,
@@ -763,6 +772,7 @@ class LogicEditorView(QtWidgets.QWidget):
                     current=current,
                     none_label="(not selected)",
                     empty_source_label="signals",
+                    texts={str(key): str(value) for key, value in source_texts.items()},
                 )
         elif self.source_combo is not None:
             self._retire_selector(self.source_combo)

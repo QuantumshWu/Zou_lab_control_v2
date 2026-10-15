@@ -1012,6 +1012,23 @@ def muted_note_label(text: str) -> "QtWidgets.QLabel":
     return lbl
 
 
+def set_muted(label: QtWidgets.QLabel, muted: bool) -> None:
+    """Write ``label`` in MUTED_INK while what it names is kept but not in
+    use -- a parked row, a mark that plays nothing -- and in TEXT again once
+    it is used; the body font either way.  The label counterpart of a
+    :class:`FluentSelectionGrid`'s ``muted_rows``, written only when it
+    changes."""
+
+    muted = bool(muted)
+    if label.property("muted") == muted:
+        return
+    label.setProperty("muted", muted)
+    label.setStyleSheet(
+        f'QLabel {{ color: {MUTED_INK if muted else TEXT}; font: {fluent_font_size()}pt "{FONT}"; '
+        "background: transparent; }"
+    )
+
+
 def column_header_label(text: str) -> "FluentLabel":
     """A heading INSIDE a card: the name of a column laid out by hand -- a
     grid of bindings, a form set in columns -- or of a small group of rows
@@ -3740,6 +3757,31 @@ _CHECKED_ROLE = QtCore.Qt.UserRole + 3
 _CHECK_ICONS: dict[tuple[float, float, bool], QtGui.QIcon] = {}
 
 
+def _unticked_hover() -> QtGui.QColor:
+    """An unticked box under the pointer: NEUTRAL_FILL one step toward blue."""
+
+    return _mixed(NEUTRAL_FILL, ACCENT, 0.4)
+
+
+def _paint_tick(painter: QtGui.QPainter, cx: float, cy: float, width: float, height: float) -> None:
+    """The white tick of a ticked box ``width`` x ``height`` centred on
+    ``(cx, cy)``: 0.26..0.75 of the box across and 0.34..0.68 down, centred
+    on it, so its corners keep those proportions.  THE one tick, of
+    :class:`FluentCheckBox` and of a checkable combo's rows."""
+
+    points = ((0.26, 0.52), (0.43, 0.68), (0.75, 0.34))
+    dx = cx - (0.26 + 0.75) / 2.0 * width
+    dy = cy - (0.34 + 0.68) / 2.0 * height
+    pen = QtGui.QPen(QtGui.QColor(SURFACE))
+    pen.setWidthF(max(1.5, width / 8.0))
+    pen.setCapStyle(QtCore.Qt.RoundCap)
+    pen.setJoinStyle(QtCore.Qt.RoundJoin)
+    painter.setPen(pen)
+    painter.drawPolyline(QtGui.QPolygonF([
+        QtCore.QPointF(dx + x * width, dy + y * height) for x, y in points
+    ]))
+
+
 def _check_icon(checked: bool) -> QtGui.QIcon:
     """A checkable combo row's box: :class:`FluentCheckBox`'s own indicator.
 
@@ -3767,24 +3809,13 @@ def _check_icon(checked: bool) -> QtGui.QIcon:
         if checked:
             fill = QtGui.QColor(ACCENT_HOVER if deeper else ACCENT)
         else:
-            fill = _mixed(NEUTRAL_FILL, ACCENT, 0.4) if deeper else QtGui.QColor(NEUTRAL_FILL)
+            fill = _unticked_hover() if deeper else QtGui.QColor(NEUTRAL_FILL)
         painter.setPen(QtCore.Qt.NoPen)
         painter.setBrush(fill)
         radius = float(_radius())
         painter.drawRoundedRect(QtCore.QRectF(0, 0, side, side), radius, radius)
         if checked:
-            # The tick of FluentCheckBox.paintEvent, in the same proportions.
-            points = ((0.26, 0.52), (0.43, 0.68), (0.75, 0.34))
-            dx = side / 2.0 - (0.26 + 0.75) / 2.0 * side
-            dy = side / 2.0 - (0.34 + 0.68) / 2.0 * side
-            pen = QtGui.QPen(QtGui.QColor(SURFACE))
-            pen.setWidthF(max(1.5, side / 8.0))
-            pen.setCapStyle(QtCore.Qt.RoundCap)
-            pen.setJoinStyle(QtCore.Qt.RoundJoin)
-            painter.setPen(pen)
-            painter.drawPolyline(QtGui.QPolygonF([
-                QtCore.QPointF(dx + x * side, dy + y * side) for x, y in points
-            ]))
+            _paint_tick(painter, side / 2.0, side / 2.0, side, side)
         painter.end()
         icon.addPixmap(pixmap, mode)
     _CHECK_ICONS[key] = icon
@@ -8185,7 +8216,7 @@ class FluentCheckBox(QtWidgets.QCheckBox):
     def __init__(self, text: str = "", parent=None):
         super().__init__(text, parent)
         self.setMinimumHeight(control_height())
-        rest_hover = _mixed(NEUTRAL_FILL, ACCENT, 0.4).name()
+        rest_hover = _unticked_hover().name()
         self.setStyleSheet(
             f"""
             QCheckBox {{
@@ -8258,24 +8289,12 @@ class FluentCheckBox(QtWidgets.QCheckBox):
         if not self.isChecked():
             return
         box = QtCore.QRectF(self._indicator_rect())
-        cx = device_snap(self, box.center().x())
-        cy = device_snap(self, box.center().y(), axis="y")
-        w, h = box.width(), box.height()
-        # The tick's own extent: 0.26..0.75 of the box across, 0.34..0.68
-        # down -- centred on the box, its corners keep those proportions.
-        points = ((0.26, 0.52), (0.43, 0.68), (0.75, 0.34))
-        dx = cx - (0.26 + 0.75) / 2.0 * w
-        dy = cy - (0.34 + 0.68) / 2.0 * h
         painter = QtGui.QPainter(self)
         painter.setRenderHint(QtGui.QPainter.Antialiasing)
-        pen = QtGui.QPen(QtGui.QColor(SURFACE))
-        pen.setWidthF(max(1.5, w / 8.0))
-        pen.setCapStyle(QtCore.Qt.RoundCap)
-        pen.setJoinStyle(QtCore.Qt.RoundJoin)
-        painter.setPen(pen)
-        painter.drawPolyline(QtGui.QPolygonF([
-            QtCore.QPointF(dx + x * w, dy + y * h) for x, y in points
-        ]))
+        _paint_tick(
+            painter, device_snap(self, box.center().x()), device_snap(self, box.center().y(), axis="y"),
+            box.width(), box.height(),
+        )
         painter.end()
 
 
@@ -9228,11 +9247,12 @@ _GRID_MUTED_ROLE = QtCore.Qt.UserRole + 4
 _GRID_ACTION_FACE_ROLE = QtCore.Qt.UserRole + 5
 #: Cell states besides chosen/unchosen: reached by a rule rather than marked
 #: (a cell may be chosen AND derived: a pair a rule chose); marked but not
-#: honoured; marked and kept, with nothing to act on this time (amber, the
-#: ink of a note: nothing is wrong); wanted by nobody (an empty card in red
-#: dashes, so a name in a cell still means it was chosen); held by another
-#: row (an empty dashed outline that cannot be chosen here).
-GRID_CELL_STATES = ("derived", "warning", "kept", "missing", "held")
+#: honoured (the ``error`` of :data:`STATUS_CUES`, red); marked and kept,
+#: with nothing to act on this time (its ``warning``, amber: nothing is
+#: wrong); wanted by nobody (an empty card in red dashes, so a name in a
+#: cell still means it was chosen); held by another row (an empty dashed
+#: outline that cannot be chosen here).
+GRID_CELL_STATES = ("derived", "error", "kept", "missing", "held")
 
 
 def _mixed(first: str, second: str, weight: float) -> QtGui.QColor:
@@ -9437,15 +9457,16 @@ class _SelectionGridDelegate(QtWidgets.QStyledItemDelegate):
     pointer).  A DERIVED cell -- reached by a rule rather than marked, chosen
     or not -- is the lighter ACCENT_TINT wash with a dashed SELECTION_EDGE
     and its name in DERIVED_INK: the dashes say "a rule put this here".  A
-    WARNING cell -- chosen but not honoured -- is RED_TINT with its name in
-    RED_DARK, chosen or not, so the problem is never hidden under the
-    selection; a KEPT cell -- chosen, kept, with nothing to act on this
-    time -- is the same card in amber (ORANGE_TINT, its name in
-    ORANGE_DARK), the ink of a note rather than a problem; a MISSING cell is an empty card in red dashes and a HELD one
-    an empty dashed outline (somebody else's frame).  A disabled grid shows
-    every card on the BG face with the chosen names in DISABLED_INK, so
-    what is chosen still reads but nothing invites a click.  Names sit on
-    their row's one line (:func:`_paint_grid_label`), centred across.
+    ERROR cell -- chosen but not honoured -- is RED_TINT with its name in
+    the ``error`` ink, chosen or not, so the problem is never hidden under
+    the selection; a KEPT cell -- chosen, kept, with nothing to act on this
+    time -- is the same card in amber (ORANGE_TINT, its name in the
+    ``warning`` ink), said rather than refused; a MISSING cell is an empty
+    card in red dashes and a HELD one an empty dashed outline (somebody
+    else's frame).  A disabled grid shows every card on the BG face with
+    the chosen names in DISABLED_INK, so what is chosen still reads but
+    nothing invites a click.  Names sit on their row's one line
+    (:func:`_paint_grid_label`), centred across.
     """
 
     def paint(self, painter, option, index) -> None:
@@ -9462,14 +9483,14 @@ class _SelectionGridDelegate(QtWidgets.QStyledItemDelegate):
         selected = bool(option.state & QtWidgets.QStyle.State_Selected)
         hovered = bool(option.state & QtWidgets.QStyle.State_MouseOver) and not held and live
         derived = state == "derived"
-        warning = state == "warning"
+        error = state == "error"
         kept = state == "kept"
         edge = None
         if held:
             fill, edge = None, DIVIDER
         elif not live:
             fill = BG
-        elif warning:
+        elif error:
             fill = _mixed(RED_TINT, RED, 0.19).name() if hovered else RED_TINT
         elif kept:
             fill = _mixed(ORANGE_TINT, ORANGE, 0.19).name() if hovered else ORANGE_TINT
@@ -9485,10 +9506,11 @@ class _SelectionGridDelegate(QtWidgets.QStyledItemDelegate):
         rect = _paint_grid_card(painter, grid.viewport(), cell, fill, edge)
         # A name says the row has the cell; the empty states say nobody, or
         # somebody else, has it -- named only as the preview under the pointer.
-        if selected or hovered or derived or warning or kept:
+        if selected or hovered or derived or error or kept:
             ink = (
                 DISABLED_INK if not live
-                else RED_DARK if warning else ORANGE_DARK if kept else DERIVED_INK if derived
+                else status_cue("error")[1] if error else status_cue("warning")[1] if kept
+                else DERIVED_INK if derived
                 else TEXT if selected else MUTED_INK
             )
             # The font the grid sizes its columns with (set_grid).
@@ -9697,7 +9719,7 @@ class FluentSelectionGrid(QtWidgets.QTableView):
     ``(value, tooltip)`` -- makes each row label a link.  Both are reported
     as ``row_action(row, value)`` and never change the selection.
     :meth:`set_cell_states` marks cells a rule reached ("derived"), that
-    cannot be honoured ("warning"), that are kept with nothing to act on
+    cannot be honoured ("error"), that are kept with nothing to act on
     this time ("kept"), that nobody has ("missing") or that
     another row holds ("held", not choosable: the pointer says so, and a
     click shows the cell's tooltip at once).  :meth:`set_label_width` ends

@@ -1786,6 +1786,10 @@ def test_a_processor_adds_with_an_unresolved_source_and_no_modal(
     assert presenter.view.logic_editors[node_id]["source_groups"] == {
         stable_signal_key(camera_id, "frames"): camera_id
     }
+    # Closed, the picker reads it as a status reads it.
+    assert presenter.view.logic_editors[node_id]["source_texts"] == {
+        stable_signal_key(camera_id, "frames"): f"{presenter.logic[camera_id].name}/frames"
+    }
 
     presenter.view.logic_draft_changed.emit(
         node_id,
@@ -1803,7 +1807,11 @@ def test_a_processor_adds_with_an_unresolved_source_and_no_modal(
         if name.startswith(f"@logic/{node_id}/")
     ]
     assert bundle_members == [stable_signal_key(node_id, "counts")]
-    assert "occupied" in projection["source_labels"][bundle_members[0]]
+    # A bundle reads as its first signal, spelled as a status spells it,
+    # then its producer's other outputs.
+    assert projection["source_labels"][bundle_members[0]] == (
+        f"{presenter.logic[node_id].name}/counts, frame_judged, occupied"
+    )
     presenter.view.logic_draft_changed.emit(
         derived_id, {"source_signal": stable_signal_key(node_id, "occupied")}
     )
@@ -2769,6 +2777,10 @@ def test_a_renamed_node_is_called_by_its_name_and_addressed_by_its_id(presenter,
     occupancy_page = presenter.view.logic_editors[occupancy_id]
     assert occupancy_page["source_signal"] == frames
     assert occupancy_page["source_groups"][frames] == "Camera A"
+    # ONE spelling of the signal: the closed Source picker reads what the
+    # row's status reads, and so do the panel's pickers.
+    assert occupancy_page["source_texts"][frames] == "Camera A/frames"
+    assert presenter.view._cards[panel.panel_id].texts[frames] == "Camera A/frames"
     scan_field = next(field for field in presenter.view.logic_editors[scan_id]["form_spec"].fields
                       if field.key == "acquisition_logic")
     assert ("Camera A", camera_id) in {(choice.label, choice.value) for choice in scan_field.choices}
@@ -2781,6 +2793,7 @@ def test_a_renamed_node_is_called_by_its_name_and_addressed_by_its_id(presenter,
     assert (panel_page["producer_node_id"], panel_page["producer_name"]) == (camera_id, "Camera A")
     assert panel_page["frozen_signal"] == frames
     assert panel_page["frozen_signal_text"] == "Camera A/frames"
+    assert panel_page["signal_texts"][frames] == "Camera A/frames"
     state = presenter.control_state()
     assert {(row["node_id"], row["name"]) for row in state["logic"]} >= {(camera_id, "Camera A")}
     assert next(item["name"] for item in state["panels"] if item["panel_id"] == panel.panel_id) == "Camera A/frames"
@@ -2793,7 +2806,9 @@ def test_a_renamed_node_is_called_by_its_name_and_addressed_by_its_id(presenter,
         *(text for row in presenter.view.logic_rows for text in (row.title, *row.state)),
         *(text for row in presenter.view.logic_rows for item in row.publishes for text in item),
         *(str(page[key]) for page in pages for key in ("name", "status", "issues")),
-        *(text for page in pages for text in (*page["source_groups"].values(), *page["source_labels"].values())),
+        *(text for page in pages for text in (
+            *page["source_groups"].values(), *page["source_labels"].values(), *page["source_texts"].values())),
+        *presenter.view._cards[panel.panel_id].texts.values(), *panel_page["signal_texts"].values(),
         *(choice.label for choice in scan_field.choices),
         surface["caption"], surface["panel_name"], *headings, panel_page["producer_name"],
     ]

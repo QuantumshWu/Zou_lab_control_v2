@@ -81,8 +81,15 @@ def choice_tree_groups(
     *,
     state_labels: tuple[str, str, str] | None = None,
     empty_source_label: str = "",
+    texts=None,
 ) -> list[tuple[str, list[tuple[str, str, str]]]]:
-    """Build nested ``(source, [(leaf, key, full_label)])`` rows."""
+    """Build nested ``(source, [(leaf, key, full_label)])`` rows.
+
+    ``full_label`` is what the closed picker reads: ``texts[key]`` when the
+    caller has its own name for the choice -- a signal is called what the
+    presenter calls it everywhere else -- otherwise its source and label,
+    ``source · label``.
+    """
 
     flat = grouped_choice_items(
         names,
@@ -92,6 +99,7 @@ def choice_tree_groups(
         state_labels=state_labels,
         empty_source_label=empty_source_label,
     )
+    texts = dict(texts or {})
     groups: list[tuple[str, list[tuple[str, str, str]]]] = []
     current_source: str | None = None
     leaves: list[tuple[str, str, str]] = []
@@ -105,7 +113,7 @@ def choice_tree_groups(
         if current_source is None:
             raise ValueError("choice rows must begin with a source header")
         short = _choice_short_label(key, labels)
-        leaves.append((display.strip(), key, f"{current_source} · {short}"))
+        leaves.append((display.strip(), key, str(texts.get(key) or f"{current_source} · {short}")))
     if current_source is not None:
         groups.append((current_source, leaves))
     return groups
@@ -122,8 +130,13 @@ def fill_grouped_choice_combo(
     labels=None,
     state_labels: tuple[str, str, str] | None = None,
     empty_source_label: str = "",
+    texts=None,
 ) -> None:
-    """Populate a flat or tree combo with grouped keyed choices."""
+    """Populate a flat or tree combo with grouped keyed choices.
+
+    ``texts`` names a choice the way the closed tree picker reads it
+    (:func:`choice_tree_groups`); a flat list reads its rows.
+    """
 
     cur = str(current or "")
     names = list(names or [])
@@ -139,6 +152,7 @@ def fill_grouped_choice_combo(
                     labels,
                     state_labels=state_labels,
                     empty_source_label=empty_source_label,
+                    texts=texts,
                 ),
                 current=cur,
                 none_label=none_label,

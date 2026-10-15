@@ -879,7 +879,7 @@ def _editor_session(rows=(), bundle=None):
 
     def project(shown, inputs=bundle, error=""):
         editor.update_projection({"form_values": {"variables": shown}, "input_bundle": inputs,
-                                  "node_id": "derive", "error": error})
+                                  "node_id": "derive", "name": "Derive 1", "error": error})
         settle()
         return editor._cards
 
@@ -988,7 +988,10 @@ def test_the_editor_builds_the_users_example_by_clicks() -> None:
         assert head["axis"].currentText() == "All" and labels.isHidden()
         s.pick(head["axis"], "frame")
         s.row_at(labels, 4)
+        # The signal it publishes, as every status and picker calls it.
+        assert head["publish"].toolTip() == "Published as Derive 1/same"
         s.click(head["publish"])
+        assert head["publish"].toolTip() == "Internal: other variables read it; nothing publishes it"
         assert drafts[-1] == ({"name": "same", "publish": False, "terms": (
             {"of": "occupied", "at": "frame", "labels": ("0",)},)},)
 
@@ -1175,7 +1178,7 @@ def test_the_editor_reads_down_one_control_column_and_says_problems_under_their_
     operand says "choose", and Tab walks the controls as they read."""
     from PyQt5 import QtCore, QtTest, QtWidgets
 
-    from zlc_ui.fluent import MUTED_INK, field_text_inset, row_gap
+    from zlc_ui.fluent import field_text_inset, row_gap
 
     def at(of, *labels, **extra):
         return {"of": of, "at": "frame", "labels": list(labels), **extra}
@@ -1274,6 +1277,8 @@ def test_the_editor_reads_down_one_control_column_and_says_problems_under_their_
         error = bright.terms_ui[1]["error"]
         assert error.text() == "the mask has frame, which counts[frame 1] does not; pick one frame value of the mask."
         assert error.isVisible() and not bright.preview.isVisible()
+        # In the one status table's words: a problem that blocks is an error.
+        assert error.property("status_word") == "error"
         assert (error.mapTo(bright, QtCore.QPoint()).y(), bright.height()) == (result_y, height)
         assert text_x(error) == control + field_text_inset()
         assert editor.shown_problems() == {
@@ -1286,7 +1291,7 @@ def test_the_editor_reads_down_one_control_column_and_says_problems_under_their_
         idea = {"name": "idea", "publish": False, "terms": [{"of": "counts"}, {"op": ">"}]}
         cards = s.project([*rows[:3], idea])
         parked = cards[3].terms_ui[1]["error"]
-        assert parked.text() == "choose what it reads." and parked.property("ink") == MUTED_INK
+        assert parked.text() == "choose what it reads." and parked.property("status_word") == "idle"
         assert cards[3].preview.text() == "→ internal · read by nothing, so not evaluated"
         assert editor.shown_problems() == {}
         assert not cards[3].statistic["block"].isVisible() and cards[2].statistic["block"].isVisible()

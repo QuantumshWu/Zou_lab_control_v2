@@ -7,10 +7,10 @@ from difflib import SequenceMatcher
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 from zlc_ui.fluent import (
-    FONT, MUTED_INK, TEXT, FluentButton, FluentComboBox, set_status_ink, ElidedLabel, FluentGroupBox,
+    FluentButton, FluentComboBox, set_status_ink, ElidedLabel, FluentGroupBox,
     FluentLabel, FluentReadoutEdit, FluentScrollArea, FluentSectionLabel, FluentTableView, centred_line_top,
-    column_header_label, field_text_inset, fluent_font_size, fluent_scrollbar_thickness, read_editable_combo,
-    retire_widget, signals_blocked,
+    column_header_label, field_text_inset, fluent_scrollbar_thickness, read_editable_combo,
+    retire_widget, set_muted, signals_blocked,
 )
 
 from ._layout import (
@@ -341,12 +341,7 @@ class PulseConfigView(QtWidgets.QWidget):
             # muted: the name is there to switch back to, not applied.
             parked = field_id in record.parked
             for widget in (widgets[_FIELD], widgets[_STATUS]):
-                if widget.property("parked") is not parked:
-                    widget.setProperty("parked", parked)
-                    widget.setStyleSheet(
-                        f'QLabel {{ color: {MUTED_INK if parked else TEXT}; '
-                        f'font: {fluent_font_size()}pt "{FONT}"; background: transparent; }}'
-                    )
+                set_muted(widget, parked)
             combo = widgets[1]
             draft = combo.currentText() if combo.lineEdit().hasFocus() and combo.lineEdit().isModified() else None
             combo.setProperty("accepted_key", key)

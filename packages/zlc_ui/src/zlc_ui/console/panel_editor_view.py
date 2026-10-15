@@ -126,7 +126,10 @@ class PanelEditorView(QtWidgets.QWidget):
         self._snapshot_can_save = False
         self._signal_groups = ()
         self._overlay_groups = ()
-        self._signal_runtime = signal_form_runtime(self._choice_groups)
+        self._signal_texts: dict[str, str] = {}
+        self._signal_runtime = signal_form_runtime(
+            self._choice_groups, lambda: self._signal_texts
+        )
 
         outer = QtWidgets.QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -316,6 +319,8 @@ class PanelEditorView(QtWidgets.QWidget):
         self._state = state
         self._signal_groups = tuple(incoming.get("signal_options") or ())
         self._overlay_groups = tuple(incoming.get("overlay_signal_options") or ())
+        # What a person calls each offered signal: the closed pickers read it.
+        self._signal_texts = dict(incoming.get("signal_texts") or {})
         surface = incoming.get("parameter_surface")
         paints_images = bool(
             isinstance(surface, Mapping) and surface.get("paints_images")

@@ -145,7 +145,12 @@ grammar, never by the card.  Beside it the presenter projects `panel_name`,
 what the panel is called -- what the Setting form's "Panel name" and the Edit
 page show, a renamed node's `<name>/<output>` while the title is automatic.
 Both are display only -- the state's `title` stays the panel's record -- and
-a card no presenter has captioned is called by its title.
+a card no presenter has captioned is called by its title.  The Setting
+form's signal and overlay pickers list each signal under its producer;
+closed, they read it as `set_signal_choices(texts=...)` gives it -- the
+presenter's `<name>/<output>`, the spelling of every status and caption --
+and the Edit page's pickers read the projection's `signal_texts` the same
+way.  A Logic Edit page's Source picker reads `source_texts` likewise.
 
 A card is laid out the same with or without a picture.  Its strip always
 reads two lines -- the caption (and data sizes) above, the axis names below
@@ -323,8 +328,9 @@ marks a running node `· edited` and Revert leaves it alone.
 A running node's page stays editable, and the edits are the next run's.  The
 projection's `edited` says the draft differs from the configuration the
 current run (running, following or queued) was started with.  While it holds,
-Revert -- a standard command in its own fixed slot left of the Plot group,
-always shown -- is enabled and raises `revert_requested`
+Revert -- red and one click, as every command that throws something away,
+in its own fixed slot left of the Plot group, always shown -- is enabled and
+raises `revert_requested`
 (`logic_revert_requested` on the handle), which makes that whole configuration
 the draft again -- replacing it, so a device or artifact input only the edit
 named goes too -- without restarting; Restart wears the dirty star and the

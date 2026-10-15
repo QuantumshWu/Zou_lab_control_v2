@@ -92,6 +92,7 @@ class _CardView:
         self.drag_started = _Signal()
         self.choices: tuple = ()
         self.chosen = ""
+        self.texts: dict = {}
         self.size = ""
         self.selectors_enabled = True
         self.status: tuple = ("", False)
@@ -103,11 +104,13 @@ class _CardView:
         current: str = "",
         overlay_groups=(),
         overlay_current: str = "",
+        texts=None,
     ) -> None:
         self.choices = tuple(groups)
         self.chosen = str(current or self.chosen)
         self.overlay_choices = tuple(overlay_groups)
         self.overlay_chosen = str(overlay_current)
+        self.texts = dict(texts or {})
 
     def set_selectors_enabled(self, enabled: bool) -> None:
         self.selectors_enabled = bool(enabled)

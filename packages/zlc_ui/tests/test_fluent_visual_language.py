@@ -79,7 +79,7 @@ def test_a_chosen_grid_card_is_the_selected_fill_and_nothing_round_it(app, host)
                   {(row, column): str(column) for row in range(2) for column in range(4)})
     grid.set_selected([(0, 0), (0, 1), (1, 2), (1, 3)])
     # (0, 1) is chosen by a rule: derived wins over the selection's fill.
-    grid.set_cell_states({(0, 1): "derived", (1, 2): "warning", (1, 3): "kept"})
+    grid.set_cell_states({(0, 1): "derived", (1, 2): "error", (1, 3): "kept"})
     grid.resize(grid.sizeHint())
     _shown(app, host, grid)
     viewport = grid.viewport()
@@ -90,7 +90,7 @@ def test_a_chosen_grid_card_is_the_selected_fill_and_nothing_round_it(app, host)
     def colour(x, y):
         return _at(viewport, x, y)
 
-    chosen, empty, derived, warned = card(0, 0), card(0, 2), card(0, 1), card(1, 2)
+    chosen, empty, derived, refused = card(0, 0), card(0, 2), card(0, 1), card(1, 2)
     # A row is a form row: a control-high card and a row gap shared above
     # and below it.  The card's top row: the cell inset by its share above.
     assert chosen.height() == control_height() + row_gap()
@@ -109,11 +109,11 @@ def test_a_chosen_grid_card_is_the_selected_fill_and_nothing_round_it(app, host)
     top_row = {colour(x, derived.top() + inset) for x in range(derived.left() + 6, derived.right() - 6)}
     assert SELECTION_EDGE.upper() in top_row, "a derived card keeps its dashed edge"
     assert ACCENT_TINT.upper() in top_row or len(top_row) > 1, "dashed, not solid"
-    assert colour(warned.left() + 6, warned.center().y()) == RED_TINT.upper(), (
-        "a warning shows even on a chosen card")
+    assert colour(refused.left() + 6, refused.center().y()) == RED_TINT.upper(), (
+        "an error shows even on a chosen card")
     kept = card(1, 3)
     assert colour(kept.left() + 6, kept.center().y()) == ORANGE_TINT.upper(), (
-        "a card kept with nothing to act on is amber, a note's ink, never red")
+        "a card kept with nothing to act on is amber, the warning's ink, never red")
     # One extent for every card: the chosen face is as large as the edged one.
     def extent(rect):
         row = rect.center().y()
@@ -123,10 +123,10 @@ def test_a_chosen_grid_card_is_the_selected_fill_and_nothing_round_it(app, host)
     assert extent(chosen) == extent(derived) == extent(empty)
     # The grid ends on its last row's cards: no gutter below them adds to
     # the gap the layout puts after the grid.
-    faced = [y for y in range(warned.top(), viewport.height())
-             if colour(warned.left() + 6, y) == RED_TINT.upper()]
+    faced = [y for y in range(refused.top(), viewport.height())
+             if colour(refused.left() + 6, y) == RED_TINT.upper()]
     assert faced and faced[-1] == viewport.height() - 1
-    assert warned.height() < chosen.height()
+    assert refused.height() < chosen.height()
 
     # Under the pointer: an empty card takes the hover wash.
     _under_pointer(viewport, empty.center())

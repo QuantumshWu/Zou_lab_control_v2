@@ -82,8 +82,9 @@ A state is a fill, never an extra outline or a focus ring.
   On/off settings are switches, not toggle commands, and a disclosure chevron
   (a device card's fold, a tree's triangle) shows its state by its direction.
 - **Red takes something away or stops it**: Remove, Clear, Ungroup, Unload,
-  Discard, Exclude selected, Reset (a point review's exclusions), Reset
-  wavefront, a device's Close, Shut down devices, every Stop.  A labelled
+  Discard, Revert (a Logic Edit page's edits), Exclude selected, Reset (a
+  point review's exclusions), Reset wavefront, a device's Close, Shut down
+  devices, every Stop.  A labelled
   one has a pale red face; a one-glyph `×` repeated down rows rests as a grey
   ghost and turns red under the pointer.  It acts on one click.
 - **Closing a view is not removing anything**: a tab's `×` and a Setting
@@ -113,7 +114,16 @@ The API, one line each:
   signal — the two-click remover; act on `confirmed`, never on `clicked`.
 - `FluentStatusDot.set_state(word)` and `set_status_ink(label, word)` — a dot
   and its words (a label, or a copyable readout) from `STATUS_CUES`; a
-  presenter says the word with the text, so a failure is always red.
+  presenter says the word with the text, so a failure is always red.  A
+  sentence under an editor's line takes the same table: a problem that
+  blocks is `error`, a kept item this run does not use is `warning`, a
+  parked helper is `idle`.
+- `set_muted(label, muted)` — a row kept but not in use (a parked field, a
+  mark that plays nothing) in grey words, as a selection grid's
+  `muted_rows`.
+- `fill_grouped_choice_combo(..., texts=...)` — what a closed tree picker
+  reads for each key: a signal as the presenter spells it everywhere else
+  (`<producer>/<output>`).
 
 ## Development
 

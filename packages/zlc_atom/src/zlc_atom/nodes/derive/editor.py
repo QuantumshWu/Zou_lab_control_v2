@@ -35,13 +35,15 @@ from html import escape
 
 from PyQt5 import QtCore, QtGui, QtWidgets, sip
 
+from zlc_runtime import stable_signal_key
 from zlc_ui.fluent import (
-    AXIS_GROUP_COLORS, FONT, MUTED_INK, RED_DARK, FluentButton, FluentColumnLine, FluentColumnSet,
+    AXIS_GROUP_COLORS, FluentButton, FluentColumnLine, FluentColumnSet,
     FluentComboBox, FluentFrame, FluentLabel, FluentLineEdit, FluentSegmentedButtons, FluentSwitch, card_pad,
-    error_note_label, field_text_inset, fluent_font_size, hold_place, muted_note_label, retire_widget, row_gap,
-    scaled_px, section_gap, show_problem, signals_blocked,
+    error_note_label, field_text_inset, hold_place, muted_note_label, retire_widget, row_gap,
+    scaled_px, section_gap, set_status_ink, show_problem, signals_blocked, status_cue,
 )
 from zlc_ui.fluent.column_set import section_header
+from zlc_workbench.topology import signal_text
 
 from zlc_atom.authoring import AuthoringField, AuthoringSchema
 from zlc_atom.nodes._framework.frames import FIRST, LAST
@@ -108,15 +110,6 @@ def _visible(widget: QtWidgets.QWidget, shown: bool, hold: bool = True) -> None:
         widget.setSizePolicy(policy)
     if widget.isHidden() == shown:
         widget.setVisible(shown)
-
-
-def _ink(label: QtWidgets.QLabel, colour: str) -> None:
-    """A problem's ink: red when it blocks, muted when it does not."""
-
-    if label.property("ink") != colour:
-        label.setProperty("ink", colour)
-        label.setStyleSheet(
-            f'color: {colour}; background: transparent; border: none; font: {fluent_font_size()}pt "{FONT}";')
 
 
 def _alive(widget: QtWidgets.QWidget) -> bool:
@@ -191,7 +184,7 @@ def _label_items(at: str, keys: tuple | None, alternates: tuple) -> tuple:
         for index, key in enumerate(keys[:_LABEL_LIMIT])
     )
     if len(keys) > _LABEL_LIMIT:
-        items += ((f"{_LABEL_LIMIT} of {len(keys)} shown", None, False, MUTED_INK, False),)
+        items += ((f"{_LABEL_LIMIT} of {len(keys)} shown", None, False, status_cue("idle")[1], False),)
     return (*(_item(text, key) for text, key in _ENDS), _header(at), *items)
 
 
@@ -453,7 +446,7 @@ class _VariableCard(FluentFrame):
         # "over" goes under the strip when the page is too narrow for both.
         line.place("operand", box, to="publish", fill=True)
         line.stand_on_first_row()
-        remove = _remove_button(self, "Remove the statistic")
+        remove = _remove_button(self, "Remove this statistic")
         remove.clicked.connect(self._close_statistic)
         line.place("remove", remove)
         return {"block": block, "error": error, "strip": strip, "reduce": reduce, "word": word, "over": over,
@@ -706,7 +699,7 @@ class _VariableCard(FluentFrame):
         publish = self.head["publish"]
         with signals_blocked(publish):
             publish.setChecked(bool(row["publish"]))
-        _set_tip(publish, f"Published as @logic/{context['node']}/{row['name']}" if row["publish"]
+        _set_tip(publish, f"Published as {context['signal_text'](row['name'])}" if row["publish"]
                  else "Internal: other variables read it; nothing publishes it")
         for ui, term, info in zip(self.terms_ui, terms, infos):
             self._show_term(ui, term, info)
@@ -728,7 +721,8 @@ class _VariableCard(FluentFrame):
             stage, detail, muted = None, "", False
         said = self._line_of(stage)
         for ui in (*self.terms_ui, self.statistic):
-            _ink(ui["error"], MUTED_INK if muted else RED_DARK)
+            # Red when it blocks; a parked helper's in the idle ink of a note.
+            set_status_ink(ui["error"], "idle" if muted else "error")
             show_problem(ui["error"], detail if ui is said else "")
         self.problem = str(error) if error is not None and not muted else ""
         # A parked helper's problem blocks nothing; its result says why.
@@ -940,6 +934,9 @@ class DeriveEditor(QtWidgets.QWidget):
         #: The axes no pick may name (``changing_axes``), over every member.
         self._changing: dict[object, tuple[str, ...]] = {}
         self._node = ""
+        #: What the operator calls this node: a published variable's
+        #: signal is read as ``<name>/<variable>``.
+        self._node_name = ""
         self._failure: tuple[str, str, str] | None = None
         self._draft_problem = ""
         #: The columns every line of every card shares.  The "=", the lead
@@ -1157,6 +1154,7 @@ class DeriveEditor(QtWidgets.QWidget):
         values = projection.get("form_values") or {}
         bundle = tuple(projection.get("input_bundle") or ())
         self._node = str(projection.get("node_id") or "")
+        self._node_name = str(projection.get("name") or self._node)
         self._members = tuple(str(name) for name, _schema, _snapshot in bundle)
         self._inputs = {str(name): schema for name, schema, _snapshot in bundle}
         frames = projection.get("source_frames")
@@ -1230,7 +1228,7 @@ class DeriveEditor(QtWidgets.QWidget):
                 card.show_row(row, answer, {
                     "members": members, "variables": variables, "names": (*members, *variables),
                     "schema_of": schema_of, "frames_of": frames_of, "frame_axis": self._frame_axis,
-                    "typed": typed, "node": self._node,
+                    "typed": typed, "signal_text": self._published_text,
                     "changing": self._changing,
                     "failure": failure[1:] if failure is not None and failure[0] == row["name"] else None,
                 })
@@ -1239,6 +1237,12 @@ class DeriveEditor(QtWidgets.QWidget):
             self._order_focus()
         finally:
             self._loading = False
+
+    def _published_text(self, variable: str) -> str:
+        """What a person calls the signal ``variable`` publishes, as every
+        status and picker calls it (:func:`signal_text`)."""
+
+        return signal_text(stable_signal_key(self._node, variable), {self._node: self._node_name})
 
     def _order_focus(self) -> None:
         """Tab walks the page as it reads: Add variable, then each card

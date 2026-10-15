@@ -411,6 +411,7 @@ def test_pair_matrix_selects_like_a_table_and_writes_the_draft() -> None:
         drafts.clear()
         project(selection="custom", custom_pairs=({"start": "0", "end": "1"}, {"start": "2", "end": "5"}))
         assert marked() == [(0, 1)] and form.note.text() == "kept, not in this source: 2→5." and drafts == []
+        assert form.note.property("status_word") == "warning", "said in the warning ink, not refused"
         # The strip always marks one choice: a list with pairs is Selected.
         assert derived() == [] and form.presets.current() == "custom"
         # A look at a rule keeps Selected's list: picked again, it comes back.

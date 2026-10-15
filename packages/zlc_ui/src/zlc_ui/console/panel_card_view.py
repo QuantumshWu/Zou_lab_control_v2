@@ -405,7 +405,11 @@ class PanelCardView(FluentGroupBox):
         self._overlay_groups: tuple[
             tuple[str, tuple[tuple[str, str], ...]], ...
         ] = ()
-        self._signal_runtime = signal_form_runtime(self._choice_groups)
+        #: {signal key: what a person calls it}, as the presenter says it.
+        self._signal_texts: dict[str, str] = {}
+        self._signal_runtime = signal_form_runtime(
+            self._choice_groups, lambda: self._signal_texts
+        )
         # A replace-only projection of the Workbench state.  It is view state,
         # never a second saved panel configuration or an authority of its own.
         self._state_projection = panel_state_document(
@@ -1105,8 +1109,13 @@ class PanelCardView(FluentGroupBox):
             tuple[str, tuple[tuple[str, str], ...]], ...
         ] = (),
         overlay_current: str = "",
+        texts: dict[str, str] | None = None,
     ) -> None:
-        """Replace the signal domain used by the Setting form."""
+        """Replace the signal domain used by the Setting form.
+
+        ``texts`` is what a person calls each signal (the presenter's
+        ``<producer>/<output>``), which the closed pickers read.
+        """
 
         selected_groups = tuple(
             (str(producer), tuple((str(display), str(key)) for display, key in leaves))
@@ -1120,9 +1129,11 @@ class PanelCardView(FluentGroupBox):
         overlay = str(
             overlay_current or self._state_projection.get("overlay_signal") or ""
         )
+        texts = {str(key): str(text) for key, text in dict(texts or {}).items()}
         if (
             selected_groups == self._groups
             and selected_overlay_groups == self._overlay_groups
+            and texts == self._signal_texts
             and current == str(self._state_projection.get("signal") or "")
             and overlay
             == str(self._state_projection.get("overlay_signal") or "")
@@ -1130,6 +1141,7 @@ class PanelCardView(FluentGroupBox):
             return
         self._groups = selected_groups
         self._overlay_groups = selected_overlay_groups
+        self._signal_texts = texts
         if current:
             self._state_projection["signal"] = current
         self._state_projection["overlay_signal"] = overlay
