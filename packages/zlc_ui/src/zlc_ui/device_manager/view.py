@@ -550,7 +550,7 @@ class DeviceControlView(QtWidgets.QWidget):
             "is the tighter of it and the bench policy"
         )
         apply = FluentButton("Apply")
-        dot = FluentStatusDot(size=12)
+        dot = FluentStatusDot()
         status = ElidedLabel("")
         # Status has one shared width. Long messages elide behind their
         # tooltip, without moving the controls in another row.
@@ -913,7 +913,7 @@ class DeviceManagerView(QtWidgets.QWidget):
         # and the edited document are a compact pair on the right.
         self.status_strip = StatusStrip()
         self.status_strip.set_inset(False, right=gutter)
-        self.status_dot = FluentStatusDot(size=12)
+        self.status_dot = FluentStatusDot()
         self.status_dot.set_state("idle")
         self.document_name = ElidedLabel(
             "untitled", align=QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter

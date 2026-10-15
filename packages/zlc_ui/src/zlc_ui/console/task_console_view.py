@@ -35,7 +35,7 @@ from zlc_ui.fluent import (
 from zlc_ui.status import name_words
 
 from .board_view import ConsoleBoardView
-from .logic_row_view import STATUS_DOT, LogicRowView, mount_logic_page
+from .logic_row_view import LogicRowView, mount_logic_page
 from .panel_card_view import PanelCardView
 from .status_strip import StatusStrip
 
@@ -111,7 +111,7 @@ class TaskConsoleView(QtWidgets.QWidget):
         header.setSpacing(row_gap())
 
         # The console's state: the worst of its logic nodes' (set_console_state).
-        self.status_dot = FluentStatusDot(size=STATUS_DOT)
+        self.status_dot = FluentStatusDot()
         # The window's identity, as a word (nothing reads a name typed
         # here), at its own width so the summary follows the word.
         self.name_label = FluentLabel("task")

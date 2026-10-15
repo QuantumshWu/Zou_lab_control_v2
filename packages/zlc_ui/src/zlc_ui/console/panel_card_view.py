@@ -435,7 +435,7 @@ class PanelCardView(FluentGroupBox):
         # The presenter marks the card a board-wide error line is about.  The
         # card body reserves no status row, so the dot rides the title strip
         # beside Setting and the full message travels as its tooltip.
-        self.status_dot = FluentStatusDot(size=12)
+        self.status_dot = FluentStatusDot()
         self.status_dot.hide()
 
         # The strip: one grey band across the whole top of the card, two

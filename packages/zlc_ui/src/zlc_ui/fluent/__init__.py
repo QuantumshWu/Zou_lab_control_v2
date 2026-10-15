@@ -17,11 +17,10 @@ for _name in (
     "FIELD_BORDER_PX", "scaled_even_px", "device_snap", "frame_border_px", "frame_inner_rect",
     "stepper_column", "fluent_stepper_extent", "field_room_end", "field_text_inset", "line_edit_text_right",
     "paint_chevron", "paint_centred_ink", "centred_line_top",
-    "center_window_on_primary_screen", "release_window", "retain_window",
+    "release_window",
     "fluent_font_size", "fluent_text_width", "popup_gap", "fluent_widget_stylesheet",
-    "fluent_scrollbar_thickness", "fluent_scrollbar_stylesheet", "status_dot_stylesheet",
-    "stroke_card_border", "signals_blocked", "format_compact_number",
-    "align_to_resolution", "FluentStatusDot", "STATUS_CUES", "status_cue", "set_status_ink",
+    "fluent_scrollbar_thickness", "signals_blocked",
+    "FluentStatusDot", "STATUS_CUES", "status_cue", "set_status_ink",
     "FluentLabel", "muted_note_label", "set_muted", "column_header_label",
     "HEADING_CSS_WEIGHT",
     "FluentFrame", "FluentOverlayFrame", "FluentPopup", "show_fluent_popup_for_anchor",
@@ -32,18 +31,18 @@ for _name in (
     "retire_pending_widgets", "retire_widget", "detach_widget",
     "fluent_confirm", "fluent_save_path", "fluent_open_path", "stamped_file_name",
     "FluentComboBox", "FluentCycleComboBox", "FluentTreeComboBox", "FluentTabWidget",
-    "FluentUnitPicker", "fluent_unit_picker", "unit_choice_tree",
-    "FluentSwitch", "add_row_switch", "fluent_switch_width", "fluent_spinbox_stylesheet", "row_gap", "section_gap", "card_pad", "fluent_inner_edit_stylesheet", "FluentSpinBox", "FluentInputDialog", "FluentCardDialog",
+    "fluent_unit_picker", "unit_choice_tree",
+    "FluentSwitch", "add_row_switch", "fluent_switch_width", "row_gap", "section_gap", "card_pad", "fluent_inner_edit_stylesheet", "FluentSpinBox", "FluentInputDialog", "FluentCardDialog",
     "FluentCodeEdit", "FluentDoubleSpinBox", "fluent_count_box", "fluent_integer_box", "FluentCheckBox", "FluentScrollArea",
     "FluentPageBody", "FluentTableView", "FluentSelectionGrid", "FluentSegmentedButtons",
     "LinkedScrollPanes", "apply_fluent_scrollbars", "FluentWindow", "FluentDialogWindow",
-    "bind_body_close", "launch_fluent_window",
+    "launch_fluent_window",
     "open_fluent_window",
     "ElidedLabel", "FluentStatusStrip", "status_dot_gap",
 ):
     _EXPORTS[_name] = ("zlc_ui.fluent.fluent", _name)
 for _name in (
-    "COLUMN_KINDS", "FluentColumnSet", "FluentColumnLine", "hold_place", "error_note_label",
+    "FluentColumnSet", "FluentColumnLine", "hold_place", "error_note_label",
     "show_note", "show_problem",
 ):
     _EXPORTS[_name] = ("zlc_ui.fluent.column_set", _name)
@@ -61,7 +60,7 @@ for _name in (
 ):
     _EXPORTS[_name] = ("zlc_ui.fluent.style", _name)
 for _name in (
-    "choice_state", "grouped_choice_items", "choice_tree_groups", "fill_grouped_choice_combo",
+    "fill_grouped_choice_combo",
     "read_editable_combo", "coerce_choice_labels",
 ):
     _EXPORTS[_name] = ("zlc_ui.fluent.choice_picker", _name)

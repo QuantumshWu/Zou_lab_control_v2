@@ -15,24 +15,20 @@ to one width, decided by the column's kind:
     the widest thing any line puts there;
 ``"stretch"``
     whatever the line has left over (one such column per set);
-``"slots"``
-    one slot per widget, every slot as wide as the widest widget, standing at
-    the column's trailing edge -- repeated commands keep one x each, and the
-    last one sits beside the line's ×;
 ``"glyph"``
     a square as tall as the controls (a line's ×).
 
 A widget hidden with ``retainSizeWhenHidden`` keeps its place and its share
-of the width, as Qt's own layouts keep it, so a used "+ Where" leaves its
-slot empty instead of letting "+ Combine" slide into it; any other hidden
-widget takes no room.  A line that is itself hidden (a closed stage) still
-counts, so opening it moves nothing.  A cell may span to a later column
-(:meth:`FluentColumnLine.place` ``to=``): a statistic strip starts at the
-operand's x and runs on through the columns after it.  :meth:`set_width`
-pins a column (an output name's width, an editor's label column), and
-:meth:`follow` keeps a row under the lines -- an error, a result -- starting
-at a column's x, so a long message adds lines below instead of squeezing
-into what is left beside the controls.
+of the width, as Qt's own layouts keep it, so an ``at`` with no frames to
+offer leaves its place empty instead of letting the next cell slide into it;
+any other hidden widget takes no room.  A line that is itself hidden (a
+closed stage) still counts, so opening it moves nothing.  A cell may span to
+a later column (:meth:`FluentColumnLine.place` ``to=``): a statistic strip
+starts at the operand's x and runs on through the columns after it.
+:meth:`set_width` pins a column (an output name's width, an editor's label
+column), and :meth:`follow` keeps a row under the lines -- an error, a
+result -- starting at a column's x, so a long message adds lines below
+instead of squeezing into what is left beside the controls.
 
 :func:`section_header` is the line a section of such an editor opens with:
 its title, the section's own control, and at the right end its summary and
@@ -48,9 +44,6 @@ from PyQt5 import QtCore, QtWidgets, sip
 
 from ..status import sentence
 from .fluent import FluentLabel, FluentSectionLabel, control_height, row_gap, set_status_ink
-
-#: What decides a column's width; see the module docstring.
-COLUMN_KINDS = ("fit", "stretch", "slots", "glyph")
 
 
 def section_header(
@@ -138,7 +131,7 @@ def _counts(widget: QtWidgets.QWidget) -> bool:
 class FluentColumnSet(QtCore.QObject):
     """Named columns shared by every :class:`FluentColumnLine` built on it.
 
-    ``columns`` is ``(name, kind)`` in order, kinds from :data:`COLUMN_KINDS`.
+    ``columns`` is ``(name, kind)`` in order, kinds from the module docstring.
     The owner calls :meth:`refresh` after it changed what its lines hold
     (rows built or refilled, a picker mounted) and :meth:`forget` before it
     retires a line, so a line on its way out no longer widens a column.
@@ -148,9 +141,6 @@ class FluentColumnSet(QtCore.QObject):
         super().__init__(parent)
         self.names = tuple(str(name) for name, _kind in columns)
         self._kinds = {str(name): str(kind) for name, kind in columns}
-        unknown = set(self._kinds.values()) - set(COLUMN_KINDS)
-        if unknown:
-            raise ValueError(f"unknown column kinds {sorted(unknown)!r}")
         self.gap = row_gap()
         self._pinned: dict[str, int] = {}
         self._lines: list[FluentColumnLine] = []
@@ -162,21 +152,11 @@ class FluentColumnSet(QtCore.QObject):
     def kind(self, column: str) -> str:
         return self._kinds[column]
 
-    def set_width(self, column: str, width: int | None) -> None:
-        """Pin ``column`` to ``width`` (None measures it again)."""
+    def set_width(self, column: str, width: int) -> None:
+        """Pin ``column`` to ``width``."""
 
-        if width is None:
-            self._pinned.pop(column, None)
-        else:
-            self._pinned[column] = int(width)
+        self._pinned[column] = int(width)
         self.refresh()
-
-    def column_x(self, column: str) -> int:
-        """Where ``column`` starts, from the lines' left edge -- for a column
-        at or before the stretch column, whose x does not depend on the
-        line's width."""
-
-        return self._x[column]
 
     def follow(self, widget: QtWidgets.QWidget, column: str, *, inset: int = 0) -> None:
         """Keep ``widget`` -- a row laid under the lines, sharing their left
@@ -207,12 +187,8 @@ class FluentColumnSet(QtCore.QObject):
             kind = self._kinds[name]
             if kind == "stretch":
                 continue
-            if kind in ("slots", "glyph"):
-                needs = [line._slot_need(name, kind) for line in self._lines]
-                count = max((count for count, _width in needs), default=0)
-                slot = max((width for _count, width in needs), default=0)
-                slots[name] = slot
-                measured = count * slot + self.gap * max(0, count - 1) if slot else 0
+            if kind == "glyph":
+                measured = slots[name] = max((line._glyph_need(name) for line in self._lines), default=0)
             else:
                 measured = max((line._need(name) for line in self._lines), default=0)
             widths[name] = self._pinned.get(name, measured)
@@ -257,8 +233,8 @@ class FluentColumnLine(QtWidgets.QWidget):
             box = QtWidgets.QHBoxLayout(cell)
             box.setContentsMargins(0, 0, 0, 0)
             box.setSpacing(columns.gap)
-            # Commands stand at a slot column's trailing edge; everything
-            # else starts at its column's x and leaves the rest empty.
+            # A glyph stands at its column's trailing edge; everything else
+            # starts at its column's x and leaves the rest empty.
             box.addStretch(1)
             layout.addWidget(cell)
             self._cells[name] = cell
@@ -283,16 +259,16 @@ class FluentColumnLine(QtWidgets.QWidget):
             names = self._columns.names
             self._spans[column] = to
             self._covered.update(names[names.index(column) + 1:names.index(to) + 1])
-        slots = self._columns.kind(column) in ("slots", "glyph")
+        glyph = self._columns.kind(column) == "glyph"
         for widget in widgets:
-            if slots:
+            if glyph:
                 box.addWidget(widget)
             else:
                 box.insertWidget(box.count() - 1, widget, 1 if fill else 0)
             if fill:
                 self._fills.add(id(widget))
             self._held[column].append(widget)
-        if fill and not slots:
+        if fill and not glyph:
             box.setStretch(box.count() - 1, 0)
 
     def stand_on_first_row(self) -> None:
@@ -318,11 +294,8 @@ class FluentColumnLine(QtWidgets.QWidget):
         sizes = [self._natural(widget) for widget in self._held[column] if _counts(widget)]
         return sum(sizes) + self._columns.gap * max(0, len(sizes) - 1)
 
-    def _slot_need(self, column: str, kind: str) -> tuple[int, int]:
-        widgets = [widget for widget in self._held[column] if _counts(widget)]
-        if kind == "glyph":
-            return len(widgets), max((widget.minimumHeight() for widget in widgets), default=0)
-        return len(widgets), max((widget.sizeHint().width() for widget in widgets), default=0)
+    def _glyph_need(self, column: str) -> int:
+        return max((widget.minimumHeight() for widget in self._held[column] if _counts(widget)), default=0)
 
     def _apply(self) -> None:
         columns = self._columns
@@ -350,7 +323,7 @@ class FluentColumnLine(QtWidgets.QWidget):
             stretch = 1 if stretches else 0
             if layout.stretch(index) != stretch:
                 layout.setStretch(index, stretch)
-            if columns.kind(name) in ("slots", "glyph"):
+            if columns.kind(name) == "glyph":
                 slot = columns._slots[name]
                 for widget in self._held[name]:
                     if slot and (widget.minimumWidth() != slot or widget.maximumWidth() != slot):
@@ -358,7 +331,6 @@ class FluentColumnLine(QtWidgets.QWidget):
 
 
 __all__ = [
-    "COLUMN_KINDS",
     "FluentColumnLine",
     "FluentColumnSet",
     "error_note_label",

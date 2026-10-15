@@ -1442,9 +1442,6 @@ class PulseDragContainer(QtWidgets.QWidget):
             widget = widget.parentWidget()
         return None
 
-    def pulse_cards(self) -> tuple[PeriodCard, ...]:
-        return self._cards
-
     # ------------------------------------------------------- where edits land
     def selected_items(self) -> tuple[tuple[str, str], ...]:
         """Exactly the selected visible items, in timeline order."""

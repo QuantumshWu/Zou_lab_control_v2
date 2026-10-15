@@ -294,12 +294,6 @@ def frame_inner_rect(widget: QtWidgets.QWidget) -> QtCore.QRectF:
     return QtCore.QRectF(left, top, right - left, bottom - top)
 
 
-#: The edge a field sheet gives a resting / focused field: the field sheets
-#: (``fluent_spinbox_stylesheet``, ``FluentLineEdit``) are written from these.
-_FIELD_EDGE_REST = PLACEHOLDER
-_FIELD_EDGE_FOCUS = ACCENT
-
-
 def frame_stroke_rect(widget: QtWidgets.QWidget, rect: QtCore.QRectF | None = None) -> QtCore.QRectF:
     """``rect`` (default: the widget's) inset by half the frame edge, so a
     pen of ``frame_border_px`` stroked on it lies wholly inside."""
@@ -1803,7 +1797,7 @@ class FluentButton(QtWidgets.QPushButton):
         self._label = str(text)
         self._dirty = False
         self._armed = False
-        self._confirm_what = ""
+        self._confirm_what = str(confirm_twice)
         self._arm_timer: QtCore.QTimer | None = None
         #: The frame a FluentSettingsPopupAnchor opens from this button.
         self._anchored_popup = None
@@ -1819,7 +1813,8 @@ class FluentButton(QtWidgets.QPushButton):
         self.set_role(role)
         self.setStyleSheet(_button_stylesheet())
         self.clicked.connect(self._click_for_arm)
-        self.set_confirm_twice(confirm_twice)
+        if self._confirm_what:
+            self.setToolTip(f"Click twice to {self._confirm_what}")
 
     def setText(self, text: str) -> None:  # noqa: N802 - Qt API name
         self._label = str(text)
@@ -2024,15 +2019,6 @@ class FluentButton(QtWidgets.QPushButton):
 
     def is_active(self) -> bool:
         return bool(self.property("active"))
-
-    def set_confirm_twice(self, what: str) -> None:
-        """Make this remover take two clicks to ``what`` ("remove this
-        node"), or, with ``""``, act on one click again."""
-
-        self.disarm()
-        self._confirm_what = str(what)
-        if self._confirm_what:
-            self.setToolTip(f"Click twice to {self._confirm_what}")
 
     def is_armed(self) -> bool:
         return self._armed
@@ -2256,13 +2242,13 @@ class FluentLineEdit(QtWidgets.QLineEdit):
             f"""
             QLineEdit {{
                 background: white;
-                border: {FIELD_BORDER_PX}px solid {_FIELD_EDGE_REST};
+                border: {FIELD_BORDER_PX}px solid {PLACEHOLDER};
                 border-radius: {_radius()}px;
                 padding: {scaled_px(PADDING_V)}px {scaled_px(EDIT_PADDING_H)}px;
                 color: {TEXT};
                 font: {fluent_font_size()}pt "{FONT}";
             }}
-            QLineEdit:focus {{ border: {FIELD_BORDER_PX}px solid {_FIELD_EDGE_FOCUS}; }}
+            QLineEdit:focus {{ border: {FIELD_BORDER_PX}px solid {ACCENT}; }}
             QLineEdit:disabled {{ background: {BG}; color: {DISABLED_INK}; }}
             """
         )
@@ -6378,11 +6364,6 @@ class FluentSwitch(QtWidgets.QAbstractButton):
             )
         painter.end()
 
-    def mouseReleaseEvent(self, event) -> None:
-        # QAbstractButton already gates toggling on the left button + enabled state,
-        # so the release is forwarded unconditionally.
-        super().mouseReleaseEvent(event)
-
     def _checked_offset(self) -> float:
         track_w, track_h = _switch_track_size()
         inset = self._thumb_inset()
@@ -6446,8 +6427,8 @@ def add_row_switch(
 def fluent_spinbox_stylesheet(
     selector: str,
     *,
-    edge: str = _FIELD_EDGE_REST,
-    focus_edge: str = _FIELD_EDGE_FOCUS,
+    edge: str = PLACEHOLDER,
+    focus_edge: str = ACCENT,
     fill: str = "white",
     ink: str = TEXT,
 ) -> str:
@@ -7781,7 +7762,7 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
         and ink -- or, with no ``edge``, the plain field's.  A bound edge
         keeps its colour under focus, as a bound line edit's does."""
 
-        rest, focus = (_FIELD_EDGE_REST, _FIELD_EDGE_FOCUS) if edge is None else (edge, edge)
+        rest, focus = (PLACEHOLDER, ACCENT) if edge is None else (edge, edge)
         self.setStyleSheet(fluent_spinbox_stylesheet(
             "QDoubleSpinBox", edge=rest, focus_edge=focus, fill=fill, ink=ink))
 
@@ -8323,11 +8304,11 @@ class _TableHeader(QtWidgets.QHeaderView):
     def paintSection(self, painter, rect, section: int) -> None:  # noqa: N802 - Qt naming
         table = self.parent()
         model = self.model()
-        if not isinstance(table, QtWidgets.QTableView) or model is None or not rect.isValid():
+        if model is None or not rect.isValid():
             super().paintSection(painter, rect, section)
             return
         orientation = self.orientation()
-        if orientation == QtCore.Qt.Horizontal and isinstance(table, FluentTableView):
+        if orientation == QtCore.Qt.Horizontal:
             cut = table.cut_column_left()
             if cut is not None and rect.left() >= cut:
                 # Its values are withheld too (FluentTableView.set_value_columns).
@@ -9094,7 +9075,6 @@ class FluentTableView(QtWidgets.QTableView):
 
 #: Item-data roles of a selection grid beyond Qt's own.
 _GRID_STATE_ROLE = QtCore.Qt.UserRole + 1
-_GRID_NOTE_ROLE = QtCore.Qt.UserRole + 2
 #: The value a trailing action cell reports; None on every other cell.
 _GRID_ACTION_ROLE = QtCore.Qt.UserRole + 3
 #: Whether a row label reads as a row kept but not in use.
@@ -9106,9 +9086,8 @@ _GRID_ACTION_FACE_ROLE = QtCore.Qt.UserRole + 5
 #: honoured (the ``error`` of :data:`STATUS_CUES`, red); marked and kept,
 #: with nothing to act on this time (its ``warning``, amber: nothing is
 #: wrong); wanted by nobody (an empty card in red dashes, so a name in a
-#: cell still means it was chosen); held by another row (an empty dashed
-#: outline that cannot be chosen here).
-GRID_CELL_STATES = ("derived", "error", "kept", "missing", "held")
+#: cell still means it was chosen).
+GRID_CELL_STATES = ("derived", "error", "kept", "missing")
 
 
 def _mixed(first: str, second: str, weight: float) -> QtGui.QColor:
@@ -9139,15 +9118,14 @@ class _SelectionGridModel(QtCore.QAbstractTableModel):
         self._cells: dict[tuple[int, int], str] = {}
         self._states: dict[tuple[int, int], str] = {}
         self._tips: dict[tuple[int, int], str] = {}
-        self._row_notes: tuple[str, ...] = ()
         self._row_tips: tuple[str, ...] = ()
         self._muted_rows: frozenset[int] = frozenset()
 
-    def reset(self, rows, columns, cells, *, row_notes=(), row_tips=(), muted_rows=()) -> None:
+    def reset(self, rows, columns, cells, *, row_tips=(), muted_rows=()) -> None:
         self.beginResetModel()
         self._rows, self._columns, self._cells = tuple(rows), tuple(columns), dict(cells)
         self._states, self._tips = {}, {}
-        self._row_notes, self._row_tips = tuple(row_notes), tuple(row_tips)
+        self._row_tips = tuple(row_tips)
         self._muted_rows = frozenset(int(row) for row in muted_rows)
         self.endResetModel()
 
@@ -9195,8 +9173,6 @@ class _SelectionGridModel(QtCore.QAbstractTableModel):
         if role == QtCore.Qt.DisplayRole:
             labels = self._rows if rows else self._columns
             return labels[section] if 0 <= section < len(labels) else None
-        if rows and role == _GRID_NOTE_ROLE and 0 <= section < len(self._row_notes):
-            return self._row_notes[section]
         if rows and role == _GRID_MUTED_ROLE:
             return section in self._muted_rows
         if rows and role == QtCore.Qt.ToolTipRole and 0 <= section < len(self._rows):
@@ -9206,7 +9182,7 @@ class _SelectionGridModel(QtCore.QAbstractTableModel):
 
     def flags(self, index):
         cell = (index.row(), index.column())
-        if cell in self._cells and self._states.get(cell) != "held":
+        if cell in self._cells:
             return QtCore.Qt.ItemIsEnabled | QtCore.Qt.ItemIsSelectable
         return QtCore.Qt.NoItemFlags
 
@@ -9261,14 +9237,14 @@ def _paint_grid_card(
 ) -> QtCore.QRectF:
     """One small card in a grid cell, and the rect its label goes in.
 
-    Every card -- chosen, empty, derived, held -- has the SAME outer extent:
+    Every card -- chosen, empty, derived -- has the SAME outer extent:
     the cell inset by the gutter across and its row insets down
     (:func:`_grid_row_insets`), snapped to device pixels, rounded like
     every other face.  The face fills that extent.  An ``edge`` is drawn
     only where it says something, and always DASHED (a rule reached it,
-    nobody has it, another row holds it): a whole-device-pixel stroke laid
-    INSIDE the extent, concentric with it, so an edged card is exactly as
-    large as its plain neighbours and the gutters stay even."""
+    nobody has it): a whole-device-pixel stroke laid INSIDE the extent,
+    concentric with it, so an edged card is exactly as large as its plain
+    neighbours and the gutters stay even."""
 
     inset = _grid_gutter()
     above, below = _grid_row_insets()
@@ -9316,10 +9292,9 @@ class _SelectionGridDelegate(QtWidgets.QStyledItemDelegate):
     the selection; a KEPT cell -- chosen, kept, with nothing to act on this
     time -- is the same card in amber (ORANGE_TINT, its name in the
     ``warning`` ink), said rather than refused; a MISSING cell is an empty
-    card in red dashes and a HELD one an empty dashed outline (somebody
-    else's frame).  A disabled grid shows every card on the BG face with
-    the chosen names in DISABLED_INK, so what is chosen still reads but
-    nothing invites a click.  Names sit on their row's one line
+    card in red dashes.  A disabled grid shows every card on the BG face
+    with the chosen names in DISABLED_INK, so what is chosen still reads
+    but nothing invites a click.  Names sit on their row's one line
     (:func:`_paint_grid_label`), centred across.
     """
 
@@ -9328,21 +9303,18 @@ class _SelectionGridDelegate(QtWidgets.QStyledItemDelegate):
             self._paint_action(painter, option, index)
             return
         state = index.data(_GRID_STATE_ROLE)
-        held = state == "held"
-        if not held and not index.flags() & QtCore.Qt.ItemIsSelectable:
+        if not index.flags() & QtCore.Qt.ItemIsSelectable:
             return
         grid = self.parent()
         cell = grid._card_cell(option.rect, index.row())
         live = grid.isEnabled()
         selected = bool(option.state & QtWidgets.QStyle.State_Selected)
-        hovered = bool(option.state & QtWidgets.QStyle.State_MouseOver) and not held and live
+        hovered = bool(option.state & QtWidgets.QStyle.State_MouseOver) and live
         derived = state == "derived"
         error = state == "error"
         kept = state == "kept"
         edge = None
-        if held:
-            fill, edge = None, DIVIDER
-        elif not live:
+        if not live:
             fill = BG
         elif error:
             fill = _mixed(RED_TINT, RED, 0.19).name() if hovered else RED_TINT
@@ -9358,8 +9330,8 @@ class _SelectionGridDelegate(QtWidgets.QStyledItemDelegate):
                 edge = RED
         painter.save()
         rect = _paint_grid_card(painter, grid.viewport(), cell, fill, edge)
-        # A name says the row has the cell; the empty states say nobody, or
-        # somebody else, has it -- named only as the preview under the pointer.
+        # A name says the row has the cell; the empty states say nobody has
+        # it -- named only as the preview under the pointer.
         if selected or hovered or derived or error or kept:
             ink = (
                 DISABLED_INK if not live
@@ -9412,7 +9384,7 @@ class _SelectionGridDelegate(QtWidgets.QStyledItemDelegate):
 
 
 class _SelectionGridRowHeader(QtWidgets.QHeaderView):
-    """Row labels, each with an optional muted line beneath it.
+    """Row labels.
 
     ``activatable`` rows are things the grid's owner can act on (a file, say):
     their label lights up under the pointer and a click emits ``activated``
@@ -9428,28 +9400,19 @@ class _SelectionGridRowHeader(QtWidgets.QHeaderView):
         self._hovered = -1
         self.setMouseTracking(True)
 
-    def _fonts(self) -> tuple[QtGui.QFont, QtGui.QFont]:
-        label = QtGui.QFont(FONT)
-        label.setPointSize(fluent_font_size())
-        note = QtGui.QFont(FONT)
-        note.setPointSize(max(1, fluent_font_size() - 1))
-        return label, note
+    @staticmethod
+    def _font() -> QtGui.QFont:
+        font = QtGui.QFont(FONT)
+        font.setPointSize(fluent_font_size())
+        return font
 
-    def _texts(self, section: int) -> tuple[str, str]:
+    def _text(self, section: int) -> str:
         model = self.model()
-        if model is None:
-            return "", ""
-        label = model.headerData(section, QtCore.Qt.Vertical, QtCore.Qt.DisplayRole)
-        note = model.headerData(section, QtCore.Qt.Vertical, _GRID_NOTE_ROLE)
-        return str(label or ""), str(note or "")
+        return "" if model is None else str(model.headerData(section, QtCore.Qt.Vertical) or "")
 
     def _muted(self, section: int) -> bool:
         model = self.model()
         return model is not None and bool(model.headerData(section, QtCore.Qt.Vertical, _GRID_MUTED_ROLE))
-
-    def two_line_height(self) -> int:
-        label, note = self._fonts()
-        return QtGui.QFontMetrics(label).height() + QtGui.QFontMetrics(note).height() + row_gap()
 
     def _left(self) -> bool:
         return bool(self.defaultAlignment() & QtCore.Qt.AlignLeft)
@@ -9465,19 +9428,12 @@ class _SelectionGridRowHeader(QtWidgets.QHeaderView):
         return 0 if self._left() else scaled_px(8, minimum=5), self.parent()._label_offset()
 
     def sectionSizeFromContents(self, section: int) -> QtCore.QSize:  # noqa: N802 - Qt API
-        label, note = self._texts(section)
-        label_font, note_font = self._fonts()
-        width = max(
-            QtGui.QFontMetrics(label_font).horizontalAdvance(label),
-            QtGui.QFontMetrics(note_font).horizontalAdvance(note),
-        )
+        width = QtGui.QFontMetrics(self._font()).horizontalAdvance(self._text(section))
         return QtCore.QSize(width + sum(self._insets()), self.defaultSectionSize())
 
     def paintSection(self, painter, rect, section: int) -> None:  # noqa: N802 - Qt API
         if not rect.isValid():
             return
-        label, note = self._texts(section)
-        label_font, note_font = self._fonts()
         hovered = section == self._hovered and self.isEnabled()
         rect = self.parent()._card_cell(rect, section)
         left, right = self._insets()
@@ -9506,20 +9462,7 @@ class _SelectionGridRowHeader(QtWidgets.QHeaderView):
             DISABLED_INK if not self.isEnabled()
             else TEXT if hovered or self.activatable and not self._muted(section) else MUTED_INK
         )
-        painter.setFont(label_font)
-        painter.setPen(QtGui.QColor(ink))
-        if not note:
-            _paint_grid_label(painter, QtCore.QRectF(inner), band, align, label_font, label, ink)
-        else:
-            label_height = QtGui.QFontMetrics(label_font).height()
-            note_height = QtGui.QFontMetrics(note_font).height()
-            top = inner.top() + (inner.height() - label_height - note_height) // 2
-            painter.drawText(QtCore.QRect(inner.left(), top, inner.width(), label_height),
-                             align | QtCore.Qt.AlignVCenter, label)
-            painter.setFont(note_font)
-            painter.setPen(QtGui.QColor(MUTED_INK))
-            painter.drawText(QtCore.QRect(inner.left(), top + label_height, inner.width(), note_height),
-                             align | QtCore.Qt.AlignVCenter, note)
+        _paint_grid_label(painter, QtCore.QRectF(inner), band, align, self._font(), self._text(section), ink)
         painter.restore()
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802 - Qt API
@@ -9561,8 +9504,7 @@ class FluentSelectionGrid(QtWidgets.QTableView):
 
     ``toggle=True`` is the grid for marking many cells one by one: a click
     turns one cell on or off and a drag sweeps a run of them, headers select
-    nothing, and ``selection_edited`` comes once the gesture is over.  Rows
-    may carry a muted second line (:meth:`set_grid` ``row_notes``), and a row
+    nothing, and ``selection_edited`` comes once the gesture is over.  A row
     kept but not in use reads muted (``muted_rows``).
     ``row_actions`` -- ``(value, glyph, tooltip)`` or ``(value, glyph,
     tooltip, role)`` -- end every row with one small glyph cell per action,
@@ -9573,30 +9515,25 @@ class FluentSelectionGrid(QtWidgets.QTableView):
     as ``row_action(row, value)`` and never change the selection.
     :meth:`set_cell_states` marks cells a rule reached ("derived"), that
     cannot be honoured ("error"), that are kept with nothing to act on
-    this time ("kept"), that nobody has ("missing") or that
-    another row holds ("held", not choosable: the pointer says so, and a
-    click shows the cell's tooltip at once).  :meth:`set_label_width` ends
-    the row-label column where a form's label column ends, so the first
-    card starts on the form's field edge.
+    this time ("kept") or that nobody has ("missing").
+    :meth:`set_label_width` ends the row-label column where a form's label
+    column ends, so the first card starts on the form's field edge.
     """
 
     selection_edited = QtCore.pyqtSignal(object)
     row_action = QtCore.pyqtSignal(int, object)
 
-    def __init__(self, parent=None, *, cell_width: int = 52,
-                 toggle: bool = False, row_actions: Sequence[tuple] = (),
+    #: The narrowest cell, before the longest label widens them all.
+    _CELL_WIDTH = 52
+
+    def __init__(self, parent=None, *, toggle: bool = False, row_actions: Sequence[tuple] = (),
                  label_action: tuple[object, str] | None = None):
         super().__init__(parent)
-        self._cell_width = cell_width
         self._toggle = bool(toggle)
-        actions = []
-        for value, glyph, tip, *face in row_actions:
-            role = str(face[0]) if face else "destructive"
-            if role not in ("destructive", "quiet"):
-                raise ValueError(f"a row action is 'destructive' or 'quiet', not {role!r}")
-            actions.append((value, str(glyph), str(tip), role))
+        actions = tuple((value, str(glyph), str(tip), str(face[0]) if face else "destructive")
+                        for value, glyph, tip, *face in row_actions)
         self._grid_model = _SelectionGridModel(
-            self, actions=tuple(actions),
+            self, actions=actions,
             label_tip="" if label_action is None else str(label_action[1]),
         )
         #: The action cell under the pointer, and the one a press began on.
@@ -9624,7 +9561,7 @@ class FluentSelectionGrid(QtWidgets.QTableView):
         self.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
         self.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
         self.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
-        for header, size in ((self.horizontalHeader(), scaled_px(cell_width)), (row_header, self.row_height())):
+        for header, size in ((self.horizontalHeader(), scaled_px(self._CELL_WIDTH)), (row_header, self.row_height())):
             header.setSectionResizeMode(QtWidgets.QHeaderView.Fixed)
             # Qt's own floor is measured from the header font and padding --
             # wider than a gap column, and than a short cell, ever asks for.
@@ -9663,20 +9600,17 @@ class FluentSelectionGrid(QtWidgets.QTableView):
 
     def set_grid(self, rows: Sequence[str], columns: Sequence[str],
                  cells: "dict[tuple[int, int], str]", *,
-                 row_notes: Sequence[str] = (), row_tips: Sequence[str] = (),
-                 muted_rows: Sequence[int] = (),
+                 row_tips: Sequence[str] = (), muted_rows: Sequence[int] = (),
                  narrow_columns: Sequence[int] = ()) -> None:
         """Header labels, and the label of every selectable ``(row, column)``.
 
-        ``row_notes`` puts a muted second line under row labels;
         ``muted_rows`` are rows kept but not in use, whose labels read muted;
         ``narrow_columns`` are gaps between column groups, holding no cells.
         """
 
         self._programmatic = True
         try:
-            self._grid_model.reset(rows, columns, cells, row_notes=row_notes, row_tips=row_tips,
-                                   muted_rows=muted_rows)
+            self._grid_model.reset(rows, columns, cells, row_tips=row_tips, muted_rows=muted_rows)
         finally:
             self._programmatic = False
         # Wide enough for the longest label: a frame may be named, not numbered.
@@ -9687,7 +9621,7 @@ class FluentSelectionGrid(QtWidgets.QTableView):
                      default=0)
         horizontal = self.horizontalHeader()
         horizontal.setDefaultSectionSize(
-            max(scaled_px(self._cell_width), widest + 2 * scaled_px(10, minimum=6)))
+            max(scaled_px(self._CELL_WIDTH), widest + 2 * scaled_px(10, minimum=6)))
         # Column groups, and the row's actions after its cells, stand a
         # section apart.
         gap = section_gap()
@@ -9698,7 +9632,7 @@ class FluentSelectionGrid(QtWidgets.QTableView):
             # An action's column holds its square face and the gutters.
             horizontal.resizeSection(column, gap if column == trailing.start else self.action_width())
         rows_header = self.verticalHeader()
-        height = max(self.row_height(), rows_header.two_line_height() if any(row_notes) else 0)
+        height = self.row_height()
         rows_header.setDefaultSectionSize(height)
         if rows:
             # The grid ends where its last cards end: whatever follows it
@@ -9749,9 +9683,6 @@ class FluentSelectionGrid(QtWidgets.QTableView):
                         tips: "dict[tuple[int, int], str] | None" = None) -> None:
         """Mark cells with :data:`GRID_CELL_STATES`, with optional tooltips."""
 
-        unknown = set(states.values()) - set(GRID_CELL_STATES)
-        if unknown:
-            raise ValueError(f"unknown grid cell states {sorted(unknown)!r}")
         self._grid_model.set_states(states, tips or {})
 
     def set_selected(self, cells) -> None:
@@ -9786,10 +9717,6 @@ class FluentSelectionGrid(QtWidgets.QTableView):
             return None
         return index.row(), index.column()
 
-    def _held(self, pos) -> QtCore.QModelIndex | None:
-        index = self.indexAt(pos)
-        return index if index.isValid() and index.data(_GRID_STATE_ROLE) == "held" else None
-
     def _set_cursor(self, cursor) -> None:
         if cursor != self._cursor:
             self._cursor = cursor
@@ -9803,14 +9730,6 @@ class FluentSelectionGrid(QtWidgets.QTableView):
             if event.button() == QtCore.Qt.LeftButton:
                 self._pressed_action = cell
                 self.viewport().update()
-            event.accept()
-            return
-        # A held cell cannot be chosen here; the click says why at once
-        # instead of being swallowed.
-        held = self._held(event.pos())
-        if held is not None:
-            QtWidgets.QToolTip.showText(event.globalPos(), str(held.data(QtCore.Qt.ToolTipRole) or ""),
-                                        self.viewport(), self.visualRect(held))
             event.accept()
             return
         if self._toggle and event.button() == QtCore.Qt.LeftButton:
@@ -9827,9 +9746,7 @@ class FluentSelectionGrid(QtWidgets.QTableView):
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802 - Qt API
         cell = self._action_cell(event.pos())
-        self._set_cursor(QtCore.Qt.PointingHandCursor if cell is not None
-                         else QtCore.Qt.ForbiddenCursor if self._held(event.pos()) is not None
-                         else QtCore.Qt.ArrowCursor)
+        self._set_cursor(QtCore.Qt.PointingHandCursor if cell is not None else QtCore.Qt.ArrowCursor)
         if cell != self._hovered_action:
             self._hovered_action = cell
             self.viewport().update()

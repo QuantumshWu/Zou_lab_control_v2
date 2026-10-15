@@ -32,6 +32,10 @@ vm = ScheduleVM(
     1, 2, "fake", "50 MHz", "10 us", "total", 2, "2/2", "2 periods",
     ports, periods, analog_mode_choices=analog_modes,
 )
+
+def period_cards(strip):
+    from zlc_ui.pulse import PeriodCard
+    return tuple(item for item in strip.items() if isinstance(item, PeriodCard))
 '''
 
 
@@ -494,7 +498,7 @@ events = []
 view.reorder_items_requested.connect(events.append)
 strip = view.drag_container
 
-cards = strip.pulse_cards()
+cards = period_cards(strip)
 # Dropped left of the first card: it goes before p1.
 drop(("period", "p2"), cards[0].geometry().left())
 assert events == [(("period", "p2"), ("period", "p1"))], events
@@ -510,7 +514,7 @@ drop(("period", "p1"), cards[0].geometry().center().x())
 assert events == [], events
 
 # And the strip reorders nothing on its own.
-assert tuple(item.period_id for item in strip.pulse_cards()) == ("p1", "p2")
+assert tuple(item.period_id for item in period_cards(strip)) == ("p1", "p2")
 
 # Close before teardown.  A synthetic QDropEvent built in Python and a widget
 # tree torn down by the interpreter's exit race each other, and the process
@@ -875,13 +879,13 @@ assert view.hidden_count_label.text() == "2 ports hidden", view.hidden_count_lab
 print('hidden row geometry', before_height, strip.height(), strip._indicator.height())
 assert strip.height() < before_height
 assert strip.size() == strip.sizeHint()
-assert strip._indicator.height() == strip.pulse_cards()[0].height(), 'selected gap did not follow the real layout'
+assert strip._indicator.height() == view._cards["p0"].height(), 'selected gap did not follow the real layout'
 assert strip.items() == timeline and strip._posts == posts
 assert strip.selected_items() == () and strip.selected_gap == 1
 view.set_visible_ports(("d0", "d2"))
 for _ in range(4):
     app.processEvents()
-assert strip._indicator.height() == strip.pulse_cards()[0].height()
+assert strip._indicator.height() == view._cards["p0"].height()
 
 # The single-row push is the other way into that column, and it must obey the
 # same rule -- otherwise one API binding brings a hidden row back.
@@ -1058,7 +1062,7 @@ for post in posts.values():
 for key in ("c:start", "c:end"):
     assert posts[key].title() == "Bracket 2" and posts[key].color == "#4F7EA8", key
     assert "Bracket 2" in posts[key].toolTip()
-card = view.drag_container.pulse_cards()[0]
+card = period_cards(view.drag_container)[0]
 assert card._zlc_surface == (None, False, None) and card._zlc_title_color == TEXT
 
 # The outer bracket leaves: the kept posts of the other become "Bracket 1"
@@ -1158,7 +1162,7 @@ assert json.loads(bytes(started[0].data.data(strip.ITEM_MIME))) == ["bracket", "
 orders = []
 view.reorder_items_requested.connect(orders.append)
 
-cards = strip.pulse_cards()
+cards = period_cards(strip)
 assert drop(("bracket", "b:end"), strip.items()[-1].geometry().right() + 40)
 assert orders == [(("bracket", "b:start"), ("period", "p1"), ("period", "p2"), ("bracket", "b:end"))]
 assert bracket_requests == [], "drag proposes item order, not a second endpoint update"
@@ -1173,7 +1177,7 @@ right_only = replace(
 )
 assert view.set_schedule(right_only)
 app.processEvents()
-cards = strip.pulse_cards()
+cards = period_cards(strip)
 assert drop(("bracket", "b:start"), strip.items()[0].geometry().left())
 assert orders == [(("bracket", "b:start"), ("period", "p1"), ("period", "p2"), ("bracket", "b:end"))]
 assert view._schedule.brackets == right_only.brackets
@@ -1527,7 +1531,7 @@ view = PulseScheduleView()
 assert view.set_schedule(replace(vm, revision=3, brackets=(BracketVM("b", "p1", "p1", 4),)))
 view.show(); app.processEvents()
 strip = view.drag_container
-cards = strip.pulse_cards()
+cards = period_cards(strip)
 
 on_itself = cards[0].geometry().center().x()
 elsewhere = cards[-1].geometry().right() + 40
@@ -1585,7 +1589,7 @@ view = PulseScheduleView()
 assert view.set_schedule(replace(vm, revision=3, brackets=(BracketVM("b", "p1", "p2", 4),)))
 view.show(); app.processEvents()
 strip = view.drag_container
-cards = strip.pulse_cards()
+cards = period_cards(strip)
 posts = {post.kind: post for post in strip.findChildren(BracketPost)}
 assert all(item.cursor().shape() == QtCore.Qt.ArrowCursor for item in (*cards, *posts.values()))
 
@@ -1947,9 +1951,9 @@ starts = []
 strip._begin_drag = starts.append
 
 def lit():
-    return {card.period_id for card in strip.pulse_cards() if card.is_selected()}
+    return {card.period_id for card in period_cards(strip) if card.is_selected()}
 
-cards = {card.period_id: card for card in strip.pulse_cards()}
+cards = {card.period_id: card for card in period_cards(strip)}
 # The press lights it before anything is picked.
 send(cards["p2"], QtCore.QEvent.MouseButtonPress, QtCore.Qt.LeftButton, QtCore.Qt.LeftButton)
 assert lit() == {"p2"} and strip.selected_items() == () and strip.selected_gap is None
@@ -1967,7 +1971,7 @@ assert starts == [("period", "p1")], starts
 assert strip.selected_items() == (("period", "p1"),) and lit() == {"p1"}
 # The reorder the drop proposes keeps the picked one picked.
 assert view.set_schedule(replace(vm, revision=3, periods=(periods[1], periods[0])))
-assert tuple(card.period_id for card in strip.pulse_cards()) == ("p2", "p1")
+assert tuple(card.period_id for card in period_cards(strip)) == ("p2", "p1")
 assert strip.selected_items() == (("period", "p1"),) and lit() == {"p1"}
 # Clicking the picked one clears it: the press changes nothing it shows.
 send(cards["p1"], QtCore.QEvent.MouseButtonPress, QtCore.Qt.LeftButton, QtCore.Qt.LeftButton)

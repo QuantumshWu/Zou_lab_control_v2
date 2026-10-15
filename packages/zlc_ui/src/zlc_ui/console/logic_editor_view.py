@@ -47,7 +47,6 @@ from zlc_ui.form.qt_form import _form_label_width
 from zlc_ui.status import SUMMARY_SEPARATOR, name_words
 from .logic_row_view import (
     STATE_WORDS,
-    STATUS_DOT,
     START_LABELS,
     mount_logic_page,
     start_label,
@@ -150,7 +149,7 @@ class LogicEditorView(QtWidgets.QWidget):
         # The air between a dot and its words is the status strip's, so this
         # dot reads as the node row's and the strip's.
         status_row.setSpacing(status_dot_gap())
-        self.status_dot = FluentStatusDot(size=STATUS_DOT)
+        self.status_dot = FluentStatusDot()
         self.status_label = FluentLabel("stopped")
         self.status_label.setWordWrap(True)
         self.status_label.setMinimumWidth(0)
@@ -189,7 +188,7 @@ class LogicEditorView(QtWidgets.QWidget):
             ),
         ))
         self.name_form = FluentParameterForm(empty, {})
-        self.name_form.committed.connect(self._name_finished)
+        self.name_form.committed.connect(lambda _key: self._send_typed_name())
         name_layout.addWidget(self.name_form)
         self.name_problem_label = error_note_label()
         self._name_problem_row = FluentSettingRow(
@@ -518,11 +517,6 @@ class LogicEditorView(QtWidgets.QWidget):
         if box is not None and box.isModified():
             box.setModified(False)
             self.name_committed.emit(box.text().strip())
-
-    def _name_finished(self, _key: str) -> None:
-        """Return (or Qt's own word that a changed box was left)."""
-
-        self._send_typed_name()
 
     def _name_left(self) -> None:
         """The focus left the Name box: what was typed is sent, then the box

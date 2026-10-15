@@ -12,7 +12,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from PyQt5 import QtCore, QtWidgets
+from PyQt5 import QtCore
 
 from zlc_ui.fluent import (
     FluentDialogWindow,

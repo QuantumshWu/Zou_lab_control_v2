@@ -38,11 +38,6 @@ _KINDS = ("(measurement)", "(processor)", "(task)", "(panel publisher)")
 #: Every word the Start slot can say, on the row and on the node's Edit page.
 START_LABELS = ("Start", "Restart", "Starting…")
 
-#: The size of every status dot on the console (design px): the status
-#: strip's own, so the window's dot in the header, a node's dot on its row
-#: and the same node's dot on its Edit page are one mark.
-STATUS_DOT = 12
-
 #: Each node state as the status word it is drawn with (``STATUS_CUES``).
 #: ONE table for the row and the node's Edit page.  A draft is
 #: drawn as calmly as a stopped node: what keeps it from starting is
@@ -139,7 +134,7 @@ class LogicRowView(FluentFrame):
 
         top = QtWidgets.QHBoxLayout()
         top.setSpacing(row_gap())
-        self.dot = FluentStatusDot(size=STATUS_DOT)
+        self.dot = FluentStatusDot()
         # Elided in the MIDDLE: names that differ at their end ("... shot 1",
         # "... shot 2") still read differently in the column.
         self.name_label = ElidedLabel(str(title), mode=QtCore.Qt.ElideMiddle)
@@ -285,7 +280,6 @@ class LogicRowView(FluentFrame):
 __all__ = [
     "START_LABELS",
     "STATE_WORDS",
-    "STATUS_DOT",
     "LogicRowView",
     "mount_logic_page",
     "start_label",
