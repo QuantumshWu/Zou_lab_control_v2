@@ -44,6 +44,7 @@ logic_stop_requested = pyqtSignal(str)
 logic_edit_requested = pyqtSignal(str)
 logic_remove_requested = pyqtSignal(str)
 logic_draft_changed = pyqtSignal(str, object)
+logic_name_committed = pyqtSignal(str, str)    # node_id, the finished Name text
 logic_refresh_requested = pyqtSignal(str)      # re-read that node's files
 ```
 
@@ -91,6 +92,7 @@ has_panel_publisher_editor(panel_id); focus_panel_publisher_editor(panel_id)
 close_panel_publisher_editor(panel_id)
 # logic rows, by id
 add_logic_row(node_id, kind, offers_preview=True); remove_logic_row(node_id)
+set_logic_name(node_id, name)                            # what the node is called
 set_logic_state(node_id, state, status_text="")          # idle|running|error
 set_logic_commands(node_id, *, can_start, can_stop, pending=False)
 set_logic_auto_preview(node_id, enabled)
@@ -100,7 +102,10 @@ has_logic_editor(node_id); focus_logic_editor(node_id); close_logic_editor(node_
 ```
 
 `groups` for signal choices is `(producer_label, ((display_label, key), ...))`;
-the key is an opaque string the window does not interpret.  A panel's widget
+the key is an opaque string the window does not interpret, and every heading
+and label is display text the presenter composed (a Logic node's producer
+heading is its Name).  An editor's tab follows what it edits: `Edit · <name>`
+and `Edit panel · <panel name>` are retitled on every update.  A panel's widget
 is chosen by the composition root's `plot_surface` policy (one widget per
 host), so a board can present a same-shot group atomically through
 `present_panel_front`.
@@ -135,9 +140,11 @@ card keeps no other control for them.
 
 The title strip names the panel by the surface's `caption`, exactly as the
 presenter composed it: a signal's name is read by the runtime that owns its
-grammar, never by the card.  The caption is display only -- the state's
-`title` stays the panel's editable name -- and a card no presenter has
-captioned is called by that name.
+grammar, never by the card.  Beside it the presenter projects `panel_name`,
+what the panel is called -- what the Setting form's "Panel name" and the Edit
+page show, a renamed node's `<name>/<output>` while the title is automatic.
+Both are display only -- the state's `title` stays the panel's record -- and
+a card no presenter has captioned is called by its title.
 
 A card is laid out the same with or without a picture.  Its strip always
 reads two lines -- the caption (and data sizes) above, the axis names below
@@ -254,6 +261,7 @@ edit_requested = pyqtSignal()
 remove_requested = pyqtSignal()
 auto_preview_changed = pyqtSignal(bool)
 
+set_name(text: str) -> None
 set_state(state: str, status_text: str = "") -> None  # idle|running|error
 set_commands(*, can_start: bool, can_stop: bool, pending: bool = False) -> None
 set_preview_offered(offered: bool) -> None
@@ -262,7 +270,9 @@ set_task_takeover(active: bool, *, owns_task: bool = False) -> None
 set_publishes(rows: tuple[tuple[str, str, str], ...]) -> None
 ```
 
-Each publish row is `(name, shape_text, description)`.
+Each publish row is `(name, shape_text, description)`.  The row shows the
+node's Name; the name arrives only by `set_logic_name`, and the row is not
+where it is renamed -- its Edit page is.
 
 Start and Stop are two fixed slots on the row and on the node's Edit page,
 both always shown.  Start reads `Starting…` while `pending`, `Restart` while
@@ -273,10 +283,16 @@ command is disabled except the owning Task's own Stop (`owns_task`), which
 raises the same `stop_requested` as the status strip's "Stop task".
 
 A node's Edit page is three bands and only the middle one scrolls: the
-header (name, kind, status line) above, the rows, and the action bar
-(Remove | Plot, Start, Stop) as the page's foot, on the rows' left and right
-edges.  A newly opened page starts at its first row; after that its bar is
-the operator's, across tab switches.
+header (the Name, then `(api_name · kind)` in grey, and the status line)
+above, the rows, and the action bar (Remove | Plot, Start, Stop) as the
+page's foot, on the rows' left and right edges.  A newly opened page starts
+at its first row; after that its bar is the operator's, across tab switches.
+The first row is the Name, in the page's one label column; its box's tooltip
+is the node's internal ID.  It commits (`name_committed`) on Return or when
+the focus leaves the box, once, and only when it says something new; a
+refused name is one sentence under the line, in the control column, until
+the next commit.  It stays editable while a Task holds the console.  The tab
+reads `Edit · <name>` and is retitled when the node is renamed.
 
 ## `StatusStrip` (internal)
 
@@ -311,12 +327,13 @@ set_selectors(enabled: bool) -> None
 set_task_takeover(active: bool) -> None
 show_status(text: str, severity: str) -> None
 set_summary(text: str) -> None
+set_editor_tab_title(editor, title: str) -> None
 ```
 
 The header names the window (`task`) as a label; it is not an input.  Its
 one chooser lists `Plot: <kind>` and `<Layer>: <api_name>` entries -- a node
-by the name its row and Edit tab call it, its layer in words
-(`zlc_ui.status.name_words`).  The command beside it names what it adds
+TYPE by its api_name, its layer in words (`zlc_ui.status.name_words`); a
+node itself is called by its Name.  The command beside it names what it adds
 for the chosen family, `Add panel` or `Add node`, in one slot wide enough
 for either.  The handle forwards the board signals and drives the rest;
 nothing outside the window calls these directly.
