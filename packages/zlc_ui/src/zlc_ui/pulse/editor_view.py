@@ -51,8 +51,9 @@ class PulseEditorView(QtWidgets.QWidget):
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
+        self.setObjectName("PulseEditorView")
         self.setWindowTitle("PulseGUI@Zou lab")
-        self.setStyleSheet(fluent_widget_stylesheet())
+        self.setStyleSheet(fluent_widget_stylesheet(self.objectName()))
         self._closing = False
         outer = QtWidgets.QVBoxLayout(self)
         outer.setContentsMargins(window_pad(1), window_pad(1), window_pad(1), window_pad(1))

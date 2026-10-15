@@ -668,8 +668,22 @@ def popup_gap() -> int:
     return scaled_px(4, minimum=3)
 
 
-def fluent_widget_stylesheet() -> str:
-    return f'QWidget {{ background: {BG}; color: {TEXT}; font: {fluent_font_size()}pt "{FONT}"; }}'
+def fluent_widget_stylesheet(root: str) -> str:
+    """A window's ink and font for every widget in it, and its BG face on the
+    window itself alone.
+
+    ``root`` is the object name of the widget the sheet is set on.  The face
+    belongs to that widget only: one background rule for every QWidget
+    painted each plain container inside a white card -- the cell holding an
+    Auto row's switch and field, the Save figure name row, a mirrored
+    producer's row -- as a grey block.  A container shows what it stands on,
+    the card's white or the window's BG.
+    """
+
+    return (
+        f'QWidget {{ color: {TEXT}; font: {fluent_font_size()}pt "{FONT}"; }}'
+        f"QWidget#{root} {{ background: {BG}; }}"
+    )
 
 
 def fluent_scrollbar_thickness() -> int:

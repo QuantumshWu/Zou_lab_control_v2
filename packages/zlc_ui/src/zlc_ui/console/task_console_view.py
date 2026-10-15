@@ -75,7 +75,7 @@ class TaskConsoleView(QtWidgets.QWidget):
         super().__init__(parent)
         self.setObjectName("TaskConsoleView")
         self.setWindowTitle("TaskConsole@Zou lab")
-        self.setStyleSheet(fluent_widget_stylesheet())
+        self.setStyleSheet(fluent_widget_stylesheet(self.objectName()))
 
         outer = QtWidgets.QVBoxLayout(self)
         margin = window_pad(1)

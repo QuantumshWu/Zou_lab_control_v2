@@ -778,3 +778,40 @@ def test_a_checkbox_label_too_wide_for_its_room_ends_in_an_ellipsis(host) -> Non
     assert long_box.toolTip() == "pgc_1D_freq_switch"
     assert long_box.text() == "pgc_1D_freq_switch"
     assert short_box._shown_option().text == "cooling" and short_box.toolTip() == ""
+
+
+def test_a_plain_container_in_a_white_card_shows_the_card_not_the_window_grey(app) -> None:
+    """The window sheet paints BG on the window alone: a plain container in a
+    card -- an Auto row's switch-and-field cell, the Save figure name row --
+    shows the card's white, where one rule for every QWidget painted it grey."""
+
+    from PyQt5 import QtGui, QtWidgets
+    from zlc_ui.fluent import FluentGroupBox, FluentSwitch, fluent_widget_stylesheet
+    from zlc_ui.fluent.style import BG, SURFACE
+
+    root = QtWidgets.QWidget()
+    root.setObjectName("SheetRoot")
+    root.setStyleSheet(fluent_widget_stylesheet(root.objectName()))
+    root.resize(400, 200)
+    outer = QtWidgets.QVBoxLayout(root)
+    outer.setContentsMargins(20, 20, 20, 20)
+    card = FluentGroupBox("Card", root)
+    outer.addWidget(card)
+    inner = QtWidgets.QVBoxLayout(card)
+    holder = QtWidgets.QWidget(card)
+    holder.setMinimumHeight(40)
+    row = QtWidgets.QHBoxLayout(holder)
+    row.setContentsMargins(0, 0, 0, 0)
+    row.addWidget(FluentSwitch("Auto", holder))
+    row.addStretch(1)
+    inner.addWidget(holder)
+    root.show()
+    QtWidgets.QApplication.processEvents()
+    image = root.grab().toImage()
+    ratio = image.devicePixelRatio()
+    corner = holder.mapTo(root, holder.rect().topRight())
+    probe = QtGui.QColor(image.pixel(int((corner.x() - 4) * ratio), int((corner.y() + 4) * ratio))).name().upper()
+    window = QtGui.QColor(image.pixel(int(5 * ratio), int(5 * ratio))).name().upper()
+    root.close()
+    assert probe == SURFACE.upper(), probe
+    assert window == BG.upper(), window
