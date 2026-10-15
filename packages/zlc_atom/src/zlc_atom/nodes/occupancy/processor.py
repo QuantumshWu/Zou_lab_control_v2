@@ -113,8 +113,10 @@ class OccupancyProcessor:
     exposures are each read with the thresholds and kernels trained on frames
     like them.  Which calibration reads which frame is resolved against the
     frames that actually arrive, so "first", "last" and "rest" follow a cycle
-    that gains or loses a frame, and a claim the cycle cannot honour refuses
-    the run by name.  One calibration on its own reads every frame.
+    that gains or loses a frame.  A frame two calibrations read, or none
+    does, refuses the run by name; a middle number the cycle does not carry
+    between its ends reads nothing and refuses nothing.  One calibration on
+    its own reads every frame.
 
     A calibration claiming no frame is PARKED: the operator keeps it at hand
     without using it.  Only its file goes on, into the run record; it is
