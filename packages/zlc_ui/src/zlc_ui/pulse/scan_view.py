@@ -71,11 +71,16 @@ class PulseScanView(QtWidgets.QWidget):
         listing.addWidget(self.scan_slots_label)
         listing.addWidget(self.bindings_box)
         info_layout.addLayout(listing)
+        layout.addWidget(info)
 
-        run_row = QtWidgets.QHBoxLayout()
-        run_row.setContentsMargins(0, 0, 0, 0)
+        # How the scan plays -- how many times the table is walked, holding
+        # a point, stepping -- is its own card: under "Bound fields" an
+        # operator looking for Hold found it among a list of fields.
+        playback = FluentGroupBox("Playback")
+        run_row = QtWidgets.QHBoxLayout(playback)
+        run_row.setContentsMargins(pad, pad, pad, pad)
         run_row.setSpacing(row_gap())
-        run_row.addWidget(FluentLabel("Scan repeats (0 = ∞)"))
+        run_row.addWidget(FluentLabel("Scan repeats"))
         self.scan_repeats_spin = fluent_count_box()
         # As wide as every repeat box, wider only while it shows or takes a
         # longer count.
@@ -100,8 +105,7 @@ class PulseScanView(QtWidgets.QWidget):
             run_row.addWidget(button)
         self.scan_progress_label = FluentLabel("")
         run_row.addWidget(self.scan_progress_label, 1)
-        info_layout.addLayout(run_row)
-        layout.addWidget(info)
+        layout.addWidget(playback)
 
         body = QtWidgets.QHBoxLayout()
         body.setSpacing(row_gap())
@@ -197,6 +201,10 @@ class PulseScanView(QtWidgets.QWidget):
             raise ValueError("repeat range is invalid")
         self._minimum_repeats = minimum
         self.scan_repeats_spin.setMinimum(minimum)
+        # A count of 0 walks the table forever, and the box says so where
+        # it is typed: it shows ∞.  A range that starts above 0 has no
+        # forever in it.
+        self.scan_repeats_spin.setSpecialValueText("∞" if minimum == 0 else "")
         self.set_repeats(default)
 
     def _size_repeats(self, text: str = "") -> None:

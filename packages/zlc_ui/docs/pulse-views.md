@@ -68,9 +68,11 @@ Config name it binds, as in Value Config's Pulse bindings).
 Every card stacks its words on one left edge: the title, the header caption
 (a Period's or Subpulse's Duration, an end post's Repeats) and the field boxes
 start on the content edge, the values at the field text inset.  The three
-repeat boxes -- Delay / Scan's Repeat, Scan repeats and a bracket's Repeats --
-share one measure, `count_box_width`: a five-digit count whole beside the
-stepper, widened before a longer count is shown and while one is typed.  The
+repeat boxes -- Delay / Scan's Repeats, the Scan page's Scan repeats (in its
+own Playback card, under Bound fields) and a bracket's Repeats -- share one
+measure, `count_box_width`: a five-digit count whole beside the stepper,
+widened before a longer count is shown and while one is typed.  The two whose
+0 runs forever show it as ∞.  The
 Control card's Hide side panels / Show side panels hides and restores the
 Port catalog and Delay / Scan; Collapse is only an expanded Subpulse's command.
 
@@ -172,8 +174,10 @@ presenter's fact; the view keeps no copy of it.
 `PulseEditorView` composes Edit, Preview, Scan, Config, and Target tabs and exposes
 `set_title`, `set_summary`, `set_status_color`, `ask_open_path`,
 `ask_save_path`, `confirm`, `show_warning`, `finish_close`, and the
-`close_requested`/`clear_all_requested` signals. It does not know a
-controller. A product opens it through the single `open_pulse_editor` handle;
+`close_requested`/`clear_all_requested` signals. `show_warning` and
+`show_done` hand the one Pulse dialog every message as a sentence
+(`zlc_ui.status.sentence`: a full stop, never a capital added by code). It
+does not know a controller. A product opens it through the single `open_pulse_editor` handle;
 the view does not provide a parallel raw-window launcher.
 
 ## `PulseEditorHandle`

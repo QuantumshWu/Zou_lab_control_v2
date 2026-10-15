@@ -2078,6 +2078,10 @@ class FluentLineEdit(QtWidgets.QLineEdit):
         values"), or that nothing is chosen yet is something the operator
         must read, so information is the default; only a field's own name
         repeated inside it ("File name", "role") may stay faint.
+
+        A switched-off field writes either in DISABLED_INK, as it writes its
+        text: a prompt in reading ink invited typing into a box that
+        refuses it.
         """
 
         colour = QtGui.QColor(TEXT if prompt else MUTED_INK)
@@ -2085,6 +2089,7 @@ class FluentLineEdit(QtWidgets.QLineEdit):
             colour.setAlpha(128)
         palette = self.palette()
         palette.setColor(QtGui.QPalette.PlaceholderText, colour)
+        palette.setColor(QtGui.QPalette.Disabled, QtGui.QPalette.PlaceholderText, QtGui.QColor(DISABLED_INK))
         self.setPalette(palette)
 
     def set_display_elide(self, mode) -> None:
@@ -3505,9 +3510,12 @@ class FluentComboBox(QtWidgets.QAbstractButton):
         if editable:
             text = self.currentText()
             self._line_edit = FluentLineEdit(text, self)
+            # Switched off, its text is DISABLED_INK, as a non-editable
+            # combo's is (its placeholder too: set_placeholder_prompt).
             self._line_edit.setStyleSheet(
                 f'QLineEdit {{ background: transparent; border: none; padding: 0; '
                 f'color: {TEXT}; font: {fluent_font_size()}pt "{FONT}"; }}'
+                f'QLineEdit:disabled {{ color: {DISABLED_INK}; }}'
             )
             # The combo draws the field; its editor takes exactly the text
             # room inside it.  A field's own minimum height made the editor
@@ -3571,8 +3579,8 @@ class FluentComboBox(QtWidgets.QAbstractButton):
         It carries the empty key like any other keyed row, and while it is
         current the collapsed box paints its words as an empty field paints
         its placeholder, in MUTED_INK: a missing input must not look like a
-        value someone picked.  A row whose empty key IS a choice ("Subpulse
-        file") is an ordinary ``addItem``.
+        value someone picked.  A row whose empty key IS a choice
+        ("Independent file") is an ordinary ``addItem``.
         """
 
         self.addItem(text, "")
@@ -6826,8 +6834,11 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
         super().setValue(float(number))
         # Qt only rewrites the text when the double changed; a decimal that
         # differs in a digit the double cannot hold would otherwise be shown
-        # from the float.
-        self.lineEdit().setText(self.textFromValue(float(number)))
+        # from the float.  At the minimum a special value text ("∞" for a
+        # count whose 0 runs forever) is shown, as Qt's own edit shows it.
+        special = self.specialValueText()
+        self.lineEdit().setText(special if special and float(number) == self.minimum()
+                                else self.textFromValue(float(number)))
         # The chip shows only beside a number it leaves room for.
         self._place_step_chip()
         if notify_normalized and number != requested:

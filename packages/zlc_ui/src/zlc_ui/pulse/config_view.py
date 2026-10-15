@@ -9,7 +9,7 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 from zlc_ui.fluent import (
     FluentButton, FluentComboBox,
     ElidedLabel, FluentGroupBox, FluentLabel, FluentReadoutEdit, FluentScrollArea,
-    FluentSectionLabel, FluentTableView, column_header_label, field_text_inset,
+    FluentSectionLabel, FluentTableView, centred_line_top, column_header_label, field_text_inset,
     fluent_scrollbar_thickness,
     read_editable_combo, retire_widget, signals_blocked,
 )
@@ -25,6 +25,13 @@ from zlc_ui.status import SUMMARY_SEPARATOR
 #: chosen for it, its default and the Config value (columns 2 and 3), and the
 #: status, which takes the rest of the row.
 _FIELD, _NAME, _DEFAULT, _STATUS = 0, 1, 2, 4
+
+
+def _default_indent() -> int:
+    """How far the Default column's words stand inside it: with the grid's
+    row gap before the column, a section gap from the Config name boxes."""
+
+    return section_gap() - row_gap()
 
 
 class PulseConfigView(QtWidgets.QWidget):
@@ -129,10 +136,20 @@ class PulseConfigView(QtWidgets.QWidget):
         bindings_layout = QtWidgets.QVBoxLayout(bindings_box)
         bindings_layout.setContentsMargins(pad, pad, pad, pad)
         bindings_layout.setSpacing(row_gap())
+        # The mode line and the hint are rows like the grid's under them:
+        # each as tall as a control, its text on the line a control centres
+        # its own on, so the card keeps one pitch from its title down.  A
+        # long mode line (a Config error) wraps below its first line.
         self.mode_label = FluentLabel("Config is off. Pulse defaults are used.")
         self.mode_label.setWordWrap(True)
+        self.mode_label.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop)
+        self.mode_label.ensurePolished()
+        self.mode_label.setContentsMargins(
+            0, centred_line_top(0, row_height(), self.mode_label.font()), 0, 0)
+        self.mode_label.setMinimumHeight(row_height())
         bindings_layout.addWidget(self.mode_label)
         hint = ElidedLabel("Choose a Config name for each field. Save the Pulse to keep these bindings.")
+        hint.setFixedHeight(row_height())
         bindings_layout.addWidget(hint)
         # Each column as wide as what it holds, so a Config name sits beside
         # the field it binds: the field column is its widest label, the name
@@ -151,6 +168,10 @@ class PulseConfigView(QtWidgets.QWidget):
         # their own edge.  It is a row like the rows under it, so the grid
         # keeps one pitch from its header down.
         self._grid_headers[_NAME].setIndent(field_text_inset())
+        # The Default column's words, header and values alike, start a
+        # section gap after the Config name boxes rather than a row gap:
+        # one row gap on, "2 ms" read as the box's suffix.
+        self._grid_headers[_DEFAULT].setIndent(_default_indent())
         for column, header in enumerate(self._grid_headers):
             header.setFixedHeight(row_height())
             self._binding_grid.addWidget(header, 0, column)
@@ -296,8 +317,14 @@ class PulseConfigView(QtWidgets.QWidget):
                 for widget in widgets:
                     widget.setFixedHeight(row_height())
                 combo.setFixedWidth(config_name_width())
-                for widget in widgets[_DEFAULT:_STATUS]:
-                    widget.setFixedWidth(px(110, minimum=90))
+                # Default under its header's indent, its column as much wider:
+                # the value keeps the text room Config value has.
+                default_value, config_value = widgets[_DEFAULT:_STATUS]
+                margins = default_value.textMargins()
+                default_value.setTextMargins(margins.left() + _default_indent(), margins.top(),
+                                             margins.right(), margins.bottom())
+                default_value.setFixedWidth(px(110, minimum=90) + _default_indent())
+                config_value.setFixedWidth(px(110, minimum=90))
                 self._binding_rows[field_id] = widgets
             for column, widget in enumerate(widgets):
                 index = self._binding_grid.indexOf(widget)
