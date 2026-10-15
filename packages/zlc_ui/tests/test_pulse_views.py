@@ -168,7 +168,7 @@ assert not view.set_schedule(ScheduleVM(1, 1, vm.document_name, vm.clock_text, v
 assert view._cards["p1"] is first
 
 # A reused card must compare against the newly projected period, not what
-# was last typed into this widget before Load/Sync/Clear changed the model.
+# was last typed into this widget before Open/Sync/Clear all changed the model.
 from dataclasses import replace
 from PyQt5 import QtCore, QtTest
 committed = []
@@ -515,7 +515,7 @@ view.resize(900, 420); view.show(); app.processEvents()
 view.set_schedule(ScheduleVM(
     document_generation=0, revision=0, document_name="",
     clock_text="50 MHz", total_text="0", total_tooltip="", period_count=0,
-    visible_text="0/0", summary_text="Add Period to start a pulse on this board",
+    visible_text="0/0", summary_text="Add a period to start a pulse on this board",
     ports=ports, periods=(),
     delay_rows=tuple(
         DelayRowVM(port.key, FieldVM("0", editable=False), "ns", ("ns",))
@@ -680,7 +680,7 @@ def test_hiding_a_port_takes_its_delay_row_with_it(run_qt) -> None:
     and ``_visible_delay_rows`` gives the delay column the same filter, so the
     three read across as one table by construction.  Before that the delay
     rows arrived as "every output the board can delay" and were handed over
-    unfiltered, so Hide Off dropped rows from the cards and left their delays
+    unfiltered, so Hide off dropped rows from the cards and left their delays
     behind, aligned with whatever happened to be next to them.
     """
 
@@ -733,7 +733,7 @@ assert view.hidden_count_label.text() == "", "the combo says All ports shown"
 view.set_visible_ports(("d0", "d2"))
 assert retired_delay.isHidden(), "retired rows must disappear before deferred deletion"
 # The Ports card counts what its combo holds; how many are shown is the
-# Port Catalog's Visible line, said once for the page.
+# Port catalog's Visible line, said once for the page.
 assert view.hidden_count_label.text() == "1 port hidden", view.hidden_count_label.text()
 app.processEvents()
 assert strip.items() == timeline and strip._posts == posts
@@ -767,7 +767,7 @@ assert set(view.channel_panel._rows) == {"d0", "d2"}
 
 view.set_visible_ports(("d0", "d1", "d2"))
 app.processEvents()
-assert set(view.channel_panel._rows) == {"d0", "d1", "d2"}, "Show All brings it back"
+assert set(view.channel_panel._rows) == {"d0", "d1", "d2"}, "Show all brings it back"
 assert view.hidden_count_label.text() == ""
 # The columns are read across: a row shown again goes back to its place,
 # not to the bottom of its column, and so does a port added between two.
@@ -1232,7 +1232,7 @@ assert combo.count() == 0 and combo.currentText() == 'Default'
 handle.set_config_page(replace(record, entries=entries_before_names))
 QtTest.QTest.mouseClick(config.save_button, QtCore.Qt.LeftButton)
 assert saves == [True]
-assert view.scan_view.scan_load_array_button.text() == "Load Array"
+assert view.scan_view.scan_load_array_button.text() == "Open array…"
 view.tabs.setCurrentWidget(view.schedule_view)
 app.processEvents()
 channel = view.schedule_view.channel_panel
@@ -1521,7 +1521,7 @@ assert view.timeline_scroll.width() > open_timeline, (
 view.collapse_button.click()
 for _ in range(40):
     app.processEvents()
-assert view.left_scroll.width() == open_width, "Show Left did not give it back"
+assert view.left_scroll.width() == open_width, "Show left did not give it back"
 
 view.close()
 app.processEvents()
@@ -2102,13 +2102,22 @@ view.tabs.setCurrentWidget(view.component_view); app.processEvents()
 assert view.component_view._buttons["save"].text() == "Save Pulse"
 assert not view.component_view.schedule_view.run_button.isVisible()
 from zlc_ui.fluent import FluentReadoutEdit
-# Renamed in the page's own Name field: the catalog reads the name, as it
-# reads the totals under it, so it keeps its four lines on both pages.
+# Renamed where a Pulse is, in the catalog's Name field: the header's
+# Subpulse choice names it, and no second Name field repeats it there.
 embedded_name = view.component_view.schedule_view.names_panel.name_edit
-assert isinstance(embedded_name, FluentReadoutEdit) and embedded_name.isVisible()
+assert not isinstance(embedded_name, FluentReadoutEdit) and embedded_name.isVisible()
+assert embedded_name.isEnabled() and not embedded_name.isReadOnly()
 assert embedded_name.text() == local.document_name
-assert not view.component_view.schedule_view.names_panel._rows["d0"].isEnabled()
-assert view.component_view.schedule_view.names_panel._rows["d0"].isReadOnly()
+assert not hasattr(view.component_view, "name_edit")
+renames = []
+handle.component_action_requested.connect(lambda *args: renames.append(args))
+embedded_name.setText("MOT renamed"); embedded_name.editingFinished.emit()
+assert renames == [("rename", ("mot", "MOT renamed"))], renames
+assert embedded_name.text() == local.document_name, "nothing accepted the name, so the field keeps the old one"
+# The board's port names are read here, in the totals' column, not shown
+# as switched-off fields.
+assert isinstance(view.component_view.schedule_view.names_panel._rows["d0"], FluentReadoutEdit)
+assert not isinstance(main.names_panel._rows["d0"], FluentReadoutEdit)
 assert main.names_panel._rows["d0"].isEnabled()
 assert isinstance(view.component_view.schedule_view._cards["p1"], PeriodCard)
 events = []
@@ -2357,7 +2366,7 @@ def test_the_port_rows_start_one_section_gap_under_the_header_rows(run_qt) -> No
     """Every card and side panel opens with four header rows and its port
     rows start one section gap under them, on one y across the strip: the
     header block was a fixed 178 px that left a hole three section gaps
-    tall, and the read-only catalog hid its Name line and left two."""
+    tall, and a catalog without its Name line left two."""
 
     run_qt(_schedule_source() + r'''
 from PyQt5 import QtCore, QtWidgets
@@ -2388,7 +2397,7 @@ for embedded in (False, True):
     if not embedded:
         columns.append((view.channel_panel, view.channel_panel._rows["d0"][0]))
     else:
-        assert isinstance(panel.name_edit, FluentReadoutEdit) and panel.name_edit.isVisible()
+        assert not isinstance(panel.name_edit, FluentReadoutEdit) and panel.name_edit.isVisible()
         assert panel.name_edit.text() == vm.document_name
     rows = {card.title(): header_rows(card, view) for card, _row in columns}
     assert len({tuple(tops) for tops, _bottom in rows.values()}) == 1, rows

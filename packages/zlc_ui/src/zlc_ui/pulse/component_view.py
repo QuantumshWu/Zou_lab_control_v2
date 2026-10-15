@@ -66,7 +66,10 @@ class PulseComponentView(QtWidgets.QWidget):
         head.setSpacing(row_gap())
         # The two rows are one form: one label column, so the Subpulse
         # choice and the Config file start on one x, and both rows end on
-        # the card's right edge, Browse under the last command.
+        # the card's right edge, Browse under the last command.  The choice
+        # names the Subpulse; it is renamed where a Pulse is, in the Port
+        # catalog's Name field below, so the page says its name twice, not
+        # three times.
         label_width = setting_label_width(("Subpulse", "Config file"), minimum=0)
         top = QtWidgets.QHBoxLayout()
         top.setSpacing(row_gap())
@@ -77,15 +80,9 @@ class PulseComponentView(QtWidgets.QWidget):
         self.context_combo.setMinimumWidth(px(150))
         self.context_combo.currentIndexChanged.connect(self._context_changed)
         top.addWidget(self.context_combo, 1)
-        top.addWidget(FluentLabel("Name"))
-        self.name_edit = FluentLineEdit("")
-        self.name_edit.setPlaceholderText("Subpulse name")
-        self.name_edit.set_placeholder_prompt()
-        self.name_edit.editingFinished.connect(self._name_committed)
-        top.addWidget(self.name_edit, 1)
         self._buttons = {}
         for action, text in (
-            ("new", "New"), ("open", "Open"), ("save", "Save"),
+            ("new", "New file"), ("open", "Open…"), ("save", "Save"),
             ("save_as", "Save as…"), ("insert", "Insert into Pulse"),
         ):
             button = FluentButton(text)
@@ -113,7 +110,11 @@ class PulseComponentView(QtWidgets.QWidget):
         file_row.addWidget(self.browse_source_button)
         head.addWidget(self.config_file_row)
         self.config_file_row.hide()
+        # The lines read under the rows are rows themselves: as tall as a
+        # control, their text on a control's line, so the card keeps one
+        # pitch from its first row to its last.
         self.path_label = ElidedLabel("")
+        self.path_label.setFixedHeight(row_height())
         head.addWidget(self.path_label)
         # What Save does here from the card's left edge, and the source's
         # state at its right -- not squeezed in after Browse, where it ended
@@ -121,8 +122,10 @@ class PulseComponentView(QtWidgets.QWidget):
         hint = QtWidgets.QHBoxLayout()
         hint.setSpacing(row_gap())
         self.scope_label = ElidedLabel("")
+        self.scope_label.setFixedHeight(row_height())
         hint.addWidget(self.scope_label, 1)
         self.source_status = quiet(FluentLabel(""))
+        self.source_status.setFixedHeight(row_height())
         hint.addWidget(self.source_status)
         self.source_status.hide()
         head.addLayout(hint)
@@ -215,10 +218,13 @@ class PulseComponentView(QtWidgets.QWidget):
             with signals_blocked(self.context_combo):
                 self.context_combo.setCurrentIndex(self.context_combo.findData(self._selected_id))
 
-    def _name_committed(self) -> None:
-        name = self.name_edit.text().strip()
+    def _name_committed(self, name: str) -> None:
+        name = name.strip()
         if name != self._accepted_name:
             self.action_requested.emit("rename", (self._context_id, name))
+            # The synchronous owner projected the accepted name or kept the
+            # old one; a refused draft never stays in the field.
+            self.schedule_view.names_panel.name_edit.setText(self._accepted_name)
 
     def _make_schedule(self) -> PulseScheduleView:
         schedule = PulseScheduleView(embedded=True)
@@ -235,6 +241,8 @@ class PulseComponentView(QtWidgets.QWidget):
         ):
             getattr(schedule, signal).connect(lambda *args, a=action: self.edit_requested.emit(a, args))
         schedule.feedback_requested.connect(self.feedback_requested)
+        schedule.names_panel.name_edit.setPlaceholderText("Subpulse name")
+        schedule.document_name_committed.connect(self._name_committed)
         self._pinned.addWidget(schedule.toolbar)
         self._page.insertWidget(1, schedule)
         return schedule
@@ -258,8 +266,6 @@ class PulseComponentView(QtWidgets.QWidget):
         self._set_context_choices()
         self._project_source(busy=busy)
         self._accepted_name = schedule.document_name if schedule else ""
-        self.name_edit.setText(self._accepted_name)
-        self.name_edit.setEnabled(schedule is not None and not busy)
         instance = bool(self._context_id)
         self._buttons["save"].setText("Save Pulse" if instance else "Save")
         self._buttons["save_as"].setText("Export file…" if instance else "Save as…")

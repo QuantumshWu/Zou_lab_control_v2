@@ -12,7 +12,8 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 from zlc_ui.fluent import (
     detach_widget,
     FluentButton, FluentComboBox, FluentFrame, FluentLabel,
-    FluentReadoutEdit, FluentScrollArea, FluentSwitch, add_row_switch, signals_blocked,
+    FluentReadoutEdit, FluentScrollArea, FluentSwitch, LinkedScrollPanes, add_row_switch,
+    signals_blocked,
 )
 
 from ._layout import (
@@ -34,9 +35,13 @@ class PulsePreviewView(QtWidgets.QWidget):
         self._wheel_target: QtWidgets.QWidget | None = None
         # The page's edges and gaps are every tab's; the controls card's
         # content stands the card pad inside it, at the one control height.
+        # The drawing stands in the right inset, its vertical bar at the
+        # tab's edge as on every tab whose page scrolls, and the inset is
+        # kept whether or not the bar shows: the card and the drawing end on
+        # one x, bar or no bar.
         layout = QtWidgets.QVBoxLayout(self)
         page = section_gap()
-        layout.setContentsMargins(page, page, page, page)
+        layout.setContentsMargins(page, page, 0, page)
         layout.setSpacing(section_gap())
 
         controls = FluentFrame()
@@ -68,12 +73,20 @@ class PulsePreviewView(QtWidgets.QWidget):
             row.addWidget(widget)
         row.addWidget(self.preview_status, 1)
         row.addWidget(self.preview_save_figure_button)
-        layout.addWidget(controls)
+        controls_row = QtWidgets.QHBoxLayout()
+        controls_row.setContentsMargins(0, 0, page, 0)
+        controls_row.addWidget(controls)
+        layout.addLayout(controls_row)
 
         self.preview_scroll = FluentScrollArea()
         self.preview_scroll.setWidgetResizable(False)
         self.preview_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
-        self.preview_scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
+        # The group holds the vertical bar, in the gutter; the drawing keeps
+        # its own horizontal one.
+        canvas = LinkedScrollPanes(gutter=page)
+        canvas.add_pane(self.preview_scroll, stretch=1)
+        # Installed after the group's own, so it is asked first: a wheel over
+        # the drawing is the drawing's, anywhere else it scrolls the page.
         self.preview_scroll.viewport().installEventFilter(self)
         self.preview_body = QtWidgets.QWidget()
         self.preview_body_layout = QtWidgets.QVBoxLayout(self.preview_body)
@@ -82,7 +95,7 @@ class PulsePreviewView(QtWidgets.QWidget):
         self.preview_placeholder.setAlignment(QtCore.Qt.AlignCenter)
         self.preview_body_layout.addWidget(self.preview_placeholder)
         self.preview_scroll.setWidget(self.preview_body)
-        layout.addWidget(self.preview_scroll, 1)
+        layout.addWidget(canvas, 1)
 
     @property
     def preview_size(self) -> str:
