@@ -327,9 +327,13 @@ of a finite run. Its draft is `variables`, one row per variable: a `name`,
 and nothing publishes), `terms` -- the formula, one row per line -- and an
 optional `statistic` over named axes. A term reads `of` (a member of the bound
 bundle or any other variable), a `number`, or `boolean` true/false (only
-after `==`/`!=`), and may pick labels of one axis of `of` by name, in any
-domain: `at` is the axis name, `labels` its exact labels as the catalog lists
-them; one label drops the axis, several keep those coordinates in axis order.
+after `==`/`!=`), and may pick on `of` by name: `at` is one of its axes, in
+any domain, and `labels` its exact labels as the catalog lists them -- or
+`at` is a domain with two or more axes (`Point`, `Cell`, `Repeat`) and
+`labels` its rows, written `"detuning 2 · power 1"`; one label drops the axis
+(the domain's axes), several keep those coordinates. A pick never names an
+axis each publication carries its own part of (a finite run's shots and
+scan points, a monitor's shots): those are reduced, or plotted.
 Every later term has an operator of one of four kinds -- arithmetic
 `+ - * /`, comparison `== != > < >= <=`, logic `and`/`or`/`and not`, mask
 `where`/`where not` -- under one left-associative precedence (`* /`, `+ -`,

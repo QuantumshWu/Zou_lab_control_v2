@@ -159,19 +159,27 @@ formula, one row per line, in order), optional `statistic` + `over`, and
 `"publish": false` for an internal helper that other variables read and
 nothing publishes. A term is `of` (a member or any other variable, no
 cycles), or `number`, or `boolean` (`"true"`/`"false"`, only after `==` or
-`!=`); a pick is `at` = an axis name of `of`, in any domain, plus `labels` = a
-list of its labels: one label drops the axis, several keep those coordinates.
-Every term after the first has `op`: `+ - * /`, `== != > < >= <=`, `and`,
-`or`, `and not`, `where`, `where not`. Precedence: `* /`, then `+ -`, then one
+`!=`); a pick is `at` plus `labels` (always a list): `at` = an axis name of
+`of`, in any domain, and `labels` its labels; or `at` = a domain with two or
+more axes (`Repeat`, `Point`, `Cell`) and `labels` its rows, each written as
+its axes' names and labels joined by ` · ` (`"detuning 2 · power 1"`, `"y 3 ·
+x 5"`). One label drops the axis (the domain's axes), several keep those
+coordinates; a Cell domain's rows must fill a grid. A pick never names an axis
+each publication carries its own part of -- a finite run's shots and scan
+points, a monitor's shots: the catalog's labels of those are the run's, and a
+live publication carries one -- so reduce over it with a statistic or plot it
+in a panel; admission refuses such a pick. Every term after the first has
+`op`: `+ - * /`, `== != > < >= <=`, `and`, `or`, `and not`, `where`, `where
+not`. Precedence: `* /`, then `+ -`, then one
 comparison, then `and`/`and not`, then `or`, then `where`; left to right within
 a level; no parentheses -- put a group in an internal variable. `over` lists
 axis names of any domain; at the end of a finite run Derive reads the run's
 Dataset, so `over` a repeat axis is a shot average without error bars -- use a
 plot panel's Reduce for those. Booleans: `sum` is the number true, `mean` the
 fraction true, `count` the valid samples; booleans never mix with numbers. An
-operand whose axes are all on the other side repeats along the rest. A live
-publication that lacks a picked Repeat/Point value (another scan point or
-shot) fails the run, named by variable and term.
+operand whose axes are all on the other side repeats along the rest. Names
+are letters, digits and `_`, not starting with a digit, and never an input's
+name.
 
 | name | row |
 | --- | --- |
@@ -186,12 +194,15 @@ shot) fails the run, named by variable and term.
 | empty0 | `{"terms":[{"of":"occupied","at":"frame","labels":["0"]},{"op":"==","boolean":"false"}]}` |
 | level + norm | `{"name":"level","publish":false,"terms":[{"of":"counts","at":"frame","labels":["1"]},{"op":"where","of":"occupied","at":"frame","labels":["1"]}],"statistic":"mean","over":["Site"]}` then `{"name":"norm","terms":[{"of":"counts","at":"frame","labels":["1"]},{"op":"/","of":"level"}]}` |
 | corner + corner_full | `{"name":"corner","publish":false,"terms":[{"of":"occupied","at":"Site","labels":["1","2","3","7","8","9"]}]}` then `{"name":"corner_full","terms":[{"of":"corner","at":"frame","labels":["1"]}],"statistic":"all","over":["Site"]}` |
+| pixel | `{"terms":[{"of":"frames","at":"Cell","labels":["y 3 · x 5"]}]}` (one pixel of a y × x image: the domain's row) |
 
 Each row also carries its `name`. Issues read `<name> · term k: <reason>`,
 `<name> · statistic: <reason>` or `<name> · name: <reason>`, or `switch
 Publish on for at least one variable`, in `lab_state` logic[].issues and
-`logic.validate`; `logic.start` is refused until they are fixed, and a member
-the producer never publishes is refused at Start in the same words. An
+`logic.validate`; `logic.start` is refused until they are fixed. What a
+variable reads -- a member, another variable, itself, a cycle -- is checked
+against the producer's members: by admission once it has published, and at
+Start's build before then, in the same words. An
 unpublished variable that no published one reads is not evaluated and never
 blocks Start. Old drafts with `outputs` or `code` are refused as unknown
 fields. Do not export arrays to reconstruct Occupancy or Frame Survival.
