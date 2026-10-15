@@ -8,7 +8,7 @@ from dataclasses import dataclass
 import json
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Mapping
+from typing import Mapping
 
 import numpy as np
 from zlc_data import (

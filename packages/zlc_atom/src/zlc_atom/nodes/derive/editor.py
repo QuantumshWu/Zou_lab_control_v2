@@ -37,18 +37,15 @@ from zlc_ui.fluent import (
 from zlc_ui.fluent.column_set import section_header
 from zlc_workbench.topology import signal_text
 
-from zlc_atom.authoring import AuthoringField, AuthoringSchema
 from zlc_atom.nodes._framework.frames import FIRST, LAST
 
 from .expression import (
-    CATEGORIES, DOMAINS, NO_PUBLISHED, OPERATORS, STATISTICS, TERM_DEFAULTS, VARIABLE_COLUMNS, axis_groups,
+    CATEGORIES, DOMAINS, NO_PUBLISHED, OPERATORS, STATISTICS, TERM_DEFAULTS, axis_groups,
     changing_axes, compact_variable, describe_schema, error_stage, frames_kept, pick_values, term_text,
     typed_variables, where_notes,
 )
+from .logic_node import _ROWS
 
-#: The rows as a draft holds them, completed column by column; no validator,
-#: because a problem is shown under its line, not refused.
-_ROWS = AuthoringSchema((AuthoringField("variables", "rows", "Variables", (), columns=VARIABLE_COLUMNS),))
 _STRIPS = dict(CATEGORIES)
 _FOOTER = "Averages over shots with error bars, per-site probabilities and fits belong in a plot panel."
 _EMPTY = ("No variables yet. A variable picks values of an input, combines them line by line, can mask and "

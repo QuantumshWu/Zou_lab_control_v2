@@ -814,7 +814,7 @@ def test_live_monitor_chain_camera_occupancy_survival() -> None:
     from zlc_atom.nodes.camera.measurement import (
         CAMERA_FRAMES_OUTPUT,
     )
-    from zlc_atom.nodes.occupancy import OccupancyProcessor
+    from zlc_atom.nodes.occupancy import CalibrationReading, OccupancyProcessor
     from zlc_atom.nodes.occupancy.processor import OCCUPANCY_OUTPUTS
     from zlc_atom.nodes.frame_survival import (
         SURVIVAL_OUTPUTS,
@@ -911,7 +911,7 @@ def test_live_monitor_chain_camera_occupancy_survival() -> None:
             ),
         )
 
-        occupancy = OccupancyProcessor(calibration, source_signal=frames_key)
+        occupancy = OccupancyProcessor((CalibrationReading(calibration),), source_signal=frames_key)
         occupancy_host = NodeHost(
             occupancy,
             plane,

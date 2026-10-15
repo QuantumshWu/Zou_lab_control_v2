@@ -121,12 +121,6 @@ def canonical_frames(raw: object) -> tuple[FrameToken, ...]:
     return (*numbers, *(name for name in FRAME_NAMES if name in tokens))
 
 
-def describe_frames(frames: Sequence[FrameToken]) -> str:
-    """The one text form of claimed frames: ``"2, first, last"``."""
-
-    return ", ".join(str(token) for token in frames) or "no frame"
-
-
 #: The folder a run keeps its finished artifact in: ``<run>/final/<file>``.
 RUN_FINAL_FOLDER = "final"
 
@@ -384,7 +378,6 @@ __all__ = [
     "check_claims",
     "claim_problems",
     "claim_names",
-    "describe_frames",
     "frame_identity",
     "frame_problems",
     "frame_token",

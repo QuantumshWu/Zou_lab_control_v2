@@ -30,7 +30,7 @@ from zlc_atom.devices.camera.photoelectrons import (
 )
 from zlc_atom.install import create_installation
 from zlc_atom.nodes.calibration.calibration import ReadoutModelKind
-from zlc_atom.nodes.occupancy import OccupancyProcessor
+from zlc_atom.nodes.occupancy import CalibrationReading, OccupancyProcessor
 from zlc_runtime import SignalValue
 
 from fakes import FakePlane, camera_cycle_snapshot
@@ -124,7 +124,7 @@ def test_a_calibration_in_photoelectrons_reads_the_same_atoms(tmp_path: Path) ->
         revision=1,
         value_unit="count",
     )
-    counted = OccupancyProcessor(counts.calibration).process(raw_source)
+    counted = OccupancyProcessor((CalibrationReading(counts.calibration),)).process(raw_source)
     assert counted.artifacts["counts"].block.schema.value_schema.value_unit == "count"
     assert (
         electrons.calibration.site_map.n_sites
@@ -171,7 +171,7 @@ def test_a_run_in_the_other_unit_is_refused(tmp_path: Path) -> None:
         replace(calibration_request(repeats=8), photoelectrons=True),
     ) as task:
         calibration = task.run(tmp_path)
-    processor = OccupancyProcessor(calibration.calibration)
+    processor = OccupancyProcessor((CalibrationReading(calibration.calibration),))
     frames = np.asarray(
         [record.image for record in calibration.capture.frames[:3]],
         dtype=np.float32,

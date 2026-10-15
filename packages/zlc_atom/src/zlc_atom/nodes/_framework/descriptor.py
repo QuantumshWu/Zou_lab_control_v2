@@ -86,8 +86,6 @@ class ArtifactCodec:
             raise ValueError("artifact codec suffixes must be unique")
         if not callable(self.decode):
             raise TypeError("artifact codec decode must be callable")
-        if self.describe is not None and not callable(self.describe):
-            raise TypeError("artifact codec describe must be callable")
         object.__setattr__(self, "contract_id", contract_id)
         object.__setattr__(self, "file_filter", file_filter)
         object.__setattr__(self, "suffixes", suffixes)
@@ -586,14 +584,6 @@ class LogicNodeDescriptor:
             raise TypeError("resolve_field_availability must be callable or None")
         if self.resolve_defaults is not None and not callable(self.resolve_defaults):
             raise TypeError("resolve_defaults must be callable or None")
-        if self.admit_source is not None and not callable(self.admit_source):
-            raise TypeError("admit_source must be callable or None")
-        if self.admit_resources is not None and not callable(self.admit_resources):
-            raise TypeError("admit_resources must be callable or None")
-        if self.estimate_run is not None and not callable(self.estimate_run):
-            raise TypeError("estimate_run must be callable or None")
-        if self.describe_output_frames is not None and not callable(self.describe_output_frames):
-            raise TypeError("describe_output_frames must be callable or None")
         if any(not isinstance(value, ArtifactOutputSpec) for value in artifact_outputs):
             raise TypeError("artifact_outputs must contain ArtifactOutputSpec values")
         if any(not isinstance(value, DeviceRequirement) for value in requirements):

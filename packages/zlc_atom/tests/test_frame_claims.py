@@ -5,16 +5,13 @@ from __future__ import annotations
 import pytest
 
 from zlc_atom.nodes import frame_claim_entries
-from zlc_atom.nodes._framework.frames import canonical_frames, describe_frames, frame_identity
+from zlc_atom.nodes._framework.frames import canonical_frames, frame_identity
 
 
 def test_claimed_frames_have_one_spelling_and_one_order() -> None:
     # Frame 0 IS the first frame: one claim, one spelling.
     assert canonical_frames(["rest", 2, "0", "LAST"]) == (2, "first", "last", "rest")
     assert canonical_frames(["rest", "last", 3, " First "]) == (3, "first", "last", "rest")
-    assert describe_frames((0, 2, "last")) == "0, 2, last"
-    assert describe_frames((1, "first", "rest")) == "1, first, rest"
-    assert describe_frames(()) == "no frame"
     assert tuple(frame_identity(index, 4) for index in range(4)) == (0, 1, 2, "last")
     assert frame_identity(0, 1) == 0
     for bad in ([True], [-1], ["second"], [1.5], "rest"):

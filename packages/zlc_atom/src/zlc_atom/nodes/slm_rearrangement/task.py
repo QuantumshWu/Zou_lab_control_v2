@@ -7,7 +7,6 @@ from pathlib import Path
 from time import perf_counter, monotonic, time_ns
 import sys
 from dataclasses import replace
-from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 from threading import Event

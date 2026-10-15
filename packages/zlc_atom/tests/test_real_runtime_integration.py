@@ -19,7 +19,7 @@ from zlc_atom.nodes.camera import (
     MonitorCapture,
 )
 from zlc_atom.nodes.calibration import CalibrationTask
-from zlc_atom.nodes.occupancy import OccupancyProcessor
+from zlc_atom.nodes.occupancy import CalibrationReading, OccupancyProcessor
 from zlc_atom.nodes.calibration.pulse import arm_sequencer, resolve_pulse
 from fakes import camera_cycle_snapshot
 from pulse_fixture import IMAGING_PULSE_RESOURCE, calibration_request
@@ -81,9 +81,7 @@ def test_the_packages_run_the_virtual_chain_from_fire_to_calibration(
         assert tuple(
             path.name for path in sorted(figure_directory.glob("*.npz"))
         ) == tuple(path.with_suffix(".npz").name for path in report_images)
-        occupancy_node = OccupancyProcessor(
-            task_result.calibration,
-        )
+        occupancy_node = OccupancyProcessor((CalibrationReading(task_result.calibration),))
         occupancy = occupancy_node.process(
             camera_cycle_snapshot(
                 [(record,) for record in task_result.capture.short]

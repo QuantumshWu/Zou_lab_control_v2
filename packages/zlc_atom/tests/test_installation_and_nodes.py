@@ -12,7 +12,7 @@ from zlc_runtime import DatasetOutputDeclaration
 from zlc_atom.install import create_installation, discover_device_catalog
 from zlc_atom.nodes import discover_logic_nodes
 from zlc_atom.nodes.calibration import CalibrationTask
-from zlc_atom.nodes.occupancy import OccupancyProcessor
+from zlc_atom.nodes.occupancy import CalibrationReading, OccupancyProcessor
 
 from fakes import FakePlane, camera_cycle_snapshot
 from pulse_fixture import IMAGING_PULSE_RESOURCE, calibration_request
@@ -442,9 +442,7 @@ def test_two_virtual_calibrations_write_separate_artifacts_and_feed_occupancy(
         # The runtime view is recursively immutable; the artifact codec owns
         # the independent plain JSON projection.
         json.dumps(result.calibration.to_dict()["report"]["run_record"])
-        occupancy_node = OccupancyProcessor(
-            result.calibration,
-        )
+        occupancy_node = OccupancyProcessor((CalibrationReading(result.calibration),))
         # 30 cycles, each holding the one readout frame this task judged.
         occupancy = occupancy_node.process(
             camera_cycle_snapshot([(record,) for record in result.capture.short]),

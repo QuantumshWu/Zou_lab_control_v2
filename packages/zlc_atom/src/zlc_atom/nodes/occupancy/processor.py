@@ -90,9 +90,8 @@ class CalibrationReading:
     """One calibration and the frames of every cycle it reads.
 
     ``frames`` are claims (:mod:`zlc_atom.nodes._framework.frames`): frame
-    numbers from 0, ``"first"``, ``"last"`` and ``"rest"``; none at all is a
-    calibration kept but not read.  ``path`` is the file it was read from,
-    for the run record and for naming it in a refusal.
+    numbers from 0, ``"first"``, ``"last"`` and ``"rest"``.  ``path`` is the
+    file it was read from, for the run record and for naming it in a refusal.
     """
 
     calibration: TrapCalibration
@@ -111,32 +110,21 @@ class OccupancyProcessor:
     Every frame of a cycle reads the SAME sites, with the calibration that
     claims it (:mod:`zlc_atom.nodes._framework.frames`), resolved against the
     frames that actually arrive.  One calibration on its own reads every
-    frame.  A parked calibration's file only goes into the run record;
-    ``parked`` names such files directly, for a caller that never decoded
-    them.
+    frame.  ``parked`` names the files kept but not read: they go into the
+    run record only.
     """
 
     def __init__(
         self,
-        calibrations: TrapCalibration | Sequence[CalibrationReading],
+        calibrations: Sequence[CalibrationReading],
         *,
         parked: Sequence[Path | None] = (),
         source_signal: str | None = None,
         model_kind: ReadoutModelKind | None = None,
     ) -> None:
-        given = (
-            (CalibrationReading(calibrations),)
-            if isinstance(calibrations, TrapCalibration)
-            else tuple(calibrations)
-        )
-        if any(not isinstance(reading, CalibrationReading) for reading in given):
-            raise TypeError("occupancy calibrations must be CalibrationReading")
-        readings = tuple(reading for reading in given if reading.frames)
-        #: The files kept but not read, for the run record only.
-        self.parked: tuple[Path | None, ...] = (
-            *(reading.path for reading in given if not reading.frames),
-            *(None if path is None else Path(path).expanduser().resolve() for path in parked),
-        )
+        readings = tuple(calibrations)
+        self.parked: tuple[Path | None, ...] = tuple(
+            None if path is None else Path(path).expanduser().resolve() for path in parked)
         if not readings and not self.parked:
             raise ValueError("occupancy needs at least one calibration")
         #: How a refusal names each calibration: as the editor's rows name

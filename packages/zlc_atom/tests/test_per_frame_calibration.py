@@ -71,7 +71,7 @@ def test_each_frame_reads_with_the_calibration_that_claims_it() -> None:
     shared = _calibration(1.0)
     strict = _calibration(1e6)
     frames = _cycle(10.0, 10.0, 10.0)
-    plain = OccupancyProcessor(shared).process(frames)
+    plain = OccupancyProcessor((CalibrationReading(shared),)).process(frames)
     assert plain.occupied.tolist() == [[[True], [True], [True]]]
     readings = (CalibrationReading(shared, ("rest",)), CalibrationReading(strict, (1,)))
     mixed = OccupancyProcessor(readings).process(frames)
@@ -172,7 +172,8 @@ def test_calibrations_must_fit_together() -> None:
     with pytest.raises(ValueError) as refused:
         OccupancyProcessor(tuple(
             CalibrationReading(_calibration(1.0), frames, Path(f"{name}.json")) for name, frames in (
-                ("p", ()), ("a", ("rest",)), ("b", ("rest", 2)), ("c", (0,)), ("d", ("first", 2)))))
+                ("a", ("rest",)), ("b", ("rest", 2)), ("c", (0,)), ("d", ("first", 2)))),
+            parked=(Path("p.json"),))
     assert str(refused.value) == ("'rest' is claimed by both a and b; frame 2 is claimed by both b and d; "
                                   "'first' is claimed by both c and d")
     with pytest.raises(ValueError, match="'last' is claimed by a, b and c"):
@@ -181,18 +182,11 @@ def test_calibrations_must_fit_together() -> None:
     late = OccupancyProcessor((CalibrationReading(_calibration(1.0), (5,), Path("late.json")),))
     with pytest.raises(ValueError, match="frames 0, 1, 2 have no calibration: give them to one"):
         late.process(_cycle(10.0, 10.0, 10.0))
-    # A calibration kept but not read is checked against nothing -- other
-    # sites, trained in photoelectrons, a copy of one that reads -- and the
-    # run record keeps it, beside a file never decoded at all.
-    elsewhere = replace(_calibration(1.0, sites=("site-1", "site-2")),
-                        report={"run_record": {"request": {"photoelectrons": True}}})
+    # A file kept but not read -- even a copy of one that reads -- goes into
+    # the run record only, beside a row with no file yet.
     kept = OccupancyProcessor(
-        (
-            CalibrationReading(_calibration(1.0), ("rest",), Path("a.json")),
-            CalibrationReading(elsewhere, (), Path("b.json")),
-            CalibrationReading(_calibration(1.0), (), Path("a.json")),
-        ),
-        parked=(Path("gone.json"), None),
+        (CalibrationReading(_calibration(1.0), ("rest",), Path("a.json")),),
+        parked=(Path("b.json"), Path("a.json"), Path("gone.json"), None),
     )
     counted = SignalValue("camera/frames", _cycle(10.0, 10.0), None)
     kept.evaluate(counted)
@@ -206,8 +200,7 @@ def test_calibrations_must_fit_together() -> None:
     ]
     with pytest.raises(ValueError, match="no calibration reads a frame: give one the frames it reads, "
                                          "or let one read the rest"):
-        OccupancyProcessor((CalibrationReading(_calibration(1.0), (), Path("a.json")),),
-                           parked=(Path("b.json"),))
+        OccupancyProcessor((), parked=(Path("a.json"), Path("b.json")))
     with pytest.raises(ValueError, match="a is listed twice"):
         OccupancyProcessor((
             CalibrationReading(_calibration(1.0), ("rest",), Path("a.json")),
