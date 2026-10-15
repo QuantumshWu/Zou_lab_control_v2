@@ -898,7 +898,8 @@ def start_server(flow, *, host="127.0.0.1", port: int, token: str, allow_control
             """Use the normal experiment action. Consult lab_catalog only for unknown fields. logic.add: api_name, optional values,
             source_signal, device_keys, artifact_inputs. Node edits: node_id plus values,
             source_signal, device_keys, artifact_inputs (a path per input; a frame_claims input such as
-            Occupancy's calibrations takes [{path, frames}] rows). Start/Stop: node_id. logic.start on a running,
+            Occupancy's calibrations takes [{path, frames}] rows; a row with frames [] is kept on purpose and
+            never needs deleting). Start/Stop: node_id. logic.start on a running,
             following or queued node is the GUI Restart: it stops the current run and queues the replacement; the reply
             still carries the old generation (pending.generation null), so read the new one from lab_state once
             pending is null. Editing a running, following or queued node changes only its draft;

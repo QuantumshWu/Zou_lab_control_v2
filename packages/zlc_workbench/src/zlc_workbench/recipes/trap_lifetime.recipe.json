@@ -23,7 +23,7 @@
     "calibrations": {
       "path": ["logic", 1, "artifact_inputs", "calibrations"],
       "required": true,
-      "description": "Occupancy's Calibration rows, each an existing Calibration JSON (relative to workspace/data, or absolute) and the frames it reads: [{\"path\":\"calibration.json\",\"frames\":[\"rest\"]}] reads every frame with one file; give frames trained at another exposure their own row, e.g. [{\"path\":\"load.json\",\"frames\":[\"first\"]},{\"path\":\"readout.json\",\"frames\":[\"rest\"]}]. Frames are numbers from 0, 'first' (frame 0), 'last' and 'rest'; each frame is read by exactly one row. They must match the camera/readout; this recipe does not recalibrate."
+      "description": "Occupancy's Calibration rows, each an existing Calibration JSON (relative to workspace/data, or absolute) and the frames it reads: [{\"path\":\"calibration.json\",\"frames\":[\"rest\"]}] reads every frame with one file; give frames trained at another exposure their own row, e.g. [{\"path\":\"load.json\",\"frames\":[\"first\"]},{\"path\":\"readout.json\",\"frames\":[\"rest\"]}]. Frames are numbers from 0, 'first' (frame 0), 'last' and 'rest'; each frame is read by exactly one row. They must match the camera/readout; this recipe does not recalibrate. A row with frames [] is kept but not read: its file need not exist or match, so leave such rows in place."
     },
     "scan_plan": {
       "path": ["logic", 3, "values", "plan"],
