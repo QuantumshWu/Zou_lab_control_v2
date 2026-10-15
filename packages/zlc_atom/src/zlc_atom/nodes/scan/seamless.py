@@ -51,6 +51,7 @@ from .plan import (
     hardware_scan_ports_for,
     port_label,
     split_outer_axes,
+    unscannable_api_ports,
 )
 from .source import check_cancelled, wait_for_board
 
@@ -134,7 +135,7 @@ def estimate_scan_time(
     pulse_axes = tuple(axis for axis in plan.axes if axis.port.startswith((API_PARAM_FAMILY, PULSE_PARAM_FAMILY)))
     ports = bind_plan(ScanPlan(pulse_axes), (
         *hardware_scan_ports_for(sequence), *api_scan_ports_for(sequence),
-    )) if pulse_axes else ()
+    ), withheld=unscannable_api_ports(sequence)) if pulse_axes else ()
     planned = {axis.port[len(PULSE_PARAM_FAMILY):] for axis in board_axes}
     sequence = replace(sequence, bindings=tuple(
         replace(binding, scan=binding.field_id in planned) for binding in sequence.bindings

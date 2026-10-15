@@ -41,6 +41,7 @@ from zlc_atom.nodes.scan import (
     apply_api_overrides,
     plan_from_authored,
     scan_ports_for_devices,
+    unscannable_api_ports,
 )
 
 
@@ -159,6 +160,7 @@ def _build(
                 device_labels=device_labels,
             ),
         ),
+        withheld=unscannable_api_ports(sequence),
     ) if bindable else ()
 
     return SeamlessScanMeasurement(

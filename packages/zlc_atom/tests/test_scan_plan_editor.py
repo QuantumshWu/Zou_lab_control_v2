@@ -916,6 +916,38 @@ def test_an_api_axis_in_the_plan_locks_that_parameters_value_box() -> None:
     editor.close()
 
 
+def test_an_empty_brackets_repeat_count_is_labelled_for_what_it_is() -> None:
+    """An axis walking an empty bracket's API repeat count says its bracket
+    is empty; "not in this pulse" sent the operator looking for a parameter
+    the pulse still carries."""
+
+    import json
+    from dataclasses import replace
+
+    from zlc_pulse import PulseBinding, PulseBracket, PulseFieldRef
+
+    ensure_qt_app(["scan-editor-empty-bracket"])
+    editor = ScanPlanEditor()
+    bound = _bound_sequence()
+    count = PulseBinding(PulseFieldRef("bracket_count", bracket_id="wait"), "count", source="api")
+    # A bracket from p1 back to p0 is the empty one between them.
+    empty = replace(bound, brackets=(PulseBracket("wait", "p1", "p0", 2),), bindings=(*bound.bindings, count))
+    filled = replace(empty, brackets=(PulseBracket("wait", "p0", "p1", 2),))
+    plan = json.dumps({"axes": [{"port": "api:bracket_count:wait", "values": [1.0, 2.0], "unit": ""}]})
+    try:
+        editor.update_projection(_projection(empty, plan=plan))
+        assert "api:bracket_count:wait" not in {port.port for port in editor._ports}
+        assert editor._rows[0].port_combo.currentText().endswith("(its bracket is empty)")
+        editor.update_projection(_projection(filled, plan=plan))
+        assert "api:bracket_count:wait" in {port.port for port in editor._ports}
+        assert "(" not in editor._rows[0].port_combo.currentText()
+        editor.update_projection(_projection(replace(empty, bindings=bound.bindings), plan=plan))
+        assert editor._rows[0].port_combo.currentText().endswith("(not in this pulse)")
+    finally:
+        editor.close()
+        editor.deleteLater()
+
+
 def test_a_problem_under_the_plan_reads_as_one_sentence_and_a_hand_axis_is_labelled() -> None:
     """Whatever words it -- the plan, a row, the bench -- a problem under
     the rows is one sentence ending in a full stop, as in every editor; and

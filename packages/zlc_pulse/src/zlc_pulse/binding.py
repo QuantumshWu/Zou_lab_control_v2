@@ -253,18 +253,25 @@ def field_label(sequence: PulseSequence, reference: PulseFieldRef) -> str:
 
     _check_inputs(sequence, reference)
     if reference.kind == FIELD_BRACKET_COUNT:
-        for ordinal, bracket in enumerate(sequence.brackets, 1):
-            if bracket.bracket_id == reference.bracket_id:
-                label = f"Bracket {ordinal}.repeats"
-                component = sequence.component_for_field(reference)
-                return label if component is None else f"{component.name} / {label}"
-        raise ValueError(f"no bracket exists with id {reference.bracket_id!r}")
+        return f"{bracket_label(sequence, str(reference.bracket_id))}.repeats"
     if reference.kind == FIELD_DELAY:
         return f"{_port_text(sequence, reference.port)}.delay"
     period_text = sequence.period_label(str(reference.period_id))
     if reference.kind == FIELD_DURATION:
         return f"{period_text}.duration"
     return f"{period_text}.{_port_text(sequence, reference.port)}"
+
+
+def bracket_label(sequence: PulseSequence, bracket_id: str) -> str:
+    """One bracket, said the way its posts read: ``Bracket N``, its place
+    among the pulse's brackets, under its Subpulse's name when it is in one."""
+
+    for ordinal, bracket in enumerate(_sequence_of(sequence).brackets, 1):
+        if bracket.bracket_id == bracket_id:
+            label = f"Bracket {ordinal}"
+            component = sequence.component_for_field(PulseFieldRef(FIELD_BRACKET_COUNT, bracket_id=bracket_id))
+            return label if component is None else f"{component.name} / {label}"
+    raise ValueError(f"no bracket exists with id {bracket_id!r}")
 
 
 def _port_text(sequence: PulseSequence, port: str | None) -> str:

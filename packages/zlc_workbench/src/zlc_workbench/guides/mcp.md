@@ -80,7 +80,8 @@ Pulse `run_repeats=0` is infinite; explicitly choose finite repeats for a finite
 manual capture. Seamless Scan owns its own repeat/shot counts.
 
 Things the operator keeps but does not use are parked, not errors; leave them.
-An empty bracket (start one past end) saves, validates and runs looping nothing.
+An empty bracket (start one past end) saves, validates and runs looping nothing;
+its API repeat count is no Scan port until a period is put inside it.
 A binding with source default or api may keep a `config_key`: the Config name
 kept for switching back, never applied. A value-file row left all blank is
 dropped on save. A Scan mark only makes a field scannable: the scan table drives

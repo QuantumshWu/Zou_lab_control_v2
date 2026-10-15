@@ -35,6 +35,7 @@ from zlc_pulse import (
     FIELD_BRACKET_COUNT,
     apply_api_values,
     PulseFieldRef,
+    bracket_label,
     PulseSequence,
     api_parameter_columns_for,
     scan_columns_for,
@@ -271,23 +272,41 @@ def api_scan_ports_for(sequence: PulseSequence) -> tuple[ScanPort, ...]:
     if not isinstance(sequence, PulseSequence):
         raise TypeError("sequence must be PulseSequence")
     slots = {column.name for column in scan_columns_for(sequence)}
-    # An empty bracket loops nothing, so walking its repeat count would play
-    # the same pulse at every point: it is no knob to scan, though it stays
-    # an API parameter the pulse can be handed.
-    resolved = resolve_subpulse_sources(sequence)
-    empty = {
-        PulseFieldRef(FIELD_BRACKET_COUNT, bracket_id=bracket.bracket_id).key
-        for bracket, (start, end) in zip(resolved.brackets, resolved.bracket_bounds, strict=True)
-        if start == end
-    }
+    withheld = unscannable_api_ports(sequence)
     return _ports_from_columns(
         tuple(
             column
             for column in api_parameter_columns_for(sequence)
-            if column.name not in slots and column.name not in empty
+            if column.name not in slots and API_PARAM_FAMILY + column.name not in withheld
         ),
         family=API_PARAM_FAMILY,
     )
+
+
+def unscannable_api_ports(sequence: PulseSequence) -> dict[str, str]:
+    """The API parameters this pulse carries but offers no plan, each port
+    with the sentence that says why.
+
+    An empty bracket loops nothing, so walking its repeat count would play
+    the same pulse at every point: it is no knob to scan, though it stays an
+    API parameter the pulse can be handed.  :func:`bind_plan` refuses a plan
+    that walks one with this reason, and the Scan editor labels it so,
+    instead of saying the pulse has no such parameter.
+    """
+
+    if not isinstance(sequence, PulseSequence):
+        raise TypeError("sequence must be PulseSequence")
+    resolved = resolve_subpulse_sources(sequence)
+    api = {binding.field_id for binding in resolved.api_bindings}
+    withheld = {}
+    for bracket, (start, end) in zip(resolved.brackets, resolved.bracket_bounds, strict=True):
+        field = PulseFieldRef(FIELD_BRACKET_COUNT, bracket_id=bracket.bracket_id).key
+        if start == end and field in api:
+            withheld[API_PARAM_FAMILY + field] = (
+                f"{bracket_label(resolved, bracket.bracket_id)} is empty, "
+                "so scanning its repeat count changes nothing"
+            )
+    return withheld
 
 
 def label_device_scan_ports(
@@ -479,18 +498,25 @@ def split_outer_axes(plan: ScanPlan) -> tuple[tuple[ScanAxis, ...], tuple[ScanAx
 def bind_plan(
     plan: ScanPlan,
     ports: Sequence[ScanPort],
+    *,
+    withheld: Mapping[str, str] | None = None,
 ) -> tuple[ScanPort, ...]:
     """The port behind each axis, or the refusal that names what is wrong.
 
     Binding is where a plan meets a bench: an axis naming a port this pulse
     does not offer, or promising values outside the port's hard limits, is
-    refused HERE, before anything touches a device.
+    refused HERE, before anything touches a device.  ``withheld`` maps a
+    port the pulse has but does not offer to why
+    (:func:`unscannable_api_ports`), and an axis naming one is refused with
+    that reason.
     """
 
     by_name = {port.port: port for port in ports}
     bound = []
     for axis in plan.axes:
         port = by_name.get(axis.port)
+        if port is None and axis.port in (withheld or {}):
+            raise ValueError(f"{withheld[axis.port]}; remove axis {axis.port!r} or put a period inside the bracket")
         if port is None:
             offered = ", ".join(sorted(by_name)) or "nothing"
             raise ValueError(
