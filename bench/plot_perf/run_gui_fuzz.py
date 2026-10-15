@@ -31,7 +31,7 @@ from .run_console import ConsoleBench
 from .common import Pointer, axis_center, axis_by_role
 from .guards import ProductBeat
 from .gui_checks import (check_panel, install_observers, panel_checkpoint,
-                         check_scientific_chain, check_overlay_pixels)
+                         check_scientific_chain, check_overlay_pixels, setting_rows)
 
 
 class UnavailableAction(RuntimeError):
@@ -154,18 +154,16 @@ def inventory(bench):
     cards = {}
     for identity, card in bench.view._cards.items():
         fields = []
-        form = card._settings_form
-        if form is not None:
-            for field in form.spec.fields:
-                widget = form.widget_for(field.key)
-                try:
-                    value = form.read_value(field.key)
-                except ValueError as error:
-                    value = {"invalid_input": str(error)}
-                fields.append(dict(key=field.key, label=field.label, kind=field.kind,
-                    widget=type(widget).__name__, enabled=widget.isEnabled(),
-                    visible=widget.isVisible(), value=value,
-                    choices=[dict(value=item.value, label=item.label) for item in field.choices]))
+        for key, (form, field) in setting_rows(card).items():
+            widget = form.widget_for(field.key)
+            try:
+                value = form.read_value(field.key)
+            except ValueError as error:
+                value = {"invalid_input": str(error)}
+            fields.append(dict(key=key, label=field.label, kind=field.kind,
+                widget=type(widget).__name__, enabled=widget.isEnabled(),
+                visible=widget.isVisible(), value=value,
+                choices=[dict(value=item.value, label=item.label) for item in field.choices]))
         cards[identity] = dict(fields=fields, title=card._title_label.text())
     return cards
 
@@ -246,11 +244,13 @@ def enter_text(widget, text, app):
 
 def field_edit(bench, action):
     from PyQt5 import QtWidgets
-    _card, form = settings(bench, action["panel"])
+    card, _form = settings(bench, action["panel"])
     key, value = action["field"], action["value"]
-    if key not in form.keys:
+    rows = setting_rows(card)
+    if key not in rows:
         raise UnavailableAction(f"field is absent from current form: {key}")
-    widget = form.widget_for(key)
+    form, field = rows[key]
+    widget = form.widget_for(field.key)
     if hasattr(widget, "_popup_view"):
         choose(widget, value, bench.app)
     elif isinstance(widget, QtWidgets.QAbstractButton):
@@ -321,42 +321,42 @@ def pick_action(bench, rng, step):
     kind = rng.choice(options)
     action = dict(kind=kind, panel=panel.panel_id)
     if kind == "field":
-        form = bench.view._cards[panel.panel_id]._settings_form
-        if form is None:
+        rows = setting_rows(bench.view._cards[panel.panel_id])
+        if not rows:
             return dict(kind="settings", panel=panel.panel_id)
         allowed = []
-        for field in form.spec.fields:
+        for key, (form, field) in rows.items():
             widget = form.widget_for(field.key)
             if not widget.isEnabled():
                 continue
-            if field.key in {"cell_kind", "size", "interval_ms", "semantic__reduction",
+            if key in {"cell_kind", "size", "interval_ms", "semantic__reduction",
                 "display__relim_mode", "display__x_relim_mode", "display__show_grid",
                 "display__show_colorbar", "display__uncertainty", "display__colormap",
                 "display__x_scale", "display__y_scale", "display__density", "display__cumulative",
                 "display__log_x", "display__log_y", "display__threshold_classifier",
-                "fit__model"} or field.key.startswith("semantic__fate:"):
-                allowed.append(field)
-            elif field.key in {"display__window", "display__bin_count", "fit__expression"}:
-                allowed.append(field)
+                "fit__model"} or key.startswith("semantic__fate:"):
+                allowed.append((key, form, field))
+            elif key in {"display__window", "display__bin_count", "fit__expression"}:
+                allowed.append((key, form, field))
         if not allowed:
             return dict(kind="settings", panel=panel.panel_id)
-        field = rng.choice(allowed)
+        key, form, field = rng.choice(allowed)
         if field.choices:
             values = [item.value for item in field.choices]
-            if field.key == "size": values = [x for x in values if x in ("2x2", "4x4")]
-            if field.key == "fit__model": values = [x for x in values if str(x) in ("_ParameterChoice.NONE", "gaussian_offset", "radial_gaussian_center", "anisotropic_gaussian_center", "histogram_gaussian", "bimodal_gaussian")]
+            if key == "size": values = [x for x in values if x in ("2x2", "4x4")]
+            if key == "fit__model": values = [x for x in values if str(x) in ("_ParameterChoice.NONE", "gaussian_offset", "radial_gaussian_center", "anisotropic_gaussian_center", "histogram_gaussian", "bimodal_gaussian")]
             if not values:
                 return dict(kind="settings", panel=panel.panel_id)
             value = rng.choice(values)
         elif field.kind == "bool":
             value = not form.read_value(field.key)
-        elif field.key == "display__window":
+        elif key == "display__window":
             value = rng.choice((1, 2, 5, 10))
-        elif field.key == "display__bin_count":
+        elif key == "display__bin_count":
             value = rng.choice((2, 16, 64, 128, 256))
         else:
             value = rng.choice(("", "A=guess(20)", "not an expression", "B=0"))
-        action.update(field=field.key, value=value)
+        action.update(field=key, value=value)
     elif kind == "gesture":
         action.update(gesture=rng.choice(("double", "area", "click", "wheel", "pan", "escape", "cancel", "clim")),
                       x=rng.uniform(.2,.65), y=rng.uniform(.2,.65),
@@ -365,13 +365,12 @@ def pick_action(bench, rng, step):
     elif kind == "tab":
         action["index"] = rng.randrange(view.tabs.count())
     elif kind == "scope":
-        form = bench.view._cards[panel.panel_id]._settings_form
-        fields = [] if form is None else [field for field in form.spec.fields
+        fields = [key for key, (form, field) in setting_rows(bench.view._cards[panel.panel_id]).items()
             if field.cycle_choices is not None and len(field.cycle_choices)
             and form.widget_for(field.key).isEnabled()]
         if not fields:
             return dict(kind="settings", panel=panel.panel_id)
-        action.update(field=rng.choice(fields).key, steps=rng.choice((-3, -1, 1, 3)))
+        action.update(field=rng.choice(fields), steps=rng.choice((-3, -1, 1, 3)))
     elif kind == "source":
         sources = [name for name in bench.view._cards[panel.panel_id]._signal_runtime.choice_names("signal")
                    if name != panel.state.signal]
@@ -920,10 +919,12 @@ def perform_action(bench, action, beat, output):
         _card, form = settings(bench, action["panel"])
         choose(form.widget_for("overlay_signal"), signal_name(action["source"]), bench.app)
     elif kind == "scope":
-        _card, form = settings(bench, action["panel"])
-        if action["field"] not in form.keys:
+        card, _form = settings(bench, action["panel"])
+        rows = setting_rows(card)
+        if action["field"] not in rows:
             return "scope field replaced by preceding edit"
-        combo = form.widget_for(action["field"])
+        form, field = rows[action["field"]]
+        combo = form.widget_for(field.key)
         popup = open_popup(combo, bench.app)
         index = popup.model().index(combo._cycle_row, 0)
         if not index.isValid():

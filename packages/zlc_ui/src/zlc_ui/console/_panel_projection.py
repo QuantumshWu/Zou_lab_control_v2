@@ -7,6 +7,7 @@ from enum import Enum
 from typing import Any
 
 from zlc_ui.form import FormChoice, FormFieldProps, FormRuntimeContext, FormSpec
+from zlc_ui.status import name_words
 
 
 _STATE_KEYS = (
@@ -57,10 +58,6 @@ def panel_state_document(state: object) -> dict[str, Any]:
         "fit": dict(incoming.get("fit") or {}),
         "overlay_signal": str(incoming.get("overlay_signal") or ""),
     }
-
-
-def _pretty_key(key: object) -> str:
-    return str(key).replace("_", " ").strip().title()
 
 
 def parameter_fields(surface: object, section: str) -> tuple[dict[str, object], ...]:
@@ -122,7 +119,7 @@ def parameter_form_spec(fields: object) -> FormSpec:
             FormFieldProps(
                 key=key,
                 kind=kind,
-                label=str(field.get("label") or _pretty_key(key)),
+                label=str(field.get("label") or name_words(key)),
                 default=seed,
                 required=not allow_none,
                 unit=str(field.get("unit") or ""),
@@ -258,6 +255,30 @@ def signal_form_runtime(groups_for) -> FormRuntimeContext:
     )
 
 
+def size_form_field(sizes: object, current: object) -> FormFieldProps:
+    """The panel's size preset, as a choice of the plotting owner's sizes.
+
+    The Setting frame and the Edit page both declare the row here, so the
+    one setting has one name in both.
+    """
+
+    choices = tuple(str(value) for value in tuple(sizes or ()))
+    if not choices:
+        raise RuntimeError("panel size choices were not projected")
+    selected = str(current)
+    if selected not in choices:
+        raise ValueError(
+            f"unknown panel size {selected!r}; choose from {', '.join(choices)}"
+        )
+    return FormFieldProps(
+        "size",
+        "choice",
+        "Panel size",
+        default=selected,
+        choices=tuple(FormChoice(value, value) for value in choices),
+    )
+
+
 def interval_form_field(intervals: object, current: object) -> FormFieldProps:
     """Project the scheduler's closed refresh domain as a segmented choice.
 
@@ -295,4 +316,5 @@ __all__ = [
     "parameter_form_spec",
     "parameter_form_values",
     "signal_form_runtime",
+    "size_form_field",
 ]

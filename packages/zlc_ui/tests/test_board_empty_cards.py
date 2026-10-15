@@ -132,14 +132,15 @@ host.close(timeout=10)
 
 
 def test_an_empty_card_is_held_and_inserted_like_a_drawn_one(run_qt) -> None:
-    """The strip carries every card; a body carries none.
+    """The strip carries every card; an empty card's blank body carries it too.
 
-    An empty card's body let its presses through to the card, so it was
-    picked up mid-body -- half a card below its top-left, which is what a
-    drop snaps -- while a drawn card's body is its plot's and it could only
-    be held by its strip.  Aimed with the pointer at a slot, the empty card
-    then landed a row up.  Carried by the strip to each insert position,
-    an empty card must land exactly as a drawn one carried the same way.
+    A drawn card's body is its plot's, so it is held by its strip alone.
+    An empty card's body is a blank frame, nine tenths of the card, and the
+    drop is the slot under the pointer wherever the card is held, so the
+    whole card carries it, under the open hand.  Carried by the strip to
+    each insert position, an empty card lands exactly as a drawn one
+    carried the same way; carried by its body, in the slot the pointer
+    let go over.
     """
 
     run_qt(
@@ -188,17 +189,25 @@ def retire(window, cards):
     window.close()
     app.processEvents()
 
-# A press in the body carries neither card, wherever the pointer then goes.
+# A press in a drawn card's body carries nothing, wherever the pointer then
+# goes; an empty card's body is its grip, under the open hand.
 window, board, cards, events, starts = new_board(('drawn', 'empty', 'drawn', 'empty'))
 w, h = cards[0].width(), cards[0].height()
 slots = ((GAP, GAP), (2 * GAP + w, GAP), (GAP, 2 * GAP + h), (2 * GAP + w, 2 * GAP + h))
 assert tuple(card.pos() for card in cards) == tuple(QtCore.QPoint(*slot) for slot in slots)
-for card in cards[:2]:
-    body = QtCore.QPoint(card.width() // 2, card.height() // 2 + card._title_band.height() // 2)
-    before = card.pos()
-    carry(board, card, body, (before.x() + w // 2, before.y() + h // 2))
-    assert card.pos() == before, (card.panel_id, card.pos(), before)
+body = lambda card: QtCore.QPoint(card.width() // 2, card.height() // 2 + card._title_band.height() // 2)
+drawn, empty = cards[0], cards[1]
+assert drawn.cursor().shape() == QtCore.Qt.ArrowCursor
+assert empty.cursor().shape() == QtCore.Qt.OpenHandCursor
+assert empty.handle_rect() == empty.rect() and drawn.handle_rect() == drawn.strip_rect()
+before = drawn.pos()
+carry(board, drawn, body(drawn), (before.x() + w // 2, before.y() + h // 2))
+assert drawn.pos() == before, (drawn.pos(), before)
 assert starts == [] and events == [], (starts, events)
+carry(board, empty, body(empty), slots[2])
+assert starts == ['panel-1'], starts
+assert board._authored['panel-1'] == slots[2], board._authored
+assert empty.cursor().shape() == QtCore.Qt.OpenHandCursor
 retire(window, cards)
 
 # The same strip gesture to each insert position: the empty card and the
@@ -225,13 +234,15 @@ host.close(timeout=10)
 def test_the_header_remover_is_a_quiet_ghost_and_the_setting_close_a_plain_one(run_qt) -> None:
     """The header x is the console's one-glyph remover: no face at rest, the
     white-on-red confirm once armed, and quiet again when it disarms.  The
-    Setting frame's x only closes the frame: no face, and never red."""
+    Setting frame's x only closes the frame: the quiet look of a tab's
+    close x -- no face, MUTED_INK, never red -- square at a control's
+    height, ending where the frame's fields end."""
 
     run_qt(
         """
 from PyQt5 import QtCore, QtGui, QtTest
 from zlc_ui.qt import ensure_qt_app
-from zlc_ui.fluent import BG, RED_DARK, SURFACE
+from zlc_ui.fluent import BG, MUTED_INK, RED_DARK, SURFACE, control_height
 from zlc_ui.console import PanelCardView
 
 app = ensure_qt_app(['header-remover'])
@@ -259,8 +270,12 @@ assert face(remover, band) == QtGui.QColor(BG).name()
 card._open_settings(); app.processEvents()
 closer = card._settings_close_button
 popup = card._settings_popup
-assert closer.role() == 'standard'
+assert closer.role() == 'quiet' and closer._glyph_ink() == MUTED_INK
+assert closer.size() == QtCore.QSize(control_height(), control_height())
 assert face(closer, popup) == QtGui.QColor(SURFACE).name(), face(closer, popup)
+field = card._settings_form.widget_for('title')
+assert closer.mapTo(popup, QtCore.QPoint(closer.width(), 0)).x() == (
+    field.mapTo(popup, QtCore.QPoint(field.width(), 0)).x())
 card.retire_settings_popup(); card.close(); app.processEvents()
 """
     )

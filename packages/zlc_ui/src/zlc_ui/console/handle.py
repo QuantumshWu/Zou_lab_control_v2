@@ -547,7 +547,7 @@ class TaskConsoleHandle(QtCore.QObject):
                 if isinstance(state, Mapping)
                 else key
             )
-            self._view.add_editor_tab(editor, f"Edit Panel · {title}")
+            self._view.add_editor_tab(editor, f"Edit panel · {title}")
         else:
             editor.update_projection(panel_editor_projection(self, projection))
             self._view.focus_editor_tab(editor)

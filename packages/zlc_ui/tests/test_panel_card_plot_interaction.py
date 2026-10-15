@@ -348,22 +348,26 @@ assert '<br>' in card._title_label.text()
 # The separator is the multiplication SIGN: an axis is often called
 # "x", and a letter between the numbers asked which was which.
 assert '(20) × (10 × 10 × 10) × (3 × 35)' in card._title_label.toolTip()
-form_keys = set(card._form_spec().keys)
+form_keys = set(card._parameter_projection('semantic')[0].keys)
 assert {
-    'semantic__fate:point:field.x',
-    'semantic__fate:point:field.y',
-    'semantic__fate:point:field.z',
+    'fate:point:field.x',
+    'fate:point:field.y',
+    'fate:point:field.z',
 } <= form_keys
 card._open_settings()
 app.processEvents()
 assert 'kind' not in card._settings_form.spec.keys
 assert card._settings_form.widget_for('cell_kind').isEnabled()
 reconciles = []
-original_reconcile = card._settings_form.reconcile
-def counted_reconcile(*args, **kwargs):
-    reconciles.append(1)
-    return original_reconcile(*args, **kwargs)
-card._settings_form.reconcile = counted_reconcile
+def count_reconciles(name, form):
+    original_reconcile = form.reconcile
+    def counted_reconcile(*args, **kwargs):
+        reconciles.append(name)
+        return original_reconcile(*args, **kwargs)
+    form.reconcile = counted_reconcile
+count_reconciles('panel', card._settings_form)
+for name, form in card._settings_parameter_forms.items():
+    count_reconciles(name, form)
 # A live publication repeats the same authoring contract: no form rebuild,
 # and a title-only metadata change is equally cheap.
 card.set_panel_projection(dict(projection), dict(surface))
@@ -376,13 +380,13 @@ changed_semantic[0]['value'] = 'facet'
 card.set_panel_projection(
     dict(projection), {**surface, 'semantic': changed_semantic}
 )
-assert reconciles == [1]
+assert reconciles == ['semantic'], reconciles
 reconciles.clear()
 groups = (('camera', (('frames', '@logic/cm/frames'),)),)
 card.set_signal_choices(groups, current='@logic/cm/frames')
-assert reconciles == [1]
+assert reconciles == ['panel'], reconciles
 card.set_signal_choices(groups, current='@logic/cm/frames')
-assert reconciles == [1], 'an identical signal domain must not rebuild Setting'
+assert reconciles == ['panel'], 'an identical signal domain must not rebuild Setting'
 long_name = '@logic/' + 'a-very-long-node-name/' * 6 + 'frames'
 card.set_panel_projection({**projection, 'title': long_name}, dict(surface))
 app.processEvents()

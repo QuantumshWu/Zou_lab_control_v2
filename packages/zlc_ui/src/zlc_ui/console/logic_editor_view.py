@@ -38,6 +38,7 @@ from zlc_ui.fluent import (
 )
 from zlc_ui.form import FluentParameterForm, FormSpec, required_label
 from zlc_ui.form.qt_form import _form_label_width
+from zlc_ui.status import name_words
 from .logic_row_view import (
     STATE_COLOURS,
     STATUS_DOT,
@@ -673,9 +674,8 @@ class LogicEditorView(QtWidgets.QWidget):
 
     def _parameter_changed(self, key: str, *, normalized: bool = False) -> None:
         try:
-            value = self.form.read_value(str(key))
-        except (TypeError, ValueError) as error:
-            self.status_label.setText(str(error))
+            value = _draft_value(self.form, str(key))
+        except (TypeError, ValueError):
             return
         patch = {"values": {str(key): value}}
         if normalized:
@@ -684,9 +684,8 @@ class LogicEditorView(QtWidgets.QWidget):
 
     def _artifact_changed(self, key: str) -> None:
         try:
-            value = self.artifact_form.read_value(str(key))
-        except (TypeError, ValueError) as error:
-            self.status_label.setText(str(error))
+            value = _draft_value(self.artifact_form, str(key))
+        except (TypeError, ValueError):
             return
         self.draft_changed.emit({"artifact_inputs": {str(key): value}})
 
@@ -756,7 +755,32 @@ class LogicEditorView(QtWidgets.QWidget):
 
 
 def _device_label(name: str) -> str:
-    return str(name).replace("_", " ").title()
+    """A device argument's or a result's row words: "SLM", "Fit params"."""
+
+    return name_words(name)
+
+
+def _draft_value(form: FluentParameterForm, key: str) -> object:
+    """What the operator's edit of ``key`` puts in the draft.
+
+    An emptied box that holds a vacancy -- a text or a path, or a number
+    with no default -- is that vacancy: the draft holds what the page shows,
+    and Start's admission names the missing value in the header as a draft
+    problem, in the draft's colours.  Anything else unreadable raises and
+    the draft keeps its last value: a number still being written ("1e"),
+    or an emptied spin box, which puts its last number back when it is left.
+    """
+
+    try:
+        return form.read_value(key)
+    except (TypeError, ValueError):
+        field = next(field for field in form.spec.fields if field.key == key)
+        if form.is_empty(key):
+            if field.kind in ("text", "path"):
+                return ""
+            if field.blank_allowed:
+                return None
+        raise
 
 
 def _source_row_label(projection: Mapping[str, object]) -> str:

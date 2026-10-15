@@ -140,15 +140,26 @@ captioned is called by that name.
 
 A card is laid out the same with or without a picture.  Its strip always
 reads two lines -- the caption (and data sizes) above, the axis names below
--- and a card with no picture says why on that second line instead: `Pick a
-signal in Setting`, or `No data yet` once a signal is picked.  Its body is
+-- and a card with no picture says why on that second line instead: `Choose
+a signal in Setting`, or `No data yet` once a signal is picked.  Its body is
 the blank frame its size preset plans, and `set_surface(None)` returns a
-card to that frame.  The strip is the card's one handle (`handle_rect()`):
-a drag that starts on it carries the card, a press in the body never does
--- a drawn card's body is its plot's -- so both kinds of card are carried
-alike.  Setting is as tall as every other button and the header `×` is
-square at that height: the quiet one-glyph remover (red only under the
-pointer), whose first click arms it as the white-on-red confirm.
+card to that frame.  `handle_rect()` is what carries the card: a drawn
+card's strip (`strip_rect()`) -- its body is its plot's -- and the whole of
+an empty card, whose blank body shows the open hand; the drop is the slot
+under the pointer wherever the card is held.  Setting is as tall as every
+other button and the header `×` is square at that height: the quiet
+one-glyph remover (red only under the pointer), whose first click arms it
+as the white-on-red confirm.
+
+The Setting frame has the Edit page's sections, built by the same
+`panel_section`: Panel, then Semantic, Display and Fit as the plot owner
+declares them, each under its title a section gap apart, every control on
+one label column (`share_label_column`); a section with nothing declared
+is not shown.  Its height is its form's, bounded by its page, not by the
+card: it opens under the card's strip where the page has the room and
+over the card where it has more -- never over the strip -- its right edge
+under Setting's.  Its close `×` is the quiet glyph (`role="quiet"`), a
+control high and square, ending where the fields end.
 
 `set_selectors_enabled(False)` suspends the mounted plot's whole pointer
 transport -- area, zoom, pan, hover and double-click focus -- and the
@@ -245,9 +256,11 @@ show_status(text: str, severity: str) -> None
 set_summary(text: str) -> None
 ```
 
-The header names the window (`task`) as a label; it is not an input.  The
-handle forwards the board signals and drives the rest; nothing outside the
-window calls these directly.
+The header names the window (`task`) as a label; it is not an input.  Its
+one chooser lists `Plot: <kind>` and `<Layer>: <api_name>` entries -- a node
+by the name its row and Edit tab call it, its layer in words
+(`zlc_ui.status.name_words`).  The handle forwards the board signals and
+drives the rest; nothing outside the window calls these directly.
 
 The shell is assembled from the reusable views.  There is no mode flag for
 alternative composition; a host can mount the shell wherever it needs it.

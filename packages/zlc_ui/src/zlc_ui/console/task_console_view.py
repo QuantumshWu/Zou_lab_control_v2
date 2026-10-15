@@ -32,6 +32,8 @@ from zlc_ui.fluent import (
     window_pad,
 )
 
+from zlc_ui.status import name_words
+
 from .board_view import ConsoleBoardView
 from .logic_row_view import STATUS_DOT, LogicRowView, mount_logic_page
 from .panel_card_view import PanelCardView
@@ -205,12 +207,14 @@ class TaskConsoleView(QtWidgets.QWidget):
         # Cards stack a form gap apart, like rows; the page edges are every
         # Logic page's (mount_logic_page).
         self.logic_layout.setSpacing(row_gap())
-        self.logic_hint = FluentLabel(
-            "No logic nodes yet. Add a Measurement / Processor / Task from the header "
-            "(it starts STOPPED); open its Edit to set parameters and Start it."
+        # Says how a node arrives, in the words of the header it arrives by,
+        # as the Monitor's note does for a panel.
+        self.logic_hint = muted_note_label(
+            "No logic nodes yet. Choose a measurement, processor or task in the "
+            "header and click Add panel; it starts stopped. Open its Edit page to "
+            "set parameters, then press Start."
         )
         self.logic_hint.setWordWrap(True)
-        self.logic_hint.setStyleSheet(f"color: {MUTED_INK}; background: transparent; border: none;")
         self.logic_layout.addWidget(self.logic_hint)
         self.logic_layout.addStretch(1)
         self._logic_rows: tuple[LogicRowView, ...] = ()
@@ -264,10 +268,11 @@ class TaskConsoleView(QtWidgets.QWidget):
         self.kind_combo.clear()
         for key, label in self._panel_kind_choices:
             self.kind_combo.addItem(f"Plot: {label}", ("plot", key))
+        # A node is listed by its api_name, the name its row, its Edit tab
+        # and its Edit page call it by -- as a plot is by its kind key.
         for api_name, kind, publishes in self._logic_kind_choices:
-            title = api_name.replace("_", " ").strip().title()
-            layer = kind.replace("_", " ").strip().title() or "Logic"
-            self.kind_combo.addItem(f"{layer}: {title}", ("logic", api_name))
+            layer = name_words(kind) or "Logic"
+            self.kind_combo.addItem(f"{layer}: {api_name}", ("logic", api_name))
             self.kind_combo.setItemData(
                 self.kind_combo.count() - 1,
                 f"Publishes: {publishes}",

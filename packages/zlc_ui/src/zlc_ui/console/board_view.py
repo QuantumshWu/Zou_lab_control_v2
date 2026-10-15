@@ -19,7 +19,7 @@ from .panel_card_view import PanelCardView
 
 
 class ConsoleBoardView(QtWidgets.QWidget):
-    """Cards carried by their strip and put down in the slot under the pointer.
+    """Cards carried by their grip and put down in the slot under the pointer.
 
     A card the operator has put somewhere keeps that place: a drop records
     the slot and the board never writes over it.  Every other card FLOWS: on
@@ -407,12 +407,12 @@ class ConsoleBoardView(QtWidgets.QWidget):
     def _scroll_speed(self) -> int:
         """How far the viewport moves per tick for the pointer where it is.
 
-        Zero unless the pointer is within one strip of the viewport's top or
-        bottom edge -- the height of what the card is held by, so the board
-        moves once the hand reaches the edge -- or past it.  Faster the
-        deeper in, up to a quarter strip per tick at the edge and beyond:
-        about a card's height a second, slow enough to stop on the row
-        wanted.
+        Zero unless the pointer is within one title strip of the viewport's
+        top or bottom edge -- a band the height of what a drawn card is held
+        by, so the board moves once the hand reaches the edge -- or past it.
+        Faster the deeper in, up to a quarter strip per tick at the edge and
+        beyond: about a card's height a second, slow enough to stop on the
+        row wanted.
         """
 
         card = self._active_card
@@ -420,7 +420,7 @@ class ConsoleBoardView(QtWidgets.QWidget):
         if card is None or area is None or self._pointer is None:
             return 0
         viewport = area.viewport()
-        band = max(1, card.handle_rect().height())
+        band = max(1, card.strip_rect().height())
         y = viewport.mapFromGlobal(self._pointer).y()
         if y < band:
             return -max(1, min(band - y, band) // 4)
