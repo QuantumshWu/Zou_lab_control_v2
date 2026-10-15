@@ -53,7 +53,27 @@ assert (view.tabs.mapTo(view, QtCore.QPoint()).y()
 assert view.tabs.widget(0).isAncestorOf(view.add_panel_button)
 assert view.tabs.widget(0).isAncestorOf(view.save_image_button)
 assert view.board._cards['panel-1'] is view._cards['panel-1']
-assert view.scroll.isVisible() and not view._placeholder.isVisible()
+assert view.scroll.isVisible() and not view.board_hint.isVisible()
+# The plot chooser is worded as the console's: the box says what Add panel adds.
+from zlc_ui.console.task_console_view import plot_choice_text
+assert view.kind_combo.currentText() == plot_choice_text('Image') == 'Plot: Image'
+assert view.kind_combo.currentData() == 'image'
+# An empty board says its next step where the first card will stand: a
+# figure to open before there is one, a panel to add once there is.
+blank = FigureViewerView(); blank.set_panel_sizes(('2x2',), '2x2')
+blank.resize(1200, 700); blank.show(); app.processEvents()
+assert blank.board_hint.isVisible() and blank.board_hint.text().startswith('Open a saved figure')
+blank.set_archive_info((("Plot", (("data", "1x1x80x88 float32"),)),), {'nodes': (), 'edges': ()})
+assert blank.board_hint.text() == 'No panels yet. Choose a Plot above and click Add panel.'
+hint = blank.board_hint
+words = hint.mapTo(blank, QtCore.QPoint(hint.contentsMargins().left(), hint.contentsMargins().top()))
+assert words.x() == blank.board.mapTo(blank, QtCore.QPoint(blank.board.text_left(), 0)).x()
+blank.add_panel('panel-1', 'Camera frame'); app.processEvents()
+assert not blank.board_hint.isVisible()
+assert blank._cards['panel-1'].mapTo(blank, QtCore.QPoint()).y() == words.y()
+blank.remove_panel('panel-1'); app.processEvents()
+assert blank.board_hint.isVisible() and blank.board_hint.text().startswith('No panels yet.')
+blank.finish_close()
 
 # Showing which file is open must not re-ask for it to be opened.
 committed = []; view.path_committed.connect(committed.append)
