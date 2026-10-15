@@ -29,8 +29,10 @@ from zlc_workbench.logic import (
 
 from test_console_presenter import (  # noqa: F401 -- fixtures
     _LogicRowView,
+    _box_calibration,
     _console_over,
     _one_shot,
+    _settle_logic,
     presenter,
     session,
 )
@@ -1385,6 +1387,122 @@ def test_an_occupancys_frame_claims_survive_its_camera_changing_frame_count(pres
     assert presenter.logic[survival_id].draft.values == selection
     assert presenter.view.logic_editors[survival_id]["source_frames"] == tuple(map(str, range(22)))
     assert presenter.logic[node_id].draft.artifact_inputs == {"calibrations": claims}
+
+
+def test_a_frame_survival_after_derive_is_edited_before_anything_starts(presenter, session) -> None:
+    """The user's chain with nothing started: a camera's three frames reach
+    Frame Survival through Occupancy and Derive's draft (``same`` internal,
+    ``kept`` published), so its pairs are marked at once, and a camera edit
+    re-projects them through Derive.  Derive's own editor offers the frame
+    pick before data.  A variable picking one frame passes one frame, and
+    Frame Survival says why there is no pair.  Once Derive has published,
+    its real frames answer while its draft cannot say."""
+
+    from PyQt5 import QtCore, QtTest
+    from zlc_ui.qt import ensure_qt_app
+
+    app = ensure_qt_app(["zlc-derive-frames-test"])
+    camera_id = presenter.add_logic(
+        "camera_measurement", values={"repeat": 1, "frames_per_cycle": 3, "exposure_seconds": 0.005})
+    occupancy_id = presenter.add_logic("occupancy", source_signal=stable_signal_key(camera_id, "frames"))
+    same = {"name": "same", "publish": False, "terms": (
+        {"of": "occupied", "at": "frame", "labels": ("0",)},
+        {"op": "==", "of": "occupied", "at": "frame", "labels": ("2",)})}
+    kept = {"name": "kept", "terms": ({"of": "counts"}, {"op": "where", "of": "same"})}
+    derive_id = presenter.add_logic(
+        "derive", source_signal=stable_signal_key(occupancy_id, "occupied"), values={"variables": (same, kept)})
+    survival_id = presenter.add_logic("frame_survival", source_signal=stable_signal_key(derive_id, "kept"))
+    editors = presenter.view.logic_editors
+    assert editors[survival_id]["source_frames"] == ("0", "1", "2")
+
+    derive = presenter.logic_editor_projection(derive_id)
+    assert derive["source_frames"] == ("0", "1", "2")
+    assert derive["input_bundle"] == (("counts", None, None), ("occupied", None, None), ("frame_judged", None, None))
+    derive_editor = presenter.logic[derive_id].descriptor.ui_contributions[0]()
+    form = presenter.logic[survival_id].descriptor.ui_contributions[0]()
+    form.draft_changed.connect(lambda patch: presenter.view.logic_draft_changed.emit(survival_id, patch))
+
+    def texts(combo):
+        return [combo.itemText(row) for row in range(combo.count())]
+
+    def show(widget, projection):
+        widget.update_projection(projection)
+        app.processEvents()
+
+    try:
+        # Derive's own editor, untyped: the members by name, and on each the
+        # frame axis its source's draft declares, with those labels.
+        show(derive_editor, derive)
+        head = derive_editor._cards[1].head
+        assert texts(head["operand"])[:4] == ["Inputs", "    counts", "    occupied", "    frame_judged"]
+        assert texts(head["axis"]) == ["All", "Point", "    frame"]
+        assert texts(derive_editor._cards[0].head["labels"]) == ["0", "1", "2"]
+        assert not derive_editor._cards[1].terms_ui[1]["axis"].isVisibleTo(derive_editor), "same keeps no frame"
+
+        # Frame Survival's pairs, marked by a click before anything runs.
+        form.resize(520, 260)
+        form.show()
+        show(form, editors[survival_id])
+        assert form.table.isEnabled() and form.summary.text() == "All · 3 of 3 pairs"
+        view = form.table.viewport()
+        QtTest.QTest.mouseClick(view, QtCore.Qt.LeftButton, QtCore.Qt.NoModifier,
+                                form.table.visualRect(form.model.index(0, 0)).center())
+        app.processEvents()
+        selection = presenter.logic[survival_id].draft.values
+        assert selection["selection"] == "all" and sorted(
+            (row["start"], row["end"], row["selected"]) for row in selection["pairs"]) == [
+            ("0", "last", False), ("1", "last", False)]
+        show(form, editors[survival_id])
+        assert form.summary.text() == "All · 1 of 3 pairs"
+
+        # A camera edit reaches Frame Survival through Derive's draft.
+        presenter.view.logic_draft_changed.emit(camera_id, {"values": {"frames_per_cycle": 4}})
+        assert editors[survival_id]["source_frames"] == ("0", "1", "2", "3")
+        assert editors[derive_id]["source_frames"] == ("0", "1", "2", "3")
+        show(form, editors[survival_id])
+        assert form.summary.text() == "All · 4 of 6 pairs"
+
+        # One frame picked: one frame passed on, and why there is no pair.
+        one = {"name": "kept", "terms": ({"of": "counts", "at": "frame", "labels": ("1",)},
+                                         {"op": "where", "of": "same"})}
+        presenter.view.logic_draft_changed.emit(derive_id, {"values": {"variables": (same, one)}})
+        assert editors[survival_id]["source_frames"] == ("0",)
+        show(form, editors[survival_id])
+        assert not form.table.isEnabled()
+        assert form.summary.text() == "One frame per cycle: no pairs"
+        assert presenter.logic[survival_id].draft.values == selection, "a frame count never edits the draft"
+        assert all(binding.host is None for binding in presenter.logic.values())
+
+        # Run it.  Afterwards the draft says what it can; where it cannot --
+        # a formula being edited -- what Derive published answers.
+        calibration = presenter.session.workspace.data / "box-calibration.json"
+        _box_calibration(("site-0", "site-1"), ((12.0, 10.0), (30.0, 20.0)), (100.0, 100.0), (96, 128)).save(
+            calibration)
+        presenter.view.logic_draft_changed.emit(occupancy_id, {"artifact_inputs": {"calibrations": (
+            {"path": str(calibration), "frames": ("rest",)},)}})
+        presenter.view.logic_draft_changed.emit(camera_id, {"values": {"frames_per_cycle": 3}})
+        presenter.view.logic_draft_changed.emit(derive_id, {"values": {"variables": (same, kept)}})
+        session.load_pulse(PULSE_NAME)
+        assert presenter.start_logic(camera_id)
+        session.fire(shots=1)
+        for node_id in (camera_id, occupancy_id, derive_id):
+            if node_id != camera_id:
+                assert presenter.start_logic(node_id), presenter.view.status[-3:]
+            _settle_logic(presenter, node_id)
+            assert presenter.logic[node_id].host.observation.error is None, node_id
+        assert session.signal_plane.latest_publication(stable_signal_key(derive_id, "kept")) is not None
+        presenter.view.logic_draft_changed.emit(camera_id, {"values": {"frames_per_cycle": 4}})
+        assert editors[survival_id]["source_frames"] == ("0", "1", "2", "3"), "the draft says"
+        editing = {"name": "kept", "terms": (*kept["terms"], {"op": "+"})}
+        presenter.view.logic_draft_changed.emit(derive_id, {"values": {"variables": (same, editing)}})
+        binding = presenter.logic[derive_id]
+        assert binding.descriptor.describe_output_frames(binding.draft.values, "kept", ("0", "1", "2", "3")) is None
+        assert editors[survival_id]["source_frames"] == ("0", "1", "2"), "what Derive published"
+    finally:
+        for widget in (derive_editor, form):
+            widget.close()
+            widget.deleteLater()
+        app.processEvents()
 
 
 def test_a_producers_new_output_reaches_every_open_editors_sources(presenter) -> None:

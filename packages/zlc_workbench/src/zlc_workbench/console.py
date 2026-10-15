@@ -9809,10 +9809,12 @@ class ConsolePresenter:
 
         Asked of the source's PRODUCER first: its explicit pure metadata
         callback can preserve or describe upstream draft frames, without
-        constructing a node or inventing a data schema. Otherwise the plane says --
-        the declared signal, then its latest publication -- through the Point
-        axis with the readout-event role.  A source without one carries one
-        frame; None while there is no source or nothing says yet.
+        constructing a node or inventing a data schema. When it has none, or
+        its draft cannot say, the plane says -- the declared signal, then its
+        latest publication -- through the Point axis with the readout-event
+        role, so what a producer already published still answers while its
+        draft is being edited.  A source without one carries one frame; None
+        while there is no source or nothing says yet.
         """
 
         from zlc_data import READOUT_EVENT
@@ -9827,7 +9829,9 @@ class ConsolePresenter:
         producer = None if parts is None else self.logic.get(parts[0])
         if producer is not None and producer.descriptor.describe_output_frames is not None:
             upstream = self._source_frames_for(producer, _visited=visited)
-            return producer.descriptor.describe_output_frames(producer.draft.values, parts[1], upstream)
+            frames = producer.descriptor.describe_output_frames(producer.draft.values, parts[1], upstream)
+            if frames is not None:
+                return frames
         description = self._signal_projection()[1].get(source)
         schema = None if description is None else description.schema
         if schema is None:

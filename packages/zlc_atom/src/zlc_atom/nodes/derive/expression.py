@@ -1213,6 +1213,97 @@ def typed_variables(rows: Sequence[Mapping[str, object]],
     return tuple(answers)
 
 
+def frames_kept(rows: Sequence[Mapping[str, object]], axis: str,
+                frames: tuple[str, ...]) -> tuple[tuple[str, ...] | None, ...]:
+    """Every variable's labels of the axis named ``axis`` when each input
+    member carries that axis with labels ``frames`` -- what a source's
+    draft says before any data exists: one per variable, in card order,
+    ``()`` when the value carries no such axis, None when it cannot be told.
+
+    These are typing's rules on that one axis, over the same precedence
+    tree: a member carries ``frames``, a variable its own answer; a pick on
+    the axis keeps the picked labels in axis order and one removes it; a
+    pick of the Point domain keeps the labels its rows use, one row removes
+    it; any other pick leaves it; an operator's sides carry the same labels
+    or one carries none, a where's mask none or the value's, and the result
+    carries them; a statistic over the axis removes it.  None for whatever
+    typing refuses on that axis -- a label it lacks, two sides that differ
+    -- and for a problem typing finds first: a name, the formula's shape, a
+    variable read that has one.  What only the members' schemas say (their
+    dtypes, their other axes) is typing's to answer once they publish.
+    """
+    rows = tuple(rows)
+    _edges, order, closing, _live = _structure(rows)
+    names = _name_problems(rows)
+    first = {}
+    for position, row in enumerate(rows):
+        if row["name"]:
+            first.setdefault(row["name"], position)
+    kept: list[tuple[str, ...] | None] = [None] * len(rows)
+
+    def read(name):
+        if name not in first:
+            return frames
+        if kept[first[name]] is None:
+            raise ValueError(f"{name} cannot be told")
+        return kept[first[name]]
+
+    def pick(value, term):
+        at, labels = term["at"], tuple(term["labels"])
+        if len(set(labels)) != len(labels):
+            raise ValueError(f"{at} is chosen twice")
+        if at == DOMAINS[1] and value:
+            # A Point row is its axes' "name label" parts joined: two or
+            # more of them, the axis named in exactly one.
+            rows_picked = [label.split(" · ") for label in labels]
+            named = [[part[len(axis) + 1:] for part in parts if part.startswith(f"{axis} ")] for parts in rows_picked]
+            if any(len(parts) < 2 or len(own) != 1 for parts, own in zip(rows_picked, named)):
+                raise ValueError(f"no such {at} row")
+            chosen = [own[0] for own in named]
+        elif at == axis:
+            chosen = labels
+        else:
+            return value
+        if any(label not in value for label in chosen):
+            raise ValueError(f"no such {axis}")
+        return () if len(labels) == 1 else tuple(label for label in value if label in chosen)
+
+    def fold(node, terms):
+        if isinstance(node, int):
+            term = terms[node]
+            if not term["of"]:
+                return None
+            value = read(term["of"])
+            return pick(value, term) if term["at"] else value
+        _k, op, left, right = node
+        left, right = fold(left, terms), fold(right, terms)
+        if OPERATORS[op][0] == "where":
+            if left is None or right is None or (right and right != left):
+                raise ValueError("the mask does not fit")
+            return left
+        if left is None and right is None:
+            raise ValueError("two constants")
+        if left and right and left != right:
+            raise ValueError(f"{axis} differs")
+        return left or right or ()
+
+    for position in order:
+        row = rows[position]
+        if position in names or _formula_problem(row, closing[position]) is not None:
+            continue
+        try:
+            value = fold(_tree(row["terms"]), row["terms"])
+            if row["statistic"]:
+                over = tuple(row["over"])
+                if len(set(over)) != len(over) or (axis in over and not value):
+                    raise ValueError(f"no {axis} to reduce")
+                value = () if axis in over else value
+        except ValueError:
+            continue
+        kept[position] = value
+    return tuple(kept)
+
+
 def input_members(rows: Sequence[Mapping[str, object]], available: Sequence[str]) -> tuple[str, ...]:
     """The members the LIVE variables read, in bundle order.
 
@@ -1272,6 +1363,6 @@ def error_stage(text: str) -> tuple[str, str, str] | None:
 __all__ = [
     "CATEGORIES", "DOMAINS", "DeriveError", "NO_PUBLISHED", "OPERATORS", "Operand", "STATISTICS",
     "TERM_COLUMNS", "TERM_DEFAULTS", "VARIABLE_COLUMNS", "axes_text", "axis_groups", "changing_axes",
-    "checked_variables", "compact_variable", "describe_schema", "error_stage", "evaluate", "input_members",
-    "pick_values", "published", "term_text", "typed_variables", "where_notes",
+    "checked_variables", "compact_variable", "describe_schema", "error_stage", "evaluate", "frames_kept",
+    "input_members", "pick_values", "published", "term_text", "typed_variables", "where_notes",
 ]

@@ -146,8 +146,11 @@ pair, including newly added middle frames, but excludes first-to-last. `custom`
 starts with no pairs and explicitly selects rows, e.g. `{"selection":"custom",
 "pairs":[{"start":"0","end":"last","selected":true}]}`. Endpoints are text:
 `0` is first, `last` is last, and positive indices name middle frames. Camera
-draft changes update Occupancy and Frame Survival editors before new data arrives;
-runtime data still follows the actual acquired source schema.
+draft changes update Occupancy, Derive and Frame Survival editors before new
+data arrives -- Derive passes on the frames each published variable keeps, one
+frame when it picks or reduces the frame axis away -- and runtime data still
+follows the actual acquired source schema. A node whose draft cannot say (a
+formula being edited) answers with the frames it last published.
 
 Derive is algebra within one evaluation of one producer's bundle: live, each
 publication; at the end of a finite run, the run's Dataset. Read the member

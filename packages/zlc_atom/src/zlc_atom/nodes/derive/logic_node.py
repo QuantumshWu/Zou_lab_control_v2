@@ -10,9 +10,12 @@ from zlc_atom.nodes._framework.descriptor import (
     LogicNodeDescriptor,
     NodeKind,
 )
+from zlc_atom.nodes.camera.measurement import FRAME_AXIS_NAME
 from zlc_runtime import DatasetOutputDeclaration, split_signal_key
 
-from .expression import VARIABLE_COLUMNS, changing_axes, checked_variables, input_members, typed_variables
+from .expression import (
+    VARIABLE_COLUMNS, changing_axes, checked_variables, frames_kept, input_members, published, typed_variables,
+)
 from .processor import DeriveProcessor, declared_outputs
 
 
@@ -67,6 +70,26 @@ def _draft_outputs(
         return declared_outputs(rows)
     except (TypeError, ValueError):
         return ()
+
+
+def _describe_output_frames(values: Mapping[str, object], output_name: str,
+                            source_frames: tuple[str, ...] | None) -> tuple[str, ...] | None:
+    """A published variable's frame labels before any data: typing's own
+    rules on the frame axis (:func:`frames_kept`), every member carrying
+    the source's frames; one frame when the variable keeps no frame axis;
+    None when the source or the draft cannot say."""
+
+    if source_frames is None:
+        return None
+    try:
+        rows = _ROWS.draft_values({"variables": values.get("variables", ())})["variables"]
+    except (TypeError, ValueError):
+        return None
+    if output_name not in published(rows):
+        return None
+    kept = frames_kept(rows, FRAME_AXIS_NAME, tuple(source_frames))
+    frames = next(kept[position] for position, row in enumerate(rows) if row["name"] == output_name)
+    return None if frames is None else frames or ("0",)
 
 
 def _admit_source(values: Mapping[str, object], publication: object) -> tuple[str, ...]:
@@ -166,6 +189,7 @@ LOGIC_NODE = LogicNodeDescriptor(
     ),
     input_specs=(DatasetInputSpec("bundle", None, "exact", select_bundle=True),),
     declare_outputs=_draft_outputs,
+    describe_output_frames=_describe_output_frames,
     admit_source=_admit_source,
     ui_contributions=(_editor_factory,),
     build=_build,

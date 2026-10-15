@@ -83,12 +83,17 @@ _CANCEL_RESPONSE_SECONDS = 0.05
 _RECEIVE_BUFFER_MIB = 128
 
 
+#: The name of a cycle's frame axis: what a Derive pick or statistic writes
+#: to name it, before data as after.
+FRAME_AXIS_NAME = "frame"
+
+
 def _frame_point_axis(producer: str, frames: int) -> AxisSpec:
     """The frame axis one cycle publishes in its Point domain."""
 
     return AxisSpec(
         AxisId(f"{producer}.frames.frame"),
-        "frame",
+        FRAME_AXIS_NAME,
         READOUT_EVENT,
         int(frames),
         tuple(range(int(frames))),
@@ -1243,6 +1248,7 @@ class CameraMeasurementNode:
 
 __all__ = [
     "CAMERA_FRAMES_OUTPUT",
+    "FRAME_AXIS_NAME",
     "describe_camera_frames",
     "frames_snapshot",
     "CameraMeasurementNode",

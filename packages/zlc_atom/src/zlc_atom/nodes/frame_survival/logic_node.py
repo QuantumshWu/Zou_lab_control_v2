@@ -186,8 +186,8 @@ def _editor_factory(parent=None):
         def update_projection(self, projection):
             values = projection["form_values"]
             # The console's one answer to "which frames does the source carry".
-            frames = projection.get("source_frames")
-            frames = None if frames is None or len(frames) < 2 else tuple(frames)
+            carried = projection.get("source_frames")
+            frames = None if carried is None or len(carried) < 2 else tuple(carried)
             if frames != self._frames:
                 self._frames = frames
                 count = 0 if frames is None else len(frames)
@@ -207,7 +207,10 @@ def _editor_factory(parent=None):
             if frames is None:
                 self.table.set_cell_states({})
                 self._wanted = ()
-                self.summary.setText("Waiting for the source frames")
+                # A source of one frame per cycle is known, not awaited: say
+                # why there is no pair to mark.
+                self.summary.setText("Waiting for the source frames" if carried is None
+                                     else "One frame per cycle: no pairs")
                 show_problem(self.note, "")
                 return
             count = len(frames)
