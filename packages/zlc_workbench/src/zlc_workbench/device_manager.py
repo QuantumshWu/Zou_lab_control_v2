@@ -407,7 +407,7 @@ class DeviceManagerPresenter:
 
         session = self._active_session
         loaded = {} if session is None else session.installation.devices
-        failures = {} if session is None else session.installation.failures
+        failures = {} if session is None else session.failures
         with self._scan_lock:
             scanning = sorted(self._scan_pending)
         draft = [
@@ -1362,17 +1362,18 @@ class DeviceManagerPresenter:
     def _outcome(self, session: object, config: InstallationConfig) -> tuple[str, bool]:
         """What an Init or Apply left unopened or unused, for its status line.
 
-        A COUNT IS NOT A REASON.  The installation hands over the exception
-        that stopped each leaf, and reporting only how many there were threw
-        away the one thing an operator needs: a bench that says "2 failed"
-        and nothing else leaves them to guess which two, and why.  Each
-        reason is put on the status line, and the whole traceback goes to
-        the log, where a long one can be read without fighting a single-line
-        strip.  A card whose type this machine cannot build is one of them.
-        Simulation settings no virtual device reads are kept, and said.
+        A COUNT IS NOT A REASON.  The session hands over the exception that
+        stopped each declared leaf, and reporting only how many there were
+        threw away the one thing an operator needs: a bench that says "2
+        failed" and nothing else leaves them to guess which two, and why.
+        Each reason is put on the status line, and the whole traceback goes
+        to the log, where a long one can be read without fighting a
+        single-line strip.  A card whose type this machine cannot build is
+        one of them; a card the Apply removed is none of them.  Simulation
+        settings no virtual device reads are kept, and said.
         """
 
-        failures = dict(session.installation.failures)
+        failures = dict(session.failures)
         for key, error in sorted(failures.items()):
             _LOG.error(
                 "device %s did not start: %s: %s",

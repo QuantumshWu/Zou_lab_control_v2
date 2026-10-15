@@ -185,10 +185,12 @@ def _apparatus(*devices: tuple[str, str, str, dict]) -> InstallationConfig:
 
 
 def _session(devices: dict, *, failures: dict | None = None, **extra) -> SimpleNamespace:
-    """The loaded session as the presenter reads it: its installation's leaves."""
+    """The loaded session as the presenter reads it: its installation's
+    leaves, and the declared devices that did not open."""
 
     return SimpleNamespace(
-        installation=SimpleNamespace(devices=devices, failures=dict(failures or {})),
+        installation=SimpleNamespace(devices=devices),
+        failures=dict(failures or {}),
         **extra,
     )
 
@@ -815,7 +817,7 @@ def test_reconcile_failure_keeps_the_active_session_and_apply_state(tmp_path, ca
     installation = Installation({"camera": InstalledLeaf(
         "camera", "camera.virtual", object(), {}, closer=close_leaf,
     )}, world=None)
-    session = SimpleNamespace(installation=installation)
+    session = SimpleNamespace(installation=installation, failures={})
     reconciled: list[object] = []
     shut_down: list[object] = []
 
@@ -1644,11 +1646,16 @@ def _tunable_apparatus(value: int = 1) -> InstallationConfig:
 
 def _app_reconcile(session, candidate, keys, *, present=True, discard_changes=False):
     """The embedding's reconcile contract: a maintenance barrier over the
-    plan's affected keys before any device closes (ARCHITECTURE_DESIGN §6)."""
+    plan's affected keys before any device closes (ARCHITECTURE_DESIGN §6).
+    An edit that closes and builds nothing has no barrier to raise."""
 
     plan = session.plan_device_reconcile(candidate, close_keys=frozenset(keys))
-    barrier = session.device_use.begin_maintenance(
-        object(), "Device Manager change", tuple(sorted(plan.affected_keys))
+    barrier = (
+        session.device_use.begin_maintenance(
+            object(), "Device Manager change", tuple(sorted(plan.affected_keys))
+        )
+        if plan.affected_keys
+        else None
     )
 
     def work():
@@ -1656,7 +1663,8 @@ def _app_reconcile(session, candidate, keys, *, present=True, discard_changes=Fa
             session.reconcile_devices(plan)
             return session
         finally:
-            barrier.release()
+            if barrier is not None:
+                barrier.release()
 
     return work
 
@@ -1776,6 +1784,61 @@ def test_a_published_device_is_not_rebuilt_under_its_peer(tmp_path) -> None:
         assert manager.toggle_remote("rf") is True
         assert peer.tune("value", 9) == 9
         assert current.value == 9, "published again, the fabric serves the new device"
+    finally:
+        manager.close()
+
+
+def test_a_failed_card_removed_by_apply_is_no_longer_reported(tmp_path) -> None:
+    """A card the apparatus no longer holds has not failed anything.
+
+    Removing the one card that failed leaves nothing to build, so the Apply
+    keeps the same installation, whose startup record still names it.  The
+    status line, the snapshot and the session's failures read the live
+    declaration, so none of them names the card the operator just removed.
+    """
+
+    from zlc_atom.install import DeviceCatalogSnapshot, UnavailableDeviceTypes
+    from zlc_workbench.session import ExperimentSession
+
+    tunable = _tunable_catalog()
+    catalog = DeviceCatalogSnapshot(
+        tunable.available,
+        (UnavailableDeviceTypes(
+            "zlc_atom.devices.camera.dcam.device_types", "ImportError: no DCAM"
+        ),),
+    )
+    initial = InstallationConfig((
+        *_tunable_apparatus().devices,
+        DeviceInstanceConfig("old", "old camera", "camera.orca_retired", {}),
+    ))
+    view = _ManagerView()
+    manager = DeviceManagerPresenter(
+        view,
+        tmp_path / "apparatus.json",
+        catalog=catalog,
+        initial_config=initial,
+        initialize_session=lambda candidate: ExperimentSession.from_config(
+            tmp_path, candidate, catalog=catalog
+        ),
+        prepare_reconcile=_app_reconcile,
+    )
+    try:
+        assert manager.toggle_lifecycle() is True
+        session = manager._active_session
+        assert view.status[-1] == (
+            "warning",
+            "1 device initialized: detuning · 1 failed -- old: RuntimeError: "
+            "device type camera.orca_retired is not available on this machine",
+        )
+        original = session.installation.device("rf")
+
+        assert manager.remove_device("old") is True
+        assert manager.toggle_lifecycle() is True
+        assert view.status[-1] == ("task", "device changes applied · 1 device loaded")
+        assert session.installation.device("rf") is original
+        assert session.failures == {}
+        assert manager.snapshot()["failures"] == {}
+        assert view.lifecycle[0] == "Shut down devices"
     finally:
         manager.close()
 

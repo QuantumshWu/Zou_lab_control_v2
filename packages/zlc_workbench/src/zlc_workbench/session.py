@@ -407,9 +407,22 @@ class ExperimentSession:
 
     @property
     def failures(self) -> Mapping[str, BaseException]:
-        """Devices that did not open, by key.  An empty mapping means all did."""
+        """Declared devices that did not open, by key.  Empty means all did.
 
-        return self.installation.failures
+        Only the live declaration's devices count: an Apply that removes a
+        failed card and builds nothing keeps the same installation, whose
+        startup record still names that card, and a card no longer in the
+        apparatus has not failed anything.
+        """
+
+        from zlc_atom.install.configuration import InstallationConfig
+
+        failures = self.installation.failures
+        config = self._installation_config
+        if not isinstance(config, InstallationConfig):
+            return failures
+        declared = {item.instance_id for item in config.devices}
+        return {key: error for key, error in failures.items() if key in declared}
 
     @property
     def installation_config(self) -> object | None:

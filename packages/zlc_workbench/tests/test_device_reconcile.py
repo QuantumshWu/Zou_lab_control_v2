@@ -192,7 +192,9 @@ def test_a_card_this_machine_cannot_build_fails_alone(tmp_path):
     """A kept Unavailable card is that device's failure, not the bench's.
 
     Its family did not import here (or its type is gone): Init and Apply
-    open every other device and name the card with the reason.
+    open every other device and name the card with the reason.  Removed,
+    it is nobody's failure, although nothing is built and the installation
+    that recorded it stays.
     """
 
     from zlc_atom.install import UnavailableDeviceTypes
@@ -221,6 +223,16 @@ def test_a_card_this_machine_cannot_build_fails_alone(tmp_path):
     assert session.installation.device("base") is original
     assert set(session.installation.devices) == {"base", "other"}
     assert set(session.failures) == {"rf"}
+
+    removed = InstallationConfig(
+        (_device("base", role="renamed"), _device("other"))
+    )
+    plan = session.plan_device_reconcile(removed)
+    assert plan.affected_keys == () and plan.build_keys == ()
+    held = session.installation
+    session.reconcile_devices(plan)
+    assert session.installation is held
+    assert session.failures == {}
     assert events == []
     session.close()
 
