@@ -892,17 +892,18 @@ app.quit()
 
 def test_a_posts_number_and_ink_say_which_bracket_it_frames(run_qt) -> None:
     """Both posts of a bracket wear its number in the title and its colour on
-    the title and the edge -- the colour the preview draws that bracket's
-    loop in -- and a kept post is renumbered in place when the brackets
-    around it change.  A period card stays black on white, a spacer grey and
-    dashed: three kinds an eye tells apart."""
+    the edge -- the colour the preview draws that bracket's loop in -- and
+    that hue at reading strength on the title, 4.5:1 on a selected post's
+    body; a kept post is renumbered in place when the brackets around it
+    change.  A period card stays black on white, a spacer grey and dashed:
+    three kinds an eye tells apart."""
 
     run_qt(
         """
 from dataclasses import replace
-from PyQt5 import QtCore, QtWidgets
+from PyQt5 import QtCore, QtGui, QtWidgets
 from zlc_ui.qt import ensure_qt_app
-from zlc_ui.fluent import TEXT
+from zlc_ui.fluent import ACCENT_TINT, TEXT
 from zlc_ui.pulse import BracketPost, BracketVM, PulseScheduleView
 """ + _schedule_source() + r'''
 app = ensure_qt_app(["bracket-ink"])
@@ -914,10 +915,22 @@ view.set_schedule(replace(vm, brackets=(outer, inner)))
 view.show(); app.processEvents()
 posts = {post.key: post for post in view.drag_container._posts}
 assert set(posts) == {"b:start", "b:end", "c:start", "c:end"}, sorted(posts)
+def contrast(first, second):
+    def luminance(name):
+        channels = [value / 12.92 if value <= 0.04045 else ((value + 0.055) / 1.055) ** 2.4
+                    for value in QtGui.QColor(name).getRgbF()[:3]]
+        return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2]
+    light, dark = sorted((luminance(first), luminance(second)), reverse=True)
+    return (light + 0.05) / (dark + 0.05)
+
 for key in ("b:start", "b:end"):
     assert posts[key].title() == "Bracket 1" and posts[key].color == "#C96F3D", key
     assert posts[key]._zlc_surface == (None, False, "#C96F3D")
-    assert posts[key]._zlc_title_color == "#C96F3D"
+    title = posts[key]._zlc_title_color
+    assert contrast(title, ACCENT_TINT) >= 4.5 > contrast("#C96F3D", ACCENT_TINT), title
+    assert abs(QtGui.QColor(title).hue() - QtGui.QColor("#C96F3D").hue()) <= 6, "the bracket's own hue"
+for post in posts.values():
+    assert contrast(post._zlc_title_color, ACCENT_TINT) >= 4.5, (post.key, post._zlc_title_color)
 for key in ("c:start", "c:end"):
     assert posts[key].title() == "Bracket 2" and posts[key].color == "#4F7EA8", key
     assert "Bracket 2" in posts[key].toolTip()

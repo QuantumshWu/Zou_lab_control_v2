@@ -16,7 +16,7 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 from zlc_ui.form import FormChoice, being_edited
 from zlc_ui.fluent import (
     retire_widget,
-    ACCENT, BG, DERIVED_INK, DISABLED_INK, FIELD_BORDER_PX, HOVER, MUTED_INK, SELECTION_EDGE, TEXT, CONFIG_GREEN,
+    ACCENT, ACCENT_TINT, BG, DERIVED_INK, DISABLED_INK, FIELD_BORDER_PX, HOVER, MUTED_INK, SELECTION_EDGE, TEXT, CONFIG_GREEN,
     CONFIG_GREEN_DARK, CONFIG_GREEN_TINT, FluentButton, FluentCheckBox, FluentSegmentedButtons,
     FluentSwitch, FluentComboBox, FluentFrame, FluentGroupBox, fluent_count_box,
     FluentLabel, FluentLineEdit, FluentReadoutEdit, FluentScrollArea, LinkedScrollPanes,
@@ -863,6 +863,28 @@ class ChannelPanel(FluentGroupBox):
         self.scan_summary_label.setText(str(text))
 
 
+def _reading_ink(stroke: str) -> str:
+    """A bracket's stroke colour as words: mixed toward TEXT, a twentieth
+    at a time, until it reads 4.5:1 on the ACCENT_TINT body of a selected
+    post, the paler of a post's two faces.  The stroke edges the post and
+    draws the preview's loop; as a title it read 3.1:1 there (2.9:1 for the
+    green), under every other card title."""
+
+    def luminance(color: QtGui.QColor) -> float:
+        channels = [value / 12.92 if value <= 0.04045 else ((value + 0.055) / 1.055) ** 2.4
+                    for value in color.getRgbF()[:3]]
+        return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2]
+
+    face = luminance(QtGui.QColor(ACCENT_TINT)) + 0.05
+    start, end = QtGui.QColor(stroke), QtGui.QColor(TEXT)
+    for step in range(21):
+        ink = QtGui.QColor(*(round(a + (b - a) * step / 20) for a, b in zip(
+            start.getRgb()[:3], end.getRgb()[:3])))
+        if face / (luminance(ink) + 0.05) >= 4.5:
+            break
+    return ink.name()
+
+
 class BracketPost(FluentGroupBox):
     """One draggable post framing a bracketed run of periods.
 
@@ -977,16 +999,17 @@ class BracketPost(FluentGroupBox):
     def set_bracket_style(self, ordinal: int, color: str) -> None:
         """Say which bracket this post frames.
 
-        Its number goes in the title pill and its ink on the title and the
-        edge; both posts of a bracket wear the same, and the preview draws
-        that bracket's loop in it.  Renumbered in place when a bracket is
-        added or removed before it, the way a card's "Period k/N" is.
+        Its number goes in the title pill and its colour on the edge; both
+        posts of a bracket wear the same, and the preview draws that
+        bracket's loop in it.  The title wears that hue at reading strength
+        (:func:`_reading_ink`).  Renumbered in place when a bracket is added
+        or removed before it, the way a card's "Period k/N" is.
         """
 
         self.ordinal = int(ordinal)
         self.color = str(color or "")
         self.setTitle(f"Bracket {self.ordinal}")
-        self.set_title_color(self.color or TEXT)
+        self.set_title_color(_reading_ink(self.color) if self.color else TEXT)
         self.set_surface(edge=self.color or None)
         self.setToolTip(f"Bracket {self.ordinal}: drag to move this boundary")
 
