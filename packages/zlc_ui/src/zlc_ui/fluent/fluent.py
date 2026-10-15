@@ -3544,13 +3544,20 @@ class FluentComboBox(QtWidgets.QAbstractButton):
 
     In CHECKABLE mode (:meth:`set_checkable`) it picks several of its rows:
     each keyed row carries FluentCheckBox's box.  A click on a row's box
-    ticks or clears it and the list stays open; a click on its words makes
-    it the only ticked row and closes the list -- the one-value pick stays
-    one click.  Space ticks the current row, Enter means "only this one",
-    Escape or a click outside closes.  :attr:`checked_edited` carries the
-    ticked keys once, when the list closes having changed them.  The
-    collapsed box reads the ticked keys in list order, runs of three or
-    more as ``first–last``; with none ticked, its placeholder in MUTED_INK.
+    ticks or clears it and the list stays open; Shift with it sets every
+    row from the last one clicked to this one as that one is.  A click on a
+    row's words makes it the only ticked row and closes the list -- the
+    one-value pick stays one click -- unless the list's headers pick
+    (``headers_select``): a header's click is then the "only these" gesture,
+    and a row's words tick or clear it as its box does.  Space ticks the
+    current row, Enter (or a double click) means "only this one", Escape or
+    a click outside closes.  :attr:`checked_edited` carries the ticked keys
+    once, when the list closes having changed them.  The collapsed box
+    reads the ticked keys in list order, runs of three or more as
+    ``first–last``.
+
+    In either mode, with nothing chosen (no current row, nothing ticked)
+    the collapsed box says its :meth:`setPlaceholderText` in MUTED_INK.
     """
 
     activated = QtCore.pyqtSignal(int)
@@ -3575,6 +3582,15 @@ class FluentComboBox(QtWidgets.QAbstractButton):
         self._checked_at_open: tuple | None = None
         #: The row whose box a press landed on, until its release; -1 none.
         self._box_press = -1
+        #: The row a click last ticked or cleared: where a Shift-click's run starts.
+        self._anchor_row = -1
+        #: The ticked rows, as the items' check role holds them: a list of
+        #: thousands of labels is not read row by row on every projection.
+        self._ticked: frozenset[int] = frozenset()
+        #: Each key's first row, and the widest key's width; None until
+        #: asked after the rows changed.
+        self._key_rows: dict | None = None
+        self._widest_key: int | None = None
         self._current_index = -1
         self._minimum_contents_length = 0
         self._model = QtGui.QStandardItemModel(self)
@@ -3647,6 +3663,7 @@ class FluentComboBox(QtWidgets.QAbstractButton):
         return int(self._model.rowCount())
 
     def addItem(self, text: object, userData: object = None) -> None:  # noqa: N802
+        self._key_rows = self._widest_key = None
         item = QtGui.QStandardItem(str(text))
         item.setData(userData, QtCore.Qt.UserRole)
         item.setEditable(False)
@@ -3679,24 +3696,34 @@ class FluentComboBox(QtWidgets.QAbstractButton):
 
         return self.currentData(_BLANK_CHOICE_ROLE) is True
 
-    def set_checkable(self, checkable: bool, *, placeholder: str = "", headers_select: bool = False) -> None:
+    def setPlaceholderText(self, text: str) -> None:  # noqa: N802 - Qt API name
+        """What the collapsed box says, in MUTED_INK, while nothing is chosen."""
+
+        self._placeholder = str(text)
+        self._invalidate_content_width()
+        self.update()
+
+    def placeholderText(self) -> str:  # noqa: N802 - Qt API name
+        return self._placeholder
+
+    def set_checkable(self, checkable: bool, *, headers_select: bool = False) -> None:
         """Pick several keyed rows instead of one (see the class).
 
         A row keyed None is a header: it carries no box and ends a run of
         the collapsed text.  With ``headers_select`` a header is a choice of
         its own -- clicking it ticks exactly the rows under it, up to the
-        next header, and closes the list.  ``placeholder`` is what the
-        collapsed box says while nothing is ticked.
+        next header, and closes the list -- and a row's words tick or clear
+        it as its box does.
         """
 
         self._checkable = bool(checkable)
-        self._placeholder = str(placeholder)
         self._headers_select = self._checkable and bool(headers_select)
+        self._ticked = frozenset()
         for row in range(self.count()):
             item = self._model.item(row)
             keyed = self._checkable and item.data(QtCore.Qt.UserRole) is not None
-            item.setData(bool(item.data(_CHECKED_ROLE)) if keyed else None, _CHECKED_ROLE)
-            item.setData(_check_icon(bool(item.data(_CHECKED_ROLE))) if keyed else None, QtCore.Qt.DecorationRole)
+            item.setData(False if keyed else None, _CHECKED_ROLE)
+            item.setData(_check_icon(False) if keyed else None, QtCore.Qt.DecorationRole)
         if self._popup_view is not None:
             self._configure_checkable_view(self._popup_view)
         self._checked_changed()
@@ -3704,9 +3731,7 @@ class FluentComboBox(QtWidgets.QAbstractButton):
     def checked_data(self) -> tuple:
         """The keys of the ticked rows, in list order."""
 
-        return tuple(
-            self.itemData(row) for row in range(self.count()) if self.itemData(row, _CHECKED_ROLE)
-        )
+        return tuple(self.itemData(row) for row in sorted(self._ticked))
 
     def set_checked_data(self, values) -> None:
         """Tick exactly the rows keyed ``values``, without emitting.  Ignored
@@ -3714,34 +3739,48 @@ class FluentComboBox(QtWidgets.QAbstractButton):
 
         if self._popup is not None and self._popup.isVisible():
             return
-        values = tuple(values)
-        self._tick_rows(
-            row for row in range(self.count())
-            if self.itemData(row) is not None and self.itemData(row) in values
-        )
+        if self._key_rows is None:
+            self._key_rows = {}
+            for row in range(self.count()):
+                key = self.itemData(row)
+                if key is not None:
+                    self._key_rows.setdefault(key, row)
+        self._tick_rows(self._key_rows[value] for value in values if value in self._key_rows)
 
     def _tick_rows(self, rows) -> None:
-        """Tick exactly ``rows``; every other keyed row is cleared."""
+        """Tick exactly ``rows`` (keyed ones); every other keyed row is cleared."""
 
-        ticked = set(rows)
-        for row in range(self.count()):
+        ticked = frozenset(row for row in rows if self.itemData(row) is not None)
+        changed = ticked ^ self._ticked
+        if not changed:
+            return
+        for row in changed:
             item = self._model.item(row)
-            if item.data(QtCore.Qt.UserRole) is None:
-                continue
-            checked = row in ticked
-            if bool(item.data(_CHECKED_ROLE)) != checked:
-                item.setData(checked, _CHECKED_ROLE)
-                item.setData(_check_icon(checked), QtCore.Qt.DecorationRole)
+            item.setData(row in ticked, _CHECKED_ROLE)
+            item.setData(_check_icon(row in ticked), QtCore.Qt.DecorationRole)
+        self._ticked = ticked
         self._checked_changed()
 
-    def _toggle_row(self, row: int) -> None:
+    def _toggle_row(self, row: int, extend: bool = False) -> None:
+        """Tick or clear ``row``; with ``extend``, set every keyed row from
+        the last one clicked to ``row`` as that one now is."""
+
         item = self._model.item(int(row))
         if item is None or item.data(QtCore.Qt.UserRole) is None or not item.isEnabled():
             return
-        self._tick_rows(
-            other for other in range(self.count())
-            if (other == row) != bool(self.itemData(other, _CHECKED_ROLE))
-        )
+        ticked = set(self._ticked)
+        anchor = self._model.item(self._anchor_row) if 0 <= self._anchor_row < self.count() else None
+        if extend and anchor is not None and anchor.data(QtCore.Qt.UserRole) is not None:
+            low, high = sorted((self._anchor_row, int(row)))
+            run = {
+                other for other in range(low, high + 1)
+                if self.itemData(other) is not None and self._model.item(other).isEnabled()
+            }
+            ticked = ticked | run if self._anchor_row in ticked else ticked - run
+        else:
+            ticked ^= {int(row)}
+            self._anchor_row = int(row)
+        self._tick_rows(ticked)
 
     def _header_rows(self, row: int) -> tuple[int, ...]:
         """The enabled keyed rows under the header at ``row``, up to the next one."""
@@ -3757,21 +3796,23 @@ class FluentComboBox(QtWidgets.QAbstractButton):
 
     def _checked_text(self) -> str:
         """The ticked keys in list order, a run of three or more consecutive
-        rows (unbroken by a header) written ``first–last``."""
+        rows (unbroken by a header, which is never ticked) written
+        ``first–last``."""
 
         parts: list[str] = []
-        run: list[str] = []
+        run: list[int] = []
 
         def close_run() -> None:
-            parts.extend((f"{run[0]}–{run[-1]}",) if len(run) >= 3 else run)
+            keys = [str(self.itemData(row)) for row in run]
+            parts.extend((f"{keys[0]}–{keys[-1]}",) if len(keys) >= 3 else keys)
             run.clear()
 
-        for row in range(self.count()):
-            if self.itemData(row) is not None and self.itemData(row, _CHECKED_ROLE):
-                run.append(str(self.itemData(row)))
-            else:
+        for row in sorted(self._ticked):
+            if run and row != run[-1] + 1:
                 close_run()
-        close_run()
+            run.append(row)
+        if run:
+            close_run()
         return ", ".join(parts)
 
     def _checked_changed(self) -> None:
@@ -3835,14 +3876,17 @@ class FluentComboBox(QtWidgets.QAbstractButton):
         if pressed < 0:
             return False
         if on_box and index.row() == pressed:
-            self._toggle_row(pressed)
+            self._toggle_row(pressed, bool(event.modifiers() & QtCore.Qt.ShiftModifier))
         return True
 
     def clear(self) -> None:
+        self._key_rows = self._widest_key = None
         if self._checkable:
             # A refill closes an open list without emitting: what was
             # ticked belonged to rows that are gone.
             self._checked_at_open = None
+            self._anchor_row = -1
+            self._ticked = frozenset()
             self.hidePopup()
         previous = self._current_index
         if self.count():
@@ -3875,6 +3919,8 @@ class FluentComboBox(QtWidgets.QAbstractButton):
     ) -> None:  # noqa: N802
         model_index = self._model.index(int(index), 0)
         if model_index.isValid():
+            if role == QtCore.Qt.UserRole:
+                self._key_rows = self._widest_key = None
             self._model.setData(model_index, value, role)
 
     def findData(
@@ -3957,10 +4003,26 @@ class FluentComboBox(QtWidgets.QAbstractButton):
     def _popup_view_created(self, view: QtWidgets.QAbstractItemView) -> None:
         """Subclass hook for signals owned by the one materialized view."""
 
-        view.clicked.connect(self._commit_flat_index)
+        view.clicked.connect(self._row_clicked)
         view.activated.connect(self._commit_flat_index)
         if self._checkable:
             self._configure_checkable_view(view)
+
+    def _row_clicked(self, index: QtCore.QModelIndex) -> None:
+        """A click on a row's words: in a list whose headers pick, it ticks
+        or clears the row as its box does; otherwise it is the choice."""
+
+        if (
+            self._checkable and self._headers_select and index.isValid()
+            and index.data(QtCore.Qt.UserRole) is not None
+            and index.flags() & QtCore.Qt.ItemIsEnabled
+        ):
+            self._toggle_row(
+                index.row(),
+                bool(QtWidgets.QApplication.keyboardModifiers() & QtCore.Qt.ShiftModifier),
+            )
+            return
+        self._commit_flat_index(index)
 
     def _commit_flat_index(self, index: QtCore.QModelIndex) -> None:
         if not index.isValid() or not (
@@ -4189,13 +4251,16 @@ class FluentComboBox(QtWidgets.QAbstractButton):
 
     def _collapsed_text_candidates(self) -> tuple[str, ...]:
         if self._checkable:
-            # What the box may say: its placeholder, what is ticked, or any
-            # one key alone.
-            return (
-                self._placeholder, self._checked_text(),
-                *(str(self.itemData(row)) for row in range(self.count()) if self.itemData(row) is not None),
-            )
-        return tuple(self.itemText(index) for index in range(self.count()))
+            # What the box may say: its placeholder, or what is ticked; any
+            # one key alone is measured once per list (_widest_key_width).
+            return (self._placeholder, self._checked_text())
+        # What the box may say: its placeholder, or a row that can be
+        # chosen as it says it (without a grouped list's indent); a header
+        # nobody can choose never widens it.
+        return (self._placeholder, *(
+            self.itemText(index).lstrip() for index in range(self.count())
+            if self._model.item(index).isEnabled()
+        ))
 
     def _collapsed_content_width(self) -> int:
         if self._cached_content_width is None:
@@ -4213,7 +4278,25 @@ class FluentComboBox(QtWidgets.QAbstractButton):
                 ),
                 default=0,
             )
+            if self._checkable:
+                self._cached_content_width = max(self._cached_content_width, self._widest_key_width(metrics))
         return self._cached_content_width
+
+    def _widest_key_width(self, metrics: QtGui.QFontMetricsF) -> int:
+        """The widest key of a checkable list, as the box would say it
+        alone; measured once per list, and only up to the widest box a
+        checkable combo takes (a long sampled axis has thousands)."""
+
+        if self._widest_key is None:
+            cap, widest = scaled_px(200), 0
+            for row in range(self.count()):
+                key = self.itemData(row)
+                if key is not None:
+                    widest = max(widest, int(math.ceil(metrics.horizontalAdvance(str(key)))))
+                    if widest >= cap:
+                        break
+            self._widest_key = widest
+        return self._widest_key
 
     def sizeHint(self):  # noqa: N802 - Qt API name
         font = self._collapsed_font()
@@ -4266,8 +4349,11 @@ class FluentComboBox(QtWidgets.QAbstractButton):
         if self._line_edit is None:
             text_rect = self._collapsed_text_rect()
             # The blank choice reads as an empty field's placeholder does,
-            # and so does a checkable box with nothing ticked.
-            blank = not self.checked_data() if self._checkable else self.current_is_blank()
+            # and so does a box with nothing chosen.
+            blank = (
+                not self._ticked if self._checkable
+                else bool(self._placeholder) and self._current_index < 0 or self.current_is_blank()
+            )
             ink = DISABLED_INK if not enabled else MUTED_INK if blank else TEXT
             painter.setPen(QtGui.QColor(ink))
             painter.setFont(self._collapsed_font())
@@ -4516,7 +4602,7 @@ class FluentComboBox(QtWidgets.QAbstractButton):
         indent a grouped list gives the rows under a header; checkable: what is ticked."""
         if self._checkable:
             return self._checked_text() or self._placeholder
-        return self.currentText().lstrip()
+        return self.currentText().lstrip() if self._current_index >= 0 else self._placeholder
 
     def _sync_popup_selection(self) -> None:
         """Project the collapsed flat selection into the materialized view.
@@ -4529,10 +4615,7 @@ class FluentComboBox(QtWidgets.QAbstractButton):
             return
         row = self._current_index
         if self._checkable:
-            row = next(
-                (other for other in range(self.count()) if self.itemData(other, _CHECKED_ROLE)),
-                self._selectable_row(0, 1),
-            )
+            row = min(self._ticked, default=self._selectable_row(0, 1))
         index = self._model.index(row, 0)
         if not index.isValid():
             view.clearSelection()

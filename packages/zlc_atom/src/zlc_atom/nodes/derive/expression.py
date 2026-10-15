@@ -19,10 +19,12 @@ does the math; nothing here runs operator-written code.
 """
 from __future__ import annotations
 
-import keyword
+import functools
+import itertools
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from types import MappingProxyType
 
 import numpy as np
 from zlc_data import DatasetSchema, DomainSpec, SCALAR_DOMAIN, ValidityContract, ValueSchema
@@ -80,15 +82,18 @@ TERM_COLUMNS = (
         AuthoringChoice("", "None"), AuthoringChoice("true", "true"), AuthoringChoice("false", "false"),
     ), description="true or false instead of of; only after == or !="),
     AuthoringField("at", "text", "At", "",
-                   description="the name of one axis of of, in any domain; empty picks nothing"),
+                   description="what of is picked on: the name of one of its axes, in any domain, or a domain "
+                               "(Repeat, Point or Cell) with two or more axes; empty picks nothing"),
     AuthoringField("labels", "text_tuple", "Labels", None,
-                   description="labels of that axis, as the catalog lists them: one drops the axis, "
-                               "several keep those coordinates in axis order"),
+                   description="a list of texts: labels of that axis as the catalog lists them, or rows of that "
+                               "domain written 'detuning 2 · power 1'; one drops the axis (the domain's axes), "
+                               "several keep those coordinates in axis (row) order"),
 )
 #: One variable.
 VARIABLE_COLUMNS = (
-    AuthoringField("name", "text", "Name", "", required=True,
-                   description="letters, digits and _; a published variable is the signal @logic/<node>/<name>"),
+    AuthoringField("name", "text", "Name", "",
+                   description="letters, digits and _, not starting with a digit; a published variable is the "
+                               "signal @logic/<node>/<name>"),
     AuthoringField("publish", "bool", "Publish", True,
                    description="on: published as a signal; off: an internal helper other variables read"),
     AuthoringField("terms", "rows", "Terms", (), required=True, columns=TERM_COLUMNS,
@@ -97,14 +102,20 @@ VARIABLE_COLUMNS = (
         AuthoringChoice("", "None"), *(AuthoringChoice(name, name) for name in STATISTICS),
     ), description="reduces the formula's result over the axes named in over"),
     AuthoringField("over", "text_tuple", "Over", None,
-                   description="names of the axes the statistic reduces, in any domain"),
+                   description="a list of axis names: the axes the statistic reduces, in any domain"),
 )
 _VARIABLE_DEFAULTS = {column.name: () if column.default is None else column.default for column in VARIABLE_COLUMNS}
-_TERM_DEFAULTS = {column.name: () if column.value_type == "text_tuple" else column.default
-                  for column in TERM_COLUMNS}
+#: A term with nothing written: every column at its default, as a draft projects it.
+TERM_DEFAULTS = MappingProxyType({column.name: () if column.value_type == "text_tuple" else column.default
+                                  for column in TERM_COLUMNS})
 _BOOLEANS_MIX = ("booleans do not mix with numbers; compare booleans with = or ≠, "
                  "or count them with a statistic")
 _DOMAINS = ("repeat_domain", "point_domain", "cell_domain")
+#: The three domains as a pick names them, in domain order.
+DOMAINS = ("Repeat", "Point", "Cell")
+#: What a variable's name may be; the same text is what a failure's
+#: ``<variable> · <stage>:`` is read back by.
+_NAME = r"[A-Za-z_][A-Za-z0-9_]*"
 
 
 def compact_variable(row: Mapping[str, object]) -> dict[str, object]:
@@ -114,7 +125,7 @@ def compact_variable(row: Mapping[str, object]) -> dict[str, object]:
 
     compact = {column: value for column, value in row.items()
                if column in ("name", "terms") or value != _VARIABLE_DEFAULTS[column]}
-    compact["terms"] = tuple({column: value for column, value in term.items() if value != _TERM_DEFAULTS[column]}
+    compact["terms"] = tuple({column: value for column, value in term.items() if value != TERM_DEFAULTS[column]}
                              for term in row["terms"])
     return compact
 
@@ -151,11 +162,81 @@ def _unit_power(unit, exponent):
                     for symbol, power in sorted(powers.items()) if power) or "1"
 
 
+def _primary(domain: DomainSpec) -> tuple:
+    """A domain's primary named axes, in order; the one-value placeholder axis is never one."""
+    return tuple(axis for axis in domain.axes if axis.coordinate_of is None and axis.role != SCALAR)
+
+
 def _named_axes(schema: DatasetSchema) -> list:
-    """(domain index, axis) of every primary named axis, in domain order.
-    The one-value placeholder axis is never one."""
-    return [(d, axis) for d, domain in enumerate(_domains(schema)) for axis in domain.axes
-            if axis.coordinate_of is None and axis.role != SCALAR]
+    """(domain index, axis) of every primary named axis, in domain order."""
+    return [(d, axis) for d, domain in enumerate(_domains(schema)) for axis in _primary(domain)]
+
+
+def axis_groups(schema: DatasetSchema) -> tuple[tuple[str, DomainSpec, tuple], ...]:
+    """``(domain word, domain, its primary named axes)`` of every domain that
+    has some, in domain order: what a pick and a statistic choose from."""
+
+    return tuple((word, domain, axes) for word, domain in zip(DOMAINS, _domains(schema))
+                 if (axes := _primary(domain)))
+
+
+@functools.lru_cache(maxsize=64)
+def _axis_labels(axis) -> tuple[tuple[str, ...], dict[str, int] | None]:
+    """An axis' labels and each one's position -- None when two read alike.
+    Kept for the axes last asked about: a pick asks every publication, and
+    writing out a long sampled axis' labels each time cost tens of ms."""
+    labels = axis.labels()
+    positions = {label: index for index, label in enumerate(labels)}
+    return labels, positions if len(positions) == len(labels) else None
+
+
+@functools.lru_cache(maxsize=32)
+def _domain_rows(domain: DomainSpec, mapped: bool) -> tuple[tuple[str, ...], dict[str, int] | None]:
+    """A domain's rows as a pick names them -- each row's primary axes,
+    name and label, joined ``detuning 2 · power 1`` -- in row order, and
+    each one's position (None when two read alike).  A dense domain's rows
+    are every combination of its axes, the last fastest."""
+    axes = _primary(domain)
+    texts = [tuple(f"{axis.name} {label}" for label in _axis_labels(axis)[0]) for axis in axes]
+    if mapped:
+        codes = [domain.codes(axis.axis_id) for axis in axes]
+        rows = tuple(" · ".join(text[int(code[row])] for text, code in zip(texts, codes))
+                     for row in range(domain.size))
+    else:
+        rows = tuple(" · ".join(parts) for parts in itertools.product(*texts))
+    positions = {row: index for index, row in enumerate(rows)}
+    return rows, positions if len(positions) == len(rows) else None
+
+
+def pick_values(schema: DatasetSchema, at: str) -> tuple[str, ...] | None:
+    """What a pick ``at`` (an axis name, or a domain word) on a value of
+    ``schema`` chooses among, in order -- its labels, or its domain's rows
+    -- or None when ``at`` names nothing that can be picked there."""
+
+    try:
+        d, axes = _pick_target(schema, at, "the value")
+    except ValueError:
+        return None
+    return _domain_rows(_domains(schema)[d], d < 2)[0] if at in DOMAINS else _axis_labels(axes[0])[0]
+
+
+def _pick_target(schema, at, what):
+    """(domain index, the axes a pick ``at`` takes): one primary axis named
+    ``at``, or the primary axes of the domain ``at`` when it has two or
+    more -- a one-axis domain is picked by its axis' name, never two ways."""
+    if at not in DOMAINS:
+        d, axis = _axis(schema, at, what, "pick")
+        return d, (axis,)
+    if any(axis.name == at for domain in _domains(schema) for axis in domain.axes):
+        raise ValueError(f"{at} names both a domain and an axis of {what}; it cannot be picked by name")
+    d = DOMAINS.index(at)
+    axes = _primary(_domains(schema)[d])
+    if len(axes) == 1:
+        raise ValueError(f"{at} has one axis, {axes[0].name}; pick {axes[0].name}")
+    if not axes:
+        names = ", ".join(axis.name for _d, axis in _named_axes(schema)) or "none"
+        raise ValueError(f"{what} has no {at} axes; its axes: {names}")
+    return d, axes
 
 
 def axes_text(schema: DatasetSchema) -> str:
@@ -228,20 +309,64 @@ def _isel_plan(schema, d, axis, indexes, scalar):
                 tuple(rank[codes[list(rows)]]) if a.axis_id in family
                 else tuple(domain.codes(a.axis_id)) for a in kept))
         domains[d] = domain
-        take = (d, rows, False, False)
+        take = (((d, rows, False),), False)
     else:
         position = domain.axes.index(axis)
         axes = tuple(a for a in domain.axes if a.axis_id != axis.axis_id) if scalar else tuple(
             _subset_axis(a, indexes) if a.axis_id == axis.axis_id else a for a in domain.axes)
         domains[d] = DomainSpec(tuple(a.size for a in axes), axes) if axes else SCALAR_DOMAIN
-        take = (position + 2, indexes, scalar, not axes)
+        take = (((position + 2, indexes, scalar),), not axes)
+    return _schema(domains, schema.value_schema.dtype, _unit(schema), schema.value_schema.name), take
+
+
+def _domain_plan(schema, d, axes, rows, scalar):
+    """(schema keeping ``rows`` of domain ``d`` -- positions among its rows,
+    ascending -- how to take its storage).
+
+    One row removes the domain's axes and their coordinate groups; several
+    keep them, restricted to the coordinates those rows use.  A Repeat/Point
+    domain keeps exactly the rows; a dense Cell domain keeps a grid, so its
+    rows must be every combination of the coordinates they use.
+    """
+    domains = list(_domains(schema))
+    domain = domains[d]
+    family = {member.axis_id for axis in axes for member in domain.coordinate_axes(axis.axis_id)}
+    if d < 2:
+        rows = (range(rows[0], rows[-1] + 1) if rows[-1] - rows[0] + 1 == len(rows) else tuple(rows))
+        domain = _subset_mapped_domain(domain, rows)
+        if scalar:
+            kept = tuple(a for a in domain.axes if a.axis_id not in family)
+            domain = DomainSpec(domain.shape, kept, tuple(tuple(domain.codes(a.axis_id)) for a in kept))
+        domains[d] = domain
+        take = (((d, rows, False),), False)
+    else:
+        positions = [domain.axes.index(axis) for axis in axes]
+        indexes = np.array(np.unravel_index(np.asarray(rows, dtype=np.int64), [axis.size for axis in axes])).T
+        if scalar:
+            rest = tuple(a for a in domain.axes if a.axis_id not in family)
+            domains[d] = DomainSpec(tuple(a.size for a in rest), rest) if rest else SCALAR_DOMAIN
+            take = (tuple((position + 2, (int(index),), True)
+                          for position, index in zip(positions, indexes[0])), not rest)
+        else:
+            used = [tuple(sorted({int(index) for index in indexes[:, k]})) for k in range(len(axes))]
+            if len(rows) != int(np.prod([len(kept) for kept in used])):
+                raise ValueError(f"these {DOMAINS[d]} values do not fill a grid of "
+                                 f"{' × '.join(axis.name for axis in axes)}; pick one, or pick each axis in a "
+                                 "variable of its own")
+            subsets = dict(zip((axis.axis_id for axis in axes), used))
+            kept = tuple(_subset_axis(a, subsets[a.axis_id]) if a.axis_id in subsets else a for a in domain.axes)
+            domains[d] = DomainSpec(tuple(a.size for a in kept), kept)
+            take = (tuple((position + 2, subset, False) for position, subset in zip(positions, used)), False)
     return _schema(domains, schema.value_schema.dtype, _unit(schema), schema.value_schema.name), take
 
 
 def _take(array, take):
-    axis, indexes, drop, expand = take
-    result = take_indices(array, indexes, axis=axis, drop=drop)
-    return result[..., None] if expand else result
+    """Storage indexed as a plan said: one step per physical axis, the
+    highest axis first so a dropped axis moves none still to come."""
+    steps, expand = take
+    for axis, indexes, drop in sorted(steps, key=lambda step: -step[0]):
+        array = take_indices(array, indexes, axis=axis, drop=drop)
+    return array[..., None] if expand else array
 
 
 def _alignment(target, other):
@@ -357,7 +482,10 @@ def _operator(op, left, right, texts):
             if not boolean:
                 raise TypeError(f"{label} needs booleans; {text} is a number")
     elif any(booleans):
-        if not all(booleans) or kind == "arithmetic":
+        if kind == "arithmetic":
+            raise TypeError(f"{label} needs numbers; {texts[booleans.index(True)]} is a boolean; count booleans "
+                            "with a statistic, or compare them with = or ≠")
+        if not all(booleans):
             raise TypeError(_BOOLEANS_MIX)
         if op not in ("==", "!="):
             raise TypeError("booleans compare only with = and ≠")
@@ -442,34 +570,71 @@ def _masked(value, mask, negate, texts):
     return Operand(schema, value.values, value.valid & keep)
 
 
-def _pick(item, term, evaluating):
-    """``item`` at the term's labels of its axis ``at``: one label removes
-    the axis, several keep it restricted to them, in axis order."""
+def changing_axes(schema: DatasetSchema, event: DatasetSchema | None) -> dict:
+    """The Repeat/Point axes of ``schema`` -- what typing reads -- whose
+    labels change from one publication to the next, each with the labels
+    the latest publication ``event`` carries.
+
+    Live, a publication carries its own rows of those two domains: a finite
+    run's typing schema is its whole geometry, and an axis the latest event
+    carries otherwise is one each event carries its own part of (shots,
+    scan points); a monitor's typing schema is its latest event, whose
+    shots (Repeat) are that publication's alone.  A pick on such an axis
+    would name what most publications lack, so typing refuses it.
+    """
+
+    if event is None:
+        return {}
+    whole = schema != event
+    changing = {}
+    for d in (0, 1):
+        carried = {axis.axis_id: axis for axis in _domains(event)[d].axes}
+        for axis in _primary(_domains(schema)[d]):
+            other = carried.get(axis.axis_id)
+            if other is None or (not whole and d == 0) or (
+                    other != axis and _axis_labels(other)[0] != _axis_labels(axis)[0]):
+                changing[axis.axis_id] = () if other is None else _axis_labels(other)[0]
+    return changing
+
+
+def _pick(item, term, evaluating, changing):
+    """``item`` at the term's labels of its axis ``at`` -- or rows of its
+    domain ``at`` -- one removing the axis (the domain's axes), several
+    keeping it restricted to them, in axis (row) order."""
     schema = _schema_of(item)
-    what = term["of"]
-    d, axis = _axis(schema, term["at"], what, "pick")
-    known = axis.labels()
-    positions = {label: index for index, label in enumerate(known)}
-    if len(positions) != len(known):
-        raise ValueError(f"{axis.name} labels repeat; it cannot be picked by label")
-    labels = term["labels"]
+    what, at, labels = term["of"], term["at"], term["labels"]
+    d, axes = _pick_target(schema, at, what)
+    moving = next((axis for axis in axes if axis.axis_id in changing), None) if not evaluating else None
+    if moving is not None:
+        carried = changing[moving.axis_id]
+        raise ValueError(f"{moving.name} changes with each publication"
+                         + (f" (the latest carries {_listed(carried)})" if carried else "")
+                         + f"; reduce over {moving.name} with a statistic, or plot it in a panel")
+    domain_pick = at in DOMAINS
+    known, positions = _domain_rows(_domains(schema)[d], d < 2) if domain_pick else _axis_labels(axes[0])
+    word = "value" if domain_pick else "label"
+    if positions is None:
+        raise ValueError(f"{at} {word}s repeat; it cannot be picked by {word}")
     twice = next((label for index, label in enumerate(labels) if label in labels[:index]), None)
     if twice is not None:
-        raise ValueError(f"{axis.name} {twice!r} is chosen twice")
+        raise ValueError(f"{at} {twice!r} is chosen twice")
     missing = next((label for label in labels if label not in positions), None)
     if missing is not None:
         if evaluating and d < 2:
             # Typing read the whole run's geometry; this one event of it
             # does not carry every scan point or shot.
-            raise ValueError(f"this publication carries no {axis.name} {missing!r}; "
-                             f"{axis.name} labels here: {_listed(known)}")
-        raise ValueError(f"{what} has no {axis.name} {missing!r}; {axis.name} labels: {_listed(known)}")
+            raise ValueError(f"this publication carries no {at} {missing!r}; "
+                             f"{at} {word}s here: {_listed(known)}")
+        raise ValueError(f"{what} has no {at} {missing!r}; {at} {word}s: {_listed(known)}")
+    chosen = tuple(sorted(positions[label] for label in labels))
     try:
-        picked, take = _isel_plan(schema, d, axis, tuple(sorted(positions[label] for label in labels)),
-                                  len(labels) == 1)
+        if domain_pick:
+            picked, take = _domain_plan(schema, d, axes, chosen, len(labels) == 1)
+        else:
+            picked, take = _isel_plan(schema, d, axes[0], chosen, len(labels) == 1)
     except EmptySelection:
         where = "this publication carries" if evaluating else f"{what} stores"
-        raise ValueError(f"{where} no row at {axis.name} {labels[0]!r}") from None
+        raise ValueError(f"{where} no row at {at} {labels[0]!r}") from None
     if not isinstance(item, Operand):
         return picked
     return Operand(picked, _take(item.values, take), _take(item.valid, take))
@@ -674,6 +839,7 @@ def _number_text(number: float) -> str:
 def term_text(term: Mapping[str, object]) -> str:
     """A term as notes and messages write it: ``counts[frame 1]``,
     ``counts[frame 1, 2]``, ``Site 1, 2, 3, 7, … (6)`` past four labels,
+    a domain's rows as they read (``counts[detuning 2 · power 1]``),
     ``30`` or ``true``."""
 
     if term["number"] is not None:
@@ -684,7 +850,7 @@ def term_text(term: Mapping[str, object]) -> str:
         return str(term["of"])
     labels = tuple(term["labels"])
     shown = ", ".join(labels) if len(labels) <= 4 else f"{', '.join(labels[:4])}, … ({len(labels)})"
-    return f"{term['of']}[{term['at']} {shown}]"
+    return f"{term['of']}[{shown}]" if term["at"] in DOMAINS else f"{term['of']}[{term['at']} {shown}]"
 
 
 def _tree(terms):
@@ -750,9 +916,11 @@ def where_notes(terms) -> tuple[str, ...]:
     return tuple(notes)
 
 
-def _formula_problem(row, closing) -> DeriveError | None:
+def _formula_problem(row, closing=None) -> DeriveError | None:
     """The first problem of a variable's formula and statistic that needs no
-    data, or None.  ``closing`` maps a term index to the cycle it closes."""
+    data, or None.  ``closing`` maps a term index to the cycle it closes;
+    None leaves what the variable reads unchecked -- a name it reads may be
+    an input's, which only the source can say."""
     name, terms = row["name"], row["terms"]
     if not terms:
         return DeriveError(name, "term 1", "choose what it reads")
@@ -774,9 +942,9 @@ def _formula_problem(row, closing) -> DeriveError | None:
             problem = f"choose {term['at']} values"
         elif term["labels"] and not term["at"]:
             problem = "choose the axis of these labels"
-        elif term["of"] == name:
+        elif closing is not None and term["of"] == name:
             problem = f"{name} reads itself"
-        elif k in closing:
+        elif closing is not None and k in closing:
             problem = closing[k]
         else:
             continue
@@ -796,19 +964,23 @@ def _formula_problem(row, closing) -> DeriveError | None:
     return None
 
 
-def _value(row, read, evaluating, trace=None):
+def _value(row, read, evaluating, trace=None, changing=None):
     """One variable: its terms folded through the precedence tree, then its
     statistic.  ``read(name)`` gives a member's or variable's value.  A
     failure names the term of the operand or operator it came from, or the
-    statistic.  ``trace``, while typing, receives what the editor shows:
-    each term's operand and left side, the unit a number there takes, and
-    the value the statistic reduces."""
+    statistic; an operator's, where precedence groups the formula otherwise
+    than reading it left to right, also says how the formula reads.
+    ``trace``, while typing, receives what the editor shows: each term's
+    operand and left side, the unit a number there takes, and the value the
+    statistic reduces.  ``changing`` (typing) holds the axes no pick may
+    name (:func:`changing_axes`)."""
     name, terms = row["name"], row["terms"]
+    tree = _tree(terms)
 
     def stage_error(k, error):
         return DeriveError(name, f"term {k + 1}", str(error))
 
-    def fold(node):
+    def fold(node, grouped=False):
         if isinstance(node, int):
             term = terms[node]
             if term["number"] is not None:
@@ -819,11 +991,11 @@ def _value(row, read, evaluating, trace=None):
                 value = read(term["of"])
                 if trace is not None:
                     trace["terms"][node]["operand"] = value
-                return _pick(value, term, evaluating) if term["at"] else value
+                return _pick(value, term, evaluating, changing or {}) if term["at"] else value
             except (ValueError, TypeError) as error:
                 raise stage_error(node, error) from None
         k, op, left_node, right_node = node
-        left, right = fold(left_node), fold(right_node)
+        left, right = fold(left_node), fold(right_node, True)
         if trace is not None:
             trace["terms"][k]["left"] = left if isinstance(left, DatasetSchema) else None
             kind = OPERATORS[op][0]
@@ -835,9 +1007,14 @@ def _value(row, read, evaluating, trace=None):
         try:
             return _operator(op, left, right, (_text(left_node, terms), _text(right_node, terms)))
         except (ValueError, TypeError) as error:
+            # An operator a looser one holds on its right, or one holding a
+            # tighter one on its own right, joins other terms than the lines
+            # above it suggest: say how the formula reads.
+            if grouped or isinstance(right_node, tuple):
+                raise stage_error(k, f"{error}; this formula reads {_text(tree, terms)}") from None
             raise stage_error(k, error) from None
 
-    value = fold(_tree(terms))
+    value = fold(tree)
     if trace is not None:
         trace["reducible"] = _schema_of(value)
     if row["statistic"]:
@@ -857,10 +1034,8 @@ def _name_problems(rows, members=()) -> dict[int, DeriveError]:
         name = row["name"]
         if not name:
             detail = "choose a name"
-        elif not name.isidentifier():
+        elif not re.fullmatch(_NAME, name):
             detail = "a name uses letters, digits and _, and does not start with a digit"
-        elif keyword.iskeyword(name):
-            detail = f"{name} is a Python word; choose another"
         elif name in seen:
             detail = f"another variable is already named {name}"
         elif name in members:
@@ -878,15 +1053,17 @@ def _structure(rows, members=()):
 
     ``(edges, order, closing, live)``: for each variable the (term, variable)
     of every variable it reads (a name reads the first variable so named,
-    never a member's namesake); the dependency order, by depth-first search
-    in card order; for each variable the cycle each term of it closes; and
-    the LIVE set -- the published variables and everything they read.
+    never a member's namesake; an empty name is read by nothing); the
+    dependency order, by depth-first search in card order; for each
+    variable the cycle each term of it closes; and the LIVE set -- the
+    published variables and everything they read.
     """
     index = {}
     for position, row in enumerate(rows):
-        if row["name"] not in members:
+        if row["name"] and row["name"] not in members:
             index.setdefault(row["name"], position)
-    edges = [tuple((k, index[term["of"]]) for k, term in enumerate(row["terms"]) if term["of"] in index)
+    edges = [tuple((k, index[term["of"]]) for k, term in enumerate(row["terms"])
+                   if term["of"] and term["of"] in index)
              for row in rows]
     state, stack, order = [0] * len(rows), [], []
     closing = [{} for _ in rows]
@@ -925,41 +1102,52 @@ def _unknown(name, members, rows) -> str:
 
 
 def checked_variables(rows: Sequence[Mapping[str, object]]) -> tuple[Mapping[str, object], ...]:
-    """The complete rows as read without data, or the first BLOCKING problem.
+    """The complete rows as read without data or the source, or the first
+    BLOCKING problem.
 
     Names are checked on every variable; at least one variable must be
     published; formulas and statistics are checked on the LIVE variables
-    only, so a parked helper's problems never block Start.
+    only, so a parked helper's problems never block Start.  What a variable
+    reads -- an input, another variable, itself, a cycle -- is not checked
+    here: which names are inputs is the source's to say, so typing,
+    admission and the build check it (:func:`typed_variables`,
+    :func:`input_members`), and a variable named like an input is never
+    mistaken for one that reads itself.
     """
     rows = tuple(rows)
     for problem in _name_problems(rows).values():
         raise problem
     if not any(row["publish"] for row in rows):
         raise ValueError(NO_PUBLISHED)
-    _edges, _order, closing, live = _structure(rows)
+    _edges, _order, _closing, live = _structure(rows)
     for position, row in enumerate(rows):
         if position in live:
-            problem = _formula_problem(row, closing[position])
+            problem = _formula_problem(row)
             if problem is not None:
                 raise problem
     return rows
 
 
 def published(rows: Sequence[Mapping[str, object]]) -> tuple[str, ...]:
-    """The names of the published variables in card order, or the first name problem."""
+    """The names of the published variables whose names read, in card
+    order: a variable being renamed withdraws its own signal, never its
+    siblings'."""
     rows = tuple(rows)
-    for problem in _name_problems(rows).values():
-        raise problem
-    return tuple(row["name"] for row in rows if row["publish"])
+    problems = _name_problems(rows)
+    return tuple(row["name"] for position, row in enumerate(rows) if row["publish"] and position not in problems)
 
 
 def typed_variables(rows: Sequence[Mapping[str, object]],
-                    inputs: Mapping[str, DatasetSchema] | None) -> tuple[dict[str, object], ...]:
+                    inputs: Mapping[str, DatasetSchema | None],
+                    changing: Mapping[object, tuple[str, ...]] | None = None) -> tuple[dict[str, object], ...]:
     """Every variable's answer before Start, by the evaluation's own plans.
 
     ``inputs`` maps member names to the schemas the evaluation reads
-    (``value.canonical_schema or value.snapshot.block.schema``), or is None
-    before the source publishes.  One dict per variable, in card order:
+    (``value.canonical_schema or value.snapshot.block.schema``), each None
+    before the source publishes: what each variable reads is checked
+    against the names alone, and values are typed once every member has a
+    schema.  ``changing`` holds the axes no pick may name
+    (:func:`changing_axes`).  One dict per variable, in card order:
     ``schema`` and ``error`` (a :class:`DeriveError`), ``live``,
     ``waits_for`` (the variable with a problem it reads), ``reads`` and
     ``read_by`` (variable names), ``grouping`` (``reads …`` when precedence
@@ -970,7 +1158,7 @@ def typed_variables(rows: Sequence[Mapping[str, object]],
     first problem; a variable reading one with a problem waits.
     """
     rows = tuple(rows)
-    members = () if inputs is None else tuple(inputs)
+    members = tuple(inputs)
     edges, order, closing, live = _structure(rows, members)
     names = _name_problems(rows, members)
     answers = []
@@ -985,13 +1173,14 @@ def typed_variables(rows: Sequence[Mapping[str, object]],
             "reducible": None,
             "terms": tuple({"operand": None, "left": None, "number_unit": None} for _term in row["terms"]),
         })
-    if inputs is None:
+    if not members or any(schema is None for schema in inputs.values()):
         return tuple(answers)
     schemas = {name: _normal(schema) for name, schema in inputs.items()}
     typed = {}
     first = {}
     for position, row in enumerate(rows):
-        first.setdefault(row["name"], position)
+        if row["name"]:
+            first.setdefault(row["name"], position)
 
     def read(name):
         if name in schemas:
@@ -1016,9 +1205,9 @@ def typed_variables(rows: Sequence[Mapping[str, object]],
             continue
         try:
             if choosing:
-                _value({**rows[position], "statistic": "", "over": ()}, read, False, answer)
+                _value({**rows[position], "statistic": "", "over": ()}, read, False, answer, changing)
             else:
-                answer["schema"] = typed[position] = _value(rows[position], read, False, answer)
+                answer["schema"] = typed[position] = _value(rows[position], read, False, answer, changing)
         except DeriveError as error:
             answer["error"] = error
     return tuple(answers)
@@ -1027,16 +1216,20 @@ def typed_variables(rows: Sequence[Mapping[str, object]],
 def input_members(rows: Sequence[Mapping[str, object]], available: Sequence[str]) -> tuple[str, ...]:
     """The members the LIVE variables read, in bundle order.
 
-    Refuses, by variable and stage, a variable named like a member and a
-    name that is neither a member nor a variable.
+    Refuses, by variable and stage, a variable named like a member, and in
+    a LIVE variable a name that is neither a member nor a variable, a
+    variable that reads itself and a cycle.
     """
     rows, available = tuple(rows), tuple(available)
     for problem in _name_problems(rows, available).values():
         raise problem
-    _edges, _order, _closing, live = _structure(rows, available)
+    _edges, _order, closing, live = _structure(rows, available)
     variables = {row["name"] for row in rows}
     requested = set()
     for position in sorted(live):
+        problem = _formula_problem(rows[position], closing[position])
+        if problem is not None:
+            raise problem
         for k, term in enumerate(rows[position]["terms"]):
             name = term["of"]
             if not name or name in variables:
@@ -1067,7 +1260,7 @@ def evaluate(rows: Sequence[Mapping[str, object]], members: Mapping[str, Operand
     return results
 
 
-_ERROR_TEXT = re.compile(r"(?:^|: )([A-Za-z_][A-Za-z0-9_]*) · (name|term [1-9][0-9]*|statistic): (.*)\Z", re.S)
+_ERROR_TEXT = re.compile(rf"(?:^|: )({_NAME}) · (name|term [1-9][0-9]*|statistic): (.*)\Z", re.S)
 
 
 def error_stage(text: str) -> tuple[str, str, str] | None:
@@ -1077,7 +1270,8 @@ def error_stage(text: str) -> tuple[str, str, str] | None:
 
 
 __all__ = [
-    "CATEGORIES", "DeriveError", "NO_PUBLISHED", "OPERATORS", "Operand", "STATISTICS", "TERM_COLUMNS",
-    "VARIABLE_COLUMNS", "axes_text", "checked_variables", "compact_variable", "describe_schema",
-    "error_stage", "evaluate", "input_members", "published", "term_text", "typed_variables", "where_notes",
+    "CATEGORIES", "DOMAINS", "DeriveError", "NO_PUBLISHED", "OPERATORS", "Operand", "STATISTICS",
+    "TERM_COLUMNS", "TERM_DEFAULTS", "VARIABLE_COLUMNS", "axes_text", "axis_groups", "changing_axes",
+    "checked_variables", "compact_variable", "describe_schema", "error_stage", "evaluate", "input_members",
+    "pick_values", "published", "term_text", "typed_variables", "where_notes",
 ]

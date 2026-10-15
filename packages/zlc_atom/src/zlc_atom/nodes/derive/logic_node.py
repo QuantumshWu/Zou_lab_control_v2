@@ -12,14 +12,15 @@ from zlc_atom.nodes._framework.descriptor import (
 )
 from zlc_runtime import DatasetOutputDeclaration, split_signal_key
 
-from .expression import VARIABLE_COLUMNS, checked_variables, input_members, typed_variables
+from .expression import VARIABLE_COLUMNS, changing_axes, checked_variables, input_members, typed_variables
 from .processor import DeriveProcessor, declared_outputs
 
 
 def _readable(values: Mapping[str, object]) -> None:
-    """A complete draft is one whose variables read without data: every
-    name, at least one published variable, and the formula and statistic
-    of every variable a published one reads.
+    """A complete draft is one whose variables read without data or the
+    source: every name, at least one published variable, and the formula
+    and statistic of every variable a published one reads.  What each one
+    reads is checked where the inputs' names are known: admission, build.
 
     Refused here, by what was written, while the draft is being edited --
     not at Start, where the same words would arrive as a failure to run.
@@ -53,10 +54,11 @@ def _draft_outputs(
 ) -> tuple[DatasetOutputDeclaration, ...]:
     """What one draft publishes: its published variables, in card order.
 
-    Declared whenever every variable's name reads -- a formula being edited
-    does not withdraw the signal a panel shows -- and nothing while a name
-    does not, or the rows do not project; the schema's validator says why,
-    to the editor, in the draft's own words.
+    Each one whose name reads is declared -- a formula being edited does
+    not withdraw the signal a panel shows, and a variable being renamed
+    withdraws only its own -- and nothing while the rows do not project;
+    the schema's validator says why, to the editor, in the draft's own
+    words.
     """
 
     del devices
@@ -72,20 +74,25 @@ def _admit_source(values: Mapping[str, object], publication: object) -> tuple[st
 
     Every variable typed against the schemas an evaluation reads -- the
     run's whole geometry for a finite source, the latest event for a
-    monitor -- by the evaluation's own rules: the typing the editor shows
-    under each card.  Each problem of a LIVE variable, and any variable's
+    monitor -- by the evaluation's own rules, the typing the editor shows
+    under each card: what each one reads, its picks (never on an axis each
+    publication carries its own part of, :func:`changing_axes`), operators
+    and statistic.  Each problem of a LIVE variable, and any variable's
     name problem, in its ``<variable> · <stage>: …`` words.  Asked with the
     rest of the draft's admission, so the Edit page says it as a draft and
     Start waits; a parked helper's problems never hold Start.
     """
 
-    inputs = {
-        parts[1]: value.canonical_schema or value.snapshot.block.schema
-        for key, value in publication.signals.items()
-        if (parts := split_signal_key(key)) is not None
-    }
+    inputs, changing = {}, {}
+    for key, value in publication.signals.items():
+        parts = split_signal_key(key)
+        if parts is None:
+            continue
+        event = value.snapshot.block.schema
+        inputs[parts[1]] = schema = value.canonical_schema or event
+        changing.update(changing_axes(schema, event))
     return tuple(
-        str(answer["error"]) for answer in typed_variables(values["variables"], inputs)
+        str(answer["error"]) for answer in typed_variables(values["variables"], inputs, changing)
         if answer["error"] is not None and (answer["live"] or answer["error"].stage == "name")
     )
 
@@ -138,16 +145,20 @@ LOGIC_NODE = LogicNodeDescriptor(
         "publish (default true; false keeps a helper internal: other variables read it, nothing "
         "publishes it); terms, the formula, one row per line; optional statistic + over. A term names "
         "of (an input member or any other variable, no cycles), or gives number, or boolean "
-        "\"true\"/\"false\" (only after == or !=). at (an axis name of of, any domain) with labels (that "
-        "axis' labels from the catalog) picks coordinates: one label drops the axis, several keep them. "
-        "Every term after the first has op: arithmetic + - * /, comparison == != > < >= <=, logic and, "
-        "or, \"and not\", mask where, \"where not\". Precedence: * / then + - then one comparison then "
-        "and/\"and not\" then or then where; left to right within a level; no parentheses (put a group "
-        "in an internal variable). statistic sum mean count min max std any all reduces the over axis "
-        "names (any domains). Booleans: sum is the number true, mean the fraction true, count the "
-        "valid samples; booleans never mix with numbers. An operand whose axes are a subset of the "
-        "other's repeats along the rest. Only published variables become signals; an unpublished "
-        "variable no published one reads is not evaluated and never blocks Start. Example: "
+        "\"true\"/\"false\" (only after == or !=). at with labels (a list) picks coordinates of of: at is "
+        "an axis name (any domain) and labels are that axis' labels from the catalog, or at is a domain "
+        "with two or more axes (Repeat, Point, Cell) and labels are its rows written \"detuning 2 · power "
+        "1\"; one label drops the axis (the domain's axes), several keep those coordinates. A pick never "
+        "names an axis each publication carries its own part of (a finite run's shots and scan points, a "
+        "monitor's shots): reduce those, or plot them. Every term after the first has op: arithmetic + - "
+        "* /, comparison == != > < >= <=, logic and, or, \"and not\", mask where, \"where not\". "
+        "Precedence: * / then + - then one comparison then and/\"and not\" then or then where; left to "
+        "right within a level; no parentheses (put a group in an internal variable). statistic sum mean "
+        "count min max std any all reduces the over axis names (a list, any domains). Booleans: sum is "
+        "the number true, mean the fraction true, count the valid samples; booleans never mix with "
+        "numbers. An operand whose axes are a subset of the other's repeats along the rest. Only "
+        "published variables become signals; an unpublished variable no published one reads is not "
+        "evaluated and never blocks Start. Example: "
         "[{\"name\":\"same\",\"publish\":false,\"terms\":[{\"of\":\"occupied\",\"at\":\"frame\","
         "\"labels\":[\"0\"]},{\"op\":\"==\",\"of\":\"occupied\",\"at\":\"frame\",\"labels\":[\"2\"]}]},"
         "{\"name\":\"kept\",\"terms\":[{\"of\":\"counts\"},{\"op\":\"where\",\"of\":\"same\"}]}]. "

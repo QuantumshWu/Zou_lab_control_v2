@@ -11,7 +11,7 @@ from .expression import Operand, compact_variable, evaluate, published
 
 
 def declared_outputs(rows: Sequence[Mapping[str, object]]) -> tuple[DatasetOutputDeclaration, ...]:
-    """One signal per published variable, in card order; raises a name problem."""
+    """One signal per published variable whose name reads, in card order."""
 
     return tuple(DatasetOutputDeclaration(name, f"derive.{name}", index_by_source=True)
                  for name in published(rows))

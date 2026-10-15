@@ -203,6 +203,14 @@ class AxisSpec:
         compare=False,
         default=None,
     )
+    #: ``labels()``, written out once: a long sampled axis is asked again
+    #: by every pick, catalog and tooltip that names its coordinates.
+    _labels: tuple[str, ...] | None = field(
+        init=False,
+        repr=False,
+        compare=False,
+        default=None,
+    )
 
     def __post_init__(self) -> None:
         if not isinstance(self.axis_id, AxisId):
@@ -279,6 +287,7 @@ class AxisSpec:
             object.__setattr__(self, "coordinate_labels", labels)
         object.__setattr__(self, "_coordinate_positions", None)
         object.__setattr__(self, "_hash", None)
+        object.__setattr__(self, "_labels", None)
 
     def __eq__(self, other: object) -> bool:
         if self is other:
@@ -359,6 +368,8 @@ class AxisSpec:
 
         if self.coordinate_labels is not None:
             return self.coordinate_labels
+        if self._labels is not None:
+            return self._labels
 
         def written(value: Any) -> str:
             if isinstance(value, str):
@@ -368,7 +379,9 @@ class AxisSpec:
             text = str(value) if isinstance(value, np.floating) else repr(value)
             return text[:-2] if text.endswith(".0") else text
 
-        return tuple(written(value) for value in self.coordinate_values())
+        labels = tuple(written(value) for value in self.coordinate_values())
+        object.__setattr__(self, "_labels", labels)
+        return labels
 
     def coordinate_values(self) -> np.ndarray | tuple[CoordinateScalar, ...]:
         """Read actual coordinates; only a factored time axis needs expansion."""

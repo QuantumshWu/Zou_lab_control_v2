@@ -16,8 +16,8 @@ from zlc_runtime import MonitorCoverage, SignalValue
 from zlc_atom.authoring import AuthoringSchema
 from zlc_atom.nodes.derive import DERIVE_SCHEMA, LOGIC_NODE, DeriveError, DeriveProcessor, Operand
 from zlc_atom.nodes.derive.expression import (
-    NO_PUBLISHED, checked_variables, compact_variable, describe_schema, error_stage, evaluate,
-    input_members, typed_variables,
+    NO_PUBLISHED, changing_axes, checked_variables, compact_variable, describe_schema, error_stage, evaluate,
+    input_members, pick_values, term_text, typed_variables,
 )
 
 COUNTS = "@logic/occupancy/counts"
@@ -258,6 +258,38 @@ def test_a_pick_takes_labels_of_any_axis_in_any_domain() -> None:
     np.testing.assert_array_equal(results["two_b"].values, values[:, [0, 2, 1, 4], :])
     np.testing.assert_array_equal(results["far"].values, values[:, [1], :])
 
+    # A domain with two or more axes is picked by its rows, each written as
+    # its axes' names and labels: one row drops the domain's axes, several
+    # keep exactly those rows (in row order), axes cut to what they use.
+    assert pick_values(scan.schema, "Point") == ("a 10 · b 1", "a 10 · b 3", "a 20 · b 1", "a 20 · b 2", "a 20 · b 3")
+    rows = _rows(
+        {"name": "row", "terms": [{"of": "scan", "at": "Point", "labels": ["a 20 · b 2"]}]},
+        {"name": "rows", "terms": [{"of": "scan", "at": "Point", "labels": ["a 20 · b 3", "a 10 · b 3"]}]},
+    )
+    results = _evaluated(rows, {"scan": scan})
+    assert results["row"].schema.point_domain.axes == () and results["row"].shape == (2, 1, 2)
+    np.testing.assert_array_equal(results["row"].values, values[:, [3], :])
+    points = results["rows"].schema.point_domain
+    assert [axis.labels() for axis in points.axes] == [("10", "20"), ("3",), ("0.4",)]
+    np.testing.assert_array_equal(results["rows"].values, values[:, [1, 4], :])
+    assert term_text(rows[1]["terms"][0]) == "scan[a 20 · b 3, a 10 · b 3]"
+    # A dense Cell domain keeps a grid: one cell, or rows that fill one.
+    y = AxisSpec(AxisId("camera.y"), "y", SITE, 3, (0, 1, 2))
+    x = AxisSpec(AxisId("camera.x"), "x", SITE, 2, (0, 1))
+    image = Operand(replace(base, cell_domain=DomainSpec((3, 2), (y, x)), value_schema=ValueSchema(
+        ValidityContract.components(y.axis_id, x.axis_id), np.dtype(float), "count")),
+        np.arange(60.0).reshape(2, 5, 3, 2))
+    rows = _rows(
+        {"name": "pixel", "terms": [{"of": "image", "at": "Cell", "labels": ["y 1 · x 1"]}]},
+        {"name": "corner", "terms": [{"of": "image", "at": "Cell", "labels": [
+            "y 2 · x 1", "y 1 · x 0", "y 1 · x 1", "y 2 · x 0"]}]},
+    )
+    results = _evaluated(rows, {"image": image})
+    assert results["pixel"].schema.cell_domain == SCALAR_DOMAIN
+    np.testing.assert_array_equal(results["pixel"].values[..., 0], image.values[:, :, 1, 1])
+    assert describe_schema(results["corner"].schema) == "repeat 2 × frame 5 × y 2 × x 2 · float64 · unit count"
+    np.testing.assert_array_equal(results["corner"].values, image.values[:, :, 1:3, :])
+
     # Pick problems, each at its term, typed as evaluated.
     members = _occupancy()
     other = AxisSpec(AxisId("other.frame"), "frame", SITE, 6)
@@ -265,8 +297,10 @@ def test_a_pick_takes_labels_of_any_axis_in_any_domain() -> None:
         ValidityContract.components(other.axis_id), np.dtype(np.float32), "count"))
     labelled = replace(members["counts"].schema, point_domain=DomainSpec((3,), (replace(
         members["counts"].schema.point_domain.axes[0], coordinate_labels=("first", "rest", "rest")),), ((0, 1, 2),)))
+    framed = replace(members["counts"].schema, point_domain=DomainSpec((3,), (replace(
+        members["counts"].schema.point_domain.axes[0], name="Point"),), ((0, 1, 2),)))
     members.update(twin=Operand(twin, members["counts"].values), labelled=Operand(labelled, members["counts"].values),
-                   scan=scan)
+                   scan=scan, image=image, framed=Operand(framed, members["counts"].values))
     for term, detail in (
         ({"of": "occupied", "at": "frmae", "labels": ["0"]}, "occupied has no axis 'frmae'; its axes: repeat, frame, Site"),
         ({"of": "occupied", "at": "Site", "labels": ["7"]}, "occupied has no Site '7'; Site labels: 1, 2, 3, 4, 5, 6"),
@@ -274,6 +308,11 @@ def test_a_pick_takes_labels_of_any_axis_in_any_domain() -> None:
         ({"of": "twin", "at": "frame", "labels": ["0"]}, "two axes of twin are named frame; it cannot be picked by name"),
         ({"of": "labelled", "at": "frame", "labels": ["rest"]}, "frame labels repeat; it cannot be picked by label"),
         ({"of": "scan", "at": "time", "labels": ["0.1"]}, "time is another coordinate of b; pick b"),
+        ({"of": "occupied", "at": "Cell", "labels": ["Site 1"]}, "Cell has one axis, Site; pick Site"),
+        ({"of": "image", "at": "Cell", "labels": ["y 0 · x 0", "y 1 · x 1"]},
+         "these Cell values do not fill a grid of y × x; pick one, or pick each axis in a variable of its own"),
+        ({"of": "framed", "at": "Point", "labels": ["1"]},
+         "Point names both a domain and an axis of framed; it cannot be picked by name"),
     ):
         rows = _rows({"name": "x", "terms": [term]})
         assert _problem(rows, members) == ("x", "term 1", detail)
@@ -281,6 +320,9 @@ def test_a_pick_takes_labels_of_any_axis_in_any_domain() -> None:
             evaluate(rows, members)
     rows = _rows({"name": "x", "terms": [{"of": "occupied", "at": "frame", "labels": ["3"]}]})
     assert _problem(rows, members) == ("x", "term 1", "occupied has no frame '3'; frame labels: 0, 1, 2")
+    rows = _rows({"name": "x", "terms": [{"of": "scan", "at": "Point", "labels": ["a 10 · b 2"]}]})
+    assert _problem(rows, members) == ("x", "term 1", "scan has no Point 'a 10 · b 2'; Point values: a 10 · b 1, "
+                                                      "a 10 · b 3, a 20 · b 1, a 20 · b 2, a 20 · b 3")
     with pytest.raises(DeriveError, match="^x · term 1: choose frame values"):
         checked_variables(_rows({"name": "x", "terms": [{"of": "occupied", "at": "frame"}]}))
 
@@ -380,6 +422,10 @@ def test_problems_are_said_by_variable_and_stage_without_and_with_data() -> None
         return _problem(_rows(*variables), members)
 
     counts, occupied = {"of": "counts"}, {"of": "occupied"}
+
+    def at(name, label):
+        return {"of": name, "at": "frame", "labels": [label]}
+
     # Shape, read without data.
     assert no_data({"name": "x", "terms": [{"op": "+", **counts}]}) == "x · term 1: the first term takes no operator"
     assert no_data({"name": "x", "terms": [counts, counts]}) == "x · term 2: choose an operator"
@@ -397,17 +443,47 @@ def test_problems_are_said_by_variable_and_stage_without_and_with_data() -> None
     assert no_data({"name": "x", "terms": [counts], "statistic": "sum"}) == (
         "x · statistic: choose the axes it reduces over")
     assert no_data({"name": "x", "terms": [counts], "over": ["Site"]}) == "x · statistic: choose the statistic"
-    # References: itself, and a cycle at the term that closes it.
-    assert no_data({"name": "x", "terms": [counts, {"op": "+", "of": "x"}]}) == "x · term 2: x reads itself"
-    assert no_data({"name": "kept", "terms": [counts, {"op": "where", "of": "same"}]},
-                   {"name": "same", "terms": [occupied, {"op": "==", "of": "kept"}]}) == (
-        "same · term 2: same reads kept, which reads same")
-    # Names, on every variable; at least one is published.
+    # Names, on every variable, in one rule (no Python runs: "in" is a
+    # name like any other); at least one variable is published.
     assert no_data({"name": "x", "terms": [counts]}, {"name": "x", "publish": False, "terms": [counts]}) == (
         "x · name: another variable is already named x")
     assert no_data({"name": "2x", "terms": [counts]}) == (
         "2x · name: a name uses letters, digits and _, and does not start with a digit")
+    assert no_data({"name": "数", "terms": [counts]}) == (
+        "数 · name: a name uses letters, digits and _, and does not start with a digit")
+    assert no_data({"name": "", "terms": [counts]}) == "variable 1 · name: choose a name"
+    assert DERIVE_SCHEMA.project_values({"variables": [{"name": "in", "terms": [counts]}]})["variables"][0]["name"] == "in"
     assert no_data({"name": "x", "publish": False, "terms": [counts]}) == NO_PUBLISHED
+    # What a variable reads is the source's to say: a variable named like
+    # an input reads that input, and only the inputs' names tell a
+    # variable that reads itself, or a cycle, from it.  So neither is
+    # refused without them; with them -- typing, admission, the build --
+    # each is said once, by what it is.
+    reads_itself = ({"name": "x", "terms": [counts, {"op": "+", "of": "x"}]},)
+    cycle = ({"name": "kept", "terms": [counts, {"op": "where", "of": "same"}]},
+             {"name": "same", "terms": [occupied, {"op": "==", "of": "kept"}]})
+    named = ({"name": "counts", "terms": [counts, {"op": "*", "number": 2}]},)
+    false_cycle = ({"name": "occupied", "terms": [{"of": "kept"}, {"op": ">", "number": 1}]},
+                   {"name": "kept", "terms": [counts, {"op": "where", **occupied}]})
+    for variables in (reads_itself, cycle, named, false_cycle):
+        DERIVE_SCHEMA.project_values({"variables": variables})
+    assert typed(*reads_itself) == ("x", "term 2", "x reads itself")
+    assert typed(*cycle) == ("same", "term 2", "same reads kept, which reads same")
+    assert typed(*named) == ("counts", "name", "counts is an input's name; choose another")
+    answers = typed_variables(_rows(*false_cycle), {name: value.schema for name, value in members.items()})
+    assert str(answers[0]["error"]) == "occupied · name: occupied is an input's name; choose another"
+    assert answers[1]["error"] is None and answers[1]["reads"] == ()
+    assert str(typed_variables(_rows(*reads_itself), {"counts": None})[0]["error"]) == "x · term 2: x reads itself"
+    for variables, text in ((reads_itself, "x · term 2: x reads itself"),
+                            (cycle, "same · term 2: same reads kept, which reads same")):
+        with pytest.raises(DeriveError, match=f"^{text}$"):
+            input_members(_rows(*variables), ("counts", "occupied"))
+    # An empty name -- one being retyped -- is read by nothing: a number is
+    # never taken for a reference to it.
+    answers = typed_variables(_rows({"name": "", "terms": [counts]},
+                                    {"name": "brighter", "terms": [counts, {"op": "+", "number": 5}]}),
+                              {name: value.schema for name, value in members.items()})
+    assert (answers[0]["read_by"], answers[1]["waits_for"], answers[1]["error"]) == ((), None, None)
     # Old drafts are refused as unknown fields, wherever they stand.
     assert no_data() == "Variables must have at least one row"
     with pytest.raises(ValueError, match=r"unknown authoring fields: \['outputs'\]"):
@@ -421,9 +497,6 @@ def test_problems_are_said_by_variable_and_stage_without_and_with_data() -> None
             {"of": "counts", "at": "frame", "labels": "1"}]}]})
 
     # Types, axes and units, typed as they would evaluate.
-    def at(name, label):
-        return {"of": name, "at": "frame", "labels": [label]}
-
     assert typed({"name": "x", "terms": [counts, {"op": "+", "of": "smae"}]}) == ("x", "term 2", (
         "no input or variable named 'smae'; inputs: counts, occupied; variables: x"))
     assert typed({"name": "counts", "terms": [occupied]}) == ("counts", "name", "counts is an input's name; choose another")
@@ -433,6 +506,15 @@ def test_problems_are_said_by_variable_and_stage_without_and_with_data() -> None
                                                                                   "booleans compare only with = and ≠")
     assert typed({"name": "x", "terms": [occupied, {"op": "and", **counts}]}) == ("x", "term 2",
                                                                                   "and needs booleans; counts is a number")
+    assert typed({"name": "x", "terms": [at("occupied", "0"), {"op": "+", **at("occupied", "2")}]}) == (
+        "x", "term 2", "+ needs numbers; occupied[frame 0] is a boolean; count booleans with a statistic, or "
+                       "compare them with = or ≠")
+    # Where precedence groups the formula otherwise than its lines read, an
+    # operator's problem says how it reads: where binds last.
+    assert typed({"name": "same", "publish": False, "terms": [at("occupied", "0")]},
+                 {"name": "kept", "terms": [counts, {"op": "where", "of": "same"}, {"op": "+", "number": 1}]}) == (
+        "kept", "term 3", "+ needs numbers; same is a boolean; count booleans with a statistic, or compare them "
+                          "with = or ≠; this formula reads counts where (same + 1)")
     assert typed({"name": "x", "terms": [counts, {"op": "where", **counts}]}) == ("x", "term 2",
                                                                                   "where needs a boolean mask; counts is a number")
     assert typed({"name": "x", "terms": [at("counts", "1"), {"op": "where", **occupied}]}) == ("x", "term 2", (
@@ -454,6 +536,7 @@ def test_problems_are_said_by_variable_and_stage_without_and_with_data() -> None
     assert error_stage("failed: bad · term 2: and needs booleans; counts is a number") == (
         "bad", "term 2", "and needs booleans; counts is a number")
     assert error_stage("failed: x · statistic: any needs booleans") == ("x", "statistic", "any needs booleans")
+    assert error_stage("failed: 数 · term 1: no") is None, "a failure is read back by the names Derive allows"
 
 
 def test_an_unpublished_helper_nothing_published_reads_is_parked_and_never_blocks() -> None:
@@ -493,11 +576,14 @@ def test_an_unpublished_helper_nothing_published_reads_is_parked_and_never_block
         input_members(_rows(dict(total, terms=[{"of": "cuonts"}])), ("counts", "occupied"))
 
 
-def test_the_descriptor_declares_published_variables_before_data_and_absent_picks_fail_the_run() -> None:
+def test_the_descriptor_declares_published_variables_and_refuses_picks_publications_do_not_share() -> None:
     """Declarations come from names alone, in card order, for published
     variables only; a formula being edited keeps them, a name problem
-    withdraws them.  A pick of a scan value this publication does not carry
-    fails the run in the variable's words."""
+    withdraws that variable's alone.  A pick on an axis each publication
+    carries its own part of -- a finite run's shots and scan points, a
+    monitor's shots -- is refused at admission, as typing says it under its
+    line; should one reach a run, the publication that lacks the value
+    fails it in the variable's words."""
 
     def declared(*variables):
         return [(item.name, item.contract_id) for item in LOGIC_NODE.outputs_for({"variables": list(variables)}, {})]
@@ -506,7 +592,8 @@ def test_the_descriptor_declares_published_variables_before_data_and_absent_pick
     assert declared({"name": "b", "terms": [{"of": "helper"}]}, helper, {"name": "a", "terms": [{"of": "x"}]}) == [
         ("b", "derive.b"), ("a", "derive.a")]
     assert declared({"name": "b", "terms": [{"of": "counts"}, {"op": "+"}]}) == [("b", "derive.b")]
-    assert declared({"name": "b", "terms": []}, {"name": "b", "terms": []}) == []
+    assert declared({"name": "b", "terms": []}, {"name": "b", "terms": []}) == [("b", "derive.b")]
+    assert declared({"name": "", "terms": []}, {"name": "a", "terms": []}) == [("a", "derive.a")]
     assert declared({"name": "b", "code": "a.counts"}) == []
     assert LOGIC_NODE.outputs_for({"outputs": [{"name": "b", "value": "counts"}]}, {}) == ()
     assert LOGIC_NODE.input_specs[0].name == "bundle"
@@ -518,10 +605,31 @@ def test_the_descriptor_declares_published_variables_before_data_and_absent_pick
     whole = replace(_schema(1, 1, 2, np.dtype(float), "count"),
                     point_domain=DomainSpec((3,), (detuning,), ((0, 1, 2),)))
     event = replace(whole, point_domain=DomainSpec((1,), (replace(detuning, size=1, coordinates=(2,)),), ((0,),)))
-    rows = _rows({"name": "far", "terms": [{"of": "counts", "at": "detuning", "labels": ["3"]}]})
-    assert typed_variables(rows, {"counts": whole})[0]["error"] is None
+    variables = [{"name": "far", "terms": [{"of": "counts", "at": "detuning", "labels": ["3"]}]},
+                 {"name": "early", "terms": [{"of": "counts", "at": "Site", "labels": ["1"]}]},
+                 {"name": "shot", "terms": [{"of": "counts", "at": "repeat", "labels": ["0"]}]}]
+    rows = _rows(*variables)
+    assert {key.value: labels for key, labels in changing_axes(whole, event).items()} == {"rf.detuning": ("2",)}
+    assert {key.value: labels for key, labels in changing_axes(event, event).items()} == {"camera.repeat": ("0",)}
+    answers = typed_variables(rows, {"counts": whole}, changing_axes(whole, event))
+    assert [str(answer["error"]) for answer in answers] == [
+        "far · term 1: detuning changes with each publication (the latest carries 2); reduce over detuning with "
+        "a statistic, or plot it in a panel", "None", "None"]
+
+    def publication(canonical):
+        snapshot = owned_snapshot_from_arrays(event, np.zeros((1, 1, 2)), 0, validity=np.ones((1, 1, 2), bool))
+        return SimpleNamespace(signals={COUNTS: SignalValue(
+            COUNTS, snapshot, coverage=MonitorCoverage(1, 1),
+            canonical_schema=canonical, cell_origin=None if canonical is None else (0, 0))})
+
+    draft = DERIVE_SCHEMA.project_values({"variables": variables})
+    assert LOGIC_NODE.admit_source(draft, publication(whole)) == (str(answers[0]["error"]),)
+    assert LOGIC_NODE.admit_source(draft, publication(None)) == (
+        "far · term 1: counts has no detuning '3'; detuning labels: 2",
+        "shot · term 1: repeat changes with each publication (the latest carries 0); reduce over repeat with a "
+        "statistic, or plot it in a panel",)
     with pytest.raises(DeriveError) as absent:
-        evaluate(rows, {"counts": Operand(event, np.zeros((1, 1, 2)))})
+        evaluate(rows[:1], {"counts": Operand(event, np.zeros((1, 1, 2)))})
     assert str(absent.value) == "far · term 1: this publication carries no detuning '3'; detuning labels here: 2"
     assert error_stage(f"failed: {absent.value}")[:2] == ("far", "term 1")
 
@@ -552,17 +660,23 @@ def _editor_session(rows=(), bundle=None):
         settle()
         return editor._cards
 
-    def click(widget, pos=None):
-        QtTest.QTest.mouseClick(widget, QtCore.Qt.LeftButton, QtCore.Qt.NoModifier,
+    def click(widget, pos=None, modifier=QtCore.Qt.NoModifier):
+        QtTest.QTest.mouseClick(widget, QtCore.Qt.LeftButton, modifier,
                                 widget.rect().center() if pos is None else pos)
         settle()
 
-    def row_at(combo, row, *, box=False):
+    def row_at(combo, row, *, box=False, modifier=QtCore.Qt.NoModifier):
         """Click row ``row`` of an open list: on its words, or on its box."""
         view = combo.view()
         assert view.window().isVisible(), "the list is open"
         rect = view.visualRect(combo.model().index(row, 0))
-        click(view.viewport(), QtCore.QPoint(rect.left() + 4 if box else rect.center().x(), rect.center().y()))
+        click(view.viewport(), QtCore.QPoint(rect.left() + 4 if box else rect.center().x(), rect.center().y()),
+              modifier)
+
+    def key(widget, which):
+        QtTest.QTest.keyClick(widget, which)
+        settle()
+        settle()
 
     def pick(combo, data):
         click(combo)
@@ -576,17 +690,21 @@ def _editor_session(rows=(), bundle=None):
     editor.show()
     project(rows)
     return SimpleNamespace(app=app, editor=editor, drafts=drafts, settle=settle, project=project, click=click,
-                           row_at=row_at, pick=pick, texts=texts)
+                           row_at=row_at, pick=pick, texts=texts, key=key)
 
 
 def test_the_editor_builds_the_users_example_by_clicks() -> None:
-    """Add variable, a name, an operand, an axis -- its labels list opens at
-    once: a click on a label's box ticks it, on its words picks only it --
-    and Publish off; + Comparison pins the same axis and asks for its label,
-    and + Where masks the next variable with it: the draft is the user's
-    example.  Each operator kind is its own strip, withholding what the
-    typed values cannot take; × removes a line or the variable."""
-    from PyQt5 import QtTest, QtWidgets
+    """Add variable, a name (written when finished), an operand, an axis --
+    its labels list opens at once, and the pick is written once a label is:
+    a click on a label's box ticks it, Shift with it a run, on its words
+    picks only it; Escape leaves the pick as it was, and the axis a line
+    already picks opens its labels again -- and Publish off; + Comparison
+    pins the same axis and asks for its label, and + Where masks the next
+    variable with it: the draft is the user's example.  Renaming a
+    variable renames what reads it.  Each operator kind is its own strip,
+    withholding what the typed values cannot take; "over" ticks axes by
+    their words, a domain by its header; × removes a line or the variable."""
+    from PyQt5 import QtCore, QtTest, QtWidgets
 
     s = _editor_session()
     editor, drafts = s.editor, s.drafts
@@ -600,19 +718,38 @@ def test_the_editor_builds_the_users_example_by_clicks() -> None:
         (same,) = editor._cards
         head = same.head
         assert head["name"].selectedText() == "variable_1", "the name is selected to type over"
+        written = len(drafts)
         QtTest.QTest.keyClicks(head["name"], "same")
+        assert len(drafts) == written, "a name is not written per keystroke"
+        s.key(head["name"], QtCore.Qt.Key_Return)
+        assert drafts[-1][0]["name"] == "same"
         assert s.texts(head["operand"]) == ["Inputs", "    counts", "    occupied", "Constants", "    Number"]
         s.pick(head["operand"], "occupied")
         assert s.texts(head["axis"]) == ["All", "Repeat", "    repeat", "Point", "    frame", "Cell", "    Site"]
+        written, preview = len(drafts), same.preview.text()
         s.pick(head["axis"], "frame")
         labels = head["labels"]
         assert s.texts(labels) == ["0", "1", "2"] and labels.view().window().isVisible(), "its labels list opens"
         assert head["error"].isHidden(), "no problem while its labels are being picked"
+        assert (len(drafts), same.preview.text()) == (written, preview), "nothing changes until a label is picked"
+        s.key(labels.view(), QtCore.Qt.Key_Escape)
+        assert head["axis"].currentText() == "All" and len(drafts) == written, "Escape leaves the pick as it was"
+        s.pick(head["axis"], "frame")
         s.row_at(labels, 1, box=True)
         s.row_at(labels, 2, box=True)
         assert labels.view().window().isVisible() and labels.checked_data() == ("1", "2"), "a box ticks"
+        s.row_at(labels, 0, box=True)
+        s.row_at(labels, 2, box=True, modifier=QtCore.Qt.ShiftModifier)
+        assert labels.checked_data() == ("0", "1", "2"), "Shift ticks the run from the last box clicked"
+        s.row_at(labels, 1, box=True)
+        s.row_at(labels, 0, box=True, modifier=QtCore.Qt.ShiftModifier)
+        assert labels.checked_data() == ("2",), "... or clears it, as that box now is"
         s.row_at(labels, 0)
         assert not labels.view().window().isVisible() and labels.checked_data() == ("0",), "words: only this"
+        assert drafts[-1][0]["terms"][0] == {"of": "occupied", "at": "frame", "labels": ("0",)}
+        s.pick(head["axis"], "frame")
+        assert labels.view().window().isVisible(), "the axis already picked opens its labels again"
+        s.row_at(labels, 0)
         s.click(head["publish"])
         assert drafts[-1] == ({"name": "same", "publish": False, "terms": (
             {"of": "occupied", "at": "frame", "labels": ("0",)},)},)
@@ -640,6 +777,15 @@ def test_the_editor_builds_the_users_example_by_clicks() -> None:
             {"name": "kept", "terms": ({"of": "counts"}, {"op": "where", "of": "same"})},
         )
         assert drafts[-1] == example, "the user's example, as the run record keeps it"
+        # A rename follows into what reads the variable, when the new name is free.
+        same.head["name"].selectAll()
+        QtTest.QTest.keyClicks(same.head["name"], "agree")
+        s.key(same.head["name"], QtCore.Qt.Key_Return)
+        assert drafts[-1][1]["terms"][1] == {"op": "where", "of": "agree"}
+        same.head["name"].selectAll()
+        QtTest.QTest.keyClicks(same.head["name"], "same")
+        s.key(same.head["name"], QtCore.Qt.Key_Return)
+        assert drafts[-1] == example
         assert same.preview.text().endswith("· internal · read by kept")
         assert kept.preview.text() == "→ repeat 1 × frame 3 × Site 6 · float32 · unit count · valid where same"
         assert "    same" in s.texts(kept.head["operand"])
@@ -661,6 +807,8 @@ def test_the_editor_builds_the_users_example_by_clicks() -> None:
         over = statistic["over"]
         s.click(over)
         assert s.texts(over) == ["Repeat", "repeat", "Point", "frame", "Cell", "Site"]
+        s.row_at(over, 1)
+        assert over.view().window().isVisible() and over.checked_data() == ("repeat", "Site"), "words tick"
         s.row_at(over, 2)
         assert drafts[-1][1]["over"] == ("frame",), "a domain's header picks its axes"
         s.click(statistic["remove"])
@@ -676,17 +824,76 @@ def test_the_editor_builds_the_users_example_by_clicks() -> None:
         s.app.processEvents()
 
 
+def test_the_editor_offers_what_each_publication_shares_and_domains_by_their_header() -> None:
+    """The axis list leaves out an axis each publication carries its own
+    part of (a monitor's shots) and offers a domain of two or more axes by
+    its header, whose labels are its rows; Add variable brings its card
+    into view on a long page."""
+    from PyQt5 import QtCore, QtWidgets
+
+    from zlc_ui.fluent import FluentScrollArea
+
+    base = _schema(1, 3, 6, np.float32, "count")
+    y = AxisSpec(AxisId("camera.y"), "y", SITE, 3, (0, 1, 2))
+    x = AxisSpec(AxisId("camera.x"), "x", SITE, 2, (0, 1))
+    image = replace(base, cell_domain=DomainSpec((3, 2), (y, x)), value_schema=ValueSchema(
+        ValidityContract.components(y.axis_id, x.axis_id), np.dtype(np.float32), "count"))
+    # A monitor: what typing reads is its latest publication.
+    latest = SimpleNamespace(block=SimpleNamespace(schema=base))
+    bundle = (("counts", base, latest), ("frames", image, None))
+    s = _editor_session([{"name": "px", "terms": [{"of": "frames"}]}], bundle)
+    editor, drafts = s.editor, s.drafts
+    try:
+        (card,) = editor._cards
+        axis = card.head["axis"]
+        assert s.texts(axis) == ["All", "Point", "    frame", "Cell", "    y", "    x"]
+        assert "changes with each publication" in editor._input_rows[0][0].toolTip()
+        s.pick(axis, "Cell")
+        labels = card.head["labels"]
+        assert s.texts(labels) == ["y 0 · x 0", "y 0 · x 1", "y 1 · x 0", "y 1 · x 1", "y 2 · x 0", "y 2 · x 1"]
+        s.row_at(labels, 3)
+        assert drafts[-1] == ({"name": "px", "terms": ({"of": "frames", "at": "Cell", "labels": ("y 1 · x 1",)},)},)
+        assert axis.currentText() == "Cell" and card.preview.text() == "→ repeat 1 × frame 3 · float32 · unit count"
+        # A pick on the shots, written by an agent, is said under its line.
+        cards = s.project([{"name": "shot", "terms": [{"of": "counts", "at": "repeat", "labels": ["0"]}]}])
+        assert cards[0].head["error"].text() == (
+            "repeat changes with each publication (the latest carries 0); reduce over repeat with a statistic, "
+            "or plot it in a panel.")
+        assert s.texts(cards[0].head["axis"])[-1] == "repeat"
+
+        # On a page that scrolls, a new card comes into view, its name ready.
+        page = FluentScrollArea()
+        page.set_width_bounded_widget(editor)
+        page.resize(1200, 300)
+        page.show()
+        s.project([{"name": f"v{index}", "terms": [{"of": "counts"}]} for index in range(6)])
+        s.click(editor.add_variable)
+        s.settle()
+        name = editor._cards[-1].head["name"]
+        top = name.mapTo(page.viewport(), QtCore.QPoint()).y()
+        assert 0 <= top and top + name.height() <= page.viewport().height()
+        assert QtWidgets.QApplication.focusWidget() is name
+        page.close()
+    finally:
+        editor.close()
+        editor.deleteLater()
+        s.app.processEvents()
+
+
 def test_the_editor_reads_down_one_control_column_and_says_problems_under_their_lines() -> None:
     """The Inputs' names, every operand, strip of statistics, add command,
     result and problem start on one x; operator strips end on the name
     field's right edge; every ``at``, axis, labels, Publish and × has one x,
-    and opening or removing a line moves none of them.  The label column
-    the editor asks for is the same with or without cards, and a wider one
-    widens the names.  A problem stands under its line where the result
-    stood -- the card keeps its height -- and a parked helper's is muted
-    and blocks nothing.  Before the source publishes the lists offer only
-    what is stored."""
-    from PyQt5 import QtCore
+    and opening or removing a line, or a long name, moves none of them.  The
+    label column the editor asks for is the same with or without cards, and
+    a wider one widens the names.  On a narrow page the add commands and a
+    statistic's "over" run on to a second row, the word and × beside them
+    staying on the first, and nothing passes the card's edge.  A problem
+    stands under its line where the result stood -- the card keeps its
+    height -- and a parked helper's is muted and blocks nothing.  Before
+    the source publishes the lists offer only what is stored, an empty
+    operand says "choose", and Tab walks the controls as they read."""
+    from PyQt5 import QtCore, QtTest, QtWidgets
 
     from zlc_ui.fluent import MUTED_INK, field_text_inset, row_gap
 
@@ -742,11 +949,42 @@ def test_the_editor_reads_down_one_control_column_and_says_problems_under_their_
             names.append(cards[0].head["name"].width())
         assert names[1] - names[0] == 40
 
-        # Opening or removing a line moves no column of any other card.
+        # Opening or removing a line, or a long name, moves no column.
         before = columns()
         s.click(cards[1].add["arithmetic"])
         s.click(cards[1].terms_ui[-1]["remove"])
         assert columns() == before
+        cards[0].head["name"].selectAll()
+        QtTest.QTest.keyClicks(cards[0].head["name"], "frames_zero_and_two_agree_at_every_site")
+        s.key(cards[0].head["name"], QtCore.Qt.Key_Return)
+        assert columns() == before and cards[1].terms_ui[1]["operand"].toolTip() == (
+            "frames_zero_and_two_agree_at_every_site")
+        cards = s.project(rows)
+
+        # Narrow: what does not fit runs on, nothing passes the card's edge.
+        wide = editor.width()
+        editor.resize(560, editor.height())
+        s.settle()
+        s.settle()
+        rise = cards[2]
+        statistic = rise.statistic
+        assert len(cards[0]._add_box._flow_rows) == 2 and len(rise._add_box._flow_rows) == 1
+        assert statistic["box"]._flow_rows == (1, 1)
+        assert x(statistic["reduce"]) == x(statistic["strip"]) == control
+
+        def middle(widget):
+            return widget.mapTo(editor, QtCore.QPoint()).y() + widget.height() / 2
+
+        assert abs(middle(statistic["remove"]) - middle(statistic["strip"])) <= 1, "the × stands on the strip's row"
+        assert middle(statistic["over"]) > middle(statistic["strip"]) + statistic["strip"].height()
+        for card in cards:
+            edge = x(card) + card.width()
+            for widget in card.findChildren(QtWidgets.QWidget):
+                if widget.isVisible() and widget.window() is editor.window():
+                    assert x(widget) + widget.width() <= edge, widget
+        editor.resize(wide, editor.height())
+        s.settle()
+        s.settle()
 
         # A problem under its line, where the result stood.
         bright = cards[3]
@@ -782,6 +1020,28 @@ def test_the_editor_reads_down_one_control_column_and_says_problems_under_their_
             "Inputs", "    counts", "    occupied", "Variables", "    same", "    kept", "Constants", "    Number"]
         assert cards[2].preview.text() == "→ checked when the source publishes"
         assert editor._input_rows[0][1].text() == "waiting for its first publication"
+        cards = s.project([{"name": "idea", "terms": [{"of": "counts"}, {"op": "and"}]}])
+        operand = cards[0].terms_ui[1]["operand"]
+        assert operand.currentIndex() < 0 and operand._display_text() == "choose", "an empty operand says so"
+
+        # Tab walks a card as it reads, a line built later in its place.
+        cards = s.project(rows[:3])
+        s.click(cards[0].add["arithmetic"])
+
+        def walk(count):
+            order, widget = [], editor.add_variable
+            for _ in range(count):
+                widget = widget.nextInFocusChain()
+                order.append(widget)
+            return order
+
+        head, later = cards[0].head, cards[0].terms_ui[-1]
+        chain = [widget.focusProxy() or widget for widget in (
+            head["name"], head["operand"], head["axis"], head["labels"], head["publish"], head["remove"],
+            later["operand"], later["remove"], cards[0].add["arithmetic"], cards[1].head["name"])]
+        order = walk(400)
+        assert [item for item in order if item in chain] == chain
+        s.click(later["remove"])
     finally:
         editor.close()
         editor.deleteLater()

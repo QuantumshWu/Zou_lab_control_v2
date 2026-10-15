@@ -14,21 +14,25 @@ under ``at``, the labels under the labels, Publish and every × on one x
 each -- and the operand column is the page's control column: the bundle
 combo's text, the Inputs' names, every operand, result and problem read
 down one x.  Fixed sets (an operator kind, the statistics) are segmented
-strips; whatever comes from the data (members, variables, axes, labels,
-``over``) is a combo, several values a checkable one.  A problem stands
-under the line it is about, as one sentence (``show_problem``); a parked
-helper's in muted ink, because it blocks nothing.
+strips; whatever comes from the data (members, variables, axes and
+domains, labels, ``over``) is a combo, several values a checkable one.  A
+problem stands under the line it is about, as one sentence
+(``show_problem``); a parked helper's in muted ink, because it blocks
+nothing.  A line's two wide commands -- the statistic strip with its
+``over``, the add commands -- run on to a second row when the page is too
+narrow for them, rather than squeeze.
 """
 
 from __future__ import annotations
 
+import functools
 import math
+import re
 from collections.abc import Mapping
 from html import escape
 
 from PyQt5 import QtCore, QtGui, QtWidgets, sip
 
-from zlc_data.axis import SCALAR
 from zlc_ui.fluent import (
     AXIS_GROUP_COLORS, FONT, MUTED_INK, RED_DARK, FluentButton, FluentColumnLine, FluentColumnSet,
     FluentComboBox, FluentFrame, FluentLabel, FluentLineEdit, FluentSegmentedButtons, FluentSwitch, card_pad,
@@ -40,29 +44,32 @@ from zlc_ui.fluent.column_set import section_header
 from zlc_atom.authoring import AuthoringField, AuthoringSchema
 
 from .expression import (
-    CATEGORIES, NO_PUBLISHED, OPERATORS, STATISTICS, TERM_COLUMNS, VARIABLE_COLUMNS, compact_variable,
-    describe_schema, error_stage, term_text, typed_variables, where_notes,
+    CATEGORIES, DOMAINS, NO_PUBLISHED, OPERATORS, STATISTICS, TERM_DEFAULTS, VARIABLE_COLUMNS, axis_groups,
+    changing_axes, compact_variable, describe_schema, error_stage, pick_values, term_text, typed_variables,
+    where_notes,
 )
 
 #: The rows as a draft holds them, completed column by column; no validator,
 #: because a problem is shown under its line, not refused.
 _ROWS = AuthoringSchema((AuthoringField("variables", "rows", "Variables", (), columns=VARIABLE_COLUMNS),))
-#: A term with nothing written: every column at its default.
-_TERM = {column.name: () if column.value_type == "text_tuple" else column.default for column in TERM_COLUMNS}
 _STRIPS = dict(CATEGORIES)
 _FOOTER = "Averages over shots with error bars, per-site probabilities and fits belong in a plot panel."
 _EMPTY = ("No variables yet. A variable picks values of an input, combines them line by line, can mask and "
           "reduce them; Publish makes it a signal.")
-#: The operand combo's constants.  A member or variable is an identifier,
-#: so no name reads like these keys.
+#: The operand combo's constants.  A member or variable name never starts
+#: with "#", so no name reads like these keys.
 _NUMBER, _TRUE, _FALSE = "#number", "#true", "#false"
 _CONSTANTS = {_NUMBER: "Number", _TRUE: "true", _FALSE: "false"}
-_DOMAINS = (("Repeat", "repeat_domain"), ("Point", "point_domain"), ("Cell", "cell_domain"))
+_COLOURS = dict(zip(DOMAINS, AXIS_GROUP_COLORS))
 #: The most labels one labels list offers; a longer axis says how many it has.
 _LABEL_LIMIT = 2048
 #: The least room a variable's name gets (design px); the lead column is as
 #: wide as the widest operator strip when that is wider.
 _NAME_WIDTH = 150
+#: The operand column (design px), pinned: a name typed on one card never
+#: moves the columns of every card.  A longer name elides; its tooltip
+#: says it whole.
+_OPERAND_WIDTH = 140
 #: The columns of every card line: the name (or a later line's operator
 #: strip), the "=" gutter, the operand, ``at`` and its axis (or a number),
 #: the labels (or a number's unit), the rest of the line, Publish and ×.
@@ -70,11 +77,17 @@ _COLUMNS = (("lead", "fit"), ("gutter", "fit"), ("operand", "fit"), ("at", "fit"
             ("tail", "stretch"), ("publish", "fit"), ("remove", "glyph"))
 _ADD = (("arithmetic", "+ Arithmetic"), ("comparison", "+ Comparison"), ("logic", "+ Logic"),
         ("where", "+ Where"), ("statistic", "+ Statistic"))
+_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
 def _set_text(widget, text: str) -> None:
     if widget.text() != text:
         widget.setText(text)
+
+
+def _set_tip(widget, text: str) -> None:
+    if widget.toolTip() != text:
+        widget.setToolTip(text)
 
 
 def _visible(widget: QtWidgets.QWidget, shown: bool, hold: bool = True) -> None:
@@ -111,58 +124,73 @@ def _flavour(schema) -> str | None:
     return None if schema is None else "b" if _boolean(schema) else "n"
 
 
-def _domains_of(schema) -> list[tuple[str, str, object, tuple]]:
-    """(domain word, its colour, the domain, its primary named axes) of each
-    domain that has some; the one-value placeholder axis is never one."""
-    groups = []
-    for (word, attribute), colour in zip(_DOMAINS, AXIS_GROUP_COLORS):
-        domain = getattr(schema, attribute)
-        axes = tuple(axis for axis in domain.axes if axis.coordinate_of is None and axis.role != SCALAR)
-        if axes:
-            groups.append((word, colour, domain, axes))
-    return groups
-
-
-def _axis_named(schema, name: str):
-    """(axis, its domain) of the one primary axis named ``name``, or None."""
-    found = [(axis, domain) for _word, _colour, domain, axes in _domains_of(schema)
-             for axis in axes if axis.name == name]
-    return found[0] if len(found) == 1 else None
-
-
 def _item(text: str, data) -> tuple:
-    return (text, data, "", "")
+    """A row of a list: ``(text, key, bold, colour, enabled)``."""
+    return (text, data, False, "", True)
 
 
-def _header(text: str, colour: str = "") -> tuple:
-    return (text, None, "header", colour)
+def _header(text: str, colour: str = "", data=None, enabled: bool = False) -> tuple:
+    """A list's bold group title; a choice of its own when ``enabled``."""
+    return (text, data, True, colour, enabled)
 
 
-def _fill(combo: FluentComboBox, items, current=None, *, headers_enabled: bool = False) -> None:
-    """Offer ``items`` -- ``(text, data, kind, colour)``, a header bold and
-    keyed None, a note muted -- refilled only when they change, and mark
-    ``current`` (nothing when None) on a one-value combo."""
+def _fill(combo: FluentComboBox, items, current=None) -> None:
+    """Offer ``items`` (:func:`_item`, :func:`_header`), refilled only when
+    they change -- a cached list is the same object, so a long one is not
+    compared row by row -- and mark ``current`` (nothing when None) on a
+    one-value combo."""
 
     items = tuple(items)
-    shown = tuple((combo.itemText(row), combo.itemData(row)) for row in range(combo.count()))
-    if shown != tuple((text, data) for text, data, _kind, _colour in items):
+    offered = getattr(combo, "_derive_offered", None)
+    if offered is not items and offered != items:
         with signals_blocked(combo):
             combo.clear()
-            for text, data, kind, colour in items:
+            for text, data, bold, colour, enabled in items:
                 combo.addItem(text, data)
-                if not kind:
+                if not (bold or colour or not enabled):
                     continue
                 item = combo.model().item(combo.count() - 1)
-                item.setEnabled(kind == "header" and headers_enabled)
-                if kind == "header":
+                item.setEnabled(enabled)
+                if bold:
                     font = item.font()
                     font.setBold(True)
                     item.setFont(font)
                 if colour:
                     item.setForeground(QtGui.QBrush(QtGui.QColor(colour)))
+        combo._derive_offered = items
     if current is not None or combo.currentIndex() >= 0:
-        with signals_blocked(combo):
-            combo.setCurrentIndex(-1 if current is None else combo.findData(current))
+        index = -1 if current is None else next(
+            (row for row in range(combo.count())
+             if combo.itemData(row) == current and combo.model().item(row).isEnabled()), -1)
+        if index != combo.currentIndex():
+            with signals_blocked(combo):
+                combo.setCurrentIndex(index)
+
+
+@functools.lru_cache(maxsize=64)
+def _label_items(keys: tuple, alternates: tuple) -> tuple:
+    """A pick's choices as list rows, each with its alternate coordinates'
+    (``1 · time 0.1 s``), at most ``_LABEL_LIMIT`` of them.  Kept: a long
+    axis is offered again on every projection."""
+
+    items = tuple(
+        _item(key + "".join(f" · {name} {labels[index]}" + (f" {unit}" if unit else "")
+                            for name, unit, labels in alternates), key)
+        for index, key in enumerate(keys[:_LABEL_LIMIT])
+    )
+    if len(keys) > _LABEL_LIMIT:
+        items += ((f"{_LABEL_LIMIT} of {len(keys)} shown", None, False, MUTED_INK, False),)
+    return items
+
+
+def _alternates(schema, at: str) -> tuple:
+    """``(name, unit, labels)`` of each alternate coordinate of the axis ``at``."""
+    for _word, domain, axes in axis_groups(schema):
+        for axis in axes:
+            if axis.name == at:
+                return tuple((other.name, other.unit or "", other.labels()) for other in domain.axes
+                             if other.coordinate_of == axis.axis_id)
+    return ()
 
 
 def _remove_button(parent, tooltip: str) -> FluentButton:
@@ -206,12 +234,79 @@ def _card_column(card: QtWidgets.QWidget) -> tuple[QtWidgets.QVBoxLayout, QtWidg
     return lines, notes
 
 
+def _flow_box(pieces) -> QtWidgets.QWidget:
+    """A box that lays ``pieces`` left to right in as few rows as its width
+    allows (:func:`_flow`), as wide as the cell it is put in."""
+
+    box = QtWidgets.QWidget()
+    box.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
+    rows = QtWidgets.QVBoxLayout(box)
+    rows.setContentsMargins(0, 0, 0, 0)
+    rows.setSpacing(row_gap())
+    box._flow_pieces, box._flow_rows = tuple(pieces), None
+    for piece in box._flow_pieces:
+        piece.setParent(box)
+    _flow(box)
+    return box
+
+
+def _flow(box: QtWidgets.QWidget) -> None:
+    """Lay the box's pieces in rows: each row takes pieces while the next
+    one's natural width still fits beside them; a hidden piece takes no
+    room, so it never opens a row of its own."""
+
+    gap, width = row_gap(), box.width()
+    rows, used = [[]], 0
+    for piece in box._flow_pieces:
+        shown = not piece.isHidden()
+        need = piece.sizeHint().width() if shown else 0
+        if shown and rows[-1] and used + gap + need > width:
+            rows.append([])
+            used = 0
+        if shown:
+            used += (gap if used else 0) + need
+        rows[-1].append(piece)
+    key = tuple(len(row) for row in rows)
+    if box._flow_rows == key:
+        return
+    box._flow_rows = key
+    layout = box.layout()
+    while layout.count():
+        layout.takeAt(0)
+    for row in rows:
+        line = QtWidgets.QHBoxLayout()
+        line.setContentsMargins(0, 0, 0, 0)
+        line.setSpacing(gap)
+        for piece in row:
+            line.addWidget(piece)
+        line.addStretch(1)
+        layout.addLayout(line)
+    box.updateGeometry()
+
+
 def _operand_key(term: Mapping[str, object]):
     if term["number"] is not None:
         return _NUMBER
     if term["boolean"]:
         return f"#{term['boolean']}"
     return term["of"] or None
+
+
+def _reveal(*widgets: QtWidgets.QWidget) -> None:
+    """Scroll the page the ``widgets`` stand in until they show, the last
+    one first of all.  A card just added has no place on the page until
+    the page is laid out again, so that is done first."""
+
+    parent = widgets[0].parentWidget()
+    while parent is not None and not isinstance(parent, QtWidgets.QScrollArea):
+        parent = parent.parentWidget()
+    if parent is None:
+        return
+    # Each layout that grows asks its parent's again: one pass per level.
+    for _level in range(4):
+        QtWidgets.QApplication.sendPostedEvents(None, QtCore.QEvent.LayoutRequest)
+    for widget in widgets:
+        parent.ensureWidgetVisible(widget, 0, row_gap())
 
 
 class _VariableCard(FluentFrame):
@@ -246,8 +341,10 @@ class _VariableCard(FluentFrame):
             button = FluentButton(text, self)
             button.clicked.connect(lambda _checked=False, kind=kind: self._add(kind))
             self.add[kind] = button
-        hold_place(self.add["statistic"])
-        add.place("operand", *self.add.values(), to="tail")
+        self._add_box = _flow_box(self.add.values())
+        self._add_box.installEventFilter(self)
+        # The add commands run on over the empty Publish and × columns.
+        add.place("operand", self._add_box, to="remove", fill=True)
         notes.addWidget(add)
 
     # -- construction -------------------------------------------------------
@@ -270,11 +367,14 @@ class _VariableCard(FluentFrame):
         """The head line (``kind`` None) or a later term's line of one operator kind."""
 
         block, line, error = self._block()
-        ui: dict[str, object] = {"kind": kind, "block": block, "error": error, "hold": False}
+        ui: dict[str, object] = {"kind": kind, "block": block, "error": error, "pending": None}
         if kind is None:
             name = FluentLineEdit("")
             name.setPlaceholderText("name")
-            name.textEdited.connect(lambda text: self._set(name=text))
+            # A name is written when it is finished, not per keystroke: the
+            # variables that read it follow it then, and a published one's
+            # signal is renamed once.
+            name.editingFinished.connect(lambda: self._rename(name))
             line.place("lead", name, fill=True)
             line.place("gutter", FluentLabel("="))
             ui["name"] = name
@@ -287,6 +387,7 @@ class _VariableCard(FluentFrame):
             line.place("lead", strip)
             ui["strip"] = strip
         operand = FluentComboBox()
+        operand.setPlaceholderText("choose")
         operand.activated.connect(lambda _index, ui=ui: self._operand_chosen(ui))
         line.place("operand", operand, fill=True)
         at = hold_place(FluentLabel("at"))
@@ -300,8 +401,9 @@ class _VariableCard(FluentFrame):
         line.place("at", at)
         line.place("at", axis, number, fill=True)
         labels = hold_place(FluentComboBox())
-        labels.set_checkable(True, placeholder="choose")
-        labels.checked_edited.connect(lambda values, ui=ui: self._term_edit(ui, labels=tuple(values)))
+        labels.set_checkable(True)
+        labels.setPlaceholderText("choose")
+        labels.checked_edited.connect(lambda values, ui=ui: self._labels_edited(ui, tuple(values)))
         unit = muted_note_label("")
         line.place("labels", labels, fill=True)
         line.place("labels", unit)
@@ -322,21 +424,46 @@ class _VariableCard(FluentFrame):
         line.place("lead", FluentLabel("statistic"))
         strip = FluentSegmentedButtons(tuple((name, name) for name in STATISTICS), self)
         strip.activated.connect(self._statistic_chosen)
+        reduce = QtWidgets.QWidget()
+        pair = QtWidgets.QHBoxLayout(reduce)
+        pair.setContentsMargins(0, 0, 0, 0)
+        pair.setSpacing(row_gap())
         word = FluentLabel("over")
         over = FluentComboBox()
-        over.set_checkable(True, placeholder="choose", headers_select=True)
+        over.set_checkable(True, headers_select=True)
+        over.setPlaceholderText("choose")
         over.checked_edited.connect(lambda values: self._set(over=tuple(values)))
-        line.place("operand", strip, word, over, to="tail")
+        pair.addWidget(word)
+        pair.addWidget(over)
+        box = _flow_box((strip, reduce))
+        box.installEventFilter(self)
+        # The strip and its "over" run on over the empty Publish column, and
+        # "over" goes under the strip when the page is too narrow for both.
+        line.place("operand", box, to="publish", fill=True)
+        line.stand_on_first_row()
         remove = _remove_button(self, "Remove the statistic")
         remove.clicked.connect(self._close_statistic)
         line.place("remove", remove)
-        return {"block": block, "error": error, "strip": strip, "word": word, "over": over, "remove": remove,
-                "hold": False}
+        return {"block": block, "error": error, "strip": strip, "reduce": reduce, "word": word, "over": over,
+                "box": box, "remove": remove, "pending": None}
 
     def _retire(self, ui: Mapping[str, object]) -> None:
         self._lines.removeWidget(ui["block"])
         self._editor.columns.forget(ui["block"])
         retire_widget(ui["block"])
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802 - Qt naming
+        kind = event.type()
+        if kind in (QtCore.QEvent.Resize, QtCore.QEvent.LayoutRequest) and hasattr(watched, "_flow_pieces"):
+            _flow(watched)
+        elif kind == QtCore.QEvent.Hide:
+            # A cascaded labels list closed.  What it ticked, if anything,
+            # was written as it closed (``_labels_edited``); one that closed
+            # with nothing ticked leaves the pick as it was.
+            for ui in self.terms_ui:
+                if ui["pending"] is not None and watched is ui["labels"].view().window():
+                    QtCore.QTimer.singleShot(0, lambda ui=ui: self._cancel_pending(ui))
+        return super().eventFilter(watched, event)
 
     # -- edits -------------------------------------------------------------
 
@@ -344,10 +471,15 @@ class _VariableCard(FluentFrame):
         self.row.update(changes)
         self._editor.card_edited()
 
+    def _rename(self, field: FluentLineEdit) -> None:
+        if field.isModified():
+            field.setModified(False)
+            self._editor.rename(self, field.text().strip())
+
     def _term(self, ui) -> dict[str, object]:
         """The term ``ui`` edits; the head line of a variable with no term yet writes its first."""
         if not self.row["terms"]:
-            self.row["terms"].append(dict(_TERM))
+            self.row["terms"].append(dict(TERM_DEFAULTS))
         return self.row["terms"][self.terms_ui.index(ui)]
 
     def _term_edit(self, ui, **changes) -> None:
@@ -367,10 +499,10 @@ class _VariableCard(FluentFrame):
         if key in (_TRUE, _FALSE):
             term.update(of="", number=None, boolean=key[1:], at="", labels=())
         else:
-            # The pick stays when the new operand has its axis, or while
-            # nothing says which axes it has.
+            # The pick stays when the new operand has its axis (domain),
+            # or while nothing says which axes it has.
             schema = self._context["schema_of"](key)
-            keeps = schema is None or (term["at"] and _axis_named(schema, term["at"]) is not None)
+            keeps = schema is None or (term["at"] and pick_values(schema, term["at"]) is not None)
             term.update(of=key, number=None, boolean="")
             if not keeps:
                 term.update(at="", labels=())
@@ -403,35 +535,45 @@ class _VariableCard(FluentFrame):
             _set_text(ui["number"], term_text(term))
 
     def _axis_chosen(self, ui) -> None:
-        """The axis, its labels cleared; then its labels to pick, the
-        line's problem held back while that list is open."""
+        """``All`` clears the pick.  An axis -- or a domain -- opens its
+        labels to pick; the pick is written once they are picked, so the
+        card, its readers and the page say nothing in between.  The axis
+        the line already picks opens its labels again."""
         axis = ui["axis"].currentData() or ""
-        if axis == self._term(ui)["at"]:
+        if not axis:
+            ui["pending"] = None
+            self._term_edit(ui, at="", labels=())
             return
-        ui["hold"] = bool(axis)
-        self._term_edit(ui, at=axis, labels=())
-        if axis:
-            QtCore.QTimer.singleShot(0, lambda: self._cascade(ui))
+        if axis != self._term(ui)["at"]:
+            ui["pending"] = axis
+            self._editor.refresh()
+        QtCore.QTimer.singleShot(0, lambda: self._cascade(ui))
 
     def _cascade(self, ui) -> None:
         labels = ui["labels"]
-        if ui in self.terms_ui and _alive(labels) and labels.count():
+        if ui not in self.terms_ui or sip.isdeleted(labels):
+            return
+        if _alive(labels) and labels.count():
             labels.showPopup()
             labels.view().window().installEventFilter(self)
-            return
-        if ui in self.terms_ui:
-            ui["hold"] = False
-            self._editor.refresh()
+        elif ui["pending"] is not None:
+            # Nothing to pick from: the axis is written, its problem says so.
+            at, ui["pending"] = ui["pending"], None
+            self._term_edit(ui, at=at, labels=())
 
-    def eventFilter(self, watched, event) -> bool:  # noqa: N802 - Qt naming
-        # The cascaded labels list closed: its line says its problem again,
-        # once the list's own close has written what was ticked.
-        if event.type() == QtCore.QEvent.Hide:
-            for ui in self.terms_ui:
-                if ui["hold"] and watched is ui["labels"].view().window():
-                    ui["hold"] = False
-                    QtCore.QTimer.singleShot(0, self._editor.refresh)
-        return super().eventFilter(watched, event)
+    def _labels_edited(self, ui, values: tuple) -> None:
+        if ui not in self.terms_ui:
+            return
+        if ui["pending"] is not None:
+            at, ui["pending"] = ui["pending"], None
+            self._term_edit(ui, at=at, labels=values)
+        else:
+            self._term_edit(ui, labels=values)
+
+    def _cancel_pending(self, ui) -> None:
+        if ui in self.terms_ui and ui["pending"] is not None:
+            ui["pending"] = None
+            self._editor.refresh()
 
     def _statistic_chosen(self, statistic: str) -> None:
         """The statistic; with nothing to reduce over yet, every Cell axis
@@ -440,12 +582,12 @@ class _VariableCard(FluentFrame):
         reducible = self._answer.get("reducible")
         cascade = False
         if not self.row["over"] and reducible is not None:
-            cells = tuple(axis.name for word, _colour, _domain, axes in _domains_of(reducible)
-                          if word == "Cell" for axis in axes)
+            groups = axis_groups(reducible)
+            cells = tuple(axis.name for word, _domain, axes in groups if word == "Cell" for axis in axes)
             if cells:
                 self.row["over"] = cells
             else:
-                cascade = bool(_domains_of(reducible))
+                cascade = bool(groups)
         self._editor.card_edited()
         if cascade:
             QtCore.QTimer.singleShot(0, self._open_over)
@@ -477,13 +619,18 @@ class _VariableCard(FluentFrame):
             self._editor.refresh()
             return
         if not self.row["terms"]:
-            self.row["terms"].append(dict(_TERM))
+            self.row["terms"].append(dict(TERM_DEFAULTS))
         head = self.row["terms"][0]
         schema_of = self._context["schema_of"]
-        term = dict(_TERM, op=_STRIPS[kind][0])
-        if kind in ("arithmetic", "comparison"):
-            pool = [name for name in self._context["names"]
-                    if kind == "comparison" or _flavour(schema_of(name)) != "b"]
+        term = dict(TERM_DEFAULTS, op=_STRIPS[kind][0])
+        # What the new line stands beside: the line above it, at the
+        # tightest binding a comparison or an arithmetic step has.
+        last = self.row["terms"][-1]
+        infos = self._answer.get("terms") or ()
+        beside = ("n" if last["number"] is not None else "b" if last["boolean"]
+                  else _flavour(infos[-1]["operand"]) if len(infos) == len(self.row["terms"]) else None)
+        if kind == "arithmetic" or (kind == "comparison" and beside != "b"):
+            pool = [name for name in self._context["names"] if _flavour(schema_of(name)) != "b"]
             of = head["of"] if head["of"] in pool else pool[0] if pool else ""
             if of:
                 term["of"] = of
@@ -493,21 +640,21 @@ class _VariableCard(FluentFrame):
             # A verdict: a boolean variable this one may read, else a member.
             pool = [name for name in (*self._context["variables"], *self._context["members"])
                     if _flavour(schema_of(name)) == "b"]
-            term["of"] = pool[0] if pool else ""
+            term["of"] = head["of"] if kind == "comparison" and head["of"] in pool else pool[0] if pool else ""
         schema = schema_of(term["of"]) if term["of"] else None
-        found = None if schema is None or not head["at"] else _axis_named(schema, head["at"])
-        if found is not None:
+        pending = None
+        if schema is not None and head["at"] and pick_values(schema, head["at"]) is not None:
             if kind != "where":
-                term["at"] = head["at"]
-            elif all(label in found[0].labels() for label in head["labels"]):
+                pending = head["at"]
+            elif all(label in pick_values(schema, head["at"]) for label in head["labels"]):
                 # The mask at the value's own pick.
                 term.update(at=head["at"], labels=tuple(head["labels"]))
         self.row["terms"].append(term)
         self._editor.card_edited()
-        if term["at"] and not term["labels"] and len(self.terms_ui) == len(self.row["terms"]):
+        if pending is not None and len(self.terms_ui) == len(self.row["terms"]):
             ui = self.terms_ui[-1]
-            ui["hold"] = True
-            show_problem(ui["error"], "")
+            ui["pending"] = pending
+            self._editor.refresh()
             QtCore.QTimer.singleShot(0, lambda: self._cascade(ui))
 
     # -- projection --------------------------------------------------------
@@ -532,20 +679,26 @@ class _VariableCard(FluentFrame):
                  context: Mapping[str, object]) -> None:
         self.row = {**row, "terms": [dict(term) for term in row["terms"]]}
         self._answer, self._context = answer, context
-        terms = self.row["terms"] or [dict(_TERM)]
+        terms = self.row["terms"] or [dict(TERM_DEFAULTS)]
         infos = answer["terms"] or ({"operand": None, "left": None, "number_unit": None},)
         self._shape(terms)
-        _set_text(self.head["name"], str(row["name"]))
+        name = self.head["name"]
+        if not name.isModified():
+            _set_text(name, str(row["name"]))
         publish = self.head["publish"]
         with signals_blocked(publish):
             publish.setChecked(bool(row["publish"]))
-        tip = (f"Published as @logic/{context['node']}/{row['name']}" if row["publish"]
-               else "Internal: other variables read it; nothing publishes it")
-        if publish.toolTip() != tip:
-            publish.setToolTip(tip)
+        _set_tip(publish, f"Published as @logic/{context['node']}/{row['name']}" if row["publish"]
+                 else "Internal: other variables read it; nothing publishes it")
         for ui, term, info in zip(self.terms_ui, terms, infos):
             self._show_term(ui, term, info)
         self._show_statistic(answer.get("reducible"))
+        for box in (self._add_box, self.statistic["box"]):
+            _flow(box)
+        if any(ui["pending"] is not None for ui in self.terms_ui):
+            # A labels list is open on a pick not written yet: what the
+            # card says under its lines stays as it was until it closes.
+            return
 
         error, failure = answer["error"], context["failure"]
         if error is not None:
@@ -558,7 +711,7 @@ class _VariableCard(FluentFrame):
         said = self._line_of(stage)
         for ui in (*self.terms_ui, self.statistic):
             _ink(ui["error"], MUTED_INK if muted else RED_DARK)
-            show_problem(ui["error"], detail if ui is said and not ui["hold"] else "")
+            show_problem(ui["error"], detail if ui is said else "")
         self.problem = str(error) if error is not None and not muted else ""
         # A parked helper's problem blocks nothing; its result says why.
         self.preview.setVisible(stage is None or muted)
@@ -592,54 +745,47 @@ class _VariableCard(FluentFrame):
                 boolean_left = info["left"] is not None and _boolean(info["left"])
                 for op in (">", "<", ">=", "<="):
                     strip.button(op).setEnabled(not boolean_left or op == term["op"])
-        _fill(ui["operand"], self._operands(kind, term, info), _operand_key(term))
+        operand = ui["operand"]
+        _fill(operand, self._operands(kind, term, info), _operand_key(term))
+        _set_tip(operand, term["of"])
 
         number = term["number"] is not None
+        at = ui["pending"] or term["at"]
         schema = schema_of(term["of"]) if term["of"] else None
-        groups = _domains_of(schema) if schema is not None else []
-        found = None if schema is None or not term["at"] else _axis_named(schema, term["at"])
-        picks = bool(term["of"]) and (bool(groups) or bool(term["at"]))
+        groups = axis_groups(schema) if schema is not None else ()
+        picks = bool(term["of"]) and (bool(groups) or bool(at))
         _visible(ui["at"], picks, hold=not number)
         _visible(ui["axis"], picks, hold=not number)
         _visible(ui["number"], number, hold=False)
-        _visible(ui["labels"], picks and bool(term["at"]), hold=not number)
+        _visible(ui["labels"], picks and bool(at), hold=not number)
         _visible(ui["unit"], number, hold=False)
         if picks:
+            changing = context["changing"]
             items = [_item("All", "")]
-            for word, colour, _domain, axes in groups:
-                items.append(_header(word, colour))
-                items.extend(_item(f"    {axis.name}", axis.name) for axis in axes)
-            if term["at"] and found is None:
-                items.append(_item(term["at"], term["at"]))
-            _fill(ui["axis"], items, term["at"])
-        if picks and term["at"]:
-            labels = ui["labels"]
-            if found is None:
-                offered = [_item(label, label) for label in term["labels"]]
-            else:
-                offered = self._label_items(*found)
-            offered.extend(_item(label, label) for label in term["labels"]
-                           if label not in {data for _text, data, _kind, _colour in offered})
-            _fill(labels, offered)
-            labels.set_checked_data(term["labels"])
+            for word, _domain, axes in groups:
+                # An axis each publication carries its own part of is never
+                # a pick; a domain is one when every axis of it may be.
+                free = [axis for axis in axes if axis.axis_id not in changing]
+                if not free:
+                    continue
+                whole = len(axes) > 1 and len(free) == len(axes)
+                items.append(_header(word, _COLOURS[word], word if whole else None, whole))
+                items.extend(_item(f"    {axis.name}", axis.name) for axis in free)
+            if at and not any(data == at and enabled for _t, data, _b, _c, enabled in items):
+                items.append(_item(at, at))
+            _fill(ui["axis"], items, at)
+        if picks and at:
+            keys = None if schema is None else pick_values(schema, at)
+            offered = _label_items(keys, _alternates(schema, at)) if keys is not None else ()
+            shown = () if ui["pending"] is not None else tuple(term["labels"])
+            known = set(keys or ())
+            extra = tuple(_item(label, label) for label in shown if label not in known)
+            _fill(ui["labels"], offered + extra if extra else offered)
+            ui["labels"].set_checked_data(shown)
         if number:
             if not ui["number"].hasFocus():
                 _set_text(ui["number"], term_text(term))
             _set_text(ui["unit"], info["number_unit"] or "")
-
-    @staticmethod
-    def _label_items(axis, domain) -> list[tuple]:
-        """The axis' labels, each with its alternate coordinates' (``1 · time 0.1 s``)."""
-        labels = axis.labels()
-        alternates = [(other, other.labels()) for other in domain.axes if other.coordinate_of == axis.axis_id]
-        items = [
-            _item(label + "".join(f" · {other.name} {texts[index]}" + (f" {other.unit}" if other.unit else "")
-                                  for other, texts in alternates), label)
-            for index, label in enumerate(labels[:_LABEL_LIMIT])
-        ]
-        if len(labels) > _LABEL_LIMIT:
-            items.append((f"{_LABEL_LIMIT} of {len(labels)} shown", None, "note", MUTED_INK))
-        return items
 
     def _operands(self, kind, term, info) -> list[tuple]:
         """What the line's operand may be: the inputs, the variables this one
@@ -684,7 +830,8 @@ class _VariableCard(FluentFrame):
         if row["statistic"] or row["over"]:
             self._statistic_open = False
         line["block"].setVisible(shown)
-        _visible(self.add["statistic"], not shown)
+        # The last command: nothing after it moves when it goes.
+        _visible(self.add["statistic"], not shown, hold=False)
         strip = line["strip"]
         strip.set_current(row["statistic"] or None)
         boolean = reducible is not None and _boolean(reducible)
@@ -693,15 +840,13 @@ class _VariableCard(FluentFrame):
                 name in ("min", "max", "std") if boolean else name in ("any", "all"))
             strip.button(name).setEnabled(not withheld or name == row["statistic"])
         items = []
-        for word, colour, _domain, axes in ([] if reducible is None else _domains_of(reducible)):
-            items.append(_header(word, colour))
+        for word, _domain, axes in (() if reducible is None else axis_groups(reducible)):
+            items.append(_header(word, _COLOURS[word], None, True))
             items.extend(_item(axis.name, axis.name) for axis in axes)
-        known = {data for _text, data, _kind, _colour in items}
+        known = {data for _text, data, _bold, _colour, _enabled in items}
         items.extend(_item(name, name) for name in row["over"] if name not in known)
-        offered = bool(items)
-        line["word"].setVisible(offered)
-        line["over"].setVisible(offered)
-        _fill(line["over"], items, headers_enabled=True)
+        _visible(line["reduce"], bool(items), hold=False)
+        _fill(line["over"], items)
         line["over"].set_checked_data(row["over"])
 
     def _preview(self, answer, typed: bool) -> str:
@@ -726,6 +871,21 @@ class _VariableCard(FluentFrame):
                          else "internal · read by nothing, so not evaluated")
         return "→ " + " · ".join(notes)
 
+    def focus_chain(self) -> list[QtWidgets.QWidget]:
+        """The card's controls in the order they read: line by line, each
+        line left to right, then the add commands."""
+        chain: list[QtWidgets.QWidget] = []
+        for ui in self.terms_ui:
+            lead = [ui["name"]] if ui["kind"] is None else ui["strip"].findChildren(QtWidgets.QAbstractButton)
+            chain.extend((*lead, ui["operand"], ui["axis"], ui["number"], ui["labels"]))
+            if ui["kind"] is None:
+                chain.append(ui["publish"])
+            chain.append(ui["remove"])
+        line = self.statistic
+        chain.extend((*line["strip"].findChildren(QtWidgets.QAbstractButton), line["over"], line["remove"]))
+        chain.extend(self.add.values())
+        return chain
+
 
 class DeriveEditor(QtWidgets.QWidget):
     """The concrete Derive contribution to the existing Logic editor."""
@@ -739,17 +899,21 @@ class DeriveEditor(QtWidgets.QWidget):
         self._enabled = True
         self._cards: list[_VariableCard] = []
         self._members: tuple[str, ...] = ()
-        #: The members' typing schemas once every member has published, else None.
-        self._typing: dict[str, object] | None = None
+        #: Each member's typing schema, None until it publishes.
+        self._inputs: dict[str, object] = {}
+        #: The axes no pick may name (``changing_axes``), over every member.
+        self._changing: dict[object, tuple[str, ...]] = {}
         self._node = ""
         self._failure: tuple[str, str, str] | None = None
         self._draft_problem = ""
-        #: The columns every line of every card shares.  The "=" and the
-        #: lead are pinned, so where the operands stand is known before the
-        #: first card is built: the label column above is fitted to it.
+        #: The columns every line of every card shares.  The "=", the lead
+        #: and the operand are pinned, so where the operands stand is known
+        #: before the first card is built (the label column above is fitted
+        #: to it), and a name typed anywhere moves no column.
         self.columns = FluentColumnSet(_COLUMNS, self)
         self._gutter = FluentLabel("=").sizeHint().width()
         self.columns.set_width("gutter", self._gutter)
+        self.columns.set_width("operand", scaled_px(_OPERAND_WIDTH))
         widths = [scaled_px(_NAME_WIDTH)]
         for _kind, operators in CATEGORIES:
             probe = FluentSegmentedButtons(tuple((op, OPERATORS[op][2]) for op in operators))
@@ -863,6 +1027,27 @@ class DeriveEditor(QtWidgets.QWidget):
         if not self._loading:
             self._show(tuple(compact_variable(card.row) for card in self._cards))
 
+    def rename(self, card: _VariableCard, name: str) -> None:
+        """``card``'s variable named ``name``.  What read it by its old
+        name reads it by the new one, when the new one is free -- a name
+        no other variable or input has -- and the card was the variable
+        that name meant (the first so named)."""
+
+        old = str(card.row["name"])
+        if name == old:
+            return
+        others = {str(other.row["name"]) for other in self._cards if other is not card}
+        first = next((other for other in self._cards if other.row["name"] == old), None) is card
+        follows = (bool(old) and first and bool(_NAME.fullmatch(name))
+                   and name not in others and name not in self._members)
+        card.row["name"] = name
+        if follows:
+            for other in self._cards:
+                for term in other.row["terms"]:
+                    if term["of"] == old:
+                        term["of"] = name
+        self.card_edited()
+
     def remove_card(self, card: _VariableCard) -> None:
         self._cards.remove(card)
         self._retire(card)
@@ -889,6 +1074,9 @@ class DeriveEditor(QtWidgets.QWidget):
     def _focus_name(card: _VariableCard) -> None:
         name = card.head["name"]
         if _alive(name):
+            # The whole card into view, its name at least: on a long page
+            # the new card stands below what shows.
+            _reveal(card, name)
             name.setFocus()
             name.selectAll()
 
@@ -915,27 +1103,31 @@ class DeriveEditor(QtWidgets.QWidget):
                 value = schema.value_schema
                 _set_text(kind, f"{value.dtype} · unit {value.value_unit or '1'}")
                 groups, lines = [], []
-                for word, colour, _domain, domain_axes in _domains_of(schema):
+                for word, _domain, domain_axes in axis_groups(schema):
+                    colour = _COLOURS[word]
                     for axis in domain_axes:
                         groups.append(f'<span style="color: {colour}">{escape(axis.name)} {axis.size}</span>')
                         labels = axis.labels()
                         shown = ", ".join(labels) if len(labels) <= 8 else f"{labels[0]} … {labels[-1]}"
+                        moving = " · changes with each publication" if axis.axis_id in self._changing else ""
                         lines.append(f"{axis.name} — {axis.axis_id.value} · {word} · {axis.role.value}"
-                                     f" · {shown}")
+                                     f" · {shown}{moving}")
                 _set_text(axes, " × ".join(groups) or "one value")
                 tooltip = "\n".join(lines)
             for label in (member, kind, axes):
-                if label.toolTip() != tooltip:
-                    label.setToolTip(tooltip)
+                _set_tip(label, tooltip)
 
     def update_projection(self, projection: Mapping[str, object]) -> None:
         values = projection.get("form_values") or {}
         bundle = tuple(projection.get("input_bundle") or ())
         self._node = str(projection.get("node_id") or "")
-        self._show_inputs(bundle)
         self._members = tuple(str(name) for name, _schema, _snapshot in bundle)
-        schemas = {str(name): schema for name, schema, _snapshot in bundle}
-        self._typing = schemas if bundle and all(schema is not None for schema in schemas.values()) else None
+        self._inputs = {str(name): schema for name, schema, _snapshot in bundle}
+        self._changing = {}
+        for _name, schema, snapshot in bundle:
+            if schema is not None and snapshot is not None:
+                self._changing.update(changing_axes(schema, snapshot.block.schema))
+        self._show_inputs(bundle)
         self._failure = error_stage(str(projection.get("error") or ""))
         self._show(values.get("variables") or ())
 
@@ -949,17 +1141,18 @@ class DeriveEditor(QtWidgets.QWidget):
         if not problem and rows and not any(row["publish"] for row in rows):
             problem = NO_PUBLISHED
         self._draft_problem = problem
-        show_problem(self.note, problem[:1].upper() + problem[1:])
-        answers = typed_variables(rows, self._typing)
-        members, schemas = self._members, self._typing or {}
-        typed: dict[str, object] = {}
+        show_problem(self.note, problem)
+        typed = bool(self._inputs) and all(schema is not None for schema in self._inputs.values())
+        answers = typed_variables(rows, self._inputs, self._changing)
+        members, schemas = self._members, self._inputs
+        results: dict[str, object] = {}
         reads: dict[str, set[str]] = {}
         for row, answer in zip(rows, answers):
-            typed.setdefault(row["name"], answer["schema"])
+            results.setdefault(row["name"], answer["schema"])
             reads.setdefault(row["name"], set()).update(term["of"] for term in row["terms"] if term["of"])
 
         def schema_of(name):
-            return schemas.get(name) if name in members else typed.get(name)
+            return schemas.get(name) if name in members else results.get(name)
 
         def readers(name):
             found, frontier = set(), [name]
@@ -988,13 +1181,24 @@ class DeriveEditor(QtWidgets.QWidget):
                 failure = self._failure
                 card.show_row(row, answer, {
                     "members": members, "variables": variables, "names": (*members, *variables),
-                    "schema_of": schema_of, "typed": self._typing is not None, "node": self._node,
+                    "schema_of": schema_of, "typed": typed, "node": self._node, "changing": self._changing,
                     "failure": failure[1:] if failure is not None and failure[0] == row["name"] else None,
                 })
             self.columns.refresh()
             self.empty.setVisible(not rows)
+            self._order_focus()
         finally:
             self._loading = False
+
+    def _order_focus(self) -> None:
+        """Tab walks the page as it reads: Add variable, then each card
+        line by line -- a line built later does not go to the end."""
+        chain = [self.add_variable]
+        for card in self._cards:
+            chain.extend(card.focus_chain())
+        chain = [widget for widget in chain if widget.focusPolicy() & QtCore.Qt.TabFocus]
+        for before, after in zip(chain, chain[1:]):
+            QtWidgets.QWidget.setTabOrder(before, after)
 
 
 __all__ = ["DeriveEditor"]

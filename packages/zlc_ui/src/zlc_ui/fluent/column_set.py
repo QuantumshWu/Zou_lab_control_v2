@@ -1,6 +1,6 @@
 """Lines that share named columns: one x for each kind of cell, down a section.
 
-A section made of lines -- Derive's output cards, the scan plan's axis rows --
+A section made of lines -- Derive's variable cards, the scan plan's axis rows --
 reads as one table only when every line puts the same kind of cell at the
 same x: every operand under every operand, every ``at`` under every ``at``,
 every × on one x.  Packed line by line, each line laid its cells out from its
@@ -49,7 +49,7 @@ from collections.abc import Sequence
 from PyQt5 import QtCore, QtWidgets, sip
 
 from ..status import sentence
-from .fluent import FluentLabel, FluentSectionLabel, fluent_font_size, row_gap
+from .fluent import FluentLabel, FluentSectionLabel, control_height, fluent_font_size, row_gap
 from .style import FONT, RED_DARK
 
 #: What decides a column's width; see the module docstring.
@@ -299,6 +299,18 @@ class FluentColumnLine(QtWidgets.QWidget):
             self._held[column].append(widget)
         if fill and not slots:
             box.setStretch(box.count() - 1, 0)
+
+    def stand_on_first_row(self) -> None:
+        """Stand every cell on the line's first row.  A cell whose commands
+        run on to a second row when the line is narrow grows downward,
+        while the word and the × beside it stay level with that first row
+        instead of centring on the whole height."""
+
+        height = control_height()
+        layout = self.layout()
+        for cell in self._cells.values():
+            cell.setMinimumHeight(height)
+            layout.setAlignment(cell, QtCore.Qt.AlignTop)
 
     def _natural(self, widget: QtWidgets.QWidget) -> int:
         hint = widget.minimumSizeHint() if id(widget) in self._fills else widget.sizeHint()
