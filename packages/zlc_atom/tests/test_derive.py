@@ -524,3 +524,265 @@ def test_the_descriptor_declares_published_variables_before_data_and_absent_pick
         evaluate(rows, {"counts": Operand(event, np.zeros((1, 1, 2)))})
     assert str(absent.value) == "far · term 1: this publication carries no detuning '3'; detuning labels here: 2"
     assert error_stage(f"failed: {absent.value}")[:2] == ("far", "term 1")
+
+
+def _editor_session(rows=(), bundle=None):
+    """The editor as the Edit page hosts it, shown offscreen, with helpers
+    that drive its real widgets: clicks on controls and on a list row's
+    words or box."""
+    from PyQt5 import QtCore, QtTest
+
+    from zlc_ui.qt import ensure_qt_app
+
+    app = ensure_qt_app(["zlc-derive-editor-test"])
+    editor = LOGIC_NODE.ui_contributions[0]()
+    drafts = []
+    editor.draft_changed.connect(lambda patch: drafts.append(patch["values"]["variables"]))
+    if bundle is None:
+        bundle = (("counts", _schema(1, 3, 6, np.float32, "count"), None),
+                  ("occupied", _schema(1, 3, 6, bool, "1"), None))
+
+    def settle():
+        for _ in range(3):
+            app.processEvents()
+
+    def project(shown, inputs=bundle, error=""):
+        editor.update_projection({"form_values": {"variables": shown}, "input_bundle": inputs,
+                                  "node_id": "derive", "error": error})
+        settle()
+        return editor._cards
+
+    def click(widget, pos=None):
+        QtTest.QTest.mouseClick(widget, QtCore.Qt.LeftButton, QtCore.Qt.NoModifier,
+                                widget.rect().center() if pos is None else pos)
+        settle()
+
+    def row_at(combo, row, *, box=False):
+        """Click row ``row`` of an open list: on its words, or on its box."""
+        view = combo.view()
+        assert view.window().isVisible(), "the list is open"
+        rect = view.visualRect(combo.model().index(row, 0))
+        click(view.viewport(), QtCore.QPoint(rect.left() + 4 if box else rect.center().x(), rect.center().y()))
+
+    def pick(combo, data):
+        click(combo)
+        row_at(combo, combo.findData(data))
+
+    def texts(combo):
+        return [combo.itemText(row) for row in range(combo.count())]
+
+    editor.resize(1200, 800)
+    editor.set_label_width(editor.label_width_floor())
+    editor.show()
+    project(rows)
+    return SimpleNamespace(app=app, editor=editor, drafts=drafts, settle=settle, project=project, click=click,
+                           row_at=row_at, pick=pick, texts=texts)
+
+
+def test_the_editor_builds_the_users_example_by_clicks() -> None:
+    """Add variable, a name, an operand, an axis -- its labels list opens at
+    once: a click on a label's box ticks it, on its words picks only it --
+    and Publish off; + Comparison pins the same axis and asks for its label,
+    and + Where masks the next variable with it: the draft is the user's
+    example.  Each operator kind is its own strip, withholding what the
+    typed values cannot take; × removes a line or the variable."""
+    from PyQt5 import QtTest, QtWidgets
+
+    s = _editor_session()
+    editor, drafts = s.editor, s.drafts
+
+    def faces(strip):
+        return [button.text() for button in strip.findChildren(QtWidgets.QPushButton)]
+
+    try:
+        s.click(editor.add_variable)
+        assert drafts[-1] == ({"name": "variable_1", "terms": ({"of": "counts"},)},)
+        (same,) = editor._cards
+        head = same.head
+        assert head["name"].selectedText() == "variable_1", "the name is selected to type over"
+        QtTest.QTest.keyClicks(head["name"], "same")
+        assert s.texts(head["operand"]) == ["Inputs", "    counts", "    occupied", "Constants", "    Number"]
+        s.pick(head["operand"], "occupied")
+        assert s.texts(head["axis"]) == ["All", "Repeat", "    repeat", "Point", "    frame", "Cell", "    Site"]
+        s.pick(head["axis"], "frame")
+        labels = head["labels"]
+        assert s.texts(labels) == ["0", "1", "2"] and labels.view().window().isVisible(), "its labels list opens"
+        assert head["error"].isHidden(), "no problem while its labels are being picked"
+        s.row_at(labels, 1, box=True)
+        s.row_at(labels, 2, box=True)
+        assert labels.view().window().isVisible() and labels.checked_data() == ("1", "2"), "a box ticks"
+        s.row_at(labels, 0)
+        assert not labels.view().window().isVisible() and labels.checked_data() == ("0",), "words: only this"
+        s.click(head["publish"])
+        assert drafts[-1] == ({"name": "same", "publish": False, "terms": (
+            {"of": "occupied", "at": "frame", "labels": ("0",)},)},)
+
+        s.click(same.add["comparison"])
+        line = same.terms_ui[1]
+        assert faces(line["strip"]) == ["=", "≠", ">", "<", "≥", "≤"]
+        assert line["labels"].view().window().isVisible(), "the pick asks for its label at once"
+        s.row_at(line["labels"], 2)
+        assert drafts[-1][0]["terms"][1] == {"op": "==", "of": "occupied", "at": "frame", "labels": ("2",)}
+        assert [line["strip"].button(op).isEnabled() for op in ("==", "!=", ">", "<", ">=", "<=")] == [
+            True, True, False, False, False, False], "booleans compare only with = and ≠"
+        assert same.preview.text() == (
+            "→ repeat 1 × Site 6 · bool · unit 1 · internal · read by nothing, so not evaluated")
+
+        s.click(editor.add_variable)
+        kept = editor._cards[1]
+        QtTest.QTest.keyClicks(kept.head["name"], "kept")
+        s.click(kept.add["where"])
+        assert faces(kept.terms_ui[1]["strip"]) == ["where", "where not"]
+        example = (
+            {"name": "same", "publish": False, "terms": (
+                {"of": "occupied", "at": "frame", "labels": ("0",)},
+                {"op": "==", "of": "occupied", "at": "frame", "labels": ("2",)})},
+            {"name": "kept", "terms": ({"of": "counts"}, {"op": "where", "of": "same"})},
+        )
+        assert drafts[-1] == example, "the user's example, as the run record keeps it"
+        assert same.preview.text().endswith("· internal · read by kept")
+        assert kept.preview.text() == "→ repeat 1 × frame 3 × Site 6 · float32 · unit count · valid where same"
+        assert "    same" in s.texts(kept.head["operand"])
+        assert "    kept" not in s.texts(same.head["operand"]), "same may not read what reads it: no cycle"
+
+        # The other strips, the statistic and every ×.
+        for kind, shown in (("arithmetic", ["+", "−", "×", "÷"]), ("logic", ["and", "or", "and not"])):
+            s.click(kept.add[kind])
+            assert faces(kept.terms_ui[-1]["strip"]) == shown
+            s.click(kept.terms_ui[-1]["remove"])
+            assert drafts[-1] == example
+        s.click(kept.add["statistic"])
+        statistic = kept.statistic
+        assert len(faces(statistic["strip"])) == 8 and drafts[-1] == example, "opened, nothing chosen yet"
+        assert kept.add["statistic"].isHidden()
+        assert [statistic["strip"].button(name).isEnabled() for name in ("min", "any")] == [True, False]
+        s.click(statistic["strip"].button("mean"))
+        assert (drafts[-1][1]["statistic"], drafts[-1][1]["over"]) == ("mean", ("Site",)), "over every Cell axis"
+        over = statistic["over"]
+        s.click(over)
+        assert s.texts(over) == ["Repeat", "repeat", "Point", "frame", "Cell", "Site"]
+        s.row_at(over, 2)
+        assert drafts[-1][1]["over"] == ("frame",), "a domain's header picks its axes"
+        s.click(statistic["remove"])
+        assert drafts[-1] == example and not kept.add["statistic"].isHidden()
+        s.click(editor.add_variable)
+        s.click(editor._cards[-1].head["remove"])
+        assert drafts[-1] == example and len(editor._cards) == 2
+        editor.set_mutation_enabled(False)
+        assert not editor.add_variable.isEnabled() and not any(card.isEnabled() for card in editor._cards)
+    finally:
+        editor.close()
+        editor.deleteLater()
+        s.app.processEvents()
+
+
+def test_the_editor_reads_down_one_control_column_and_says_problems_under_their_lines() -> None:
+    """The Inputs' names, every operand, strip of statistics, add command,
+    result and problem start on one x; operator strips end on the name
+    field's right edge; every ``at``, axis, labels, Publish and × has one x,
+    and opening or removing a line moves none of them.  The label column
+    the editor asks for is the same with or without cards, and a wider one
+    widens the names.  A problem stands under its line where the result
+    stood -- the card keeps its height -- and a parked helper's is muted
+    and blocks nothing.  Before the source publishes the lists offer only
+    what is stored."""
+    from PyQt5 import QtCore
+
+    from zlc_ui.fluent import MUTED_INK, field_text_inset, row_gap
+
+    def at(of, *labels, **extra):
+        return {"of": of, "at": "frame", "labels": list(labels), **extra}
+
+    rows = [
+        {"name": "same", "publish": False, "terms": [at("occupied", "0"), at("occupied", "2", op="==")]},
+        {"name": "kept", "terms": [{"of": "counts"}, {"op": "where", "of": "same"}]},
+        {"name": "rise", "terms": [at("counts", "2"), at("counts", "0", op="-"), {"op": "*", "number": 2}],
+         "statistic": "mean", "over": ["Site"]},
+        {"name": "bright", "terms": [at("counts", "1"), at("occupied", "1", op="where")]},
+    ]
+    s = _editor_session()
+    editor = s.editor
+
+    def x(widget):
+        return widget.mapTo(editor, QtCore.QPoint()).x()
+
+    def text_x(label):
+        return x(label) + label.contentsMargins().left()
+
+    def lines():
+        return [ui for card in editor._cards for ui in card.terms_ui]
+
+    def columns():
+        return {key: {x(ui[key]) for ui in lines() if ui[key].isVisible()}
+                for key in ("operand", "at", "axis", "labels", "remove")}
+
+    try:
+        floor = editor.label_width_floor()
+        s.project(rows)
+        assert editor.label_width_floor() == floor, "the column stays put as cards come"
+        names = []
+        for width in (floor, floor + 40):
+            editor.set_label_width(width)
+            cards = s.project(rows)
+            control = width + row_gap()
+            assert x(editor.inputs_title) + editor.inputs_title.width() + row_gap() == control
+            assert x(editor._input_rows[0][0]) == control + field_text_inset()
+            shown = columns()
+            assert shown["operand"] == {control} and all(len(xs) == 1 for xs in shown.values()), shown
+            for card in cards:
+                name = card.head["name"]
+                for ui in card.terms_ui[1:]:
+                    assert x(ui["strip"]) + ui["strip"].width() == x(name) + name.width()
+                assert text_x(card.preview) == control + field_text_inset()
+                assert x(card.add["arithmetic"]) == control
+            rise = cards[2]
+            assert x(rise.statistic["strip"]) == control
+            assert {x(card.head["publish"]) for card in cards} == {x(cards[0].head["publish"])}
+            assert {x(card.head["remove"]) for card in cards} == shown["remove"]
+            names.append(cards[0].head["name"].width())
+        assert names[1] - names[0] == 40
+
+        # Opening or removing a line moves no column of any other card.
+        before = columns()
+        s.click(cards[1].add["arithmetic"])
+        s.click(cards[1].terms_ui[-1]["remove"])
+        assert columns() == before
+
+        # A problem under its line, where the result stood.
+        bright = cards[3]
+        result_y, height = bright.preview.mapTo(bright, QtCore.QPoint()).y(), bright.height()
+        rows[3] = {"name": "bright", "terms": [at("counts", "1"), {"op": "where", "of": "occupied"}]}
+        s.project(rows)
+        error = bright.terms_ui[1]["error"]
+        assert error.text() == "the mask has frame, which counts[frame 1] does not; pick one frame value of the mask."
+        assert error.isVisible() and not bright.preview.isVisible()
+        assert (error.mapTo(bright, QtCore.QPoint()).y(), bright.height()) == (result_y, height)
+        assert text_x(error) == control + field_text_inset()
+        assert editor.shown_problems() == {
+            "bright · term 2: the mask has frame, which counts[frame 1] does not; pick one frame value of the mask":
+                "Variables"}
+        # A run's failure stands under the line it names.
+        s.project(rows[:3], error="failed: kept · term 2: this publication carries no Site '7'")
+        assert cards[1].terms_ui[1]["error"].text() == "this publication carries no Site '7'."
+        # A parked helper's problem is muted and blocks nothing.
+        idea = {"name": "idea", "publish": False, "terms": [{"of": "counts"}, {"op": ">"}]}
+        cards = s.project([*rows[:3], idea])
+        parked = cards[3].terms_ui[1]["error"]
+        assert parked.text() == "choose what it reads." and parked.property("ink") == MUTED_INK
+        assert cards[3].preview.text() == "→ internal · read by nothing, so not evaluated"
+        assert editor.shown_problems() == {}
+        assert not cards[3].statistic["block"].isVisible() and cards[2].statistic["block"].isVisible()
+
+        # Before the source publishes: every name, and only what is stored.
+        cards = s.project(rows[:3], inputs=(("counts", None, None), ("occupied", None, None)))
+        head = cards[2].head
+        assert s.texts(head["axis"]) == ["All", "frame"] and s.texts(head["labels"]) == ["2"]
+        assert s.texts(cards[2].statistic["over"]) == ["Site"]
+        assert s.texts(cards[2].terms_ui[1]["operand"]) == [
+            "Inputs", "    counts", "    occupied", "Variables", "    same", "    kept", "Constants", "    Number"]
+        assert cards[2].preview.text() == "→ checked when the source publishes"
+        assert editor._input_rows[0][1].text() == "waiting for its first publication"
+    finally:
+        editor.close()
+        editor.deleteLater()
+        s.app.processEvents()

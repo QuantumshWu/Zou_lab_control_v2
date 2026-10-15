@@ -735,6 +735,21 @@ def _grouping(terms) -> str | None:
     return None
 
 
+def where_notes(terms) -> tuple[str, ...]:
+    """``valid where <mask>`` -- ``… is false`` after ``where not`` -- for
+    each where of a formula that reads, in term order, the mask as the
+    precedence groups it: ``counts where a and b`` masks with ``a and b``."""
+
+    tree = _tree(terms)
+    notes = []
+    for _k, op, _left, right in sorted(node for node in _nodes(tree) if OPERATORS[node[1]][0] == "where"):
+        mask = _text(right, terms)
+        if op == "where not":
+            mask = f"({mask}) is false" if isinstance(right, tuple) else f"{mask} is false"
+        notes.append(f"valid where {mask}")
+    return tuple(notes)
+
+
 def _formula_problem(row, closing) -> DeriveError | None:
     """The first problem of a variable's formula and statistic that needs no
     data, or None.  ``closing`` maps a term index to the cycle it closes."""
@@ -987,15 +1002,23 @@ def typed_variables(rows: Sequence[Mapping[str, object]],
 
     for position in order:
         answer = answers[position]
-        if answer["error"] is not None:
+        # A statistic still being chosen leaves its formula typed: the
+        # statistic's choices are what that formula's value offers, and a
+        # problem of the formula comes before the statistic's.
+        choosing = answer["error"] is not None and position not in names and answer["error"].stage == "statistic"
+        if answer["error"] is not None and not choosing:
             continue
         waits = next((rows[other]["name"] for _k, other in edges[position]
                       if answers[other]["error"] is not None or answers[other]["waits_for"] is not None), None)
         if waits is not None:
-            answer["waits_for"] = waits
+            if not choosing:
+                answer["waits_for"] = waits
             continue
         try:
-            answer["schema"] = typed[position] = _value(rows[position], read, False, answer)
+            if choosing:
+                _value({**rows[position], "statistic": "", "over": ()}, read, False, answer)
+            else:
+                answer["schema"] = typed[position] = _value(rows[position], read, False, answer)
         except DeriveError as error:
             answer["error"] = error
     return tuple(answers)
@@ -1056,5 +1079,5 @@ def error_stage(text: str) -> tuple[str, str, str] | None:
 __all__ = [
     "CATEGORIES", "DeriveError", "NO_PUBLISHED", "OPERATORS", "Operand", "STATISTICS", "TERM_COLUMNS",
     "VARIABLE_COLUMNS", "axes_text", "checked_variables", "compact_variable", "describe_schema",
-    "error_stage", "evaluate", "input_members", "published", "term_text", "typed_variables",
+    "error_stage", "evaluate", "input_members", "published", "term_text", "typed_variables", "where_notes",
 ]
