@@ -117,13 +117,27 @@ def test_camera_descriptor_builds_repeat_zero_and_finite_measurements() -> None:
         assert infinite.request.roi_xywh == (2, 3, 20, 16)
         assert finite.repeat == 2
         assert finite.request.roi_xywh is None
-        with pytest.raises(ValueError, match="all four fields"):
-            descriptor.instantiate(
-                camera=installation.capability("camera.adapter"),
-                camera_key="camera",
-                signal_plane=plane,
-                roi_x=2,
-            )
+        # A blank ROI field is the camera's current value for that field:
+        # only the height is authored, and the run arms at the camera's
+        # x, y and width with that height.
+        camera = installation.capability("camera.adapter")
+        camera.set_roi((4, 6, 64, 48))
+        taller = descriptor.instantiate(
+            camera=camera,
+            camera_key="camera",
+            signal_plane=plane,
+            roi_height=8,
+            repeat=1,
+        )
+        assert taller.request.roi_xywh == (None, None, None, 8)
+        capture = taller.prepare()
+        try:
+            armed = camera.working_point()
+            assert armed.roi_origin_yx == (6, 4)
+            assert armed.roi_shape_yx == (8, 64)
+            assert taller.run_record["parameters"]["roi_xywh"] == [4, 6, 64, 8]
+        finally:
+            capture.close()
     finally:
         installation.close()
         plane.close()

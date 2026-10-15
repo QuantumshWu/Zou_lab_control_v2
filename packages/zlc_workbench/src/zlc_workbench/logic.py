@@ -27,6 +27,7 @@ from types import MappingProxyType
 from typing import Any
 
 from zlc_runtime import NodeHost
+from zlc_ui.status import name_words
 
 from .device_use import DeviceClaim, DeviceLease, LogicReservation
 
@@ -66,8 +67,10 @@ class LogicDraftFinalization:
     device_keys: Mapping[str, str]
     devices: Mapping[str, object]
     #: The resolved artifact per input.  A frame-claims input's is a tuple of
-    #: ``FrameClaim``, one per row, whose value is None where the row's file
-    #: did not resolve -- and then an issue says why.
+    #: ``FrameClaim``, one per row: its value is the ``ResolvedArtifact``,
+    #: whose own value is the error where the file did not decode, or None
+    #: for a row with no file.  A row that reads frames and has no usable
+    #: file is an issue; a row reading no frame is kept either way.
     artifacts: Mapping[str, object]
     resources: Mapping[str, object]
     #: ``{field name: why not}`` for settings this draft's bound devices
@@ -124,6 +127,11 @@ class LogicCandidate:
     reservation: LogicReservation | None = None
     run_root: Path | None = None
     input_summary: Mapping[str, object] = field(default_factory=dict)
+    #: A copy of the draft this run was built from, kept where the Start is
+    #: accepted.  It becomes the node's running configuration
+    #: (``LogicBinding.started_draft``) only when the run is installed; a
+    #: candidate discarded before then takes its configuration with it.
+    draft: LogicDraft | None = None
 
     @property
     def waiting_for(self) -> tuple[str, ...]:
@@ -138,6 +146,11 @@ class LogicBinding:
     It used to carry its ROW as well -- a widget, held by the layer that is
     not allowed to hold one.  The row lives in the window now, and this side
     names the node instead.
+
+    ``node_id`` is the node's identity, minted once and never changed: every
+    signal key, reference, lease, layout and MCP address spells it.
+    ``name`` is what the operator calls it, and the one place that is kept;
+    everything a person reads derives it from here at display time.
     """
 
     node_id: str
@@ -167,6 +180,15 @@ class LogicBinding:
     #: every publication of the same incompatible schema.
     following: bool = False
     draft_revision: int = 0
+    #: A copy of the draft the installed run (or a standing follow) was
+    #: started with.  While a Restart is queued the configuration the node
+    #: runs is that candidate's own copy (``pending.draft``); this one is
+    #: replaced only when the candidate is installed, so a queued Restart
+    #: that is discarded leaves the old run's record in place.  The draft
+    #: goes on being edited for the next run; the running configuration is
+    #: what Revert puts back, what a follow restart rebuilds, and what the
+    #: draft is compared with to say "edited".
+    started_draft: LogicDraft | None = None
     finalization_key: tuple = ()
     finalization: LogicDraftFinalization | None = None
     #: Open this node's declared preview panel when it starts.  A preference
@@ -188,6 +210,15 @@ class LogicBinding:
     #: draft remains the only current value; manual edits, not passive numeric
     #: normalization, cancel undo. A newer panel takes ownership without stacking.
     selection_restore: dict[str, tuple[str, Any]] = field(default_factory=dict)
+    #: What the operator calls this node; the id until they rename it.  Like
+    #: ``auto_preview`` it belongs to the board, never to the draft.
+    name: str = ""
+    #: Why the operator's last rename was refused, until the next one is
+    #: accepted.  Presentation only: never saved.
+    name_problem: str = ""
+
+    def __post_init__(self) -> None:
+        self.name = str(self.name).strip() or self.node_id
 
 
 def task_input_summary(
@@ -201,7 +232,8 @@ def task_input_summary(
             "contract_id": str(spec.contract_id),
             **(
                 {"claims": [
-                    {"path": str(claim.value.path), "frames": list(claim.frames)}
+                    {"path": None if claim.value is None else str(claim.value.path),
+                     "frames": list(claim.frames)}
                     for claim in finalization.artifacts[spec.name]
                 ]}
                 if spec.frame_claims
@@ -248,11 +280,17 @@ def dataset_inputs(descriptor: Any, values: Mapping[str, Any] | None = None) -> 
 
 
 def source_label(spec: Any) -> str:
-    """The words a node's source chooser stands under on its Edit page --
-    the input's own name, and what a bundle input selects -- and so the
-    words a draft names it by."""
+    """The words a node's source chooser stands under on its Edit page,
+    and so the words a draft names it by.
 
-    return spec.name.replace("_", " ").title() + (" · Signal bundle" if spec.select_bundle else "")
+    A bundle input is chosen as a whole producer's bundle, so it reads
+    "Signal bundle"; any other input's name reads as words, like every
+    form label beside it.
+    """
+
+    if spec.select_bundle:
+        return "Signal bundle"
+    return name_words(spec.name)
 
 
 def artifact_input_specs(descriptor: Any) -> tuple[Any, ...]:
@@ -342,8 +380,9 @@ def finalize_logic_draft(
 ) -> LogicDraftFinalization:
     """Resolve every Start admission fact without building or acquiring a run.
 
-    ``previous`` is this row's last finalization: a file it decoded is taken
-    from it again while the draft still names the same path.  Files are read
+    ``previous`` is this row's last finalization: a file it read is taken
+    from it again, decoded or not, while the draft still names the same
+    path.  Files are read
     at the explicit boundaries -- opening Edit, Refresh, Start -- which pass
     none; a keystroke in an unrelated field re-decoded an SLM-sized context
     and every calibration the row names, and quietly picked up whatever had
@@ -351,6 +390,10 @@ def finalize_logic_draft(
 
     ``source_frames`` is how many frames a cycle of the source carries, when
     that is known: frame claims are then checked against it as well.
+
+    An issue never names another node: it is copied into the refusal a
+    Start leaves on the row, which would keep a name the operator has since
+    changed.  The picker it is about, on the same page, says which.
     """
 
     from zlc_atom.nodes import ResolvedArtifact
@@ -373,11 +416,15 @@ def finalize_logic_draft(
         values = {}
         authored = False
         issues.append(str(error))
+    # What the draft cannot do with what it was given is a draft issue too,
+    # asked once the draft projects and every resource it names resolved.
+    if descriptor.admit_resources is not None and authored and not resource_issues:
+        issues.extend(descriptor.admit_resources(values, resources, installation))
 
     acquisition_field = descriptor.acquisition_input
     acquisition = str(draft.values.get(acquisition_field) or "") if descriptor.authoring_schema.is_enabled(acquisition_field, raw_values) else ""
     if acquisition and acquisition not in acquisition_options:
-        issues.append(f"{acquisition!r} is not an available acquisition Measurement")
+        issues.append("the selected acquisition is not an available Measurement")
 
     active_requirements = descriptor.active_device_requirements(raw_values)
     options = device_key_options(descriptor, installation=installation, values=raw_values)
@@ -450,12 +497,18 @@ def finalize_logic_draft(
                 f"{descriptor.api_name} resolves availability for undeclared "
                 f"fields {sorted(unknown_fields)!r}"
             )
+        # Only for the fields the draft uses: one its mode leaves aside is
+        # neither offered nor refused, and a reason on it -- "the selected
+        # camera states no conversion" on a calibration of saved frames,
+        # which selects no camera -- would say something untrue.
+        field_availability = {
+            name: reason for name, reason in field_availability.items()
+            if descriptor.authoring_schema.is_enabled(name, raw_values)
+        }
         fields = {
             field.name: field for field in descriptor.authoring_schema.fields
         }
         for name, reason in field_availability.items():
-            if not descriptor.authoring_schema.is_enabled(name, raw_values):
-                continue
             if fields[name].value_type == "bool":
                 values[name] = False
             elif values.get(name):
@@ -482,7 +535,8 @@ def finalize_logic_draft(
                     if spec.contract_id is not None
                 ) or "a compatible"
                 issues.append(
-                    f"{source!r} is not declared as {contracts} Dataset"
+                    f"{source_label(wants_source[0])} is not declared as "
+                    f"{contracts} Dataset"
                 )
             else:
                 # Nothing on the plane under that name yet: a processor
@@ -528,17 +582,22 @@ def finalize_logic_draft(
         )
     artifacts: dict[str, object] = {}
     data_root = Path(getattr(workspace, "data", Path.cwd())).resolve()
-    # One decode per file AND contract: a file the last answer decoded is
-    # taken from it again, several rows naming one file read it once, and
-    # the same path offered to an input of another contract is decoded (and
-    # suffix-checked) by that contract's own codec.
+    # One decode per file AND contract: a file the last answer read is taken
+    # from it again -- whether it decoded or not, since only the boundaries
+    # read files and they pass no last answer -- several rows naming one
+    # file read it once, and the same path offered to an input of another
+    # contract is decoded (and suffix-checked) by that contract's own codec.
     decoded: dict[tuple[str, Path], ResolvedArtifact] = {}
     for held in () if previous is None else previous.artifacts.values():
         for item in (claim.value for claim in held) if isinstance(held, tuple) else (held,):
             if item is not None:
                 decoded[(item.contract_id, Path(item.path))] = item
 
-    def resolve(spec: Any, text: str) -> ResolvedArtifact | None:
+    def resolve(spec: Any, text: str) -> ResolvedArtifact:
+        """The file ``text`` names, decoded; one that does not decode is
+        answered with the error as its value, and the caller says whether
+        that refuses the draft."""
+
         selected_path = Path(text).expanduser()
         if not selected_path.is_absolute():
             selected_path = data_root / selected_path
@@ -549,8 +608,11 @@ def finalize_logic_draft(
             try:
                 resolved = spec.codec.resolve(selected_path)
             except Exception as error:
-                issues.append(f"{spec.contract_id} artifact “{text}” is invalid: {error}")
-                return None
+                # The error, not how it was raised: its traceback holds this
+                # call's frames, and through them the last answer -- every
+                # answer would keep the one before it, and what it read.
+                error.__traceback__ = error.__context__ = error.__cause__ = None
+                resolved = ResolvedArtifact(selected_path, spec.codec.contract_id, error)
             decoded[cache_key] = resolved
         return resolved
 
@@ -573,7 +635,9 @@ def finalize_logic_draft(
                 issues.append(f"{descriptor.api_name} needs artifact input {spec.name}")
             continue
         resolved = resolve(spec, text)
-        if resolved is not None:
+        if isinstance(resolved.value, Exception):
+            issues.append(_invalid_artifact(spec, text, resolved.value))
+        else:
             artifacts[spec.name] = resolved
 
     return LogicDraftFinalization(
@@ -590,6 +654,12 @@ def finalize_logic_draft(
     )
 
 
+def _invalid_artifact(spec: Any, text: str, error: Exception) -> str:
+    """Why the file a draft names for an artifact input cannot be used."""
+
+    return f"{spec.contract_id} artifact “{text}” is invalid: {error}"
+
+
 def _resolve_frame_claims(
     descriptor: Any,
     spec: Any,
@@ -603,10 +673,15 @@ def _resolve_frame_claims(
     The claims are checked as far as what is known allows: among themselves
     always, against the source's cycle once its frame count is known.  The
     processor makes the same check against the frames that actually arrive.
-    None only when the value is not rows of claims at all, or has none.
+    A row reading no frame is parked: kept with whatever its file is, and
+    refused for nothing -- not a missing or unreadable file, not being the
+    same file as a row that reads.  None only when the value is not rows of
+    claims at all, or has none.
     """
 
-    from zlc_atom.nodes import FrameClaim, check_claims, claim_names, frame_claim_entries, frame_problems
+    from zlc_atom.nodes import (
+        FrameClaim, claim_names, claim_problems, frame_claim_entries, frame_problems, parked_entries,
+    )
 
     try:
         entries = frame_claim_entries(raw)
@@ -618,29 +693,29 @@ def _resolve_frame_claims(
             issues.append(f"{spec.label} must have at least one file")
         return None
     names = claim_names(entries)
-    resolved_rows = []
-    for name, entry in zip(names, entries):
-        if entry["path"]:
-            resolved_rows.append(resolve(spec, entry["path"]))
-        else:
-            issues.append(f"{spec.label} {name} has no file yet")
-            resolved_rows.append(None)
-    paths = [None if row is None else Path(row.path) for row in resolved_rows]
+    frames = tuple(entry["frames"] for entry in entries)
+    parked = parked_entries(frames)
+    rows = []
+    for index, (name, entry) in enumerate(zip(names, entries)):
+        row = resolve(spec, entry["path"]) if entry["path"] else None
+        if index not in parked:
+            if row is None:
+                issues.append(f"{spec.label} {name} has no file yet")
+            elif isinstance(row.value, Exception):
+                issues.append(_invalid_artifact(spec, entry["path"], row.value))
+        rows.append(row)
+    # One file reading frames in two rows; a parked copy reads nothing.
+    paths = [None if row is None or index in parked else Path(row.path)
+             for index, row in enumerate(rows)]
     repeated = sorted({name for name, path in zip(names, paths)
                        if path is not None and paths.count(path) > 1})
     if repeated:
         issues.append(f"{repeated[0]} is listed twice: give it every frame it reads in one row")
-    frames = tuple(entry["frames"] for entry in entries)
-    try:
-        check_claims(frames, names)
-    except ValueError as error:
-        issues.append(str(error))
-    else:
-        if source_frames is not None:
-            issues.extend(frame_problems(frames, source_frames, names, what="file"))
-    return tuple(
-        FrameClaim(row, entry["frames"]) for row, entry in zip(resolved_rows, entries)
-    )
+    problems = claim_problems(frames, names, what="file")
+    issues.extend(problems)
+    if not problems and source_frames is not None:
+        issues.extend(frame_problems(frames, source_frames, names, what="file"))
+    return tuple(FrameClaim(row, entry["frames"]) for row, entry in zip(rows, entries))
 
 
 def _resolve_workspace_resources(
@@ -873,12 +948,15 @@ def make_host(
     values: Mapping[str, Any],
     devices: Mapping[str, object],
     request_owner_wake: Callable[[], None] | None = None,
+    display_name: Callable[[], str] | None = None,
 ) -> NodeHost:
     """One node under the runtime's own lifecycle, named for its instance.
 
     The descriptor's output declarations for this draft, on the devices it
     bound, are the sole signal vocabulary; the plane refuses a node whose
-    own declarations differ.
+    own declarations differ.  ``display_name`` answers what the operator
+    calls the node; the run keeps the answer it gets when it declares its
+    record, as history.
     """
 
     inputs = dataset_inputs(descriptor, values)
@@ -892,7 +970,7 @@ def make_host(
     siblings: tuple[str, ...] = ()
     if has_input and kind == "processor":
         # A node that computes what it was asked to (derive) reads the
-        # outputs its expression names, and says so on the instance; every
+        # members its variables name, and says so on the instance; every
         # other processor reads only the signal it subscribed to.
         declared_by_node = getattr(node, "dataset_input_siblings", None)
         siblings = () if declared_by_node is None else tuple(declared_by_node)
@@ -916,4 +994,5 @@ def make_host(
             for output in descriptor.artifact_outputs
         },
         task_name=str(descriptor.api_name),
+        display_name=display_name,
     )

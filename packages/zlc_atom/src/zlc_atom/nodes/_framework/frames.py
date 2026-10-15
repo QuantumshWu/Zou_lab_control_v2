@@ -13,16 +13,22 @@ they ARE, the frames between them by their number:
   (the numbering the camera, Frame Survival and the Calibration task use);
 * ``"rest"``, every frame no entry names.
 
-So a cycle that gains or loses a frame keeps meaning what was authored: the
+An entry claiming no frame is PARKED: it stays in the assignment, reads
+nothing and is checked against nothing (:func:`parked_entries`) -- a file
+the operator keeps at hand is not a file they must use.  Only an assignment
+in which every entry is parked is refused.
+
+A cycle that gains or loses a frame keeps meaning what was authored: the
 ends follow the cycle, a middle number keeps its position, and a middle
-number the shorter cycle no longer has between its ends becomes ABSENT -- it
-never takes over the last frame.  A frame is read by exactly one entry.  Only
-"rest" ranks below anything else: every other collision -- two entries
-reaching one frame ("first" and "last" in a one-frame cycle), a middle number
-the source does not carry, a frame nobody reads -- is refused with the
-entries named, never settled silently.  One entry reaching a frame two ways
-is one reader.  Nothing here ever edits what was authored: the same claims
-are valid again once the frame count that suited them returns.
+number the shorter cycle no longer has between its ends is ABSENT -- it
+never takes over the last frame, reads nothing in this cycle and is noted
+(:func:`absent_notes`), not refused.  A frame is read by exactly one entry.
+Only "rest" ranks below anything else: every other collision -- two entries
+reaching one frame ("first" and "last" in a one-frame cycle), a frame nobody
+reads -- is refused with the entries named, never settled silently.  One
+entry reaching a frame two ways is one reader.  Nothing here ever edits what
+was authored: an absent number reads its frame again once a frame count that
+has it returns.
 """
 
 from __future__ import annotations
@@ -35,6 +41,10 @@ FIRST = "first"
 LAST = "last"
 REST = "rest"
 FRAME_NAMES = (FIRST, LAST, REST)
+#: The name of a cycle's frame axis -- the READOUT_EVENT Point axis the
+#: camera and the Calibration task publish, and Occupancy keeps -- and so
+#: what a Derive pick or statistic writes to name it, before data as after.
+FRAME_AXIS_NAME = "frame"
 
 FrameToken = int | str
 
@@ -172,32 +182,58 @@ def claim_names(entries: Sequence[Mapping[str, object]]) -> tuple[str, ...]:
     return tuple(name or f"row {index + 1}" for index, name in enumerate(names))
 
 
-def check_claims(
+def parked_entries(frames_by_entry: Sequence[Sequence[object]]) -> tuple[int, ...]:
+    """The entries claiming no frame: kept where they were written, reading nothing."""
+
+    return tuple(entry for entry, frames in enumerate(frames_by_entry) if not frames)
+
+
+def claim_problems(
     frames_by_entry: Sequence[Sequence[object]],
     names: Sequence[str],
-) -> tuple[tuple[FrameToken, ...], ...]:
-    """What can be refused without knowing the frame count.
+    *,
+    what: str = "entry",
+) -> tuple[str, ...]:
+    """What can be refused without knowing the frame count, every reason at once.
 
-    Every entry claims at least one frame, and every middle number, "first",
-    "last" and "rest" belongs to at most one entry.  "first" against "last"
-    collides only in a one-frame cycle: that is :func:`frame_problems`'.
+    Every middle number, "first", "last" and "rest" belongs to at most one
+    entry, and at least one entry reads a frame.  A parked entry claims
+    nothing, so it neither collides nor hides a collision of two others.
+    "first" against "last" collides only in a one-frame cycle: that is
+    :func:`frame_problems`'.
     """
 
     if len(frames_by_entry) != len(names):
         raise ValueError("every entry needs a name")
     claims = tuple(canonical_frames(frames) for frames in frames_by_entry)
-    for name, frames in zip(names, claims):
-        if not frames:
-            raise ValueError(f"{name} reads no frame: choose its frames or remove it")
-    owners: dict[FrameToken, int] = {}
+    owners: dict[FrameToken, list[int]] = {}
     for entry, frames in enumerate(claims):
         for token in frames:
-            if token in owners:
-                what = f"frame {token}" if isinstance(token, int) else repr(token)
-                raise ValueError(
-                    f"{what} is claimed by both {names[owners[token]]} and {names[entry]}")
-            owners[token] = entry
-    return claims
+            owners.setdefault(token, []).append(entry)
+    problems = [
+        f"{f'frame {token}' if isinstance(token, int) else repr(token)} is claimed by "
+        + (f"both {names[entries[0]]} and {names[entries[1]]}" if len(entries) == 2 else
+           ", ".join(names[entry] for entry in entries[:-1]) + f" and {names[entries[-1]]}")
+        for token, entries in owners.items() if len(entries) > 1
+    ]
+    if claims and len(parked_entries(claims)) == len(claims):
+        problems.append(
+            f"no {what} reads a frame: give one the frames it reads, or let one read the rest")
+    return tuple(problems)
+
+
+def check_claims(
+    frames_by_entry: Sequence[Sequence[object]],
+    names: Sequence[str],
+    *,
+    what: str = "entry",
+) -> tuple[tuple[FrameToken, ...], ...]:
+    """The claims in their canonical form, or every :func:`claim_problems` reason."""
+
+    problems = claim_problems(frames_by_entry, names, what=what)
+    if problems:
+        raise ValueError("; ".join(problems))
+    return tuple(canonical_frames(frames) for frames in frames_by_entry)
 
 
 @dataclass(frozen=True)
@@ -271,22 +307,18 @@ def frame_problems(
     *,
     what: str = "entry",
 ) -> tuple[str, ...]:
-    """Why ``count`` frames cannot be read this way, in operator words."""
+    """Why ``count`` frames cannot be read this way, in operator words.
+
+    A frame two entries reach, and a frame nobody reads.  An absent middle
+    number is not one: it is :func:`absent_notes`'.
+    """
 
     reach = reach_frames(frames_by_entry, count)
-    span = "only frame 0" if count == 1 else f"0-{count - 1}"
     problems = [
-        f"{names[entry]} names middle frame {number}, but the source carries "
-        f"{count} frame{'s' if count != 1 else ''} ({span}); a numbered middle "
-        "frame never stands for the first or the last"
-        for entry, number in reach.absent
+        f"frame {frame} is read by both "
+        + " and ".join(f"{names[entry]} ({how})" for entry, how in readers)
+        for frame, readers in enumerate(reach.readers) if len(readers) > 1
     ]
-    for frame, readers in enumerate(reach.readers):
-        if len(readers) > 1:
-            problems.append(
-                f"frame {frame} is read by both "
-                + " and ".join(f"{names[entry]} ({how})" for entry, how in readers)
-            )
     unread = [frame for frame, readers in enumerate(reach.readers) if not readers]
     if unread:
         frames = ", ".join(str(frame) for frame in unread)
@@ -298,6 +330,22 @@ def frame_problems(
     return tuple(problems)
 
 
+def absent_notes(
+    frames_by_entry: Sequence[Sequence[FrameToken]],
+    count: int,
+    names: Sequence[str],
+) -> tuple[str, ...]:
+    """Each claimed middle number a ``count``-frame cycle does not have between
+    its ends: kept as written and reading nothing now, so it is said, not refused."""
+
+    span = "only frame 0" if count == 1 else f"frames 0-{count - 1}"
+    return tuple(
+        f"{names[entry]}'s middle frame {number} is not in this source ({span}); "
+        "it is kept for a cycle that has it"
+        for entry, number in reach_frames(frames_by_entry, count).absent
+    )
+
+
 def assign_frames(
     frames_by_entry: Sequence[Sequence[FrameToken]],
     count: int,
@@ -305,7 +353,11 @@ def assign_frames(
     *,
     what: str = "entry",
 ) -> tuple[int, ...]:
-    """The one entry each of ``count`` frames is read by, or every reason why not."""
+    """The one entry each of ``count`` frames is read by, or every reason why not.
+
+    An absent middle number does not stop it: that entry reads the frames it
+    still reaches, and its absent number reads nothing.
+    """
 
     problems = frame_problems(frames_by_entry, count, names, what=what)
     if problems:
@@ -316,20 +368,24 @@ def assign_frames(
 
 __all__ = [
     "FIRST",
+    "FRAME_AXIS_NAME",
     "FRAME_NAMES",
     "FrameClaim",
     "FrameReach",
     "FrameToken",
     "LAST",
     "REST",
+    "absent_notes",
     "assign_frames",
     "canonical_frames",
     "check_claims",
+    "claim_problems",
     "claim_names",
     "describe_frames",
     "frame_identity",
     "frame_problems",
     "frame_token",
+    "parked_entries",
     "reach_frames",
     "resolve_frame",
 ]

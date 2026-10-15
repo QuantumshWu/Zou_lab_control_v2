@@ -139,6 +139,9 @@ class _LogicRowView:
         self.auto_preview = True
         self.preview_offered = True
 
+    def set_name(self, text: str, details: tuple[str, ...] = ()) -> None:
+        self.title = str(text)
+
     def set_preview_offered(self, offered: bool) -> None:
         self.preview_offered = bool(offered)
 
@@ -176,8 +179,9 @@ class _ConsoleView:
         "panel_edit_requested", "panel_plot_error",
         "panel_publisher_edit_requested", "panel_publisher_draft_changed",
         "logic_start_requested", "logic_auto_preview_changed",
-        "logic_stop_requested",
+        "logic_stop_requested", "logic_revert_requested",
         "logic_edit_requested", "logic_remove_requested", "logic_draft_changed",
+        "logic_name_committed",
         "panel_state_changed", "panel_snapshot_refresh_requested",
         "panel_editor_closed",
     )
@@ -217,6 +221,7 @@ class _ConsoleView:
         self.focused_panel_editor = ""
         self.task_takeover = False
         self.panel_publishers: dict[str, tuple] = {}
+        self.panel_publisher_names: dict[str, str] = {}
         self.panel_publisher_editors: dict[str, dict] = {}
         #: Every front the presenter put on a staged panel widget, in order.
         self.presented_fronts: list[tuple[str, object]] = []
@@ -368,7 +373,10 @@ class _ConsoleView:
     def set_panel_publishers(self, publishers) -> None:
         self.panel_publishers = {
             str(panel_id): tuple(rows)
-            for panel_id, rows in publishers
+            for panel_id, _name, rows in publishers
+        }
+        self.panel_publisher_names = {
+            str(panel_id): str(name) for panel_id, name, _rows in publishers
         }
 
     def open_panel_publisher_editor(self, panel_id: str, projection) -> None:
@@ -453,6 +461,9 @@ class _ConsoleView:
 
     def remove_logic_row(self, node_id: str) -> None:
         self._rows.pop(str(node_id), None)
+
+    def set_logic_name(self, node_id: str, name: str, api_name: str = "") -> None:
+        self._rows[str(node_id)].set_name(name)
 
     def set_logic_state(self, node_id: str, state: str, status_text: str = "") -> None:
         self._rows[str(node_id)].set_state(state, status_text)
@@ -974,13 +985,13 @@ def test_header_save_layout_writes_no_panel_dataset(
     node, snapshot = _one_shot(session)
     presenter.add_panel(node.signal_key("frames"), snapshot, title="frames")
     rows = (
-        {"name": "first", "value": "frames", "at": "0"},
-        {"name": "twice", "value": "first", "op": "*", "with": "2"},
-        {"name": "rows", "code": "result = first.mean('spatial-y')"},
+        {"name": "first", "publish": False, "terms": [{"of": "frames", "at": "frame", "labels": ["0"]}]},
+        {"name": "twice", "terms": [{"of": "first"}, {"op": "*", "number": 2.0}]},
+        {"name": "rows", "terms": [{"of": "first"}], "statistic": "mean", "over": ["spatial-y"]},
     )
     derived = presenter.add_logic(
         "derive", source_signal=node.signal_key("frames"),
-        values={"outputs": rows},
+        values={"variables": rows},
     )
     path = tmp_path / "layout.json"
     presenter.view.save_answer = str(path)
@@ -994,13 +1005,14 @@ def test_header_save_layout_writes_no_panel_dataset(
     assert presenter.LAYOUT_FORMAT == "zlc.console-board"
     assert document["format"] == presenter.LAYOUT_FORMAT
     assert document["panels"][0]["signal"] == node.signal_key("frames")
-    assert document["logic"][0]["values"]["outputs"] == list(rows)
+    assert document["logic"][0]["values"]["variables"] == list(rows)
     assert presenter.apply_layout(document)
     # A draft holds the projected value: a "rows" field is a tuple of rows,
-    # each with every column.
-    from zlc_atom.nodes.derive.expression import complete_row
+    # each with every column, a column of rows (the terms) included.
+    from zlc_atom.nodes.derive import DERIVE_SCHEMA
 
-    assert presenter.logic[derived].draft.values["outputs"] == tuple(complete_row(row) for row in rows)
+    assert presenter.logic[derived].draft.values["variables"] == DERIVE_SCHEMA.draft_values(
+        {"variables": rows})["variables"]
     assert not tuple(tmp_path.glob("*.npz"))
 
 
@@ -1049,6 +1061,13 @@ def test_add_panel_puts_a_blank_fixed_kind_panel_on_the_board(presenter) -> None
     original_state = binding.state
     assert presenter.update_panel_state(binding.panel_id, {"interval_ms": 500}) is False
     assert binding.state is original_state
+    # A control client is offered exactly the intervals the GUI offers, and
+    # values only, not how a control draws them.
+    catalog = presenter.control_catalog(panel_id=binding.panel_id)
+    assert catalog["panel_intervals"] == list(presenter.view.panel_intervals)
+    assert not any({"segmented", "step"} & set(field)
+                   for group in ("semantic", "display", "fit")
+                   for field in catalog["panel"]["parameter_surface"][group])
 
 
 def test_a_card_is_captioned_through_the_signal_key_grammar(presenter) -> None:
@@ -2803,9 +2822,10 @@ def test_committed_selection_outputs_enter_the_real_occupancy_input(
             binding.panel_id
         ]
     }
-    assert {row.name for row in fit_signals}.union({roi_signal}) <= (
-        logic_tab_panel_names
-    )
+    # Named as a person reads a signal: producer and output, no prefix.
+    assert {row.name.removeprefix("@logic/") for row in fit_signals}.union(
+        {roi_signal.removeprefix("@logic/")}
+    ) <= logic_tab_panel_names
 
     source = session.signal_plane.freeze().value(roi_signal)
     assert source is not None
@@ -2967,7 +2987,7 @@ def test_every_control_on_a_card_is_answered(presenter, session) -> None:
 
     presenter.view.panel_state_updates.clear()
     presenter.update_panel_state(binding.panel_id, {"title": "MOT"})
-    assert presenter.panels[binding.panel_id].title == "MOT"
+    assert presenter.panels[binding.panel_id].state.title == "MOT"
     assert card.title == "MOT"
     assert presenter.view.panel_state_updates == [
         (binding.panel_id, presenter.panels[binding.panel_id].state)
@@ -3571,6 +3591,7 @@ def test_a_board_can_be_written_down_and_put_back(presenter, session, tmp_path) 
     assert document["logic"] == [
         {
             "node_id": logic_id,
+            "name": logic_id,
             "api_name": "camera_measurement",
             "values": presenter.logic[logic_id].draft.values,
             "source_signal": "",
@@ -3580,6 +3601,7 @@ def test_a_board_can_be_written_down_and_put_back(presenter, session, tmp_path) 
         },
         {
             "node_id": occupancy_id,
+            "name": occupancy_id,
             "api_name": "occupancy",
             "values": {"model_kind": "default"},
             "source_signal": f"@logic/{logic_id}/frames",
@@ -3618,7 +3640,7 @@ def test_a_board_can_be_written_down_and_put_back(presenter, session, tmp_path) 
             for binding in restored
         ),
     )
-    assert [binding.title for binding in restored] == ["camera", "again"]
+    assert [binding.state.title for binding in restored] == ["camera", "again"]
     assert restored[0].kind == "image"
     assert restored[0].size == "4x4"
     assert restored[0].port.display_interval_ms == 800
@@ -3894,7 +3916,7 @@ def test_loading_a_layout_over_running_logic_asks_and_stops_it(
     assert host.shut_down
     assert tuple(presenter.logic) == (logic_id,)
     assert presenter.logic[logic_id].host is None
-    assert [binding.title for binding in presenter.panels.values()] == ["here"]
+    assert [binding.state.title for binding in presenter.panels.values()] == ["here"]
     assert ("task", "layout loaded") in view.status
 
 
@@ -3913,11 +3935,58 @@ def test_a_board_naming_a_signal_nobody_publishes_keeps_the_blank_panel(
     )
 
     assert presenter.apply_layout(document) is True
-    assert [binding.title for binding in presenter.panels.values()] == ["here", "gone"]
+    assert [binding.state.title for binding in presenter.panels.values()] == ["here", "gone"]
     unresolved = tuple(presenter.panels.values())[-1]
     assert unresolved.signal == "nobody.publishes.this"
     assert unresolved.host is None and unresolved.port is None
     assert any("nobody.publishes.this" in text for _severity, text in presenter.view.status)
+
+
+def test_a_board_row_whose_device_or_source_no_longer_fits_is_kept(presenter) -> None:
+    """A stale row costs that row its Start, not the board its load.
+
+    Boards keep rows the operator is not using today, and the apparatus or
+    an upstream row can change under one: a device key now naming another
+    kind of device, a source now declared as another contract.  The row is
+    kept as written, the load says so, and the row's own check refuses it.
+    """
+
+    row = {"values": {}, "source_signal": "", "device_keys": {},
+           "artifact_inputs": {}, "auto_preview": False}
+    document = {
+        "format": "zlc.console-board",
+        "panels": [],
+        "logic": [
+            {**row, "node_id": "cm", "api_name": "camera_measurement",
+             "device_keys": {"camera": "sequencer"}},
+            {**row, "node_id": "fb", "api_name": "slm_feedback",
+             "values": {"feedback_mode": "ramsey_frequency"},
+             "source_signal": "@logic/cm/frames"},
+        ],
+    }
+
+    assert presenter.apply_layout(document) is True
+    assert tuple(presenter.logic) == ("cm", "fb")
+    assert presenter.logic["cm"].draft.device_keys["camera"] == "sequencer"
+    assert presenter.logic["fb"].draft.source_signal == "@logic/cm/frames"
+    warnings = [text for severity, text in presenter.view.status if severity == "warning"]
+    assert any(
+        "logic cm names 'sequencer' as its camera, which does not provide camera.adapter"
+        in text for text in warnings
+    )
+    assert any(
+        text.startswith("logic fb reads cm/frames, which publishes ")
+        for text in warnings
+    )
+    camera = presenter.control_action("logic.validate", {"node_id": "cm"})
+    assert camera["accepted"] is False
+    assert "'sequencer' does not provide camera.adapter" in camera["error"]
+    presenter.control_action("logic.validate", {"node_id": "fb"})
+    assert any(
+        issue.endswith("is not declared as zlc.selection.fit.parameter Dataset")
+        and "cm" not in issue
+        for issue in presenter.logic["fb"].finalization.issues
+    )
 
 
 def test_a_board_panel_whose_saved_table_is_refused_does_not_stop_the_rest(
@@ -3956,7 +4025,7 @@ def test_a_board_panel_whose_saved_table_is_refused_does_not_stop_the_rest(
 
     assert presenter.apply_layout(document) is True
     before, refused, after = presenter.panels.values()
-    assert [binding.title for binding in (before, refused, after)] == [
+    assert [binding.state.title for binding in (before, refused, after)] == [
         "before", "refused", "after",
     ]
     assert refused.port is None
@@ -3968,7 +4037,7 @@ def test_a_board_panel_whose_saved_table_is_refused_does_not_stop_the_rest(
     status = list(presenter.view.status)
     assert ("task", "layout loaded") in status, status
     assert any(
-        f"cannot draw {signal} as image" in text
+        f"cannot draw {signal.removeprefix('@logic/')} as image" in text
         and "remains available for rewiring" in text
         for _severity, text in status
     ), status
@@ -4056,7 +4125,7 @@ def test_a_loaded_board_reads_its_panels_derived_signals_by_their_fresh_ids(
 
     assert presenter.apply_layout(document) is True
     restored = list(presenter.panels.values())
-    assert [binding.title for binding in restored] == ["camera", "roi", "orphan"]
+    assert [binding.state.title for binding in restored] == ["camera", "roi", "orphan"]
     fresh = restored[0].panel_id
     assert fresh != upstream.panel_id, "an id is never handed out twice"
     assert restored[1].state.signal == stable_signal_key(fresh, "roi_frame")
@@ -4168,12 +4237,12 @@ def test_a_board_names_its_panels_and_a_load_respells_every_reference_to_them() 
     with pytest.raises(LayoutError, match="unknown fit model"):
         LayoutDocument.from_tree(tree)
     saved["fit"] = {}
+    # A Derive saved before variables keeps none of its retired outputs: it
+    # loads empty, to be written again.
     tree["logic"].append({"node_id": "derived", "api_name": "derive", "values": {
         "outputs": [{"name": "result", "code": "a.counts +", "retired_column": 123}]}})
     _document, unfinished = _loaded_board(tree, ("panel-3", "panel-4", "panel-5"))
-    from zlc_atom.nodes.derive.expression import complete_row
-
-    assert unfinished.logic[-1].draft.values["outputs"] == (complete_row({"name": "result", "code": "a.counts +"}),)
+    assert unfinished.logic[-1].draft.values == {"variables": ()}
     with pytest.raises(LayoutError, match="one fresh panel_id per saved panel"):
         _loaded_board(tree, ("panel-3", "panel-4"))
 
@@ -4453,6 +4522,19 @@ def test_a_running_task_freezes_logic_identity_but_not_panels(
     messages = len(presenter.view.status)
     presenter.beat()
     assert len(presenter.view.status) == messages
+    # A name is not what the Task runs: renaming it is allowed while it holds
+    # the console, the standing Task line follows on the same turn, and the
+    # console is not handed over again.
+    handed: list[str] = []
+    shown = presenter.view.set_task_takeover
+    presenter.view.set_task_takeover = lambda owner: (handed.append(owner), shown(owner))
+    presenter.view.logic_name_committed.emit(task_id, "Cal A")
+    assert presenter.view.status[-2:] == [
+        ("task", "renamed calibration to Cal A"),
+        ("task", "Cal A: Saving results"),
+    ]
+    assert handed == [] and presenter._active_task_id == task_id
+    presenter.view.logic_name_committed.emit(task_id, task_id)
     primary = DatasetOutputDeclaration("frames", "camera.frames")
     overlay = DatasetOutputDeclaration("occupied", "atom.occupied")
     presenter.logic[task_id].preview_specs = (
@@ -4561,7 +4643,7 @@ def test_running_row_waits_for_first_publication_and_terminal_phase_wins(
     finally:
         binding.host = None
     row = next(row for row in presenter.view.logic_rows if row.title == node_id)
-    assert row.publishes == (("frames", "—", f"waiting · {signal}"),)
+    assert row.publishes == (("frames", "—", f"waiting · {node_id}/frames"),)
 
     terminal = LogicNodeObservation(
         False,
@@ -4988,14 +5070,16 @@ def test_a_derive_publishes_the_counts_of_the_occupied_sites(
     assert presenter.start_logic(occupancy_id) is True
     _settle_logic(presenter, occupancy_id)
     counts_signal = stable_signal_key("occupancy", "counts")
+    at_1 = {"at": "frame", "labels": ["1"]}
     program = (
-        {"name": "bright", "value": "counts", "at": "1", "where": "occupied", "where_at": "1"},
-        {"name": "how_many", "value": "occupied", "at": "1", "statistic": "sum", "over": "calibration.site"},
+        {"name": "bright", "terms": [{"of": "counts", **at_1}, {"op": "where", "of": "occupied", **at_1}]},
+        {"name": "how_many", "terms": [{"of": "occupied", **at_1}], "statistic": "sum", "over": ["Site"]},
     )
     derive_id = presenter.add_logic(
         "derive",
         node_id="sites",
-        values={"outputs": (program[0], {"name": "how_many", "value": "occupied", "statistic": "sum"})},
+        values={"variables": (program[0], {"name": "how_many", "terms": [{"of": "occupied", **at_1}],
+                                           "statistic": "sum"})},
         source_signal=counts_signal,
         open_editor=False,
     )
@@ -5008,13 +5092,14 @@ def test_a_derive_publishes_the_counts_of_the_occupied_sites(
     # What the counts' own members cannot give is the same kind of draft
     # problem, admitted against the source's latest publication: said, and
     # Start waits, rather than a page reading "not started" over red errors.
-    typo = {**program[1], "over": "calibration.sties"}
-    assert presenter.update_logic_draft(derive_id, values={"outputs": (program[0], typo)})
+    typo = {**program[1], "over": ["Sties"]}
+    assert presenter.update_logic_draft(derive_id, values={"variables": (program[0], typo)})
     mistyped = presenter.logic_editor_projection(derive_id)
     assert not mistyped["can_start"]
-    assert mistyped["issues"][0].startswith("how_many · statistic: "), mistyped["issues"]
+    assert mistyped["issues"][0].startswith("how_many · statistic: the value has no axis 'Sties'; its axes: "), (
+        mistyped["issues"])
     assert presenter._logic_state(presenter.logic[derive_id])[0] == "draft"
-    assert presenter.update_logic_draft(derive_id, values={"outputs": program})
+    assert presenter.update_logic_draft(derive_id, values={"variables": program})
     assert presenter.logic_editor_projection(derive_id)["can_start"]
     # Named by the draft, before anything ran: the board's own listing of
     # what this row will publish.
@@ -5044,7 +5129,11 @@ def test_a_derive_publishes_the_counts_of_the_occupied_sites(
     np.testing.assert_array_equal(values[judged], expected[judged])
     assert bright.schema.point_domain.axes == (), "scalar isel removes the named frame axis"
     assert bright.schema.value_schema.value_unit == (counts.schema.value_schema.value_unit or "1")
-    assert bright.run_record["parameters"]["outputs"] == program
+    from zlc_atom.nodes.derive import DERIVE_SCHEMA
+    from zlc_atom.nodes.derive.expression import compact_variable
+
+    assert bright.run_record["parameters"]["variables"] == tuple(
+        compact_variable(row) for row in DERIVE_SCHEMA.project_values({"variables": program})["variables"])
     how_many = front.value(stable_signal_key("sites", "how_many"))
     assert how_many is not None
     np.testing.assert_array_equal(
@@ -5580,7 +5669,7 @@ def test_a_cell_kind_the_live_port_cannot_prepare_is_refused(
     assert grid.host is host
     assert (
         "warning",
-        f"{grid.panel_id}: {roi_sum} cannot be drawn as a facet grid of "
+        f"{grid.panel_id}: {roi_sum.removeprefix('@logic/')} cannot be drawn as a facet grid of "
         "image cells",
     ) in presenter.view.status
     # The form that sent the pick is still showing it: the kept record goes
@@ -5605,7 +5694,7 @@ def test_a_cell_kind_the_live_port_cannot_prepare_is_refused(
     ) is False
     assert grid.state.cell_kind == ""
     assert (
-        "warning", f"{grid.panel_id}: {roi_sum} has not published yet"
+        "warning", f"{grid.panel_id}: {roi_sum.removeprefix('@logic/')} has not published yet"
     ) in presenter.view.status
     assert (grid.panel_id, grid.state) in presenter.view.panel_state_updates[projected:]
     toggle_grid_lines()
@@ -5621,7 +5710,7 @@ def test_a_cell_kind_the_live_port_cannot_prepare_is_refused(
     # panel lets go of it once and waits portless for the next run.
     dead = grid.host
     _kill_render_child(dead)
-    ready = f"{roi_sum} has not published yet; {grid.panel_id} remains ready"
+    ready = f"{roi_sum.removeprefix('@logic/')} has not published yet; {grid.panel_id} remains ready"
     said = presenter.view.status.count(("warning", ready))
     for _beat in range(5):
         presenter.beat()
@@ -5928,7 +6017,7 @@ def test_a_vacant_record_opens_edit_without_building_a_host(
     assert built == []
     assert (
         "error",
-        f"cannot mount {binding.state.title} plot editor: {vacancy}",
+        f"cannot mount {binding.state.title.removeprefix('@logic/')} plot editor: {vacancy}",
     ) in presenter.view.status
     # A title edit offers the mount again, and builds nothing either.
     assert presenter.update_panel_state(binding.panel_id, {"title": "renamed"})
@@ -6313,7 +6402,7 @@ def test_a_following_processor_survives_its_camera_stop_and_restart(
     assert binding.host is None
     state, status = presenter._logic_state(binding)
     assert state == "running"
-    assert "following" in status and live_signal in status
+    assert "following" in status and live_signal.removeprefix("@logic/") in status
 
     # The camera arrives; the beat completes the standing Start.
     camera_id = presenter.add_logic(
@@ -7618,7 +7707,7 @@ def test_a_reported_refusal_never_edits_the_setting_field_set(
     presenter.beat()
     assert _setting_field_sets(binding.parameter_surface) == declared
     assert [item for item in presenter.view.status if item[0] == "error"] == [
-        ("error", f"{binding.title}: a genuine bridge defect")
+        ("error", f"{binding.state.title.removeprefix('@logic/')}: a genuine bridge defect")
     ]
     assert presenter.view.cards[0].status == ("a genuine bridge defect", True)
     presenter.view.status.clear()
@@ -8211,7 +8300,8 @@ def test_a_queued_restart_says_what_it_is_waiting_for() -> None:
 
     generation = object()
     binding = LogicBinding("camera_measurement", LOGIC_NODE, LogicDraft(values={}))
-    binding.pending = SimpleNamespace(waiting_for=())
+    # A queued candidate carries the configuration it was built from.
+    binding.pending = SimpleNamespace(waiting_for=(), draft=LogicDraft(values={}))
     stopping = SimpleNamespace(
         running=True, error="", phase="stopping", terminal=False, progress=None, warnings=(),
     )
@@ -8237,6 +8327,7 @@ def test_a_queued_restart_says_what_it_is_waiting_for() -> None:
         _finalize_logic_binding=lambda _binding: SimpleNamespace(issues=()),
         _observation_status=ConsolePresenter._observation_status,
         _generation_holders=lambda host: ConsolePresenter._generation_holders(console, host),
+        logic_name={"camera_measurement": "Camera A"}.get,
     )
 
     state, status = ConsolePresenter._logic_state(console, binding)
@@ -8260,8 +8351,11 @@ def test_a_queued_restart_says_what_it_is_waiting_for() -> None:
     assert ConsolePresenter._generation_holders(console, binding.host) == (("panel-1", 3.0),)
     console.panels["panel-1"].configuration = None
 
-    binding.pending = SimpleNamespace(waiting_for=("camera_measurement",))
-    assert ConsolePresenter._logic_state(console, binding)[1] == "waiting for camera_measurement"
+    # The holder is named as the operator calls it.
+    binding.pending = SimpleNamespace(
+        waiting_for=("camera_measurement",), draft=LogicDraft(values={}),
+    )
+    assert ConsolePresenter._logic_state(console, binding)[1] == "waiting for Camera A"
 
 
 def test_the_beat_polls_logic_even_when_a_display_step_fails() -> None:
@@ -8326,6 +8420,9 @@ def test_a_run_makes_the_values_a_region_wrote_the_producers_own() -> None:
     console.update_logic_draft = lambda node_id, **kwargs: (
         ConsolePresenter.update_logic_draft(console, node_id, **kwargs)
     )
+    console._commit_logic_draft = lambda binding, draft, **kwargs: (
+        ConsolePresenter._commit_logic_draft(console, binding, draft, **kwargs)
+    )
     # The region's write, the way routing does it: the patch, then the undo.
     assert console.update_logic_draft("scan-owner", values={"plan": routed})
     binding.selection_restore["plan"] = ("panel-1", original)
@@ -8339,6 +8436,7 @@ def test_a_run_makes_the_values_a_region_wrote_the_producers_own() -> None:
         previews=(),
         run_root=None,
         input_summary=None,
+        draft=LogicDraft(values={"plan": routed}),
     )
     assert ConsolePresenter._activate_candidate(console, binding, candidate) is True
     assert started and binding.selection_restore == {}
@@ -8390,6 +8488,9 @@ def test_a_region_on_a_scan_curve_reaches_the_scan_as_its_next_sweep() -> None:
             routed.append((name, patch)),
             ConsolePresenter.update_logic_draft(console, name, **patch),
         )[1],
+        _commit_logic_draft=lambda binding, draft, **kwargs: (
+            ConsolePresenter._commit_logic_draft(console, binding, draft, **kwargs)
+        ),
     )
     publication = SimpleNamespace(run_record={})
 

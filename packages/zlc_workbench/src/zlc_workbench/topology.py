@@ -20,6 +20,7 @@ happens to paint, and showing half of one instant beside half of another.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 from zlc_plot.semantics import schema_structure
@@ -28,9 +29,14 @@ from zlc_ui import SUMMARY_SEPARATOR
 
 
 __all__ = [
-    "SignalRow", "format_signal_shape", "project_signals", "signal_label",
-    "signal_output_name",
+    "UNGROUPED_HEADING", "SignalRow", "format_signal_shape", "producer_text",
+    "project_signals", "signal_label", "signal_output_name", "signal_text",
 ]
+
+
+#: The heading a picker files a signal under when no producer heads it.  A
+#: heading a person reads, like a producer's: a node's name never takes it.
+UNGROUPED_HEADING = "signals"
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,7 +48,8 @@ class SignalRow:
     #: What to show a person.  Signal names are qualified and repetitive; the
     #: producer is already the group, so the label need not repeat it.
     label: str
-    #: The producer's group heading.
+    #: The producer's owner id; the presenter maps it to the heading a
+    #: person reads (:func:`producer_text`).
     producer: str
     #: "waiting" before the first publication, "live" while more data can
     #: arrive, "finished" once it cannot, and "failed" on producer failure.
@@ -114,6 +121,41 @@ def signal_output_name(name: str) -> str:
 
     parts = split_signal_key(name)
     return (name.rsplit("/", 1)[-1] or name) if parts is None else parts[1]
+
+
+def producer_text(owner: str, names: Mapping[str, str]) -> str:
+    """What a person calls a producer, given ``names`` {Logic node id: name}.
+
+    A Logic node is called by its name, and anything it owns under its id
+    (``<node id>/review``, ``<node id>/camera``) by its name and the same
+    tail.  Every other producer -- a panel, a notebook's node, a node that
+    is gone -- is called by its id, which is the only name it has.  The id
+    stays the address everywhere; this is only what is read.
+    """
+
+    text = str(owner)
+    if text in names:
+        return names[text]
+    head, slash, tail = text.partition("/")
+    if slash and head in names:
+        return f"{names[head]}/{tail}"
+    return text
+
+
+def signal_text(key: str, names: Mapping[str, str]) -> str:
+    """What a person calls a signal: ``<producer>/<output>``.
+
+    The key's ``@logic/`` prefix tells a reader nothing, so it is dropped,
+    and the producer is called what :func:`producer_text` calls it.  Text
+    the grammar does not spell (a Figure Viewer's ``@figure/...``, a title
+    an operator typed) is read as it is.
+    """
+
+    parts = split_signal_key(key)
+    if parts is None:
+        return str(key)
+    owner, output = parts
+    return f"{producer_text(owner, names)}/{output}"
 
 
 def _producer(name: str, owner_id: str) -> str:

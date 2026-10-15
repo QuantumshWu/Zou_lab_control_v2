@@ -1,4 +1,5 @@
-"""Derive processor: named outputs, structured or code, over one publication."""
+"""Derive processor: named variables -- formulas of picks and operators,
+optionally reduced -- over one publication; the published ones are signals."""
 
 from .expression import (
     DeriveError,

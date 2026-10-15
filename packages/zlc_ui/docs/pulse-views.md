@@ -25,6 +25,9 @@ marks a successfully applied value: it is green and read-only, while the binding
 button remains usable. `binding_editable=False` locks an external Subpulse's
 internal bindings. Config selection is carried by `config_mode_committed(bool)`
 and projected through `set_config_mode`; Refresh uses `refresh_effective_requested`.
+`ConnectionVM.status_word` is the connection's state (`running` attached and
+read, `idle` attached to nothing, `warning` attached but undescribed, `error` a
+failed connect, disconnect or read); its `status` line is written in that ink.
 
 `ScheduleVM` carries `(document_generation, revision)`. `PulseScheduleView`
 rejects an older pair and accepts an identical pair idempotently; a different
@@ -42,7 +45,11 @@ returns the accepted `FieldVM`. The popup also edits the field's Config referenc
 through `config_key_committed`; names come from `FieldVM.config_names`, and
 `FieldVM.field_id` carries the domain-owned field identity. It shows the editable
 default and current effective source together. Config values and files are still
-edited and saved separately on Value Config.
+edited and saved separately on Value Config. A field switched from Config to
+Default or API keeps its Config name: the popup shows it disabled, Value Config
+lists the field muted as `Default (Config name kept)` (`ConfigPageRecord.parked`),
+nothing applies it, and choosing Config again uses it. Clearing the kept name on
+Value Config lets the binding go.
 S/A/C badges contain no numeric identity; Scan defaults remain editable.
 
 For a DAC channel, `PortRowVM.kind == "dac"` plus a
@@ -60,7 +67,10 @@ row. It applies to the whole Pulse; switching it off restores embedded defaults.
 
 Value Config and Subpulse Config remain adjacent. A Subpulse's small source
 control on the main timeline selects Default or Config. The three vertical
-operations remain Expand, Edit and Ungroup. Edit selects that Subpulse in the
+operations remain Expand, Edit and Ungroup. Expand reads Collapse on an
+expanded Subpulse and is held down (the active face) while it is expanded.
+Ungroup dissolves the Subpulse: it is red, like every command that takes
+something away, and acts on one click. Edit selects that Subpulse in the
 original single-object editor: a selector, one Subpulse file/Browse row and the
 horizontal Period/Bracket surface, then its Subpulse bindings (a field and the
 Config name it binds, as in Value Config's Pulse bindings).
@@ -68,24 +78,45 @@ Config name it binds, as in Value Config's Pulse bindings).
 Every card stacks its words on one left edge: the title, the header caption
 (a Period's or Subpulse's Duration, an end post's Repeats) and the field boxes
 start on the content edge, the values at the field text inset.  The three
-repeat boxes -- Delay / Scan's Repeat, Scan repeats and a bracket's Repeats --
-share one measure, `count_box_width`: a five-digit count whole beside the
-stepper, widened before a longer count is shown and while one is typed.  The
+repeat boxes -- Delay / Scan's Repeats, the Scan page's Scan repeats (in its
+own Playback card, under Bound fields) and a bracket's Repeats -- share one
+measure, `count_box_width`: a five-digit count whole beside the stepper,
+widened before a longer count is shown and while one is typed.  The two whose
+0 runs forever show it as ∞.  The
 Control card's Hide side panels / Show side panels hides and restores the
-Port catalog and Delay / Scan; Collapse is only an expanded Subpulse's command.
+Port catalog and Delay / Scan, and is held down while the panels are hidden;
+Collapse is only an expanded Subpulse's command.
 
 `set_subpulse_sources` supplies selector/reference metadata; `selected_id` in
 `set_component_document` identifies the selected Subpulse independently of
 `context_id`, the actual embedded-default owner (empty when editing a file).
 Config source edits the chosen file even when the global Config switch is off.
+A Config source with no file chosen yet plays its embedded default: its status
+reads No file — plays Default, it is not a Config error, and its periods stay
+editable on the timeline as a Default Subpulse's do. A Scan or API mark inside
+a file-backed Subpulse whose file no longer offers it plays the file's
+constant; the Scan page lists it after the fields it offers, muted, with
+`— not in file` after its marks.
 Changing that global switch never replaces the selection or the file draft.
 Browsing or editing the file path does not change the main-card source choice.
 Save Pulse writes embedded defaults; Save writes the selected file. Only applied
 Config sources get green cards/boundaries on the main timeline.
 
-Saved scan arrays retain ordered field IDs and units. A source update that changes
-this schema requires regeneration or an explicit Clear array; that action keeps
-the Python draft and emits `scan_array_clear_requested` through the handle.
+A scan table drives the fields it names, which need not be every field marked
+Scan: the program assigns `scan_table` as a mapping from field id (or the label
+the editor shows) to its column -- the Template: columns / grid starters write
+one entry per Scan field, and deleting an entry leaves that field playing its
+own value -- or as an array with one column per Scan field. The editor keeps the
+table's ordered field IDs and units; Save array writes them as the .npy's column
+names, and Open array reads names from such a file or from a CSV/text header:
+the first line that is neither blank nor a `#` comment, when it is not numbers
+(one name per column, each once). Marking another field Scan, or unmarking one
+the table does not drive, keeps the table, also while its program runs or its
+file loads; only an unnamed table, whose columns are the Scan fields, is refused
+when they change then. An edit that takes one of its own fields off Scan or
+changes its unit requires regeneration or an explicit Clear array; that action
+keeps the Python draft and emits `scan_array_clear_requested` through the
+handle.
 
 ```python
 view = PulseScheduleView()
@@ -106,7 +137,10 @@ The value-level setters (`set_period`, `set_delay_row`, `set_port_label`,
 `set_visible_ports`) update the accepted `ScheduleVM` the view holds as
 well as the controls, so the next rebuild from that model shows the same
 thing the controls do.  A port whose `kind` changes under the same key is
-rebuilt as a new row.  `set_visible_ports` re-flags the rows only; the
+rebuilt as a new row.  A delay row's last two commands turn a digital output
+on or off in every period (the ring, with a dot for on); an analog output has
+no level to fill, so its fill is disabled and its other command is the ghost
+`×` that removes the output's steps on one click.  `set_visible_ports` re-flags the rows only; the
 `visible_text` count is worded by the presenter and arrives with
 `set_summary`.
 
@@ -117,7 +151,9 @@ both post and period drags emit `reorder_items_requested(item_order)`.
 Add targets the next visual item, not the next period, so both sides of a
 post are distinct gaps. Neither drag mutates local state; the presenter
 commits period order and bracket anchors atomically in the new `ScheduleVM`.
-Empty brackets remain editable; running or saving requires nonempty content.
+An empty bracket (its two posts side by side) is an ordinary draft: it saves,
+reopens and runs, looping nothing, until periods are dragged in; the preview
+draws no loop for it.
 `bracket_committed(bracket_id, start_period_id, end_period_id, count)` moves or
 recounts one bracket; `bracket_add_requested(start_period_id, end_period_id,
 count)` asks for a new one (the presenter names it). Removing is one
@@ -153,14 +189,18 @@ facts from the presenter, never inferred from the unsaved table. Open array… i
 on Scan; Edit has only a compact jump-to-Config status button.
 
 `PulseTargetView` accepts `set_ports(records, editable, status_text,
-reserved=())`, `set_width_rules(digital, dac)`, and `set_feedback(text)`.
+reserved=())`, `set_width_rules(digital, dac)`, and `set_feedback(text, word)`.
 `reserved` names ports the target holds with no row on the page (a clock no
-DAC latches with); Add never mints one. The `apply_requested` payload is
+DAC latches with); Add never mints one.  `status_text` is a note in the idle
+ink; `set_feedback` writes its line in the ink of status `word`
+(`STATUS_CUES`), so a refusal is red.  Each port row ends in the ghost `×`
+that removes it on one click. The `apply_requested` payload is
 `tuple[TargetPortRecord, ...]`; manifest construction and domain validation
 stay in the presenter.
 
 `PulsePreviewView` accepts `set_size_names(tuple[str, ...])`,
-`set_preview_size(size)`, `set_status`, `show_placeholder`, and
+`set_preview_size(size)`, `set_status(text, word)` (its line in the ink of
+status `word`), `show_placeholder`, and
 `mount_content(widget, logical_size=..., wheel_target=...)`. The latter is a
 QWidget mount point, not a renderer. It emits `include_off_toggled`,
 `selectors_toggled`, `size_committed`, and `save_requested`.  Whether the
@@ -172,8 +212,10 @@ presenter's fact; the view keeps no copy of it.
 `PulseEditorView` composes Edit, Preview, Scan, Config, and Target tabs and exposes
 `set_title`, `set_summary`, `set_status_color`, `ask_open_path`,
 `ask_save_path`, `confirm`, `show_warning`, `finish_close`, and the
-`close_requested`/`clear_all_requested` signals. It does not know a
-controller. A product opens it through the single `open_pulse_editor` handle;
+`close_requested`/`clear_all_requested` signals. `show_warning` and
+`show_done` hand the one Pulse dialog every message as a sentence
+(`zlc_ui.status.sentence`: a full stop, never a capital added by code). It
+does not know a controller. A product opens it through the single `open_pulse_editor` handle;
 the view does not provide a parallel raw-window launcher.
 
 ## `PulseEditorHandle`

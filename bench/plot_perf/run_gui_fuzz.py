@@ -751,7 +751,7 @@ def perform_action(bench, action, beat, output):
         hide_settings(bench)
         choose(view.kind_combo, ("logic", action["api"]), bench.app)
         before = set(bench.presenter.logic)
-        click(view.add_panel_button, bench.app)
+        click(view.add_button, bench.app)
         if not beat.run_until(lambda: set(bench.presenter.logic) != before, 3):
             raise AssertionError("Add Logic did not create a node")
         created = set(bench.presenter.logic) - before
@@ -814,7 +814,11 @@ def perform_action(bench, action, beat, output):
             if action.get("expect_running") and not bench.presenter.logic[identity].host.running:
                 raise AssertionError("the intended in-flight action was too late: node is already terminal")
             report_start = len(bench.reports)
-            click(getattr(editor, kind.removeprefix("logic_") + "_button"), bench.app)
+            button = getattr(editor, kind.removeprefix("logic_") + "_button")
+            click(button, bench.app)
+            if kind == "logic_remove":
+                # Removing a node takes two clicks: the first only arms.
+                click(button, bench.app)
             if "expect_report" in action:
                 wanted = str(action["expect_report"])
                 if not beat.run_until(lambda: any(wanted in text for _severity, text
@@ -886,7 +890,7 @@ def perform_action(bench, action, beat, output):
         hide_settings(bench)
         choose(view.kind_combo, ("plot", action["plot"]), bench.app)
         before = set(bench.presenter.panels)
-        click(view.add_panel_button, bench.app)
+        click(view.add_button, bench.app)
         beat.run_until(lambda: set(bench.presenter.panels) != before, 2.0)
         new = set(bench.presenter.panels)-before
         if len(new) != 1: raise AssertionError("Add Panel did not add exactly one card")
@@ -899,7 +903,7 @@ def perform_action(bench, action, beat, output):
     elif kind == "selectors":
         click(view.selectors_switch, bench.app)
     elif kind == "pause":
-        click(view.pause_switch, bench.app)
+        click(view.pause_button, bench.app)
     elif kind == "tab":
         tab(bench, action["index"])
     elif kind == "settings":

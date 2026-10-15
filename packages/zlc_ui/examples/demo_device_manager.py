@@ -68,7 +68,7 @@ def populate(view) -> None:
                 "live_enabled": True,
                 "apply_enabled": False,
                 "status": "Ready",
-                "severity": "ready",
+                "severity": "idle",
                 "reason": "",
             },
             "enabled": {
@@ -79,7 +79,7 @@ def populate(view) -> None:
                 "live_enabled": True,
                 "apply_enabled": False,
                 "status": "Ready",
-                "severity": "ready",
+                "severity": "idle",
                 "reason": "",
             },
         }
@@ -88,6 +88,7 @@ def populate(view) -> None:
             spec=spec,
             projection={
                 "owners": (),
+                "owner_names": (),
                 "reason": "Offline fake device",
                 "risk_enabled": False,
                 "risk_accepted": False,

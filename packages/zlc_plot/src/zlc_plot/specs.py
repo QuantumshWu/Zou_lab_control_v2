@@ -132,12 +132,19 @@ class RelimMode(str, Enum):
     FIXED = "fixed"
 
 
+def _words(name: str) -> str:
+    """A snake_case name as the words a control shows: sentence case, the
+    first word capitalised ('height_bars' reads 'Height bars', never
+    'Height Bars'), as every other label of the settings forms."""
+
+    text = str(name).replace("_", " ")
+    return text[:1].upper() + text[1:]
+
+
 def _enum_choices(members: Iterable[Enum]) -> tuple[tuple[str, str], ...]:
     """Enum members as ``(value, label)``: the value's words, as its name."""
 
-    return tuple(
-        (str(item.value), str(item.value).replace("_", " ").title()) for item in members
-    )
+    return tuple((str(item.value), _words(str(item.value))) for item in members)
 
 
 def _spelled_choices(values: Iterable[str]) -> tuple[tuple[str, str], ...]:
@@ -535,7 +542,7 @@ def _unit_parameter(
         default=None,
         normalizer=_unit_text_or_none,
         allow_none=True,
-        label=name.removesuffix("_display_unit").replace("_", " ").title() + " unit",
+        label=_words(name.removesuffix("_display_unit")) + " unit",
     )
 
 

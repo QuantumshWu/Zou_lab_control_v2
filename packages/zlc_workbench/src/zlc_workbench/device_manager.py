@@ -32,6 +32,7 @@ from typing import Any
 
 from zlc_atom.authoring import is_tunable
 from zlc_ui import counted
+from zlc_ui.status import name_words
 from zlc_atom.install.configuration import (
     DeviceInstanceConfig,
     InstallationConfig,
@@ -314,7 +315,7 @@ class DeviceManagerPresenter:
         )
         self.view.set_templates(
             tuple(
-                (name.replace("_", " ").title(), name)
+                (name_words(name), name)
                 for name in installation_template_names()
             )
         )
@@ -406,7 +407,7 @@ class DeviceManagerPresenter:
 
         session = self._active_session
         loaded = {} if session is None else session.installation.devices
-        failures = {} if session is None else session.installation.failures
+        failures = {} if session is None else session.failures
         with self._scan_lock:
             scanning = sorted(self._scan_pending)
         draft = [
@@ -1225,12 +1226,15 @@ class DeviceManagerPresenter:
             self.busy = False
             self._show()
             loaded = len(reconciled.installation.devices)
+            outcome, failed_any = self._outcome(reconciled, effective)
             self._report(
                 (
                     f"{', '.join(keys)} closed · {counted(loaded, 'device')} loaded"
                     if keys
                     else f"device changes applied · {counted(loaded, 'device')} loaded"
                 )
+                + outcome,
+                severity="warning" if failed_any else "task",
             )
 
         try:
@@ -1346,14 +1350,30 @@ class DeviceManagerPresenter:
         roles = ", ".join(
             item.role for item in candidate.devices if item.instance_id in loaded_keys
         )
-        # A COUNT IS NOT A REASON.  The installation hands over the
-        # exception that stopped each leaf, and reporting only how many
-        # there were threw away the one thing an operator needs: a bench
-        # that says "2 failed" and nothing else leaves them to guess which
-        # two, and why.  Each reason is put on the status line, and the
-        # whole traceback goes to the log, where a long one can be read
-        # without fighting a single-line strip.
-        failures = dict(session.installation.failures)
+        outcome, failed_any = self._outcome(session, candidate)
+        self._report(
+            f"{counted(len(loaded_keys), 'device')} initialized"
+            + (f": {roles}" if roles else "")
+            + outcome,
+            severity="warning" if failed_any else "task",
+        )
+        return True
+
+    def _outcome(self, session: object, config: InstallationConfig) -> tuple[str, bool]:
+        """What an Init or Apply left unopened or unused, for its status line.
+
+        A COUNT IS NOT A REASON.  The session hands over the exception that
+        stopped each declared leaf, and reporting only how many there were
+        threw away the one thing an operator needs: a bench that says "2
+        failed" and nothing else leaves them to guess which two, and why.
+        Each reason is put on the status line, and the whole traceback goes
+        to the log, where a long one can be read without fighting a
+        single-line strip.  A card whose type this machine cannot build is
+        one of them; a card the Apply removed is none of them.  Simulation
+        settings no virtual device reads are kept, and said.
+        """
+
+        failures = dict(session.failures)
         for key, error in sorted(failures.items()):
             _LOG.error(
                 "device %s did not start: %s: %s",
@@ -1366,13 +1386,20 @@ class DeviceManagerPresenter:
             f"{key}: {type(error).__name__}: {_one_line(error)}"
             for key, error in sorted(failures.items())
         )
-        self._report(
-            f"{counted(len(loaded_keys), 'device')} initialized"
-            + (f": {roles}" if roles else "")
-            + (f" · {len(failures)} failed -- {reasons}" if failures else ""),
-            severity="warning" if failures else "task",
+        unused_simulation = bool(config.simulation) and not any(
+            self.types[item.type_id].world_config is not None
+            for item in config.devices
+            if item.type_id in self.types
         )
-        return True
+        return (
+            (f" · {len(failures)} failed -- {reasons}" if failures else "")
+            + (
+                " · simulation settings kept, unused (no virtual device)"
+                if unused_simulation
+                else ""
+            ),
+            bool(failures),
+        )
 
     def shutdown_active(self, *, present: bool = True, discard_changes: bool = False) -> bool:
         """Shut down the retained session once; keep it reachable on failure."""
@@ -1723,7 +1750,13 @@ class DeviceManagerPresenter:
         if session is None:
             return False
         loaded = frozenset(session.installation.devices)
-        configured = frozenset(item.instance_id for item in candidate.devices)
+        # A card whose type this machine cannot build is kept, never loaded:
+        # no Apply can open it, so it does not keep the button on Apply.
+        configured = frozenset(
+            item.instance_id
+            for item in candidate.devices
+            if item.type_id in self.types
+        )
         return loaded != configured
 
     def _report(self, text: str, *, severity: str = "task") -> None:

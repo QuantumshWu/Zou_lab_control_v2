@@ -2348,16 +2348,24 @@ class SignalDataPlane:
 
         The record's ``node`` is the owner holding this generation -- the
         Logic's own id, ``derive2`` beside ``derive`` -- stamped here, the one
-        place that knows it.  A node naming itself names its type.
+        place that knows it.  A node naming itself names its type.  A producer
+        the operator gave a name to (``display_name``) has it stamped beside
+        as ``node_name``: what the node was called when this run declared
+        its record, for an archive's reader, never an address.
         """
         owner_id = _node_instance_id(node)
+        display_name = getattr(node, "display_name", None)
         with self._lock:
             state = self._states.get(owner_id)
             if state is None or state.node is not node or state.retired or state.terminal:
                 raise SourceGenerationEnded("run record requires an active generation")
             if state.committed_run_record is not None or state.publication is not None:
                 raise RuntimeError("run record has already been declared")
-        frozen = _freeze_run_record({**record, "node": owner_id})
+        frozen = _freeze_run_record({
+            **record,
+            "node": owner_id,
+            **({"node_name": display_name} if display_name else {}),
+        })
         with self._lock:
             if self._states.get(owner_id) is not state or state.retired or state.terminal:
                 raise SourceGenerationEnded("generation ended while declaring its run record")

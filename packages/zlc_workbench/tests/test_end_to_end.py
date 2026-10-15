@@ -14,7 +14,7 @@ from zlc_atom.nodes.camera.measurement import (
     CameraMeasurementRequest,
 )
 from zlc_runtime.plane import SignalDataPlane
-from zlc_pulse import PulseTarget
+from zlc_pulse import PulseBinding, PulseFieldRef, PulseTarget
 from zlc_workbench.session import ExperimentSession, Workspace
 from pulse_fixtures import CAMERA_WINDOWS, PULSE_NAME, ordinary_imaging_sequence, write_ordinary_pulse
 
@@ -79,10 +79,13 @@ def test_session_loads_a_stem_or_plain_json_name_but_never_a_path(session) -> No
         ports=tuple(replace(port, label=f"Operator {port.key}") for port in sequence.target.ports),
         package_pins=sequence.target.package_pins,
     )
-    write_ordinary_pulse(session.workspace.root, sequence=replace(sequence, target=renamed))
+    # A field marked Scan is only scannable: loaded by name, it plays its value.
+    scannable = (PulseBinding(PulseFieldRef("duration", "load"), "s", scan=True),)
+    write_ordinary_pulse(session.workspace.root, sequence=replace(sequence, target=renamed, bindings=scannable))
     assert session.load_pulse(PULSE_NAME)["name"] == PULSE_NAME
     assert session.load_pulse(f"{PULSE_NAME}.json")["name"] == PULSE_NAME
     assert session.pulse_sequence.target == renamed
+    assert not session.pulse_sequence.scan_bindings
     assert session.sequencer.applied().source.target == renamed
     for invalid in (
         ".",

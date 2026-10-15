@@ -48,7 +48,12 @@ class DatasetInputSpec:
 
 @dataclass(frozen=True)
 class ResolvedArtifact:
-    """One exact file and the typed value decoded from those exact bytes."""
+    """One exact file and the typed value decoded from those exact bytes.
+
+    A frame-claims row whose file did not decode is answered with the error
+    decoding raised as its value: a row that reads no frame is kept whatever
+    its file, and still says what is wrong with it.
+    """
 
     path: Path
     contract_id: str
@@ -94,7 +99,8 @@ class ArtifactCodec:
                 f"{source.name!r} must use one of {self.suffixes!r}"
             )
         if not source.is_file():
-            raise FileNotFoundError(source)
+            # The sentence a refusal ends with; the path is already beside it.
+            raise FileNotFoundError("file not found")
         return ResolvedArtifact(source, self.contract_id, self.decode(source))
 
 
@@ -112,7 +118,8 @@ class ArtifactInputSpec:
     #: readout frame with calibrations trained on each.  The draft value is
     #: then a list of ``{"path": ..., "frames": [...]}`` entries
     #: (:func:`frame_claim_entries`) and the build receives a tuple of
-    #: :class:`~.frames.FrameClaim` whose values are the resolved artifacts.
+    #: :class:`~.frames.FrameClaim` whose values are the resolved artifacts
+    #: (None for a row with no file, which only a row reading no frame may be).
     frame_claims: bool = False
 
     def __post_init__(self) -> None:
@@ -451,6 +458,16 @@ class LogicNodeDescriptor:
     admit_source: (
         Callable[[Mapping[str, object], object], tuple[str, ...]] | None
     ) = None
+    #: What one authored draft cannot do with the workspace resources it
+    #: resolved to and the devices installed -- a scan plan's axis on a port
+    #: its pulse does not offer, or on a device that is not installed.
+    #: Called with the projected values, the resolved resources by field
+    #: name and the installation, once the draft projects and every resource
+    #: it names resolved; each answer is one draft issue, so the Edit page
+    #: says it and Start waits, instead of the build refusing at Start.
+    admit_resources: (
+        Callable[[Mapping[str, object], Mapping[str, object], object], tuple[str, ...]] | None
+    ) = None
     #: Optional plugin-owned read-only budget projection over frozen authoring,
     #: resolved devices and workspace resources. Called on the device worker,
     #: never while constructing a node or running an acquisition.
@@ -566,6 +583,8 @@ class LogicNodeDescriptor:
             raise TypeError("resolve_defaults must be callable or None")
         if self.admit_source is not None and not callable(self.admit_source):
             raise TypeError("admit_source must be callable or None")
+        if self.admit_resources is not None and not callable(self.admit_resources):
+            raise TypeError("admit_resources must be callable or None")
         if self.estimate_run is not None and not callable(self.estimate_run):
             raise TypeError("estimate_run must be callable or None")
         if self.describe_output_frames is not None and not callable(self.describe_output_frames):

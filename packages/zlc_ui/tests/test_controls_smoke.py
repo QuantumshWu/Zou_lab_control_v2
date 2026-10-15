@@ -37,6 +37,17 @@ for button in (
     view.reset_button, view.stop_button, view.confirm_button,
 ):
     assert isinstance(button, FluentButton), type(button)
+# Exclude selected and Reset take something away (red, one click); Restore
+# selected gives back; Stop is red; Continue is the surface's one primary.
+assert [button.role() for button in (
+    view.exclude_selected_button, view.restore_selected_button,
+    view.reset_button, view.stop_button, view.confirm_button,
+)] == ['destructive', 'standard', 'destructive', 'destructive', 'primary']
+view.select_points(('site-b',))
+view.exclude_selected_button.click()
+assert view.excluded_ids == ('site-b',)
+view.reset_button.click()
+assert view.excluded_ids == ()
 view.select_points(('site-b',))
 view.exclude_selected_button.click()
 assert view.excluded_ids == ('site-b',)
@@ -436,7 +447,7 @@ def test_a_card_put_below_another_stays_below_it() -> None:
     metrics = BoardMetrics(10)
     above = _board_card(100, 80, 10, 10)
     below = _board_card(100, 80, 10, 240)
-    pack([above, below], metrics, board_w=330, dropped=below)
+    pack([above, below], metrics, board_w=330)
     assert (above.col, above.row) == (10, 10)
     assert (below.col, below.row) == (10, 100), "the free slot at (120, 10) is not its place"
 
@@ -448,7 +459,7 @@ def test_two_placements_survive_each_other() -> None:
     first = _board_card(100, 80, 10, 10)
     under = _board_card(100, 80, 10, 100)
     beside = _board_card(100, 80, 200, 240)
-    pack([first, under, beside], metrics, board_w=330, dropped=beside)
+    pack([first, under, beside], metrics, board_w=330)
     assert (under.col, under.row) == (10, 100), "the earlier placement stands"
     assert (beside.col, beside.row) == (120, 10), "nothing above it, so it rises and stops at `first`"
 

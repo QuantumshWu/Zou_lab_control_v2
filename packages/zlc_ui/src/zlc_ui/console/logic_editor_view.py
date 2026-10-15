@@ -9,13 +9,13 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-from PyQt5 import QtCore, QtGui, QtWidgets
+from PyQt5 import QtCore, QtGui, QtWidgets, sip
 
 from zlc_ui.fluent import (
-    GREY,
     HEADING_CSS_WEIGHT,
-    MUTED_INK,
+    MUTED_LABEL_STYLE,
     TEXT,
+    ElidedLabel,
     FluentButton,
     FluentComboBox,
     FluentLabel,
@@ -28,21 +28,27 @@ from zlc_ui.fluent import (
     add_row_switch,
     FluentTreeComboBox,
     FONT,
+    error_note_label,
     fill_grouped_choice_combo,
+    fit_button_words,
     fluent_font_size,
     retire_widget,
     row_gap,
+    scaled_px,
     section_gap,
+    set_status_ink,
     setting_label_width,
+    show_problem,
     status_dot_gap,
+    window_pad,
 )
-from zlc_ui.form import FluentParameterForm, FormSpec, required_label
+from zlc_ui.form import FluentParameterForm, FormFieldProps, FormSpec, required_label
 from zlc_ui.form.qt_form import _form_label_width
-from zlc_ui.status import name_words
+from zlc_ui.status import SUMMARY_SEPARATOR, name_words
 from .logic_row_view import (
-    STATE_COLOURS,
+    STATE_WORDS,
     STATUS_DOT,
-    fit_start_button,
+    START_LABELS,
     mount_logic_page,
     start_label,
 )
@@ -56,8 +62,13 @@ class LogicEditorView(QtWidgets.QWidget):
     refresh_requested = QtCore.pyqtSignal()
     start_requested = QtCore.pyqtSignal()
     stop_requested = QtCore.pyqtSignal()
+    #: Put the configuration the running node uses back into the draft.
+    revert_requested = QtCore.pyqtSignal()
     remove_requested = QtCore.pyqtSignal()
     auto_preview_changed = QtCore.pyqtSignal(bool)
+    #: The operator finished typing a Name (Return, or leaving the box):
+    #: the stripped text, once, and only when it says something new.
+    name_committed = QtCore.pyqtSignal(str)
 
     def __init__(
         self,
@@ -75,7 +86,6 @@ class LogicEditorView(QtWidgets.QWidget):
         #: The projection minus what the status half applies, as last
         #: rebuilt from.  A beat that changes neither rebuilds nothing.
         self._applied_structure: dict[str, object] | None = None
-        self._status_colours: tuple[str, str] = ("", "")
         #: The editor's ONE label column, shared by the selectors, both forms,
         #: the results and every contribution, so their fields start at one x.
         self._label_width = setting_label_width(())
@@ -85,56 +95,67 @@ class LogicEditorView(QtWidgets.QWidget):
         self._artifact_result_readouts: dict[str, FluentReadoutEdit] = {}
         self._contributions: dict[object, QtWidgets.QWidget] = {}
 
+        # THREE BANDS: the header, the rows, the action bar.  Only the rows
+        # scroll.  The node's name and the status line that says why Start is
+        # off stay above them, and Start, Stop and Remove stay below them, on
+        # a page taller than its tab -- in the body, the action bar of a scan
+        # with two axes and three API values stood below the fold, and the
+        # Stop for a running scan was a scroll away on its own page.
         outer = QtWidgets.QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
-        scroll = FluentScrollArea()
+        pad = window_pad()
+        self._scroll = FluentScrollArea()
+        #: Whether the page has been shown yet: a newly opened page starts
+        #: at its first row (:meth:`showEvent`).
+        self._opened = False
         body = QtWidgets.QWidget()
         body.setStyleSheet("background: transparent;")
         # ONE RHYTHM.  Selectors, both forms, a contribution's rows and the
         # results are one run of rows, a form gap apart whichever widget
         # holds them; a section gap sits after the header, before a
         # contribution that opens with a section title and before the action
-        # bar.  The body spacing is the row gap and these spacers add the
-        # rest of a section gap, each sized by _space_sections from what is
-        # shown -- a block spacing of its own had put 9 between rows that
-        # stand 5 apart everywhere else, and 19 above the action bar.
+        # bar.  The body spacing is the row gap and each contribution's
+        # spacer adds the rest of a section gap, sized by _space_sections
+        # from what is shown -- a block spacing of its own had put 9 between
+        # rows that stand 5 apart everywhere else.
         self._body_layout = QtWidgets.QVBoxLayout(body)
         self._body_layout.setSpacing(row_gap())
-        self._lead_gap = QtWidgets.QSpacerItem(0, 0, QtWidgets.QSizePolicy.Minimum, QtWidgets.QSizePolicy.Fixed)
-        self._action_gap = QtWidgets.QSpacerItem(0, 0, QtWidgets.QSizePolicy.Minimum, QtWidgets.QSizePolicy.Fixed)
         #: The spacer above each contribution, by its factory.
         self._contribution_gaps: dict[object, QtWidgets.QSpacerItem] = {}
 
         # What this is on one line, how it stands on the next: the kind sat
         # a third of the way across and a long draft error wrapped into a
         # block beside it.  The status line is a dot and words, the way the
-        # console's status strip says things.
+        # console's status strip says things.  A section gap under it, on
+        # the body's left and right edges.
         header = QtWidgets.QWidget()
         header.setStyleSheet("background: transparent;")
         header_layout = QtWidgets.QVBoxLayout(header)
-        header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.setContentsMargins(pad, pad, pad, section_gap())
         # Two lines a row gap apart, the title and its kind a row gap apart:
         # the page's one rhythm, not private 4s and 8s.
         header_layout.setSpacing(row_gap())
         title_row = QtWidgets.QHBoxLayout()
         title_row.setSpacing(row_gap())
-        self.title_label = FluentLabel(self.node_id)
+        # The name takes its own width and gives it up, elided in the
+        # middle, when the page is narrower: a long name never widens the
+        # window.  The kind stands right after it either way.
+        self.title_label = ElidedLabel(self.node_id, mode=QtCore.Qt.ElideMiddle)
         self.title_label.setStyleSheet(
             f'QLabel {{ color: {TEXT}; font: {HEADING_CSS_WEIGHT} {fluent_font_size()}pt "{FONT}"; '
             "background: transparent; }"
         )
         self.kind_label = FluentLabel("")
-        self.kind_label.setStyleSheet(f"color: {MUTED_INK}; background: transparent; border: none;")
-        title_row.addWidget(self.title_label)
+        self.kind_label.setStyleSheet(MUTED_LABEL_STYLE)
+        title_row.addWidget(self.title_label, 1)
         title_row.addWidget(self.kind_label)
-        title_row.addStretch(1)
         header_layout.addLayout(title_row)
         status_row = QtWidgets.QHBoxLayout()
         # The air between a dot and its words is the status strip's, so this
         # dot reads as the node row's and the strip's.
         status_row.setSpacing(status_dot_gap())
-        self.status_dot = FluentStatusDot(size=STATUS_DOT, color=GREY)
+        self.status_dot = FluentStatusDot(size=STATUS_DOT)
         self.status_label = FluentLabel("stopped")
         self.status_label.setWordWrap(True)
         self.status_label.setMinimumWidth(0)
@@ -152,8 +173,40 @@ class LogicEditorView(QtWidgets.QWidget):
         status_row.addLayout(dot_column)
         status_row.addWidget(self.status_label, 1)
         header_layout.addLayout(status_row)
-        self._body_layout.addWidget(header)
-        self._body_layout.addItem(self._lead_gap)
+        outer.addWidget(header)
+
+        # THE NAME, the first row: what the operator calls this node -- its
+        # row, this page and its tab, every picker and panel that names it.
+        # One line in the one label column, the panel's "Panel name" control;
+        # the internal id the node is addressed by is the box's tooltip and
+        # its empty-box hint.  Committed when the operator is done with it,
+        # never per keystroke; a refusal is one sentence under the line, in
+        # the control column.  A page with nothing to rename (a panel
+        # publisher's) shows none of it.
+        self._name_frame = QtWidgets.QWidget()
+        self._name_frame.setStyleSheet("background: transparent;")
+        name_layout = QtWidgets.QVBoxLayout(self._name_frame)
+        name_layout.setContentsMargins(0, 0, 0, 0)
+        name_layout.setSpacing(row_gap())
+        empty = FormSpec(())
+        self._name_spec = FormSpec((
+            FormFieldProps(
+                "name", "text", "Name", description=f"Internal ID: {self.node_id}"
+            ),
+        ))
+        self.name_form = FluentParameterForm(empty, {})
+        self.name_form.committed.connect(self._name_finished)
+        name_layout.addWidget(self.name_form)
+        self.name_problem_label = error_note_label()
+        self._name_problem_row = FluentSettingRow(
+            "", self.name_problem_label, label_width=self._label_width,
+            parent=self._name_frame,
+        )
+        self._name_problem_row.hide()
+        name_layout.addWidget(self._name_problem_row)
+        #: The Name box, once the first projection has built it.
+        self._name_box: QtWidgets.QLineEdit | None = None
+        self._body_layout.addWidget(self._name_frame)
 
         # The source and device choices are rows of the form, in its label
         # column -- not a separately boxed card with its own label style.
@@ -165,7 +218,6 @@ class LogicEditorView(QtWidgets.QWidget):
         self.source_combo: FluentComboBox | None = None
         self._body_layout.addWidget(self._selector_frame)
 
-        empty = FormSpec(())
         self.artifact_form = FluentParameterForm(empty, {})
         self._body_layout.addWidget(self.artifact_form)
         self.artifact_form.changed.connect(self._artifact_changed)
@@ -194,19 +246,39 @@ class LogicEditorView(QtWidgets.QWidget):
         self._artifact_result_rows: dict[str, FluentSettingRow] = {}
         self._body_layout.addWidget(self._artifact_result_frame)
 
+        self._body_layout.addStretch(1)
+        mount_logic_page(self._scroll, body, top=False, bottom=not show_actions)
+        outer.addWidget(self._scroll, 1)
+
         # The node row's two fixed slots, in its order -- Start then Stop, as
         # On Pulse then Stop Pulse -- and with its words: Start reads Restart
         # while the node is active and Starting… while its start waits.  Both
         # are always there, so nothing on this row moves when a run begins.
-        # Remove keeps to the far side, away from the buttons pressed most.
-        actions = QtWidgets.QHBoxLayout()
+        # Revert stands left of them, always there too: it answers the one
+        # question a page edited under a running node leaves -- what does
+        # the run use? -- by putting that configuration back.
+        # Remove keeps to the far side, away from the buttons pressed most,
+        # and takes two clicks like the row's x: it removes the same node.
+        # The bar is the page's foot, on the body's left and right edges and
+        # a section gap under the last row the scroll shows, so the red
+        # Remove reads as a command and not as one more red sentence.
+        footer = QtWidgets.QWidget()
+        footer.setStyleSheet("background: transparent;")
+        actions = QtWidgets.QHBoxLayout(footer)
+        actions.setContentsMargins(pad, section_gap(), pad, pad)
         actions.setSpacing(row_gap())
-        self.remove_button = FluentButton("Remove", role="destructive")
-        self.remove_button.clicked.connect(self.remove_requested.emit)
+        self.remove_button = FluentButton(
+            "Remove", role="destructive", confirm_twice="remove this node"
+        )
+        self.remove_button.confirmed.connect(self.remove_requested.emit)
         actions.addWidget(self.remove_button)
         actions.addStretch(1)
+        self.revert_button = FluentButton("Revert")
+        self.revert_button.setToolTip("Restore the configuration the running node uses")
+        self.revert_button.clicked.connect(self.revert_requested.emit)
         self.start_button = FluentButton("Start", role="primary")
-        fit_start_button(self.start_button)
+        # Restart wears the dirty star while the draft differs from the run.
+        fit_button_words(self.start_button, (*START_LABELS, "Restart*"))
         self.start_button.clicked.connect(self.start_requested.emit)
         self.stop_button = FluentButton("Stop", role="destructive")
         self.stop_button.clicked.connect(self.stop_requested.emit)
@@ -219,22 +291,40 @@ class LogicEditorView(QtWidgets.QWidget):
             "Open this node's plot panel when it starts"
         )
         self.preview_switch.toggled.connect(self.auto_preview_changed.emit)
-        # The Plot setting sits immediately left of Start, as on the row.
-        add_row_switch(actions, self.preview_switch, lead=False)
+        # The Plot setting sits immediately left of Start, as on the row, a
+        # group of its own between Revert and Start.
+        actions.addWidget(self.revert_button)
+        add_row_switch(actions, self.preview_switch)
         actions.addWidget(self.start_button)
         actions.addWidget(self.stop_button)
-        # A section gap clear of the last section, so the ghost Remove reads
-        # as a command on the action row and not as one more red sentence.
-        self._body_layout.addItem(self._action_gap)
-        self._body_layout.addLayout(actions)
-        self._show_actions = bool(show_actions)
-        for button in (self.remove_button, self.start_button, self.stop_button, self.preview_switch):
-            button.setVisible(bool(show_actions))
-        self._body_layout.addStretch(1)
-        mount_logic_page(scroll, body)
-        outer.addWidget(scroll)
+        outer.addWidget(footer)
+        # A panel publisher's page has nothing to start or remove: no bar,
+        # and the body carries the page's bottom pad itself.
+        footer.setVisible(bool(show_actions))
 
         self.update_projection(projection)
+
+    def showEvent(self, event) -> None:  # noqa: N802 - Qt API name
+        """A newly opened page starts at its first row.
+
+        Whatever moved its bar before the operator first saw it -- a focus
+        handed on as a row was retired, a wheel turned over the window while
+        it opened -- the page opens where it begins; after that the bar
+        stays where the operator leaves it, across tab switches.
+        """
+
+        super().showEvent(event)
+        if self._opened:
+            return
+        self._opened = True
+        self._scroll.verticalScrollBar().setValue(0)
+        # Once more after the first layout pass, which is when the rows the
+        # first projections built get their heights.
+        QtCore.QTimer.singleShot(0, self._start_at_top)
+
+    def _start_at_top(self) -> None:
+        if not sip.isdeleted(self):
+            self._scroll.verticalScrollBar().setValue(0)
 
     def update_projection(self, projection: Mapping[str, object]) -> None:
         incoming = dict(projection)
@@ -256,10 +346,32 @@ class LogicEditorView(QtWidgets.QWidget):
             )
 
         self._projection = incoming
-        self.title_label.setText(str(incoming.get("api_name") or self.node_id))
-        self.title_label.setToolTip(str(incoming.get("description") or ""))
+        # The header calls the node by its name, and says beside it what the
+        # node IS -- its type and kind -- so a renamed node still reads as an
+        # Occupancy.  A page with no name (a panel publisher's) is its type.
+        name = str(incoming.get("name") or "")
+        api_name = str(incoming.get("api_name") or self.node_id)
         kind = str(incoming.get("kind") or "logic")
-        self.kind_label.setText(f"({kind})")
+        title = name or api_name
+        self.title_label.setText(title)
+        self.title_label.ensurePolished()
+        self.title_label.setMaximumWidth(
+            self.title_label.fontMetrics().horizontalAdvance(title) + scaled_px(2) + 1
+        )
+        self.title_label.setToolTip(
+            "\n".join(part for part in (title, str(incoming.get("description") or "")) if part)
+        )
+        # The type is said only where the name does not already say it.
+        self.kind_label.setText(
+            f"({api_name}{SUMMARY_SEPARATOR}{kind})"
+            if name and name.casefold() != api_name.casefold()
+            else f"({kind})"
+        )
+        # Decided before the rows are spaced below, which ask what is shown.
+        self._name_frame.setVisible("name" in incoming)
+        # First, so the Name box a first projection builds comes before the
+        # rows it builds: Tab goes from the Name to the first row.
+        self._project_name(incoming)
         managed_fields = self._reconcile_contributions(incoming)
         acquisition_key = str(incoming.get("acquisition_input") or "")
         visible_spec = FormSpec(
@@ -278,7 +390,7 @@ class LogicEditorView(QtWidgets.QWidget):
         # among them: it changes only when a run fails or recovers, and a
         # contribution shows a failure beside the row that caused it.
         volatile = ("running", "pending", "issues", "status", "state",
-                    "auto_preview", "can_start", "can_stop")
+                    "auto_preview", "can_start", "can_stop", "edited", "name", "name_problem")
         structure = {
             key: value for key, value in incoming.items() if key not in volatile
         }
@@ -303,6 +415,8 @@ class LogicEditorView(QtWidgets.QWidget):
                   if callable(getattr(widget, "set_label_width", None))),
             )
             self._label_width = label_width
+            self.name_form.set_label_width(label_width)
+            self._name_problem_row.set_label("", width=label_width)
             self.artifact_form.set_label_width(label_width)
             self.form.set_label_width(label_width)
             for widget in self._contributions.values():
@@ -322,7 +436,7 @@ class LogicEditorView(QtWidgets.QWidget):
             self._space_sections()
 
         offered = bool(incoming["preview_offered"])
-        self.preview_switch.setVisible(offered and bool(self._show_actions))
+        self.preview_switch.setVisible(offered)
         blocked = self.preview_switch.blockSignals(True)
         try:
             self.preview_switch.setChecked(bool(incoming["auto_preview"]))
@@ -349,21 +463,86 @@ class LogicEditorView(QtWidgets.QWidget):
                 issues, incoming.get("artifact_claims"), self._shown_problems()
             )
         self.status_label.setText(status)
-        # Written when they CHANGE: the sheet is re-parsed and the widget
-        # repolished on every write.
-        colours = STATE_COLOURS[state]
-        if colours != self._status_colours:
-            self._status_colours = colours
-            self.status_dot.set_color(colours[0])
-            self.status_label.setStyleSheet(
-                f"color: {colours[1]}; background: transparent; border: none;"
-            )
+        word = STATE_WORDS[state]
+        self.status_dot.set_state(word)
+        set_status_ink(self.status_label, word)
+
+    def _project_name(self, projection: Mapping[str, object]) -> None:
+        """The Name line and the sentence under it, from the projection.
+
+        A box the operator is typing in is theirs (the form's own rule); the
+        sentence is the presenter's answer to what they last committed.
+        """
+
+        if "name" not in projection:
+            return
+        self.name_form.reconcile(self._name_spec, {"name": str(projection["name"])})
+        if self._name_box is None:
+            self._name_box = self.name_form.widget_for("name")
+            self._name_box.installEventFilter(self)
+        problem = str(projection.get("name_problem") or "")
+        show_problem(self.name_problem_label, problem)
+        self._name_problem_row.setVisible(bool(problem))
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802 - Qt API name
+        """The Name box: Escape takes back what was typed there, and the
+        focus leaving it -- for another control, a closed tab -- finishes
+        it (:meth:`_name_left`).  Asked of the box's own events because Qt
+        says nothing when the focus leaves a box whose text is unchanged."""
+
+        if watched is self._name_box:
+            if (
+                event.type() == QtCore.QEvent.KeyPress
+                and event.key() == QtCore.Qt.Key_Escape
+            ):
+                self._name_box.setText(str(self._projection.get("name") or ""))
+                self._name_box.clearFocus()
+                return True
+            if (
+                event.type() == QtCore.QEvent.FocusOut
+                and event.reason() != QtCore.Qt.PopupFocusReason
+            ):
+                self._name_left()
+        return super().eventFilter(watched, event)
+
+    def _send_typed_name(self) -> None:
+        """Send what the operator TYPED in the Name box, once.
+
+        Return and then leaving the box is one rename, and a box nobody
+        typed in sends nothing -- not the name it still showed when an agent
+        renamed the node meanwhile.  An emptied box is sent too: the node is
+        then called by its internal ID, the box's hint.
+        """
+
+        box = self._name_box
+        if box is not None and box.isModified():
+            box.setModified(False)
+            self.name_committed.emit(box.text().strip())
+
+    def _name_finished(self, _key: str) -> None:
+        """Return (or Qt's own word that a changed box was left)."""
+
+        self._send_typed_name()
+
+    def _name_left(self) -> None:
+        """The focus left the Name box: what was typed is sent, then the box
+        shows the node's name as it stands, and a refusal of text no longer
+        in the box is withdrawn by sending the name the node has."""
+
+        box = self._name_box
+        self._send_typed_name()
+        if self._projection.get("name_problem"):
+            self.name_committed.emit(str(self._projection.get("name") or ""))
+        current = str(self._projection.get("name") or "")
+        if box.text() != current:
+            box.setText(current)
 
     def set_mutation_enabled(self, enabled: bool, *, owns_task: bool = False) -> None:
         """Disable authored and lifecycle commands while a Task owns the console.
 
         The owning Task's own page keeps its Stop, as its row does: the same
-        endpoint as the status strip's "Stop task".
+        endpoint as the status strip's "Stop task".  The Name stays editable:
+        a name is not part of what the Task runs.
         """
 
         self._mutation_enabled = bool(enabled)
@@ -408,6 +587,11 @@ class LogicEditorView(QtWidgets.QWidget):
             if not callable(updater):
                 raise TypeError("logic UI contribution must update_projection")
             changed.connect(self.draft_changed.emit)
+            # A contribution that holds a refreshable picker (Calibration's
+            # pulse) asks for the same Refresh as the editor's own forms.
+            refresh = getattr(widget, "refresh_requested", None)
+            if refresh is not None:
+                refresh.connect(lambda *_: self.refresh_requested.emit())
             self._contributions[factory] = widget
             gap = QtWidgets.QSpacerItem(0, 0, QtWidgets.QSizePolicy.Minimum, QtWidgets.QSizePolicy.Fixed)
             self._contribution_gaps[factory] = gap
@@ -436,7 +620,7 @@ class LogicEditorView(QtWidgets.QWidget):
         """The draft problems the contributions state under their own lines.
 
         A contribution that writes a draft problem in red where it arises --
-        Derive's typing error under the output line it is about -- names
+        Derive's typing error under the card line it is about -- names
         each one, with the section it stands in, as ``shown_problems()``;
         the header counts them rather than saying one again.
         """
@@ -476,16 +660,18 @@ class LogicEditorView(QtWidgets.QWidget):
         """Size the spacers so each shown boundary gets one gap.
 
         The body already puts a form gap between any two shown blocks; a
-        spacer adds the rest of a section gap where a section starts: after
-        the header (once, before whatever is shown first), before a
-        contribution that opens with a section title when rows come before
-        it, and before the action bar.  A hidden block takes no gap at all.
+        spacer adds the rest of a section gap before a contribution that
+        opens with a section title when rows come before it.  A hidden block
+        takes no gap at all.  The header above the rows and the action bar
+        below them carry their own section gaps.
         """
 
         extra = section_gap() - row_gap()
         rows_above = any(
             not block.isHidden()
-            for block in (self._selector_frame, self.artifact_form, self.form)
+            for block in (
+                self._name_frame, self._selector_frame, self.artifact_form, self.form,
+            )
         )
         for factory, widget in self._contributions.items():
             opens = rows_above and not widget.isHidden() and _opens_section(widget)
@@ -494,22 +680,26 @@ class LogicEditorView(QtWidgets.QWidget):
                 QtWidgets.QSizePolicy.Minimum, QtWidgets.QSizePolicy.Fixed,
             )
             rows_above = rows_above or not widget.isHidden()
-        shown = rows_above or not self._artifact_result_frame.isHidden()
-        self._lead_gap.changeSize(
-            0, extra if shown else 0,
-            QtWidgets.QSizePolicy.Minimum, QtWidgets.QSizePolicy.Fixed,
-        )
-        self._action_gap.changeSize(
-            0, extra, QtWidgets.QSizePolicy.Minimum, QtWidgets.QSizePolicy.Fixed
-        )
         self._body_layout.invalidate()
 
     def _project_commands(self) -> None:
         pending = bool(self._projection.get("pending"))
         can_start = bool(self._projection.get("can_start"))
         can_stop = bool(self._projection.get("can_stop"))
+        edited = bool(self._projection.get("edited"))
+        startable = self._mutation_enabled and can_start and not pending
         self.start_button.setText(start_label(pending=pending, active=can_stop))
-        self.start_button.setEnabled(self._mutation_enabled and can_start and not pending)
+        self.start_button.setEnabled(startable)
+        # The On Pulse rule: Start is this page's run command; a Restart of
+        # what already runs is a standard command, and it is the one thing
+        # to press -- primary, with the star every save wears -- only while
+        # pressing it would put something new in place: the edited draft.
+        self.start_button.set_role("standard" if can_stop else "primary")
+        self.start_button.set_dirty(edited and startable)
+        self.start_button.setToolTip(
+            "Restart to run the edited configuration" if self.start_button.is_dirty() else ""
+        )
+        self.revert_button.setEnabled(self._mutation_enabled and edited)
         self.stop_button.setEnabled(can_stop and (self._mutation_enabled or self._owns_task))
         # It says what the next Start will do, so it follows Start's own gate.
         self.preview_switch.setEnabled(self._mutation_enabled)
@@ -815,15 +1005,20 @@ def _draft_status(
     own = [issue for issue in issues if issue not in shown_below]
     if own:
         return f"Draft: {own[0]}"
-    sections = " and ".join(dict.fromkeys(shown_below[issue] for issue in issues))
-    count = len(issues)
+    # Every problem shown below is counted, not only the ones Start's
+    # check reached: it stops at a draft's first problem, while the
+    # editors below say each one under its own line.
+    problems = dict.fromkeys((*issues, *shown_below))
+    sections = " and ".join(dict.fromkeys(shown_below[problem] for problem in problems))
+    count = len(problems)
     return f"Draft: {count} problem{'' if count == 1 else 's'} in {sections}"
 
 
 def _row_labels(projection: Mapping[str, object]) -> tuple[str, ...]:
     """Every label the editor shows outside its two forms."""
 
-    labels = [_device_label(name) for name in (projection.get("device_options") or {})]
+    labels = ["Name"] if "name" in projection else []
+    labels.extend(_device_label(name) for name in (projection.get("device_options") or {}))
     if projection.get("source_required"):
         labels.append(_source_row_label(projection))
     acquisition_key = str(projection.get("acquisition_input") or "")

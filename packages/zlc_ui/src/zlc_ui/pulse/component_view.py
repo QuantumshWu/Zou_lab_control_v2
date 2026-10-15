@@ -8,11 +8,11 @@ from zlc_ui.fluent import (
     ElidedLabel, FluentButton, FluentComboBox,
     FluentFrame, FluentGroupBox, FluentLabel, FluentLineEdit, FluentScrollArea,
     fluent_scrollbar_thickness, read_editable_combo, retire_widget,
-    setting_label_width, signals_blocked,
+    set_status_ink, setting_label_width, signals_blocked,
 )
 
 from ._layout import (
-    bound_field_width, config_name_width, px, quiet, row_height,
+    bound_field_width, config_name_width, px, row_height,
 )
 from zlc_ui.fluent import card_pad, row_gap, section_gap
 from .models import ScheduleVM
@@ -32,7 +32,7 @@ class PulseComponentView(QtWidgets.QWidget):
         self._selected_id = ""
         self._accepted_name = ""
         self._binding_rows: dict[str, tuple] = {}
-        self._sources: tuple[tuple[str, str, str, str, str], ...] = ()
+        self._sources: tuple[tuple[str, str, str, str, str, str], ...] = ()
         self._contexts: tuple[tuple[str, str], ...] = ()
         self.schedule_view: PulseScheduleView | None = None
         # The choice of Subpulse and the schedule's commands stand still at
@@ -126,7 +126,8 @@ class PulseComponentView(QtWidgets.QWidget):
         self.scope_label = ElidedLabel("")
         self.scope_label.setFixedHeight(row_height())
         hint.addWidget(self.scope_label, 1)
-        self.source_status = quiet(FluentLabel(""))
+        self.source_status = FluentLabel("")
+        set_status_ink(self.source_status, "idle")
         self.source_status.setFixedHeight(row_height())
         hint.addWidget(self.source_status)
         self.source_status.hide()
@@ -153,18 +154,23 @@ class PulseComponentView(QtWidgets.QWidget):
         self._page.addStretch(0)
 
     def set_sources(
-        self, rows: tuple[tuple[str, str, str, str, str], ...], *,
+        self, rows: tuple[tuple[str, str, str, str, str, str], ...], *,
         enabled: bool, busy: bool = False, error: str = "",
     ) -> None:
-        """Update choices and the selected reference; global mode never changes selection."""
+        """Update choices and the selected reference; global mode never changes selection.
+
+        A row is ``(id, name, source, path, status, status_word)``: the
+        status line is written in the ink of its word (``STATUS_CUES``)."""
         del enabled, error
         self._sources = tuple(rows)
         self._set_context_choices()
         self._project_source(busy=busy)
 
     def _set_context_choices(self) -> None:
-        contexts = tuple((key, name) for key, name, _source, _path, _status in self._sources) or self._contexts
-        choices = (("", "Subpulse file"),) + tuple((key, label) for key, label in contexts if key)
+        contexts = tuple((row[0], row[1]) for row in self._sources) or self._contexts
+        # The no-Pulse choice is named by what it edits, not "Subpulse file":
+        # that is the row under it naming a Pulse Subpulse's source file.
+        choices = (("", "Independent file"),) + tuple((key, label) for key, label in contexts if key)
         with signals_blocked(self.context_combo):
             existing = tuple((self.context_combo.itemData(index), self.context_combo.itemText(index))
                              for index in range(self.context_combo.count()))
@@ -186,7 +192,7 @@ class PulseComponentView(QtWidgets.QWidget):
         )
         if record is None:
             return
-        key, _name, source, path, status = record
+        key, _name, source, path, status, word = record
         with signals_blocked(self.config_path_edit):
             draft = (self.config_path_edit.property("component_id") == key
                      and self.config_path_edit.hasFocus() and self.config_path_edit.isModified())
@@ -200,6 +206,7 @@ class PulseComponentView(QtWidgets.QWidget):
         self.config_path_edit.setToolTip(path or "Choose a Subpulse file")
         self.source_status.setText(status)
         self.source_status.setToolTip(status)
+        set_status_ink(self.source_status, word)
 
     def _commit_source(self) -> None:
         key = self.config_path_edit.property("component_id")
@@ -281,7 +288,7 @@ class PulseComponentView(QtWidgets.QWidget):
         self.scope_label.setText(
             "Default in Pulse — Save Pulse keeps these edits."
             if instance else "Config source — Save writes this Subpulse file."
-            if self._selected_id else "Subpulse file — Save writes this independent file."
+            if self._selected_id else "Independent file — Save writes this file."
         )
         self.path_label.setVisible(schedule is not None and not self._selected_id)
         self.scope_label.setVisible(schedule is not None)

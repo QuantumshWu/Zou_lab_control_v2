@@ -52,10 +52,12 @@ from zlc_ui.fluent import (
     InfoPane,
     add_row_switch,
     card_title_row,
+    fit_button_words,
     fluent_save_path,
     fluent_scrollbar_thickness,
     muted_note_label,
     muted_summary_label,
+    set_status_ink,
     setting_label_width,
     signals_blocked,
     window_pad,
@@ -431,7 +433,7 @@ class _DataEditorView(QtWidgets.QWidget):
         # what the fields below are doing -- editing the chosen axis or
         # drafting a new one -- said beside it.  Choosing which axis to edit
         # is a different sentence: the labelled Editing row, whose Apply and
-        # Delete act on the axis it holds.
+        # Remove act on the axis it holds.
         self.add_axis_button = FluentButton("Add axis")
         self.add_axis_button.setToolTip("Create a new axis")
         self.axis_mode_label = muted_summary_label("Edit selected axis")
@@ -441,9 +443,13 @@ class _DataEditorView(QtWidgets.QWidget):
         self.axis_combo = FluentComboBox()
         self.axis_combo.setMinimumContentsLength(13)
         self.apply_axis_button = FluentButton("Apply axis")
-        self.remove_axis_button = FluentButton("Delete", role="destructive")
+        # It reads Create axis while a new axis is drafted: one width for
+        # both, so the combo beside it never gives up room to the flip.
+        fit_button_words(self.apply_axis_button, ("Apply axis", "Create axis"))
+        # One verb for every remover: Remove, red, one click.
+        self.remove_axis_button = FluentButton("Remove", role="destructive")
         self.remove_axis_button.setToolTip(
-            "Delete selected axis and keep its current Scope slice"
+            "Remove the selected axis and keep its current Scope slice"
         )
         self.axis_choice_row = self._labelled_row(
             "Editing",
@@ -529,6 +535,7 @@ class _DataEditorView(QtWidgets.QWidget):
             )
         )
         self.sigma_switch = FluentSwitch("Store sigma")
+        self.sigma_switch.setToolTip("Off removes the stored sigma values")
         component_controls = QtWidgets.QWidget(data_group)
         component_controls.setStyleSheet("background: transparent;")
         component_layout = QtWidgets.QHBoxLayout(component_controls)
@@ -687,10 +694,12 @@ class _DataEditorView(QtWidgets.QWidget):
 
         Sized to the room the viewport leaves under the cards above it and
         its card's foot, a table is whole when its rows fit -- its card
-        ends under its last row -- and otherwise a viewport of exactly that
-        many rows that scrolls itself, its column names and horizontal bar
-        on screen with it, and the page has nothing left to scroll.  Below
-        the fewest rows a table still shows, the page scrolls the rest.
+        ends under its last row -- and otherwise it scrolls itself and takes
+        the whole room, its last row in part: its column names and
+        horizontal bar stay on screen with it, its card ends on the page's
+        foot -- one section gap over the action bar on either page -- and
+        the page has nothing left to scroll.  Below the fewest rows a table
+        still shows, the page scrolls the rest.
         """
 
         # The line over the commands comes and goes: settle the editor's
@@ -720,6 +729,14 @@ class _DataEditorView(QtWidgets.QWidget):
         if self._table_rows.get(table) != fit:
             self._table_rows[table] = fit
             table.set_content_rows_limit(fit, viewport_rows=fit)
+        # Whatever the page has to spare goes to a card whose table scrolls,
+        # and under a card whose table is whole.
+        scrolls = int(table.model().rowCount() > fit)
+        root = page.layout()
+        index, spare = root.indexOf(card), root.count() - 1
+        if (root.stretch(index), root.stretch(spare)) != (scrolls, 1 - scrolls):
+            root.setStretch(index, scrolls)
+            root.setStretch(spare, 1 - scrolls)
 
     def is_dirty(self) -> bool:
         return bool(getattr(self, "_dirty", False))
@@ -732,13 +749,14 @@ class _DataEditorView(QtWidgets.QWidget):
         self._emit("set_dataset_field", field=str(field), value=value)
 
     def _show_local_rejection(self, message: str) -> None:
-        self._show_message(message)
+        self._show_message(message, "error")
 
-    def _show_message(self, message: object) -> None:
+    def _show_message(self, message: object, severity: str) -> None:
         # One sentence, whoever words it: this editor's own refusals and
-        # what its presenter says alike.
+        # what its presenter says alike, in the ink of its status word.
         text = sentence(str(message))
         self.message_label.setText(text)
+        set_status_ink(self.message_label, severity)
         self.message_label.setVisible(bool(text))
         # A line over the commands is room the page no longer has.
         self._table_fit.start()
@@ -986,8 +1004,9 @@ class _DataEditorView(QtWidgets.QWidget):
             with signals_blocked(self.sigma_switch):
                 self.sigma_switch.setChecked(bool(table.get("sigma_enabled", False)))
             self.value_model.set_projection(table)
-            self.blank_help_label.setText(str(table.get("blank_help", "")))
-            self._show_message(data.get("message", ""))
+            # A hint is a sentence, whoever words it.
+            self.blank_help_label.setText(sentence(str(table.get("blank_help", ""))))
+            self._show_message(data.get("message", ""), data.get("message_severity", "idle"))
             self._dirty = bool(data.get("dirty", False))
             modified = bool(data.get("modified", False))
             self.apply_button.set_dirty(modified)
@@ -1057,7 +1076,9 @@ class FigureViewerView(QtWidgets.QWidget):
             path_caption="Open a saved figure archive (.npz)",
             file_filter="Saved figure archives (*.npz)",
             path_base_dir=str(path_base_dir),
-            initial_status="Open a saved figure archive (.npz).",
+            # A status line is a fragment; the next step is the board's
+            # hint beside it.
+            initial_status="no figure open",
             graph_tabs=("Flow",),
             parent=self,
         )
@@ -1186,6 +1207,7 @@ class FigureViewerView(QtWidgets.QWidget):
         self.scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
         self.scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
         self.scroll.setWidget(self.board)
+        self.scroll.reserve_vertical_gutter()
         monitor_layout.addWidget(self.scroll, 1)
         self.tabs.add_permanent_tab(monitor, "Monitor")
         self._surface_layout.addWidget(self.tabs, 1)

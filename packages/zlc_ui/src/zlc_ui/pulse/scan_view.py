@@ -5,8 +5,9 @@ from __future__ import annotations
 from PyQt5 import QtCore, QtWidgets
 
 from zlc_ui.fluent import (
-    ElidedLabel, FluentButton, FluentCodeEdit, FluentGroupBox, FluentLabel,
-    FluentSectionLabel, centred_line_top, fluent_count_box, retire_widget, signals_blocked,
+    FONT, MUTED_LABEL_STYLE, ElidedLabel, FluentButton, FluentCodeEdit, FluentGroupBox, FluentLabel,
+    FluentSectionLabel, centred_line_top, fluent_count_box, fluent_font_size, retire_widget, signals_blocked,
+    set_status_ink,
 )
 from zlc_ui.form import being_edited
 
@@ -71,11 +72,16 @@ class PulseScanView(QtWidgets.QWidget):
         listing.addWidget(self.scan_slots_label)
         listing.addWidget(self.bindings_box)
         info_layout.addLayout(listing)
+        layout.addWidget(info)
 
-        run_row = QtWidgets.QHBoxLayout()
-        run_row.setContentsMargins(0, 0, 0, 0)
+        # How the scan plays -- how many times the table is walked, holding
+        # a point, stepping -- is its own card: under "Bound fields" an
+        # operator looking for Hold found it among a list of fields.
+        playback = FluentGroupBox("Playback")
+        run_row = QtWidgets.QHBoxLayout(playback)
+        run_row.setContentsMargins(pad, pad, pad, pad)
         run_row.setSpacing(row_gap())
-        run_row.addWidget(FluentLabel("Scan repeats (0 = ∞)"))
+        run_row.addWidget(FluentLabel("Scan repeats"))
         self.scan_repeats_spin = fluent_count_box()
         # As wide as every repeat box, wider only while it shows or takes a
         # longer count.
@@ -100,8 +106,7 @@ class PulseScanView(QtWidgets.QWidget):
             run_row.addWidget(button)
         self.scan_progress_label = FluentLabel("")
         run_row.addWidget(self.scan_progress_label, 1)
-        info_layout.addLayout(run_row)
-        layout.addWidget(info)
+        layout.addWidget(playback)
 
         body = QtWidgets.QHBoxLayout()
         body.setSpacing(row_gap())
@@ -114,10 +119,10 @@ class PulseScanView(QtWidgets.QWidget):
         template_buttons = QtWidgets.QHBoxLayout()
         template_buttons.setSpacing(row_gap())
         self.scan_load_program_button = FluentButton("Open program…")
-        self.scan_column_template_button = FluentButton("Template: column_stack")
+        self.scan_column_template_button = FluentButton("Template: columns")
         self.scan_grid_template_button = FluentButton("Template: grid")
         self.scan_load_program_button.clicked.connect(self.load_program_requested)
-        self.scan_column_template_button.clicked.connect(lambda: self.template_requested.emit("column_stack"))
+        self.scan_column_template_button.clicked.connect(lambda: self.template_requested.emit("columns"))
         self.scan_grid_template_button.clicked.connect(lambda: self.template_requested.emit("grid"))
         for button in (self.scan_load_program_button, self.scan_column_template_button, self.scan_grid_template_button):
             button.setFixedHeight(row_height())
@@ -197,6 +202,10 @@ class PulseScanView(QtWidgets.QWidget):
             raise ValueError("repeat range is invalid")
         self._minimum_repeats = minimum
         self.scan_repeats_spin.setMinimum(minimum)
+        # A count of 0 walks the table forever, and the box says so where
+        # it is typed: it shows ∞.  A range that starts above 0 has no
+        # forever in it.
+        self.scan_repeats_spin.setSpecialValueText("∞" if minimum == 0 else "")
         self.set_repeats(default)
 
     def _size_repeats(self, text: str = "") -> None:
@@ -231,7 +240,7 @@ class PulseScanView(QtWidgets.QWidget):
         self.table_note_label.setText(str(record.table_note))
         self.table_note_label.setVisible(not record.table_text and bool(record.table_note))
         self.set_repeats(record.repeats)
-        self.set_progress_text(record.progress_text)
+        self.set_progress_text(record.progress_text, record.progress_word)
         self.set_workspace_busy(record.busy)
         self.set_progress_polling(record.progress_polling)
         if record.source_text != self.scan_code.toPlainText():
@@ -261,13 +270,19 @@ class PulseScanView(QtWidgets.QWidget):
             for record in members:
                 line = ElidedLabel(f"{record.label} · " + " + ".join(
                     (["Scan"] if record.scan else [])
-                    + ([sources[record.source]] if record.source != "default" else [])))
+                    + ([sources[record.source]] if record.source != "default" else []))
+                    + (f" — {record.note}" if record.note else ""))
+                if record.note:
+                    line.setStyleSheet(f'QLabel {{ {MUTED_LABEL_STYLE} font: {fluent_font_size()}pt "{FONT}"; }}')
                 line.setFixedHeight(row_height())
                 self._bindings_layout.addWidget(line)
         self.bindings_box.setVisible(bool(records))
 
-    def set_progress_text(self, text: str) -> None:
+    def set_progress_text(self, text: str, word: str) -> None:
+        """The Scan page's line, in the ink of status ``word``."""
+
         self.scan_progress_label.setText(str(text))
+        set_status_ink(self.scan_progress_label, word)
 
     def set_scan_table_text(self, text: str) -> None:
         text = str(text)

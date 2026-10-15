@@ -932,7 +932,7 @@ logic_index = next(
     if view._view.kind_combo.itemData(index) == ('logic', 'camera_measurement')
 )
 view._view.kind_combo.setCurrentIndex(logic_index)
-QtTest.QTest.mouseClick(view._view.add_panel_button, QtCore.Qt.LeftButton)
+QtTest.QTest.mouseClick(view._view.add_button, QtCore.Qt.LeftButton)
 application.processEvents()
 assert 'camera_measurement' in presenter.logic
 assert presenter.logic['camera_measurement'].host is None
@@ -942,7 +942,7 @@ image_index = next(
     if view._view.kind_combo.itemData(index) == ('plot', 'image')
 )
 view._view.kind_combo.setCurrentIndex(image_index)
-QtTest.QTest.mouseClick(view._view.add_panel_button, QtCore.Qt.LeftButton)
+QtTest.QTest.mouseClick(view._view.add_button, QtCore.Qt.LeftButton)
 application.processEvents()
 panel = next(iter(presenter.panels.values()))
 assert panel.state.interval_ms == 100, (
@@ -979,7 +979,7 @@ facet_index = next(
     if view._view.kind_combo.itemData(index) == ('plot', 'facet_grid')
 )
 view._view.kind_combo.setCurrentIndex(facet_index)
-QtTest.QTest.mouseClick(view._view.add_panel_button, QtCore.Qt.LeftButton)
+QtTest.QTest.mouseClick(view._view.add_button, QtCore.Qt.LeftButton)
 application.processEvents()
 site_grid = tuple(presenter.panels.values())[-1]
 assert site_grid.state.kind == 'facet_grid'
@@ -1028,7 +1028,7 @@ task_index = next(
     if view._view.kind_combo.itemData(index) == ('logic', 'calibration')
 )
 view._view.kind_combo.setCurrentIndex(task_index)
-QtTest.QTest.mouseClick(view._view.add_panel_button, QtCore.Qt.LeftButton)
+QtTest.QTest.mouseClick(view._view.add_button, QtCore.Qt.LeftButton)
 application.processEvents()
 editor = view._logic_editors['calibration']
 editor.form.widget_for('pulse_template').setText('imaging_template.json')
@@ -1040,7 +1040,7 @@ application.processEvents()
 assert presenter._active_task_id == 'calibration'
 assert view._view.status_strip.action_button.isVisible()
 assert view._view.kind_combo.isEnabled()
-assert not view._view.add_panel_button.isEnabled()
+assert not view._view.add_button.isEnabled()
 task_row = view._rows['calibration']
 assert not task_row.start_button.isEnabled()
 assert task_row.start_button.text() == editor.start_button.text() == 'Restart'
@@ -1072,7 +1072,7 @@ QtTest.QTest.mouseClick(
 until(lambda: presenter._active_task_id is None)
 assert not view._view.status_strip.action_button.isVisible()
 assert view._view.kind_combo.isEnabled()
-assert view._view.add_panel_button.isEnabled()
+assert view._view.add_button.isEnabled()
 assert view._rows['calibration'].start_button.isEnabled()
 assert view._rows['calibration'].start_button.text() == 'Start'
 assert not view._rows['calibration'].stop_button.isEnabled()
@@ -1504,7 +1504,14 @@ try:
     else:
         raise AssertionError('invalid programmatic exposure was accepted')
     assert flow._device_control_models['camera']['desired'] == previous_desired
-    assert flow.control_device('inspect', 'camera')['fields']['exposure']['severity'] == 'error'
+    inspected = flow.control_device('inspect', 'camera')
+    assert inspected['fields']['exposure']['severity'] == 'error'
+    # The schema an AI reads holds values, not the GUI's presentation hints.
+    schema_fields = inspected['schema']
+    assert schema_fields
+    for field in schema_fields:
+        for entry in (field, *field.get('columns', ())):
+            assert not {'segmented', 'step'} & set(entry), entry
     assert len(calls) == 2, 'invalid Desired reached the device'
     control.close(); application.processEvents()
     assert not control.is_visible()
@@ -1679,7 +1686,7 @@ def test_control_apply_sends_the_authored_unit_and_keeps_canonical_provenance(wo
     flow._queue_device_tune("rf", "power", 135.0, "mVpp")
     assert calls == [("power", 135.0, "mVpp")], model["status"]
     assert len(refreshes) == 2, "Apply must consume its command readback, not refresh every field"
-    assert model["status"]["power"] == ("Applied", "ready")
+    assert model["status"]["power"] == ("Applied", "idle")
     assert model["desired"]["power"][0] == pytest.approx(135.125)
     assert model["desired"]["power"][1] == "mVpp"
     assert model["tunables"][0].metadata.unit == "mVpp"
@@ -2041,6 +2048,23 @@ def test_a_queued_value_the_drain_refuses_is_said_on_its_field(workspace) -> Non
         ("frequency: Queued value not applied (Protected by scan); Apply again", "warning"),
         ("applying power", "task"),
     ]
+    # The owning node is named as the console calls it, and renaming it
+    # re-projects the window on the next beat; the owner label stays the
+    # address that admission and the tune record use.
+    names = {"scan": "scan"}
+    flow.console_presenter = SimpleNamespace(logic_names=lambda: dict(names))
+    coordinator.set_owner_spelling(lambda label: names.get(label, label))
+    flow._project_device_control("rf")
+    projected = len(control.projections)
+    flow._refresh_device_control_policies()
+    assert len(control.projections) == projected
+    names["scan"] = "Survey A"
+    flow._refresh_device_control_policies()
+    assert len(control.projections) == projected + 1
+    renamed = control.projections[-1]
+    assert (renamed["owners"], renamed["owner_names"]) == (("scan",), ("Survey A",))
+    assert renamed["fields"]["frequency"]["reason"] == "Protected by Survey A"
+    flow.console_presenter = None
     started.pop()(RuntimeError("stopped"))
     logic.release()
     coordinator.assert_idle()
@@ -2099,8 +2123,8 @@ async def client():
                 semantic["fate:point:scan.duration:gap_1"] = "x"
                 recipe = await call("lab_run_recipe", {"name":"trap_lifetime", "parameters":{
                     "camera":"camera", "sequencer":"sequencer", "pulse_path":"imaging_test.json",
-                    "calibrations":[{"path":"calibration.json", "frames":["rest"]}], "frames_per_cycle":3, "start_frame":0,
-                    "end_frame":2, "repeats":1, "shots_per_point":2,
+                    "calibrations":[{"path":"calibration.json", "frames":["rest"]}], "frames_per_cycle":3, "start_frame":"0",
+                    "end_frame":"last", "repeats":1, "shots_per_point":2,
                     "fit_fixed":{"amplitude":1., "offset":0.},
                     "panel_semantic":semantic,
                     "scan_plan":plan(points[:1] if SINGLE_FIRST else points)}})
@@ -2131,7 +2155,9 @@ async def client():
                     if "no axis holds" in table["panel_error"] or time.monotonic() >= deadline:
                         break
                     await asyncio.sleep(.05)
-                panel = (await call("lab_catalog", {"panel_id":panel_id}))["panel"]
+                catalog = await call("lab_catalog", {"panel_id":panel_id})
+                assert catalog["panel_intervals"] == [100, 200, 400, 800], catalog["panel_intervals"]
+                panel = catalog["panel"]
                 patch_fields = panel["update"]["patch_fields"]
                 assert "published_outputs" not in patch_fields and {
                     "signal", "kind", "cell_kind", "size", "interval_ms", "title",
@@ -2208,6 +2234,12 @@ dialog_watchdog.setInterval(10)
 dialog_watchdog.timeout.connect(dismiss_unexpected_dialog)
 dialog_watchdog.start()
 flow = create_experiment_flow(workspace=WORKSPACE, template="virtual")
+state_reads = [0]  # Every lab_state projection reads the Devices status once.
+status_snapshot = flow.devices.status_snapshot
+def counted_status_snapshot():
+    state_reads[0] += 1
+    return status_snapshot()
+flow.devices.status_snapshot = counted_status_snapshot
 with socket.socket() as held:
     held.bind(("127.0.0.1", 0))
     port = held.getsockname()[1]
@@ -2226,6 +2258,8 @@ def release_editor_gate():
     for args, kwargs, answer in pending:
         actual = editor_gate['original'](*args, **kwargs)
         def finish(done, answer=answer):
+            if answer.cancelled():
+                return  # The panel superseded the held update; nobody reads it.
             try:
                 answer.set_result(done.result())
             except BaseException as error:
@@ -2237,23 +2271,33 @@ def future_public_probe(self, note: str, outcome: dict | None = None):
         panel = flow.console_presenter.panels[outcome['panel_id']]
         editor = panel.editor_host
         assert editor is not None and panel.editor_configuration is None
-        editor_gate.update(host=editor, original=editor.update_data, pending=[])
+        editor_gate.update(host=editor, original=editor.update_data, pending=[], failing=False)
         def hold(*args, **kwargs):
             answer = Future()
-            editor_gate['pending'].append((args, kwargs, answer))
+            if editor_gate['failing']:
+                answer.set_exception(RuntimeError('Rejected snapshot update'))
+            else:
+                editor_gate['pending'].append((args, kwargs, answer))
             return answer
         editor.update_data = hold
         return {'generation':panel.frozen_data.snapshot.ref.stream_generation.value}
     if note == 'release-editor':
-        assert editor_gate['pending'], 'Refresh never reached the editor'
+        # A refresh can complete without calling the held update; releasing
+        # then has nothing to let through.
         release_editor_gate()
         return {'released':True}
     if note == 'fail-editor':
         assert editor_gate['pending'], 'Refresh never reached the editor'
+        # Refresh adopts the card's picture at once and, when a newer
+        # publication is still being drawn, that one as well: both fail.
+        editor_gate['failing'] = True
         pending, editor_gate['pending'] = editor_gate['pending'], []
         for _args, _kwargs, answer in pending:
             answer.set_exception(RuntimeError('Rejected snapshot update'))
         return {'failed':True}
+    if note == 'hold-editor-again':
+        editor_gate['failing'] = False
+        return {'holding':True}
     if note == 'request-review':
         binding = flow.console_presenter.logic[outcome['node_id']]
         host = binding.host
@@ -2288,7 +2332,9 @@ async def client():
     async with httpx2.AsyncClient() as http:
         assert (await http.get(url)).status_code == 401
         assert (await http.get(url, headers={"Authorization":"Bearer virtual-test", "Origin":"https://example.com"})).status_code == 403
-    async with httpx2.AsyncClient(headers={"Authorization":"Bearer virtual-test"}, timeout=10.) as http:
+    # Longer than the longest server-side wait issued below (lab_save's
+    # 30 s refresh) plus 10 s, as lab_wait asks of every client.
+    async with httpx2.AsyncClient(headers={"Authorization":"Bearer virtual-test"}, timeout=60.) as http:
         async with streamable_http_client(url, http_client=http) as (read, write, *_):
             async with ClientSession(read, write) as c:
                 await c.initialize()
@@ -2361,6 +2407,14 @@ async def client():
                 assert timeout["timed_out"] and not timeout["matched"]
                 refused_wait = await c.call_tool("lab_wait_for", {"tool_name":"lab_initialize", "arguments":{}, "path":["accepted"], "equals":True, "timeout_seconds":0})
                 assert refused_wait.is_error and "read-only" in str(refused_wait.content)
+                reflected = await c.call_tool("lab_wait_for", {"tool_name":"lab_api", "arguments":{"handle":"devices"},
+                    "path":["handle"], "equals":"devices", "timeout_seconds":0})
+                assert reflected.is_error and "operator read tools" in reflected.content[0].text
+                reads = state_reads[0]
+                unmet = await call("lab_wait_for", {"tool_name":"lab_state", "arguments":{}, "path":["closing"],
+                    "equals":True, "timeout_seconds":1})
+                # Backing off to 250 ms: about ten projections a second, not fifty.
+                assert unmet["timed_out"] and 2 <= state_reads[0] - reads <= 12, state_reads[0] - reads
                 for _ in range(100):
                     state = await call("lab_state")
                     if state["session_open"]:
@@ -2377,8 +2431,12 @@ async def client():
                 pulse = await edit("subpulse.group", {"items":[["period","load"]]})
                 component = pulse["components"][0]["component_id"]
                 await edit("subpulse.export", {"component_id":component, "path":"pulses/load.subpulse.json"})
-                await edit("subpulse.source", {"component_id":component, "source":"default",
-                                               "path":"pulses/load.subpulse.json"})
+                referenced = await edit("subpulse.source", {"component_id":component, "source":"default",
+                                                            "path":"pulses/load.subpulse.json"})
+                kept = await edit("subpulse.source", {"component_id":component, "source":"default", "path":None})
+                # Null is omitted: the reference stays, never '<workspace>/None'.
+                assert kept["components"][0]["path"] == referenced["components"][0]["path"]
+                assert kept["components"][0]["path"].endswith("load.subpulse.json")
                 pulse = await edit("subpulse.source", {"component_id":component, "source":"default", "path":""})
                 assert pulse["components"][0]["path"] == ""  # Clear, not workspace root.
                 pulse = await edit("subpulse.open", {"path":"pulses/load.subpulse.json"})
@@ -2394,6 +2452,13 @@ async def client():
                 await edit("subpulse.save", {"path":"pulses/load.subpulse.json"})
                 await edit("save", {"path":"pulses/mcp_checked.json"})
                 assert "fields" not in (await call("lab_catalog"))["logic"][0]
+                # A value name the schema lacks never makes a row: kept, it
+                # could neither Start nor be updated away.
+                unknown = await call("lab_action", {"action":"logic.add", "arguments":{
+                    "api_name":"camera_measurement", "values":{"exposure":0.01}}})
+                assert not unknown["accepted"] and unknown["node_id"] is None, unknown
+                assert "no field 'exposure'" in unknown["error"], unknown
+                assert "exposure_seconds" in unknown["error"], unknown
                 added = await call("lab_action", {"action":"logic.add", "arguments":{
                     "api_name":"camera_measurement", "values":{"repeat":0}, "device_keys":{"camera":"camera"}}})
                 node = added["node_id"]
@@ -2442,6 +2507,23 @@ async def client():
                 assert not blocked["completed"] and blocked["stopped_at"] == 0
                 assert not blocked["results"][0]["result"]["reached"]
                 assert (await call("lab_state", {"node_id":node}))["console"]["logic"][0]["observation"]["running"]
+                # A running node's draft is the next run's.  A value name its
+                # schema lacks is refused with the names it has; details show
+                # what the run uses beside the draft, and Revert restores it.
+                unknown = await call("lab_action", {"action":"logic.update",
+                    "arguments":{"node_id":node, "values":{"exposure":0.01}}})
+                assert not unknown["accepted"] and "no field 'exposure'" in unknown["error"], unknown
+                assert "exposure_seconds" in unknown["error"], unknown
+                edited = await call("lab_action", {"action":"logic.update",
+                    "arguments":{"node_id":node, "values":{"repeat":3}}})
+                assert edited["accepted"], edited
+                detailed = (await call("lab_state", {"node_id":node, "details":True}))["console"]["logic"][0]
+                assert detailed["edited_since_start"], detailed
+                assert detailed["draft"]["values"]["repeat"] == 3, detailed["draft"]
+                assert detailed["running_draft"]["values"]["repeat"] == 0, detailed["running_draft"]
+                reverted = await call("lab_action", {"action":"logic.revert", "arguments":{"node_id":node}})
+                assert reverted["accepted"] and not reverted["state"]["logic"][0]["edited_since_start"], reverted
+                assert reverted["state"]["logic"][0]["generation"] == generation, "Revert restarted the run"
                 fired = await call('lab_pulse', {'action':'fire', 'device_id':'sequencer'})
                 assert fired['accepted'], fired
                 settled_pulse = await call('lab_batch', {'calls':[
@@ -2458,6 +2540,11 @@ async def client():
                 done = await waiting
                 assert done["reached"] and done["observation"]["terminal"] and done["still_current"]
                 assert done['observation']['phase'] == 'cancelled'
+                # A stopped run never becomes ready: its outcome, not a bare tool error.
+                never_ready = await call('lab_wait', {'node_id':node,'generation':generation,
+                    'until':'ready','timeout_seconds':0})
+                assert not never_ready['reached'] and never_ready['still_current'], never_ready
+                assert never_ready['observation']['phase'] == 'cancelled' and never_ready['error'] is None
                 after_cancel = await call('lab_batch', {'calls':[
                     {'tool':'lab_wait','arguments':{'node_id':node,'generation':generation,'timeout_seconds':0}},
                     {'tool':'lab_action','arguments':{'action':'logic.add','arguments':{'api_name':'derive','node_id':'must_not_start_after_cancel'}}},
@@ -2501,7 +2588,7 @@ async def client():
                 assert not saving.done() and not (Path(WORKSPACE)/'data/pending-refresh.npz').exists()
                 await call('lab_call', {'handle':'devices','method':'future_public_probe','arguments':{'note':'fail-editor'}})
                 failed = await saving
-                assert not failed['accepted'] and not failed['saved'] and 'Rejected snapshot update' in failed['error']
+                assert not failed['accepted'] and not failed['saved'] and 'Rejected snapshot update' in failed['error'], failed
                 assert not (Path(WORKSPACE)/'data/pending-refresh.npz').exists()
                 retained = await call('lab_save', {'panel_id':panel_id,'path':'data/retained-old.png'})
                 assert retained['accepted'], retained
@@ -2509,6 +2596,7 @@ async def client():
                     'path':['console','panels',0,'saving'],'equals':False,'timeout_seconds':20}))['matched']
                 old_archive = await call('lab_artifact', {'path':'data/retained-old.npz','limit':64000})
                 assert old_archive['datasets']['data']['ref']['stream_generation'] == old['result']['generation']
+                await call('lab_call', {'handle':'devices','method':'future_public_probe','arguments':{'note':'hold-editor-again'}})
                 saving = asyncio.create_task(call('lab_save', {'panel_id':panel_id,'path':'data/pending-refresh.png','refresh':True}))
                 retry_pending = await call('lab_wait_for', {'tool_name':'lab_state','arguments':{'panel_id':panel_id},
                     'path':['console','panels',0,'configuration_pending'],'equals':True,'timeout_seconds':10})
@@ -2539,19 +2627,38 @@ async def client():
                 assert (await call('lab_results', {'panel_id':panel_id}))['status'] == 'not_enabled'
                 derived = await call("lab_action", {"action":"logic.add", "arguments":{
                     "api_name":"derive", "source_signal":"@logic/"+node+"/frames",
-                    "values":{"outputs":[{"name":"mean", "value":"frames", "statistic":"mean", "over":"spatial-y"}]}}})
+                    "values":{"variables":[{"name":"mean", "terms":[{"of":"frames"}], "statistic":"mean", "over":["spatial-y"]}]}}})
                 draft_revision = derived["state"]["logic"][0]["draft_revision"]
                 await asyncio.sleep(.03)
                 draft = (await call("lab_state", {"node_id":derived["node_id"]}))["console"]["logic"][0]
                 assert draft["draft_revision"] == draft_revision, draft
-                # The catalog names what the rows may read: members, dtypes and axes.
+                # The catalog names what the variables may read: members, dtypes,
+                # axes and their exact labels, every one up to 64.
                 (frames,) = (await call("lab_catalog", {"node_id":derived["node_id"]}))["node"]["inputs"]
                 assert frames["member"] == "frames" and "spatial-y" in [axis["name"] for axis in frames["axes"]]
+                for axis in frames["axes"]:
+                    assert len(axis["labels"]) == (axis["size"] if axis["size"] <= 64 else 16), axis
+                    assert axis.get("labels_truncated", False) == (axis["size"] > 64), axis
                 assert (await call("lab_action", {"action":"logic.remove", "arguments":{"node_id":derived["node_id"]}}))["accepted"]
                 screenshot = await c.call_tool("lab_screenshot", {"window":"devices"})
                 assert not screenshot.is_error
                 image = next(item for item in screenshot.content if item.type == "image")
                 assert base64.b64decode(image.data).startswith(b"\x89PNG")
+                # Each refusal says what was unknown or missing, in words.
+                for name, arguments, reason in (
+                    ("lab_screenshot", {"device_id":"camera"}, "Device Control 'camera' is not open"),
+                    ("lab_close", {"scope":"editor", "device_id":"camera"}, "Device Control 'camera' is not open"),
+                    ("lab_wait", {"node_id":"missing", "generation":"x", "timeout_seconds":0},
+                     "unknown logic node 'missing'"),
+                    ("lab_action", {"action":"panel.save", "arguments":{"panel_id":panel_id}},
+                     "panel.save needs selected"),
+                    ("lab_wait_for", {"tool_name":"lab_screenshot", "arguments":{}, "path":["image"],
+                                      "equals":1, "timeout_seconds":0}, "lab_screenshot returns no JSON fields"),
+                    ("lab_wait_for", {"tool_name":"lab_health", "arguments":{}, "path":["missing"],
+                                      "equals":1, "timeout_seconds":0}, "field ['missing'] is not in lab_health's result"),
+                ):
+                    refused = await c.call_tool(name, arguments)
+                    assert refused.is_error and reason in refused.content[0].text, (name, refused.content)
                 invalid = await c.call_tool("lab_signal", {"signal":"missing"})
                 assert invalid.is_error
                 assert "No publication" in str(invalid.content)
@@ -2746,3 +2853,93 @@ finally:
 '''.replace("WORKSPACE", repr(str(workspace))), cwd=workspace, timeout=110)
     assert result.returncode == 0, result.stdout + result.stderr
     assert "MCP_ROUNDTRIP_PASS" in result.stdout
+
+
+def test_mcp_addresses_a_renamed_node_by_its_id(workspace):
+    """An agent reads what the operator calls each node and keeps addressing
+    it by its id: a rename -- refused or accepted, mid-run, mid-wait --
+    changes no address the agent holds."""
+    pytest.importorskip("mcp")
+    write_ordinary_pulse(workspace)
+    result = _run_script(r'''
+import asyncio, socket, time
+from concurrent.futures import ThreadPoolExecutor
+import httpx2
+from mcp import ClientSession
+from mcp.client.streamable_http import streamable_http_client
+from zlc_ui import ensure_qt_app
+from zlc_workbench.apps.task_console import create_experiment_flow
+from zlc_workbench.apps.mcp import start_server
+app = ensure_qt_app([])
+flow = create_experiment_flow(workspace=WORKSPACE, template="virtual")
+with socket.socket() as held:
+    held.bind(("127.0.0.1", 0))
+    port = held.getsockname()[1]
+url = f"http://127.0.0.1:{port}/mcp"
+close_mcp = start_server(flow, port=port, token="rename-test")
+
+async def client():
+    async with httpx2.AsyncClient(headers={"Authorization":"Bearer rename-test"}, timeout=60.) as http:
+        async with streamable_http_client(url, http_client=http) as (read, write, *_):
+            async with ClientSession(read, write) as c:
+                await c.initialize()
+                async def call(name, args=None):
+                    result = await c.call_tool(name, args or {})
+                    assert not result.is_error, result.content
+                    return result.structured_content
+                assert "logic.rename" in str((await c.list_tools()).tools)
+                await call("lab_initialize")
+                assert (await call("lab_wait_for", {"tool_name":"lab_state", "arguments":{}, "path":["session_open"],
+                    "equals":True, "timeout_seconds":10}))["matched"]
+                added = await call("lab_action", {"action":"logic.add", "arguments":{
+                    "api_name":"camera_measurement", "values":{"repeat":0}, "device_keys":{"camera":"camera"}}})
+                node = added["node_id"]
+                assert added["state"]["logic"][0]["name"] == node == "camera_measurement"
+                started = await call("lab_action", {"action":"logic.start", "arguments":{"node_id":node}})
+                generation = started["state"]["logic"][0]["generation"]
+                waiting = asyncio.create_task(call("lab_wait", {"node_id":node, "generation":generation,
+                    "timeout_seconds":1}))
+                await asyncio.sleep(.2)
+                renamed = await call("lab_action", {"action":"logic.rename", "arguments":{"node_id":node, "name":"Camera A"}})
+                assert (renamed["accepted"], renamed["status"], renamed["node_id"]) == (True, "renamed", node)
+                row = renamed["state"]["logic"][0]
+                assert (row["node_id"], row["name"], row["generation"]) == (node, "Camera A", generation)
+                assert renamed["state"]["reports"][-1]["message"] == "renamed camera_measurement to Camera A"
+                waited = await waiting
+                assert waited["still_current"] and waited["state"]["console"]["logic"][0]["name"] == "Camera A"
+                refused = await call("lab_action", {"action":"logic.rename", "arguments":{"node_id":node, "name":"a/b"}})
+                assert (refused["accepted"], refused["status"]) == (False, "rejected")
+                assert refused["error"] == "Camera A: A name is one line of text without “/”."
+                same = await call("lab_action", {"action":"logic.rename", "arguments":{"node_id":node, "name":"Camera A"}})
+                assert (same["accepted"], same["status"]) == (True, "unchanged")
+                loading = await call("lab_action", {"action":"logic.add", "arguments":{
+                    "api_name":"occupancy", "name":"Loading", "source_signal":f"@logic/{node}/frames"}})
+                assert loading["accepted"] and loading["state"]["logic"][0]["name"] == "Loading"
+                catalog = await call("lab_catalog", {"node_id":loading["node_id"]})
+                assert catalog["node"]["source_groups"][f"@logic/{node}/frames"] == "Camera A"
+                stopped = await call("lab_action", {"action":"logic.stop", "arguments":{"node_id":node}})
+                assert stopped["accepted"]
+
+pool = ThreadPoolExecutor(max_workers=1)
+future = pool.submit(lambda: asyncio.run(client()))
+try:
+    deadline = time.monotonic() + 60
+    while not future.done() and time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(.002)
+    future.result(timeout=1)
+    print("MCP_RENAME_PASS")
+finally:
+    close_mcp()
+    deadline = time.monotonic() + 20
+    while not flow.close() and time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(.005)
+    assert flow.close(), "virtual flow did not close"
+    while not close_mcp() and time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(.005)
+    pool.shutdown(wait=True)
+'''.replace("WORKSPACE", repr(str(workspace))), cwd=workspace, timeout=110)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "MCP_RENAME_PASS" in result.stdout

@@ -245,7 +245,12 @@ unavailable type rather than a broken bench. Logic leaves follow the same
 pattern with a `logic_node.py` exporting `LOGIC_NODE`.
 Factories must return declared capability instances; startup failures are
 reported per leaf in `Installation.failures`, while independent leaves remain
-usable and close in reverse order.
+usable and close in reverse order. A device whose type this machine cannot
+build -- its device folder did not import, or no folder declares the type any
+more -- is one of those failures; its reason is that folder's import error,
+never a sibling's, and a type no folder declares has none. It does not stop
+the others. Simulation settings with no virtual device to read
+them are left unread rather than refused.
 
 ## Execution layers
 
@@ -269,9 +274,17 @@ The runtime has one direction of responsibility:
 
 For a manually controlled experiment, the product notebook calls
 `ExperimentSession.load_pulse` and `ExperimentSession.fire` around a pure
-camera measurement; those methods own compile/load and sequencer execution. For
+camera measurement; those methods own compile/load and sequencer execution.
+`load_pulse` plays every API and Scan field at its authored value, as On Pulse
+does without a scan table: a Scan mark only makes a field scannable. For
 an automated experiment, hosted Calibration owns that whole sequence and
-returns a saved calibration artifact. Calibration discovers its site count and
+returns a saved calibration artifact. With Frames set to Saved frames it
+instead calibrates again the samples a run kept with Save every sample, taking
+the crop, exposure and pulse facts from the run record saved beside them; that
+replay is offline work, so it uses no camera, sequencer or Pulse, claims no
+device and can run while another node holds the camera. The Pulse, Samples,
+exposure and API-field settings stay in its draft greyed and unchecked, and
+New frames finds them as they were. Calibration discovers its site count and
 centers from acquired images and accepts no Target, Science Context, authored
 grid rows, columns, or site count. Feedback later combines that ordinary
 Calibration with its selected Science Context and directly maps positive Target
@@ -308,8 +321,11 @@ positive numbers for the middle frames between them, `rest`; one calibration
 alone reads every frame), and selects `default`, `box`, `psf`, or `uniform_psf`
 readout.  Which calibration reads which frame is resolved against the frames
 that arrive, so `first`, `last` and `rest` follow a cycle that gains or loses a
-frame, a middle number the shorter cycle no longer has is reported absent (it
-never becomes the last frame), and any collision is refused by name.
+frame, a middle number the shorter cycle no longer has is kept and noted absent
+(it reads nothing, never becomes the last frame and stops no run), and any
+collision or unread frame is refused by name.  A calibration claiming no frame
+is parked: kept in the run record, never read and never checked against the
+calibrations that are; only a list in which none reads is refused.
 It publishes three same-publication Dataset siblings: per-site numeric
 `counts` in the source frame's effective unit; per-site boolean `occupied`,
 whose component validity is the sole truth for whether each site was readable;
@@ -321,46 +337,76 @@ occupancy-rate output. The generic
 compatible presenter join `occupied` to `frame_judged` without knowing the
 Occupancy plugin. Two processors build on that classification without
 adding a second one: `derive` publishes named Dataset results computed
-within each shot. Each row of its `outputs` is one published signal, written
-as flat columns and applied in a fixed order -- select, mask, combine,
-reduce: `value` (a member of the bound bundle or an earlier output) pinned
-with `at` (a label of its readout-event axis, such as `"1"`; empty keeps every
-frame, and a pin removes the axis), then optionally `where`/`where_at`/
-`where_is` (a boolean that invalidates the other samples), `op`/`with`/
-`with_at` (`+ - * / == != > < >= <= & |` with a member, an earlier output or a
-number in the value's unit) and `statistic`/`over` (`sum mean count min max
-std any all` over comma-separated axes inside the shot). For example
-`{"name": "bright", "value": "counts", "at": "1", "where": "occupied",
-"where_at": "1"}` keeps the counts of the sites frame 1 judged occupied, and
-`{"name": "loaded", "value": "occupied", "at": "0", "statistic": "sum",
-"over": "Site"}` counts the atoms loaded in each shot; agreement of frames 0
-and 2 is `"op": "=="` with `"with_at": "2"`, and a later row masks with it.
-On booleans `sum` is the number true, `mean` the fraction true and `count`
-the valid samples, as in a plot; booleans do not mix with numbers. An operand
-whose axes are a subset of the value's repeats along the rest, so a per-shot
-level normalises every site. The editor types each row against the source's
-own schemas -- the evaluation's rules, no data -- and shows the result
-(`→ repeat 1 × Site 35 · float32 · unit 1`) or the error beside its control;
-Start refuses a row that does not type. A row with only `name` and `code` is
-ordinary Python over `a.<member>` assigning `result`, for anything else (a
-site subset, a custom function). Statistics across shots -- averages,
-per-site probabilities with error bars, fits -- belong in a plot panel, so
+within one evaluation -- each publication live, the run's Dataset at the end
+of a finite run. Its draft is `variables`, one row per variable: a `name`,
+`publish` (on by default; off keeps an internal helper other variables read
+and nothing publishes), `terms` -- the formula, one row per line -- and an
+optional `statistic` over named axes. A term reads `of` (a member of the bound
+bundle or any other variable), a `number`, or `boolean` true/false (only
+after `==`/`!=`), and may pick on `of` by name: `at` is one of its axes, in
+any domain, and `labels` its exact labels as the catalog lists them -- or
+`at` is a domain with two or more axes (`Point`, `Cell`, `Repeat`) and
+`labels` its rows, written `"detuning 2 · power 1"`; one label drops the axis
+(the domain's axes), several keep those coordinates. A pick never names an
+axis each publication carries its own part of (a finite run's shots and
+scan points, a monitor's shots): those are reduced, or plotted.
+Every later term has an operator of one of four kinds -- arithmetic
+`+ - * /`, comparison `== != > < >= <=`, logic `and`/`or`/`and not`, mask
+`where`/`where not` -- under one left-associative precedence (`* /`, `+ -`,
+one comparison, `and`, `or`, `where`); a group is an internal variable. For
+example agreement of frames 0 and 2 is an internal
+
+    {"name": "same", "publish": false, "terms": [
+        {"of": "occupied", "at": "frame", "labels": ["0"]},
+        {"op": "==", "of": "occupied", "at": "frame", "labels": ["2"]}]}
+
+and the published `{"name": "kept", "terms": [{"of": "counts"}, {"op":
+"where", "of": "same"}]}` keeps the counts of every frame where they agree
+(`same` repeats along the frames it lacks); `{"name": "loaded", "terms":
+[{"of": "occupied", "at": "frame", "labels": ["0"]}], "statistic": "sum",
+"over": ["Site"]}` counts the atoms loaded in each shot. On booleans `sum`
+is the number true, `mean` the fraction true and `count` the valid samples,
+as in a plot; booleans do not mix with numbers. An operand whose axes are a
+subset of the other's repeats along the rest, so a per-shot level
+normalises every site. Only the published variables and what they read are
+evaluated; a helper nothing published reads never blocks Start. The editor
+types each variable against the source's own schemas -- the evaluation's
+rules, no data -- and shows the result (`→ repeat 1 × Site 35 · float32 ·
+unit 1`) or the problem under the line it is about; Start refuses a
+published variable that does not type. Before anything publishes, the frames
+each published variable keeps are told from the source's draft frames by the
+same rules on the frame axis alone (`describe_output_frames`), so a Frame
+Survival downstream is edited at once, and the editor offers the frame pick.
+The source's frames are an answer only when every member of the bundle
+carries the same ones -- a Derive reading a Derive whose variables keep
+different frames waits for data -- and one frame offers no pick. Statistics
+across shots with error bars, per-site probabilities and fits belong in a plot panel, so
 Derive owns no history.
 The separate processor
 `frame_survival` asks, for selected forward frame pairs
 of a multi-frame cycle, whether a site an earlier frame saw loaded is still
 seen by a later one -- the pairs form one labelled `READOUT_EVENT` Point axis
-(`0-1`, `0-2`, `1-2` for all pairs of three frames), each pair's value is the
+(`0→1`, `0→2`, `1→2` for all pairs of three frames), each pair's value is the
 later verdict and its validity is that pair's own denominator. **Published pairs**
-is All forward pairs, Consecutive (k→k+1), From the first frame (0→k), To the
-last frame (k→last) -- each resolved against the frames the source carries --
+is All (every forward pair), Consecutive (k→k+1), From first (0→k), To last
+(k→last) -- each resolved against the frames the source carries --
 or Selected, marked on a start × end matrix with ordinary table selection
 (drag a rectangle, Ctrl to add or remove, a row or column header for every pair
 from or to that frame). Grid edits retain the rule with sparse pair overrides:
 excluding `0` to `last` from From first still selects newly added middle frames.
+Selected keeps a list of its own (`custom_pairs`) while a rule or None is
+picked, so picking it again brings the list back; a pair marked under None
+joins it. A pair the list keeps unselected is parked: kept as written, never
+checked (it may repeat a selected pair or stand unfinished), never published,
+and recorded with the run (`parked_pairs`). A list the grid cannot read is
+named in red and the grid is locked rather than written over.
 Endpoint text `0`/`last` follows the first/last identity; middle indices never
-become a new endpoint when the count shrinks. The editor follows declared source
-draft frames immediately, while published data uses the actual acquired schema.
+become a new endpoint when the count shrinks: a selected pair whose middle frame
+the source does not carry is kept, named in an amber note and in the run record
+(`absent_pairs`), and left out of the published pairs -- the run fails only when
+none of its selected pairs is in the source. The editor follows declared source
+draft frames immediately, through Derive too, while published data uses the
+actual acquired schema; a source of one frame per cycle is said, not awaited.
 The `slm_feedback` Task takes one ordinary camera/readout Calibration and one
 strict Science Context. Calibration has no SLM or Science Context input.
 Feedback registers the Context's frozen spots Target to the measured camera

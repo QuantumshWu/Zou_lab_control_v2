@@ -13,7 +13,7 @@ from zlc_ui.fluent import (
     FluentPopup, FluentSegmentedButtons, FluentSettingsPopupAnchor, FluentSwitch,
     device_snap, field_room_end, field_text_inset, fluent_font_size, fluent_inner_edit_stylesheet,
     frame_inner_rect, line_edit_text_right, paint_centred_ink, scaled_even_px, scaled_px,
-    signals_blocked, read_editable_combo, show_fluent_popup_for_anchor,
+    setting_label_width, signals_blocked, read_editable_combo, show_fluent_popup_for_anchor,
 )
 
 from ._layout import row_height
@@ -22,6 +22,14 @@ from ._layout import row_height
 #: words every surface says them in (the popup, a badge's tooltip, the Scan
 #: page's list of bound fields).
 _SOURCES = (("default", "Default"), ("api", "API"), ("config", "Config"))
+
+
+def popup_label_width() -> int:
+    """The label column of a binding popup: a value's (Scan, Source, Config
+    name, Default, Effective) and a Subpulse's (Source) alike, so the
+    Source choice stands on one x in both."""
+
+    return setting_label_width(("Scan", "Source", "Config name", "Default", "Effective"), minimum=0)
 
 
 class _BindingButton(QtWidgets.QAbstractButton):
@@ -248,22 +256,26 @@ class FluentScanLineEdit(FluentLineEdit):
             # apart.
             for row in range(5):
                 layout.setRowMinimumHeight(row, row_height())
-            layout.addWidget(FluentLabel("Scan"), 0, 0)
+            # One label column, as every form sizes its own (the widest
+            # label and a pad), not the labels' own widths: the Config
+            # name box stood 6 px from its label.
+            label_width = popup_label_width()
+            self.config_name_label = FluentLabel("Config name")
+            labels = (FluentLabel("Scan"), FluentLabel("Source"), self.config_name_label,
+                      FluentLabel("Default"), FluentLabel("Effective"))
+            for row, label in enumerate(labels):
+                label.setFixedWidth(label_width)
+                layout.addWidget(label, row, 0)
             self.scan_toggle = FluentSwitch("")
             layout.addWidget(self.scan_toggle, 0, 1, QtCore.Qt.AlignLeft)
-            layout.addWidget(FluentLabel("Source"), 1, 0)
             self.source_switch = FluentSegmentedButtons(_SOURCES)
             layout.addWidget(self.source_switch, 1, 1, QtCore.Qt.AlignLeft)
-            self.config_name_label = FluentLabel("Config name")
             self.config_name = FluentComboBox()
             self.config_name.setEditable(True)
             self.config_name.lineEdit().setPlaceholderText("Choose or type a name")
-            layout.addWidget(self.config_name_label, 2, 0)
             layout.addWidget(self.config_name, 2, 1)
-            layout.addWidget(FluentLabel("Default"), 3, 0)
             self.default_value = FluentLabel()
             layout.addWidget(self.default_value, 3, 1)
-            layout.addWidget(FluentLabel("Effective"), 4, 0)
             self.effective_value = FluentLabel()
             layout.addWidget(self.effective_value, 4, 1)
             self.source_note = FluentLabel()
@@ -278,8 +290,7 @@ class FluentScanLineEdit(FluentLineEdit):
                 # The values read in the column of the Config name's TEXT,
                 # not from the edge of its box.
                 widget.setIndent(field_text_inset())
-            self.source_note.setFixedWidth(
-                self.config_name_label.sizeHint().width() + layout.horizontalSpacing() + content_width)
+            self.source_note.setFixedWidth(label_width + layout.horizontalSpacing() + content_width)
             # Two lines, whatever the source says: the popup keeps its shape
             # as the source changes, and every note is worded to fit two
             # (the name and the value are on the rows above it).  Three
@@ -323,11 +334,13 @@ class FluentScanLineEdit(FluentLineEdit):
             if tuple(combo.itemText(index) for index in range(combo.count())) != self._config_names:
                 combo.clear()
                 combo.addItems(self._config_names)
-            combo.setCurrentIndex(combo.findText(config_key) if named else -1)
-            combo.setEditText((config_key if draft is None else draft) if named else "")
+            # Under Default or API a kept name still shows, disabled: it is
+            # the name Config switches back to, and it is not applied.
+            combo.setCurrentIndex(combo.findText(config_key))
+            combo.setEditText(config_key if draft is None else draft)
             combo.lineEdit().setModified(draft is not None)
             combo.setEnabled(named and binding_editable)
-        self.config_name.setToolTip(config_key if named else "")
+        self.config_name.setToolTip(config_key)
         if not source_text:
             if named:
                 source_text = (

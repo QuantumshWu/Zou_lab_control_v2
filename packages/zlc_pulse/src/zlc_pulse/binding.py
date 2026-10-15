@@ -253,18 +253,25 @@ def field_label(sequence: PulseSequence, reference: PulseFieldRef) -> str:
 
     _check_inputs(sequence, reference)
     if reference.kind == FIELD_BRACKET_COUNT:
-        for ordinal, bracket in enumerate(sequence.brackets, 1):
-            if bracket.bracket_id == reference.bracket_id:
-                label = f"Bracket {ordinal}.repeats"
-                component = sequence.component_for_field(reference)
-                return label if component is None else f"{component.name} / {label}"
-        raise ValueError(f"no bracket exists with id {reference.bracket_id!r}")
+        return f"{bracket_label(sequence, str(reference.bracket_id))}.repeats"
     if reference.kind == FIELD_DELAY:
         return f"{_port_text(sequence, reference.port)}.delay"
     period_text = sequence.period_label(str(reference.period_id))
     if reference.kind == FIELD_DURATION:
         return f"{period_text}.duration"
     return f"{period_text}.{_port_text(sequence, reference.port)}"
+
+
+def bracket_label(sequence: PulseSequence, bracket_id: str) -> str:
+    """One bracket, said the way its posts read: ``Bracket N``, its place
+    among the pulse's brackets, under its Subpulse's name when it is in one."""
+
+    for ordinal, bracket in enumerate(_sequence_of(sequence).brackets, 1):
+        if bracket.bracket_id == bracket_id:
+            label = f"Bracket {ordinal}"
+            component = sequence.component_for_field(PulseFieldRef(FIELD_BRACKET_COUNT, bracket_id=bracket_id))
+            return label if component is None else f"{component.name} / {label}"
+    raise ValueError(f"no bracket exists with id {bracket_id!r}")
 
 
 def _port_text(sequence: PulseSequence, port: str | None) -> str:
@@ -401,7 +408,10 @@ def resolve_subpulse_sources(
 
     The returned components contain their actual resolved bodies. Their source is
     Default so passing the result through preparation again cannot reread a file;
-    config_path retains the exact file used in the execution document.
+    config_path retains the exact file used in the execution document.  A Config
+    instance with no file chosen yet plays its embedded default, and its empty
+    config_path says so in the execution document; a file that was chosen but
+    cannot be read is refused by name.
     """
     from .codec import read_subpulse
 
@@ -412,8 +422,12 @@ def resolve_subpulse_sources(
     for component in sequence.components:
         if component.source != "config":
             continue
-        if not component.config_path:
-            raise ValueError(f"Subpulse {component.name!r} has no Config file; choose a Subpulse file")
+        if not component.from_file:
+            resolved = replace(resolved, components=tuple(
+                replace(item, source="default") if item.component_id == component.component_id else item
+                for item in resolved.components
+            ))
+            continue
         path = Path(component.config_path).expanduser()
         if not path.is_absolute():
             path = Path(base_directory or Path.cwd()) / path
@@ -443,21 +457,24 @@ def resolve_subpulse_sources(
                 resolved, component.component_id, fragment,
                 period_id_map=mappings[0], bracket_id_map=mappings[1],
             )
-            provided = {binding.field_id: binding for binding in candidate.bindings}
-            for binding in resolved.bindings:
-                if resolved.component_for_field(binding.field_ref) != component:
-                    continue
-                if not (binding.scan or binding.source == BINDING_API):
-                    continue
-                current = provided.get(binding.field_id)
-                if (current is None or (binding.scan and not current.scan)
-                        or (binding.source == BINDING_API and current.source != BINDING_API)):
-                    raise ValueError(f"referenced file no longer provides Scan/API field {binding.field_id!r}")
-                if binding.kind == FIELD_DAC and not any(
-                    step.port == binding.field_ref.port
-                    for step in candidate.period_by_id[binding.field_ref.period_id].analog_steps
-                ):
-                    raise ValueError(f"referenced file no longer sets Scan/API field {binding.field_id!r}")
+            # The playback copy follows the file.  A Scan/API mark the file no
+            # longer offers is a field it now holds constant: it plays that
+            # constant, and only a run that drives the mark refuses it, by
+            # name, where it does (a plan's port, an API value, a scan-table
+            # column).  A mark on a DAC field the file no longer sets is a
+            # mark on no field at all and is dropped from the copy.
+            members = next(item for item in candidate.components
+                           if item.component_id == component.component_id).period_ids
+            unset = tuple(
+                binding for binding in candidate.bindings
+                if binding.kind == FIELD_DAC and binding.field_ref.period_id in members
+                and not any(step.port == binding.field_ref.port
+                            for step in candidate.period_by_id[binding.field_ref.period_id].analog_steps)
+            )
+            if unset:
+                candidate = replace(candidate, bindings=tuple(
+                    binding for binding in candidate.bindings if binding not in unset
+                ))
             resolved = replace(candidate, components=tuple(
                 replace(item, source="default", config_path=str(path),
                         period_id_map=tuple(mappings[0].items()), bracket_id_map=tuple(mappings[1].items()))
@@ -466,6 +483,35 @@ def resolve_subpulse_sources(
         except (OSError, TypeError, ValueError, KeyError) as error:
             raise ValueError(f"Cannot resolve Subpulse {component.name!r} from {str(path)!r}: {error}") from error
     return resolved
+
+
+def stale_subpulse_bindings(
+    authored: PulseSequence, resolved: PulseSequence,
+) -> tuple[PulseBinding, ...]:
+    """The Scan/API marks inside a file-backed Subpulse that its file no longer offers.
+
+    ``resolved`` is ``authored`` through :func:`resolve_subpulse_sources`.  Such
+    a mark plays the file's constant: the editor says so beside it, and a run
+    that drives it is refused where it does.
+    """
+
+    _sequence_of(authored)
+    _sequence_of(resolved)
+    if not authored.config_enabled:
+        return ()
+    provided = {binding.field_id: binding for binding in resolved.bindings}
+    stale = []
+    for binding in authored.bindings:
+        if not (binding.scan or binding.source == BINDING_API):
+            continue
+        component = authored.component_for_field(binding.field_ref)
+        if component is None or not component.from_file:
+            continue
+        current = provided.get(binding.field_id)
+        if (current is None or (binding.scan and not current.scan)
+                or (binding.source == BINDING_API and current.source != BINDING_API)):
+            stale.append(binding)
+    return tuple(stale)
 
 
 def _sequence_of(sequence: PulseSequence) -> PulseSequence:
@@ -562,4 +608,5 @@ __all__ = [
     "replace_pulse_field",
     "resolve_api_parameters",
     "resolve_subpulse_sources",
+    "stale_subpulse_bindings",
 ]

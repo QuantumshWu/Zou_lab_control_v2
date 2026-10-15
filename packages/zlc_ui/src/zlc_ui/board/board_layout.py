@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from typing import Sequence
 
 __all__ = ["BoardMetrics", "GeomProxy", "slot_under", "first_free_slot",
-           "min_board_width", "pack"]
+           "min_board_width", "pack", "drop"]
 
 
 @dataclass(frozen=True)
@@ -67,25 +67,18 @@ def _overlaps_with_gap(box: tuple[int, int, int, int], placed, metrics: BoardMet
     return False
 
 
-def first_free_slot(
-    cfg, placed, board_w: int, metrics: BoardMetrics, *, floor: int | None = None
-) -> tuple[int, int]:
+def first_free_slot(cfg, placed, board_w: int, metrics: BoardMetrics) -> tuple[int, int]:
     """The TOP-MOST then LEFT-MOST free ``(col, row)`` where ``cfg`` fits clear of every ``placed``
     card (gap apart, inside ``board_w``).  This is where a card with no place of its own GOES -- a
     panel just added tiles the top row left-to-right, wraps to the next shelf, and never leaves a
     middle hole.  Candidate points are the gap (origin) plus each placed card's right/bottom edge
     (``+gap``) and its left/top edge (so a card can tuck under a wider one); swept by y then x,
     first feasible wins.
-
-    ``floor`` refuses every row above it.  A card whose own place is taken has to yield, and it
-    yields DOWNWARD: searching the whole board would send it up to a hole somewhere else, which is
-    the one thing gravity never does.
     """
     gap = metrics.gap
     w, _h = cfg.width, cfg.height
-    lowest = gap if floor is None else max(gap, int(floor))
     xs = {gap}
-    ys = {lowest}
+    ys = {gap}
     for p in placed:
         px0, py0, px1, py1 = _aabb(p)
         xs.add(px1 + gap)
@@ -94,54 +87,83 @@ def first_free_slot(
         ys.add(py0)
     max_x = max(gap, board_w - gap - w)
     cand_x = sorted(x for x in xs if gap <= x <= max_x) or [gap]
-    for y in sorted(y for y in ys if y >= lowest):
+    for y in sorted(y for y in ys if y >= gap):
         for x in cand_x:
             if not _overlaps_with_gap((x, y, x + w, y + _h), placed, metrics):
                 return (x, y)
     # No candidate fit (should not happen -- placing past the lowest card always clears).
     bottom = max((py1 for *_rest, py1 in (_aabb(p) for p in placed)), default=0)
-    return (gap, max(lowest, bottom + gap) if placed else lowest)
+    return (gap, bottom + gap if placed else gap)
 
 
-def gravity_slot(cfg, placed, board_w: int, metrics: BoardMetrics) -> tuple[int, int]:
-    """Where one card comes to rest, falling NORTH-WEST from where it already is.
+def _rise_to(x: int, y: int, width: int, boxes, gap: int) -> int:
+    """The row a card at ``(x, y)`` rises to: the margin, or one gap under
+    the lowest card above it in its column band."""
+
+    top = gap
+    for px0, _py0, px1, py1 in boxes:
+        if x < px1 + gap and px0 < x + width + gap and py1 + gap <= y:
+            top = max(top, py1 + gap)
+    return top
+
+
+def _slide_to(x: int, y: int, height: int, boxes, gap: int) -> int:
+    """The column a card at ``(x, y)`` slides to: the margin, or one gap
+    right of the nearest card to its left in its row band."""
+
+    left = gap
+    for px0, py0, px1, py1 in boxes:
+        if y < py1 + gap and py0 < y + height + gap and px1 + gap <= x:
+            left = max(left, px1 + gap)
+    return left
+
+
+def _below(x: int, y: int, width: int, height: int, boxes, gap: int) -> int:
+    """The first row at or below ``y`` where a card at ``x`` is clear of every
+    box: straight DOWN in its own column, never up and never sideways."""
+
+    while True:
+        hits = [
+            py1
+            for px0, py0, px1, py1 in boxes
+            if x < px1 + gap and px0 < x + width + gap and y < py1 + gap and py0 < y + height + gap
+        ]
+        if not hits:
+            return y
+        y = max(hits) + gap
+
+
+def gravity_slot(cfg, placed, metrics: BoardMetrics) -> tuple[int, int]:
+    """Where a card standing clear of every ``placed`` card comes to rest under north-west gravity.
 
     It rises until a card above it -- or the top margin -- stops it, then slides left until a card
     beside it, or the left margin, stops it, and repeats until neither move is possible.  It only
-    ever moves up and left and it stops at the FIRST thing in the way: a card put below a wide one
-    stays below it, and does not fly off to a free slot beside it.  That is the whole difference
-    between gravity and a flow layout, and the reason a board can hold more than one placement.
+    ever moves up and left and it stops at the FIRST thing in the way, so from a clear place it
+    cannot pass through a card.
 
-    A card whose own place is already taken cannot rise or slide out of the overlap, so it yields
-    downward instead, to the first free row at or below its own.
+    A card stopped by a card above it RESTS UNDER it, and slides left no further than the left edge
+    of the leftmost card it rests under: a card put below another stays below it, and does not slide
+    along its bottom and rise into a hole beside it.  While nothing above stops it, it slides left
+    freely, and while nothing is above it, it rises.
     """
 
     gap = metrics.gap
     width, height = cfg.width, cfg.height
-    x = min(max(int(cfg.col), gap), max(gap, board_w - gap - width))
-    y = max(int(cfg.row), gap)
     boxes = [_aabb(p) for p in placed]
-    # Each pass strictly lowers x or y, and both take values from a finite set
-    # (the margin, and each placed card's right or bottom edge), so this ends.
-    for _pass in range(2 * len(boxes) + 2):
-        moved = False
-        top = gap
-        for px0, _py0, px1, py1 in boxes:
-            if x < px1 + gap and px0 < x + width + gap and py1 + gap <= y:
-                top = max(top, py1 + gap)
-        if top < y:
-            y, moved = top, True
-        left = gap
-        for px0, py0, px1, py1 in boxes:
-            if y < py1 + gap and py0 < y + height + gap and px1 + gap <= x:
-                left = max(left, px1 + gap)
-        if left < x:
-            x, moved = left, True
-        if not moved:
-            break
-    if _overlaps_with_gap((x, y, x + width, y + height), placed, metrics):
-        return first_free_slot(cfg, placed, board_w, metrics, floor=y)
-    return (x, y)
+    x, y = cfg.col, cfg.row
+    while True:
+        top = _rise_to(x, y, width, boxes, gap)
+        left = _slide_to(x, top, height, boxes, gap)
+        under = [
+            px0
+            for px0, _py0, px1, py1 in boxes
+            if py1 + gap == top and x < px1 + gap and px0 < x + width + gap
+        ]
+        if under:
+            left = max(left, min(x, *under))
+        if (left, top) == (x, y):
+            return (x, y)
+        x, y = left, top
 
 
 def min_board_width(configs: Sequence, metrics: BoardMetrics) -> int:
@@ -154,49 +176,153 @@ def min_board_width(configs: Sequence, metrics: BoardMetrics) -> int:
     return widest + 2 * metrics.gap
 
 
-def pack(
-    order: Sequence,
-    metrics: BoardMetrics,
-    board_w: int,
-    *,
-    dropped=None,
-) -> bool:
-    """Settle every card of ``order`` under north-west gravity, from where it is.
+def _make_way(cfg, settled, order, board_w: int, metrics: BoardMetrics, carried_down: set) -> None:
+    """Move ``cfg`` clear of the ``settled`` cards it overlaps.
 
-    Each proxy arrives carrying where its card starts from -- the place the
-    operator's drop PUT it, or for a card never dropped the first free slot
-    on this board -- and leaves carrying where that comes to rest on a board
-    this wide.  Cards settle north-west first, so whatever is above or to the
-    left of a card has already taken its place by the time that card falls
-    past it.
+    RIGHT, just clear of them, when its row has the room: every card it
+    overlaps starts at or left of it (moving right never carries it across a
+    card it makes way for), the place is on the board and clear of every
+    settled card, and the way there passes no card -- it meets none that
+    neither its start nor that place touches.
 
-    ``dropped`` names the card the operator has just released.  It wins ties
-    in that order, and nothing else: its intent decides who yields when two
-    cards want the same place, and gravity then treats it like any other.
-
-    ``board_w`` is the live viewport width, always clamped to fit one card.
-    A narrow board clamps positions but the caller keeps the places drops
-    authored and seeds the rest at this width, so widening restores the
-    arrangement rather than leaving the operator with the single column the
-    narrow board packed.  Returns whether any proxy moved.
+    Otherwise DOWN its own column, to the first row clear of every settled
+    card -- and every card not settled yet that stands below it in its column
+    moves down with it, by as much: a column makes way as one, so no card
+    lands past one that stood under it.  Those cards (``carried_down``, by
+    id) then make way in their own turn from where the column put them, and
+    only further down: a card its column moved stays in that column.
     """
+
+    gap = metrics.gap
+    start = _aabb(cfg)
+    hit = [p for p in settled if _overlaps_with_gap(start, [p], metrics)]
+    x = max(p.col + p.width for p in hit) + gap
+    place = (x, cfg.row, x + cfg.width, cfg.row + cfg.height)
+    way = (cfg.col, cfg.row, x + cfg.width, cfg.row + cfg.height)
+    passed = [
+        p
+        for p in order
+        if p is not cfg
+        and _overlaps_with_gap(way, [p], metrics)
+        and not _overlaps_with_gap(start, [p], metrics)
+        and not _overlaps_with_gap(place, [p], metrics)
+    ]
+    if (
+        id(cfg) not in carried_down
+        and all(p.col <= cfg.col for p in hit)
+        and x <= board_w - gap - cfg.width
+        and not passed
+        and not _overlaps_with_gap(place, settled, metrics)
+    ):
+        cfg.col = x
+        return
+    row = _below(cfg.col, cfg.row, cfg.width, cfg.height, [_aabb(p) for p in settled], gap)
+    down = row - cfg.row
+    for p in order:
+        if (
+            p is not cfg
+            and all(p is not s for s in settled)
+            and p.row >= cfg.row
+            and p.col < cfg.col + cfg.width + gap
+            and cfg.col < p.col + p.width + gap
+        ):
+            p.row += down
+            carried_down.add(id(p))
+    cfg.row = row
+
+
+def pack(order: Sequence, metrics: BoardMetrics, board_w: int, *, first: Sequence = ()) -> None:
+    """Settle every card of ``order`` under north-west gravity, from where it stands.
+
+    Each proxy arrives carrying where its card stands and leaves carrying
+    where it comes to rest on a board this wide (``board_w``, the live
+    viewport width, clamped to fit the widest card).
+
+    1. Overlaps settle in priority: the cards of ``first``, then every other
+       card, each group in the reading order of where its cards stand.  A card
+       that overlaps one already settled moves RIGHT just clear of it if its
+       row has the room -- on the board, across no card -- otherwise DOWN its
+       own column with every card below it there (:func:`_make_way`).  A card
+       a narrower board squeezed onto another makes way the same way.
+    2. Every card falls north-west (:func:`gravity_slot`), every other card an
+       obstacle, until nothing moves.  No card is carried past one it does
+       not overlap or searches the board for a hole, and a card stopped by a
+       card above it stays below it.
+    """
+
     order = list(order)
-    if dropped is not None and not any(cfg is dropped for cfg in order):
-        raise ValueError("the dropped card must belong to the packed board")
     board_w = max(board_w, min_board_width(order, metrics))
-    settling = sorted(
-        order,
-        key=lambda cfg: (int(cfg.row), int(cfg.col), 0 if cfg is dropped else 1),
+    gap = metrics.gap
+    for cfg in order:
+        cfg.col = min(max(int(cfg.col), gap), board_w - gap - cfg.width)
+        cfg.row = max(int(cfg.row), gap)
+    rank = {id(cfg): index for index, cfg in enumerate(order)}
+    ahead = {id(cfg) for cfg in first}
+
+    def reading(cfg) -> tuple[int, int, int]:
+        return (cfg.row, cfg.col, rank[id(cfg)])
+
+    settled: list = []
+    carried_down: set = set()
+    for cfg in sorted(order, key=lambda cfg: (id(cfg) not in ahead, *reading(cfg))):
+        if _overlaps_with_gap(_aabb(cfg), settled, metrics):
+            _make_way(cfg, settled, order, board_w, metrics, carried_down)
+        settled.append(cfg)
+    moved = True
+    while moved:
+        moved = False
+        for cfg in sorted(order, key=reading):
+            rest = gravity_slot(cfg, [p for p in order if p is not cfg], metrics)
+            if rest != (cfg.col, cfg.row):
+                cfg.col, cfg.row = rest
+                moved = True
+
+
+def drop(order: Sequence, carried, slot: tuple[int, int], metrics: BoardMetrics, board_w: int) -> None:
+    """The board once ``carried`` is let go at ``slot``, in place.
+
+    ``order`` is every card where it stood when ``carried`` was picked up,
+    ``carried`` among them, settled (:func:`pack`).
+
+    1. The TARGET is the card the carried one is let go onto: the one whose
+       place the slot is in -- standing over the slot's top-left corner.  Let
+       go on empty space, there is none.
+    2. The two swap: the target takes the place the carried card stood in,
+       and the carried card takes the slot.  Let go on empty space, the
+       carried card takes the slot.
+    3. :func:`pack` settles the board with those two first: where their new
+       places overlap, the one further up and left keeps its place and the
+       other makes way, and every other card makes way for both.  Then
+       everything falls north-west.
+
+    Let go where it was picked up, it finds every card where it stood.
+    """
+
+    if not any(cfg is carried for cfg in order):
+        raise ValueError("the carried card must belong to the board")
+    x, y = slot
+    target = next(
+        (
+            cfg
+            for cfg in order
+            if cfg is not carried
+            and cfg.col <= x < cfg.col + cfg.width
+            and cfg.row <= y < cfg.row + cfg.height
+        ),
+        None,
     )
-    placed: list = []
-    moved = False
-    for cfg in settling:
-        col, row = gravity_slot(cfg, placed, board_w, metrics)
-        if (cfg.col, cfg.row) != (col, row):
-            cfg.col, cfg.row = col, row
-            moved = True
-        placed.append(cfg)
-    return moved
+    if target is not None:
+        target.col, target.row = carried.col, carried.row
+    carried.col, carried.row = x, y
+    pack(order, metrics, board_w, first=(carried,) if target is None else (carried, target))
+
+
+def _nearest(anchors, at: int, seen: int, size: int) -> int:
+    """The anchor that keeps ``at`` inside a card ``size`` long, nearest ``seen``;
+    with none, the anchor nearest ``seen``.  Ties go to the smaller anchor."""
+
+    inside = [a for a in anchors if a <= at < a + size]
+    return min(inside or anchors, key=lambda a: (abs(a - seen), a))
 
 
 def slot_under(
@@ -205,33 +331,41 @@ def slot_under(
     others: Sequence,
     metrics: BoardMetrics,
     board_w: int,
+    *,
+    seen: tuple[int, int] | None = None,
 ) -> tuple[int, int]:
-    """The anchor a card carried with the pointer at ``point`` is put at.
+    """The place a carried card is put at: under the pointer, nearest where it is seen.
 
-    Anchors are the board's own grid lines: the margin and every other card's
-    left/right and top/bottom edges (a gap past each far edge).  The slot is
-    the one the POINTER is in -- on each axis the last anchor at or before it
-    -- so where the operator lets go decides, not where on the card they
-    happened to hold it: the anchor nearest the card's top-left would send a
-    card held far into its strip and let go just inside the second column
-    back to the first.  ``cfg`` only says how wide the carried card is, which
-    decides how far right it can start.  An occupied anchor stays a
-    candidate; choosing it puts the card there and the others make way.
+    Anchors are the margin and the other cards' edges (a gap past each far
+    edge).  On each axis the slot is the anchor that keeps ``point`` -- the
+    pointer -- inside the carried card and lies nearest ``seen``, the carried
+    card's top-left as drawn; with no such anchor, the one nearest ``seen``.
+    So the pointer picks the column wherever along the strip the card is
+    held, and of the places under it the one the card is drawn over wins,
+    whatever part of a big card -- or of an empty card's body -- is held.
+
+    The column comes first; the row is then chosen only among the cards in
+    that column band, so the edge of a short card in another column never
+    cuts a tall card in this one.  An occupied place stays a candidate:
+    choosing it lets the card go onto the card there, and the two swap
+    (:func:`drop`).  ``cfg`` only says how big the carried card is.
+    ``seen`` defaults to ``point``.
     """
 
     gap = metrics.gap
     board_w = max(board_w, min_board_width(list(others) + [cfg], metrics))
+    seen = point if seen is None else seen
+    max_x = max(gap, board_w - gap - cfg.width)
     xs = {gap}
+    for other in others:
+        left, _top, right, _bottom = _aabb(other)
+        xs.update((left, right + gap))
+    xs = sorted(x for x in xs if gap <= x <= max_x) or [gap]
+    x = _nearest(xs, int(point[0]), int(seen[0]), cfg.width)
     ys = {gap}
     for other in others:
         left, top, right, bottom = _aabb(other)
-        xs.update((left, right + gap))
-        ys.update((top, bottom + gap))
-    max_x = max(gap, board_w - gap - cfg.width)
-    xs = sorted(x for x in xs if gap <= x <= max_x)
+        if x < right + gap and left < x + cfg.width + gap:
+            ys.update((top, bottom + gap))
     ys = sorted(y for y in ys if y >= gap)
-    at_x, at_y = int(point[0]), int(point[1])
-    return (
-        max((x for x in xs if x <= at_x), default=xs[0]),
-        max((y for y in ys if y <= at_y), default=ys[0]),
-    )
+    return (x, _nearest(ys, int(point[1]), int(seen[1]), cfg.height))

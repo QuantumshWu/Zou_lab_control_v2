@@ -19,6 +19,7 @@ from zlc_data import (
     READOUT_EVENT,
     SPATIAL_X,
     SPATIAL_Y,
+    integer,
 )
 from zlc_runtime import DatasetCoverage, MonitorCoverage
 from zlc_runtime import (
@@ -37,6 +38,7 @@ from zlc_atom.devices.camera.contract import (
 )
 from zlc_atom.devices.camera.photoelectrons import PHOTOELECTRONS
 from zlc_atom.data import cell_axis_id, snapshot_from_array
+from zlc_atom.nodes._framework.frames import FRAME_AXIS_NAME
 
 
 _CAMERA_FRAME_CONTRACT = "camera.frames"
@@ -88,7 +90,7 @@ def _frame_point_axis(producer: str, frames: int) -> AxisSpec:
 
     return AxisSpec(
         AxisId(f"{producer}.frames.frame"),
-        "frame",
+        FRAME_AXIS_NAME,
         READOUT_EVENT,
         int(frames),
         tuple(range(int(frames))),
@@ -382,9 +384,12 @@ class CameraMeasurementRequest:
     """One frozen camera selection and acquisition working point."""
 
     camera_key: str
-    #: None keeps the exposure / ROI the camera has now.
+    #: None keeps the exposure / ROI the camera has now.  So does a None
+    #: ROI field, for that field alone: ``(None, None, None, 64)`` changes
+    #: only the height, and the run completes the rectangle from the
+    #: camera's current ROI when it arms.
     exposure_seconds: float | None
-    roi_xywh: tuple[int, int, int, int] | None
+    roi_xywh: tuple[int | None, int | None, int | None, int | None] | None
     repeat: int
     frames_per_cycle: int
     #: Read the camera in photoelectrons instead of counts, through the
@@ -407,8 +412,19 @@ class CameraMeasurementRequest:
         if frames_per_cycle <= 0:
             raise ValueError("frames_per_cycle must be positive")
         object.__setattr__(self, "camera_key", camera_key)
+        roi = self.roi_xywh
+        if roi == (None, None, None, None):
+            roi = None
+        if isinstance(roi, tuple) and len(roi) == 4 and None in roi:
+            roi = tuple(
+                None if value is None
+                else integer(value, f"roi_xywh[{index}]", minimum=0 if index < 2 else 1)
+                for index, value in enumerate(roi)
+            )
+        else:
+            roi = roi_request(roi)
         object.__setattr__(self, "exposure_seconds", exposure)
-        object.__setattr__(self, "roi_xywh", roi_request(self.roi_xywh))
+        object.__setattr__(self, "roi_xywh", roi)
         object.__setattr__(self, "repeat", repeat)
         object.__setattr__(self, "frames_per_cycle", frames_per_cycle)
         object.__setattr__(self, "photoelectrons", bool(self.photoelectrons))
@@ -785,6 +801,8 @@ class CameraMeasurementNode:
         self._record_received = record_received
         self._request = request
         self._actual_working_point: CameraWorkingPoint | None = None
+        #: The whole ROI this run asked the camera for, blanks completed.
+        self._run_roi: tuple[int, int, int, int] | None = None
         self._run_record: dict[str, object] | None = None
         self._settings_session_id: str | None = None
         if signal_plane is None:
@@ -867,8 +885,20 @@ class CameraMeasurementNode:
         self._next_record_ordinal = 0
         self._canonical = None
         # This measurement owns both: it exists to point the camera.  The
-        # geometry first, because it is the expensive one to get wrong.
-        self.camera.set_roi(self.request.roi_xywh)
+        # geometry first, because it is the expensive one to get wrong.  A
+        # blank ROI field is the camera's current value for that field, read
+        # now, when the run arms; whether the completed rectangle fits the
+        # sensor is the camera's to say.
+        roi = self.request.roi_xywh
+        if roi is not None and None in roi:
+            point = self.camera.working_point()
+            (origin_y, origin_x), (height, width) = point.roi_origin_yx, point.roi_shape_yx
+            roi = tuple(
+                int(current) if value is None else value
+                for value, current in zip(roi, (origin_x, origin_y, width, height))
+            )
+        self._run_roi = roi
+        self.camera.set_roi(roi)
         point = self.camera.set_exposure_seconds(self.request.exposure_seconds)
         if not isinstance(point, CameraWorkingPoint):
             raise TypeError("camera set_exposure_seconds must return CameraWorkingPoint")
@@ -986,11 +1016,7 @@ class CameraMeasurementNode:
         record = {
             "parameters": {
                 "exposure_seconds": self.request.exposure_seconds,
-                "roi_xywh": (
-                    None
-                    if self.request.roi_xywh is None
-                    else list(self.request.roi_xywh)
-                ),
+                "roi_xywh": None if self._run_roi is None else list(self._run_roi),
                 "repeat": self.request.repeat,
                 "frames_per_cycle": self.request.frames_per_cycle,
                 PHOTOELECTRONS: photoelectrons,

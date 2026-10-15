@@ -13,8 +13,7 @@ from zlc_ui.fluent import (
     retire_widget,
     detach_widget,
     ElidedLabel,
-    GREEN,
-    MUTED_INK,
+    MUTED_LABEL_STYLE,
     FluentButton,
     FluentComboBox,
     FluentFrame,
@@ -24,6 +23,7 @@ from zlc_ui.fluent import (
     FluentSwitch,
     add_row_switch,
     card_pad,
+    fit_button_words,
     FluentTabWidget,
     fluent_widget_stylesheet,
     muted_note_label,
@@ -38,6 +38,11 @@ from .board_view import ConsoleBoardView
 from .logic_row_view import STATUS_DOT, LogicRowView, mount_logic_page
 from .panel_card_view import PanelCardView
 from .status_strip import StatusStrip
+
+#: What the header's Add command says, by the family of the choice beside
+#: it: a Plot adds a panel to the Monitor, a measurement, processor or task
+#: adds a node to the Logic list.
+_ADD_WORDS = {"plot": "Add panel", "logic": "Add node"}
 
 
 def plot_choice_text(label: str) -> str:
@@ -105,15 +110,15 @@ class TaskConsoleView(QtWidgets.QWidget):
         header.setContentsMargins(side, scaled_px(6), side, scaled_px(6))
         header.setSpacing(row_gap())
 
+        # The console's state: the worst of its logic nodes' (set_console_state).
         self.status_dot = FluentStatusDot(size=STATUS_DOT)
-        self.status_dot.set_color(GREEN)
         # The window's identity, as a word: nothing reads a name typed here,
         # so an edit box in its place was an input that changed nothing.  At
         # its own width, so the summary follows the word instead of a blank
         # column a hundred pixels wide.
         self.name_label = FluentLabel("task")
         self.summary_label = ElidedLabel("")
-        self.summary_label.setStyleSheet(f"color: {MUTED_INK}; background: transparent; border: none;")
+        self.summary_label.setStyleSheet(MUTED_LABEL_STYLE)
 
         self.kind_combo = FluentComboBox()
         self._task_takeover = False
@@ -122,13 +127,20 @@ class TaskConsoleView(QtWidgets.QWidget):
         # Keep the full kind label and its arrow in the
         # same fixed slot on every screen scale.
         self.kind_combo.setFixedWidth(scaled_px(170, minimum=130))
-        self.add_panel_button = FluentButton("Add panel")
-        self.add_panel_button.setEnabled(False)
+        # The command names what it adds, a panel or a node, from the family
+        # of the choice beside it; its slot fits either, so the commands
+        # after it never move.
+        self.add_button = FluentButton(_ADD_WORDS["plot"])
+        fit_button_words(self.add_button, tuple(_ADD_WORDS.values()))
+        self.add_button.setEnabled(False)
 
-        # Rendered as a push button rather than a toggle, so the button carries
-        # the command and the label carries the state.  It emits the state it
-        # is asking FOR, which is what makes the command reversible.
-        self.pause_switch = FluentButton("Pause")
+        # A toggle command: its label names the next press, and it wears the
+        # active face while the console is paused -- both projected by the
+        # presenter (set_paused), never set by the click.  It emits the state
+        # it is asking FOR, which is what makes the command reversible.
+        self.pause_button = FluentButton("Pause")
+        # Its slot fits both words, so Resume moves nothing beside it.
+        fit_button_words(self.pause_button, ("Pause", "Resume"))
         self._paused = False
         # An on/off setting is a switch, even in a row of commands: a
         # checkable button there read as one more command.
@@ -151,12 +163,12 @@ class TaskConsoleView(QtWidgets.QWidget):
         header.addLayout(identity)
         header.addWidget(self.summary_label, 1, QtCore.Qt.AlignVCenter)
         header.addWidget(self.kind_combo, 0, QtCore.Qt.AlignVCenter)
-        header.addWidget(self.add_panel_button, 0, QtCore.Qt.AlignVCenter)
+        header.addWidget(self.add_button, 0, QtCore.Qt.AlignVCenter)
         # The setting is a group of its own between the commands, so its
         # label does not run into Pause.
         add_row_switch(header, self.selectors_switch)
         for widget in (
-            self.pause_switch,
+            self.pause_button,
             self.save_screenshot_button,
             self.save_layout_button,
             self.load_layout_button,
@@ -200,6 +212,7 @@ class TaskConsoleView(QtWidgets.QWidget):
         self.scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
         self.scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
         self.scroll.setWidget(self.board)
+        self.scroll.reserve_vertical_gutter()
         monitor_layout.addWidget(self.scroll, 1)
         self.tabs.add_permanent_tab(monitor_page, "Monitor")
 
@@ -218,7 +231,7 @@ class TaskConsoleView(QtWidgets.QWidget):
         # as the Monitor's note does for a panel.
         self.logic_hint = muted_note_label(
             "No logic nodes yet. Choose a measurement, processor or task in the "
-            "header and click Add panel; it starts stopped. Open its Edit page to "
+            "header and click Add node; it starts stopped. Open its Edit page to "
             "set parameters, then press Start."
         )
         self.logic_hint.setWordWrap(True)
@@ -230,11 +243,11 @@ class TaskConsoleView(QtWidgets.QWidget):
         self.tabs.add_permanent_tab(logic_page, "Logic")
         outer.addWidget(self.tabs, 1)
 
-        self.add_panel_button.clicked.connect(self._add_current_selection)
+        self.add_button.clicked.connect(self._add_current_selection)
         self.kind_combo.currentIndexChanged[int].connect(
             lambda _index: self._update_add_button()
         )
-        self.pause_switch.clicked.connect(
+        self.pause_button.clicked.connect(
             lambda _checked=False: self.pause_toggled.emit(not self._paused)
         )
         self.selectors_switch.toggled.connect(self.selectors_toggled.emit)
@@ -275,8 +288,8 @@ class TaskConsoleView(QtWidgets.QWidget):
         self.kind_combo.clear()
         for key, label in self._panel_kind_choices:
             self.kind_combo.addItem(plot_choice_text(label), ("plot", key))
-        # A node is listed by its api_name, the name its row, its Edit tab
-        # and its Edit page call it by -- as a plot is by its kind key.
+        # A node TYPE is listed by its api_name -- as a plot is by its kind
+        # key; a node itself is called by the Name it is given.
         for api_name, kind, publishes in self._logic_kind_choices:
             layer = name_words(kind) or "Logic"
             self.kind_combo.addItem(f"{layer}: {api_name}", ("logic", api_name))
@@ -301,12 +314,10 @@ class TaskConsoleView(QtWidgets.QWidget):
 
     def _update_add_button(self) -> None:
         selected = self.kind_combo.currentData()
-        blocked_logic = bool(
-            self._task_takeover
-            and selected is not None
-            and selected[0] == "logic"
-        )
-        self.add_panel_button.setEnabled(
+        family = "plot" if selected is None else selected[0]
+        self.add_button.setText(_ADD_WORDS[family])
+        blocked_logic = self._task_takeover and family == "logic"
+        self.add_button.setEnabled(
             self.kind_combo.count() > 0 and not blocked_logic
         )
 
@@ -328,7 +339,14 @@ class TaskConsoleView(QtWidgets.QWidget):
         """Show the state, so the button can ask for the other one."""
 
         self._paused = bool(paused)
-        self.pause_switch.setText("Resume" if self._paused else "Pause")
+        self.pause_button.setText("Resume" if self._paused else "Pause")
+        self.pause_button.set_active(self._paused)
+
+    def set_console_state(self, word: str) -> None:
+        """The header dot: ``running`` while a node runs, ``error`` while
+        one has failed, ``idle`` otherwise (``STATUS_CUES``)."""
+
+        self.status_dot.set_state(word)
 
     def set_selectors(self, enabled: bool) -> None:
         """Show whether selections derive, without asking for it again.
@@ -380,6 +398,13 @@ class TaskConsoleView(QtWidgets.QWidget):
 
     def add_editor_tab(self, editor: QtWidgets.QWidget, title: str) -> None:
         self.tabs.add_closable_tab(editor, str(title), focus=True)
+
+    def set_editor_tab_title(self, editor: QtWidgets.QWidget, title: str) -> None:
+        """Retitle an open editor's tab when what it edits is renamed."""
+
+        index = self.tabs.indexOf(editor)
+        if index >= 0 and self.tabs.tabText(index) != str(title):
+            self.tabs.setTabText(index, str(title))
 
     def focus_editor_tab(self, editor: QtWidgets.QWidget) -> bool:
         index = self.tabs.indexOf(editor)

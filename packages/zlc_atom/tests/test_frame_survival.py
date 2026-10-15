@@ -180,11 +180,18 @@ def test_single_frame_and_wrong_shapes_are_refused() -> None:
                   ((-1, 1),), ((0., 1),), ((False, 1),)):
         with pytest.raises(ValueError, match="pair"):
             FrameSurvivalProcessor(pairs=pairs)
-    selected = FrameSurvivalProcessor(pairs=((1, 3),))
-    with pytest.raises(ValueError, match="need frame 3"):
-        selected._pair(_occupied_snapshot(np.zeros((1, 3, 2), dtype=bool)))
+    # A selected pair the cycle does not carry is kept and left out, named in
+    # the run record; it is published again once a cycle that has it returns.
+    selected = FrameSurvivalProcessor(pairs=((0, 1), (1, 3)))
+    three = _occupied_snapshot(np.zeros((1, 3, 2), dtype=bool))
+    assert selected._pair(three).block.schema.point_domain.axes[0].coordinate_labels == ("0→1",)
+    parameters = selected.describe_run({"occupied": SignalValue("occupied", three, None)})["parameters"]
+    assert parameters["pairs"] == ((0, 1),) and parameters["absent_pairs"] == ((1, 3),)
     restored = selected._pair(_occupied_snapshot(np.zeros((1, 5, 2), dtype=bool)))
-    assert restored.block.schema.point_domain.axes[0].coordinate_labels == ("1→3",)
+    assert restored.block.schema.point_domain.axes[0].coordinate_labels == ("0→1", "1→3")
+    # Only a source with none of the selected pairs fails the run.
+    with pytest.raises(ValueError, match=r"has no selected frame survival pair \(kept for a longer cycle: 1→3\)"):
+        FrameSurvivalProcessor(pairs=((1, 3),))._pair(three)
 
 
 @pytest.mark.parametrize("rule, expected", (
@@ -210,13 +217,52 @@ def test_a_named_selection_follows_the_frames_the_source_carries(rule, expected)
 def test_pair_overrides_keep_the_rule_and_last_identity() -> None:
     from zlc_atom.nodes.frame_survival.logic_node import FRAME_SURVIVAL_SCHEMA, LOGIC_NODE
 
-    assert FRAME_SURVIVAL_SCHEMA.draft_values() == {"selection": "all", "pairs": ()}
+    assert FRAME_SURVIVAL_SCHEMA.draft_values() == {"selection": "all", "pairs": (), "custom_pairs": ()}
     rows = ({"start": "0", "end": "last", "selected": True},)
-    FRAME_SURVIVAL_SCHEMA.project_values({"selection": "custom", "pairs": rows})
+    FRAME_SURVIVAL_SCHEMA.project_values({"selection": "custom", "custom_pairs": rows})
     with pytest.raises(ValueError, match="at least one pair"):
-        FRAME_SURVIVAL_SCHEMA.project_values({"selection": "custom", "pairs": ()})
-    FRAME_SURVIVAL_SCHEMA.project_values({"selection": "consecutive", "pairs": rows})
-    built = LOGIC_NODE.build(source_signal="@logic/occupancy/occupied", selection="custom", pairs=rows)
+        FRAME_SURVIVAL_SCHEMA.project_values({"selection": "custom", "custom_pairs": ()})
+    # A pair Selected's list keeps unselected is parked: kept and recorded as
+    # written, never published -- and a list of parked pairs alone publishes nothing.
+    parked = {"start": "0", "end": "1", "selected": False}
+    built = LOGIC_NODE.build(source_signal="@logic/occupancy/occupied", selection="custom",
+                             custom_pairs=(*rows, parked))
+    assert built.pairs == ((0, "last"),) and built.parked_pairs == (("0", "1"),)
+    three = _occupied_snapshot(np.zeros((1, 3, 2), dtype=bool))
+    assert built._pair(three).block.schema.point_domain.axes[0].coordinate_labels == ("0→2",)
+    assert built.describe_run({"occupied": SignalValue("occupied", three, None)})[
+        "parameters"]["parked_pairs"] == (("0", "1"),)
+    with pytest.raises(ValueError, match="at least one pair"):
+        FRAME_SURVIVAL_SCHEMA.project_values({"selection": "custom", "custom_pairs": (parked,)})
+    # A parked row is never checked, against the rows in use or at all: a
+    # duplicate of a selected pair, a reversed pair, a frame that is no frame
+    # and an empty end all leave Start alone and reach the record as written.
+    odd = (("0", "last"), ("2", "1"), ("x", "1"), ("0", ""))
+    values = FRAME_SURVIVAL_SCHEMA.project_values({"selection": "custom", "custom_pairs": (*rows, *(
+        {"start": start, "end": end, "selected": False} for start, end in odd))})
+    built = LOGIC_NODE.build(source_signal="@logic/occupancy/occupied", **values)
+    assert built.pairs == ((0, "last"),) and built.parked_pairs == odd
+    # Every selected row keeps every check.
+    for listed, problem in (
+        ((*rows, {"start": "0", "end": "", "selected": True}), "Selected pairs row 2: End frame must be filled in"),
+        ((*rows, *rows), "must not contain duplicates"),
+        (({"start": "2", "end": "1"},), "require start < end"),
+        (({"start": "x", "end": "1"},), "frame numbers or 'last'"),
+    ):
+        with pytest.raises(ValueError, match=problem):
+            FRAME_SURVIVAL_SCHEMA.project_values({"selection": "custom", "custom_pairs": listed})
+    # "first" is frame 0: it starts a pair and never ends one.
+    built = LOGIC_NODE.build(source_signal="@logic/occupancy/occupied", selection="custom",
+                             custom_pairs=({"start": "first", "end": "1"},))
+    assert built.pairs == ((0, 1),)
+    for end in ("first", "0"):
+        with pytest.raises(ValueError, match="require start < end"):
+            FRAME_SURVIVAL_SCHEMA.project_values({"selection": "custom", "custom_pairs": (
+                {"start": "1", "end": end},)})
+    # The list a rule does not read is kept as written, unchecked.
+    FRAME_SURVIVAL_SCHEMA.project_values({"selection": "consecutive", "pairs": rows,
+                                          "custom_pairs": ({"start": "2", "end": "1"},)})
+    built = LOGIC_NODE.build(source_signal="@logic/occupancy/occupied", selection="custom", custom_pairs=rows)
     assert built.pairs == ((0, "last"),)
     assert LOGIC_NODE.build(source_signal="@logic/occupancy/occupied", selection="to_last", pairs=()).pairs == "to_last"
     rows = ({"start": "0", "end": "last", "selected": False},)
@@ -235,12 +281,15 @@ def test_pair_overrides_keep_the_rule_and_last_identity() -> None:
                             (4, ("0→1", "0→3"))):
         result = built._pair(_occupied_snapshot(np.zeros((1, count, 2), dtype=bool)))
         assert result.block.schema.point_domain.axes[0].coordinate_labels == expected
-    # A middle index never becomes the last frame when the source shrinks.
+    # A middle index never becomes the last frame when the source shrinks:
+    # it is kept, left out, and named in the run record.
     middle = LOGIC_NODE.build(source_signal="@logic/occupancy/occupied", selection="custom",
-                             pairs=({"start": "0", "end": "2"},))
-    with pytest.raises(ValueError, match="need frame 2"):
-        middle._pair(_occupied_snapshot(np.zeros((1, 3, 2), dtype=bool)))
-    assert middle._pair(_occupied_snapshot(np.zeros((1, 4, 2), dtype=bool))).block.values.shape == (1, 1, 2)
+                              custom_pairs=({"start": "0", "end": "2"}, {"start": "1", "end": "last"}))
+    three = _occupied_snapshot(np.zeros((1, 3, 2), dtype=bool))
+    assert middle._pair(three).block.schema.point_domain.axes[0].coordinate_labels == ("1→2",)
+    assert middle.describe_run({"occupied": SignalValue("occupied", three, None)})[
+        "parameters"]["absent_pairs"] == ((0, 2),)
+    assert middle._pair(_occupied_snapshot(np.zeros((1, 4, 2), dtype=bool))).block.values.shape == (1, 2, 2)
 
 
 def test_pair_matrix_selects_like_a_table_and_writes_the_draft() -> None:
@@ -321,20 +370,69 @@ def test_pair_matrix_selects_like_a_table_and_writes_the_draft() -> None:
         # Selected, picked under a rule, keeps the rule's pairs as the list.
         project(**drafts[-1]["values"])
         form.presets.button("custom").click()
-        assert drafts[-1] == {"values": {"selection": "custom", "pairs": tuple(
-            {"start": "0", "end": end, "selected": True} for end in ("1", "2", "last"))}}
-        # None clears every mark at once, leaving an explicit selection to fill.
+        listed = tuple({"start": "0", "end": end, "selected": True} for end in ("1", "2", "last"))
+        assert drafts[-1] == {"values": {"selection": "custom", "pairs": (), "custom_pairs": listed}}
+        project(**drafts[-1]["values"])
+        # None publishes no pair and keeps the list; the strip marks it.
         form.presets.button("none").click()
-        assert drafts[-1] == {"values": {"selection": "custom", "pairs": ()}}
+        assert drafts[-1] == {"values": {"selection": "none", "pairs": ()}}
         project(**drafts[-1]["values"])
         assert marked() == [] and form.presets.button("none").property("current")
         assert form.summary.text() == "None · 0 of 6 pairs", "the summary names the strip's segment"
-        # Pairs the source no longer carries are named, not dropped silently.
+        # None and Selected are two choices, either follows the other:
+        # Selected after None comes back to its list.
+        form.presets.button("custom").click()
+        assert drafts[-1] == {"values": {"selection": "custom", "pairs": ()}}
+        project(**drafts[-1]["values"])
+        assert marked() == [(0, 1), (0, 2), (0, 3)] and form.presets.current() == "custom"
+        assert form.summary.text() == "Selected · 3 of 6 pairs"
+        # A pair marked under None joins the list and picks Selected.
+        form.presets.button("none").click()
+        project(**drafts[-1]["values"])
+        QtTest.QTest.mouseClick(view, QtCore.Qt.LeftButton, QtCore.Qt.NoModifier,
+                               form.table.visualRect(form.model.index(1, 1)).center())
+        assert drafts[-1] == {"values": {"selection": "custom", "custom_pairs": (
+            *listed, {"start": "1", "end": "2", "selected": True})}}
+        project(**drafts[-1]["values"])
+        assert marked() == [(0, 1), (0, 2), (0, 3), (1, 2)] and form.presets.current() == "custom"
+        # With no list to come back to, Selected after None begins an empty one.
+        project(selection="none", custom_pairs=())
+        form.presets.button("custom").click()
+        assert drafts[-1] == {"values": {"selection": "custom", "pairs": (), "custom_pairs": ()}}
+        project(**drafts[-1]["values"])
+        assert marked() == [] and form.summary.text() == "Selected · 0 of 6 pairs"
+        QtTest.QTest.mouseClick(view, QtCore.Qt.LeftButton, QtCore.Qt.NoModifier,
+                               form.table.visualRect(form.model.index(0, 0)).center())
+        assert drafts[-1] == {"values": {"selection": "custom", "custom_pairs": (
+            {"start": "0", "end": "1", "selected": True},)}}
+        project(**drafts[-1]["values"])
+        assert marked() == [(0, 1)] and form.presets.current() == "custom"
+        # Pairs the source no longer carries are kept and named in amber, not dropped.
         drafts.clear()
-        project(selection="custom", pairs=({"start": "0", "end": "1"}, {"start": "2", "end": "5"}))
-        assert marked() == [(0, 1)] and form.note.text() == "not in this source: 2→5." and drafts == []
+        project(selection="custom", custom_pairs=({"start": "0", "end": "1"}, {"start": "2", "end": "5"}))
+        assert marked() == [(0, 1)] and form.note.text() == "kept, not in this source: 2→5." and drafts == []
         # The strip always marks one choice: a list with pairs is Selected.
         assert derived() == [] and form.presets.current() == "custom"
+        # A look at a rule keeps Selected's list: picked again, it comes back.
+        form.presets.button("all").click()
+        assert drafts[-1] == {"values": {"selection": "all", "pairs": ()}}
+        project(**drafts[-1]["values"])
+        assert marked() == list(_forward_pairs(4)) and form.note.isHidden()
+        form.presets.button("custom").click()
+        assert drafts[-1] == {"values": {"selection": "custom", "pairs": ()}}
+        project(**drafts[-1]["values"])
+        assert marked() == [(0, 1)] and form.note.text() == "kept, not in this source: 2→5."
+        # A pair the list keeps unselected is said in a muted note; marking
+        # it selects it in place.
+        project(custom_pairs=(*values["custom_pairs"], {"start": "0", "end": "2", "selected": False}))
+        assert marked() == [(0, 1)] and form.parked.text() == "kept, not selected: 0→2."
+        QtTest.QTest.mouseClick(view, QtCore.Qt.LeftButton, QtCore.Qt.ControlModifier,
+                               form.table.visualRect(form.model.index(0, 1)).center())
+        assert drafts[-1] == {"values": {"selection": "custom", "custom_pairs": (
+            {"start": "0", "end": "1", "selected": True}, {"start": "2", "end": "5", "selected": True},
+            {"start": "0", "end": "2", "selected": True})}}
+        project(**drafts[-1]["values"])
+        assert marked() == [(0, 1), (0, 2)] and form.parked.isHidden()
         # The reported 22-frame case: a real Ctrl click excludes only first→last.
         frames = tuple(str(index) for index in range(22))
         project(selection="from_first", pairs=())
@@ -350,6 +448,88 @@ def test_pair_matrix_selects_like_a_table_and_writes_the_draft() -> None:
         project()
         assert marked() == [(0, end) for end in range(1, 24)]
         assert form.presets.button("from_first").property("current")
+    finally:
+        form.close()
+        form.deleteLater()
+        app.processEvents()
+
+
+def test_pair_matrix_edits_only_what_it_marks_and_never_writes_over_a_list_it_cannot_read() -> None:
+    """Selected's list as the lab API may write it: a gesture changes only the
+    pairs it marks or unmarks -- parked rows, however written, and selected
+    pairs this source does not carry stay as they are -- and a list the grid
+    cannot read locks the grid instead of being replaced by the next click."""
+    from PyQt5 import QtCore, QtTest
+    from zlc_atom.nodes.frame_survival.logic_node import FRAME_SURVIVAL_SCHEMA, LOGIC_NODE
+    from zlc_ui.qt import ensure_qt_app
+
+    app = ensure_qt_app(["zlc-frame-survival-test"])
+    form = LOGIC_NODE.ui_contributions[0]()
+    drafts = []
+    form.draft_changed.connect(drafts.append)
+
+    def project(**values):
+        form.update_projection({"form_values": {**FRAME_SURVIVAL_SCHEMA.draft_values(), **values},
+                                "source_frames": ("0", "1", "2", "3")})
+        app.processEvents()
+
+    def click(start, end, modifier=QtCore.Qt.ControlModifier):
+        QtTest.QTest.mouseClick(form.table.viewport(), QtCore.Qt.LeftButton, modifier,
+                               form.table.visualRect(form.model.index(start, end - 1)).center())
+
+    def marked():
+        return sorted((index.row(), index.column() + 1) for index in form.table.selectedIndexes())
+
+    form.resize(520, 300)
+    form.show()
+    try:
+        selected = ({"start": "0", "end": "1", "selected": True}, {"start": "1", "end": "2", "selected": True})
+        parked = tuple({"start": start, "end": end, "selected": False}
+                       for start, end in (("0", "1"), ("x", "1"), ("0", "")))
+        absent = {"start": "1", "end": "4", "selected": True}
+        listed = (*selected, *parked, absent)
+        project(selection="custom", custom_pairs=listed)
+        # A parked row naming a published pair is not said: the selected row wins.
+        assert marked() == [(0, 1), (1, 2)] and form.summary.text() == "Selected · 2 of 6 pairs"
+        assert form.parked.text() == "kept, not selected: x→1, 0→(no end)." and form.error.isHidden()
+        assert form.note.text() == "kept, not in this source: 1→4."
+        # A click elsewhere adds its pair and leaves every other row as written.
+        click(2, 3)
+        assert drafts[-1] == {"values": {"selection": "custom", "custom_pairs": (
+            *listed, {"start": "2", "end": "last", "selected": True})}}
+        # Unmarking a published pair takes its selected row out; the parked
+        # row naming it stays parked, and is said again.
+        project(selection="custom", custom_pairs=listed)
+        click(0, 1)
+        assert drafts[-1] == {"values": {"selection": "custom", "custom_pairs": (selected[1], *parked, absent)}}
+        project(**drafts[-1]["values"])
+        assert marked() == [(1, 2)] and form.parked.text() == "kept, not selected: 0→1, x→1, 0→(no end)."
+        # A rule keeps the list as it is; Selected brings it back unchanged.
+        form.presets.button("consecutive").click()
+        assert drafts[-1] == {"values": {"selection": "consecutive", "pairs": ()}}
+        # Lists the grid cannot read: two selected rows naming one pair, a
+        # selected row with no end, rows that are not rows, no list at all.
+        for unread, problem in (
+            ((*selected, selected[0]), "Selected pairs cannot be marked on the grid: frame survival pairs "
+                                       "must not contain duplicates."),
+            (({"start": "0", "end": ""},), "Selected pairs cannot be marked on the grid: Selected pairs row 1: "
+                                           "End frame must be filled in."),
+            ("['0', '1']", "Selected pairs cannot be marked on the grid: Selected pairs must be a list of rows."),
+            (5, "Selected pairs cannot be marked on the grid: Selected pairs must be a list of rows."),
+        ):
+            for selection in ("custom", "none"):
+                drafts.clear()
+                project(selection=selection, custom_pairs=unread)
+                assert form.error.text() == problem and not form.table.isEnabled() and marked() == []
+                # Nothing a gesture says reaches the list.
+                form.table.selection_edited.emit(((2, 2),))
+                assert drafts == []
+            # Under a rule the grid does not write Selected's list: it is
+            # left as it is, and still the list Selected comes back to.
+            project(selection="all", custom_pairs=unread)
+            assert form.error.isHidden() and form.table.isEnabled() and len(marked()) == 6
+            form.presets.button("custom").click()
+            assert drafts[-1] == {"values": {"selection": "custom", "pairs": ()}}
     finally:
         form.close()
         form.deleteLater()

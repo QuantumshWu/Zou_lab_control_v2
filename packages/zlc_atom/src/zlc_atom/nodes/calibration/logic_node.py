@@ -41,10 +41,20 @@ _CALIBRATION_PULSE_RESOURCE = WorkspaceResourceSpec(
     load_calibration_pulse_template,
     argument_name="pulse_resource",
 )
+#: What only taking NEW frames uses: the pulse, the samples, the windows and
+#: the API fields that drive them, saving them, reading them in
+#: photoelectrons -- and the camera and sequencer below.  Calibrating saved
+#: frames again reads the crop, exposure and pulse facts recorded beside
+#: them, so these stay in the draft as they are, unchecked and unused.
+_NEW_FRAMES = ("frame_source", (FRAMES_FROM_CAMERA,))
+
+
 def _validate_calibration(values: dict[str, object]) -> None:
     # The same relation the request enforces, so the form never accepts a
     # draft the task will refuse: the readout frame is recognised in the
     # compiled program by being the SHORT window, so equal is not enough.
+    if values["frame_source"] != FRAMES_FROM_CAMERA:
+        return
     if float(values["readout_exposure_seconds"]) >= float(
         values["reference_exposure_seconds"]
     ):
@@ -64,14 +74,18 @@ CALIBRATION_SCHEMA = AuthoringSchema(
             # moment anybody edited theirs.
             "",
             required=True,
+            enabled_when=_NEW_FRAMES,
         ),
-        AuthoringField("repeats", "int", "Samples", 200, minimum=1),
+        AuthoringField(
+            "repeats", "int", "Samples", 200, minimum=1, enabled_when=_NEW_FRAMES,
+        ),
         AuthoringField(
             "reference_exposure_seconds",
             "float",
             "Reference exposure seconds",
             0.02,
             minimum=1e-9,
+            enabled_when=_NEW_FRAMES,
         ),
         AuthoringField(
             "readout_exposure_seconds",
@@ -79,6 +93,7 @@ CALIBRATION_SCHEMA = AuthoringSchema(
             "Readout exposure seconds",
             0.005,
             minimum=1e-9,
+            enabled_when=_NEW_FRAMES,
         ),
         AuthoringField(
             "camera_exposure_seconds",
@@ -90,18 +105,20 @@ CALIBRATION_SCHEMA = AuthoringSchema(
                 "Set by the calibration: the camera is armed with the longest "
                 "of the three windows, so every frame integrates its whole window."
             ),
+            # Calibrating saved frames arms no camera, so there is none.
+            blank_label="no camera",
         ),
         AuthoringField(
             "reference_before_field", "text", "Reference before API field",
-            "", required=True,
+            "", required=True, enabled_when=_NEW_FRAMES,
         ),
         AuthoringField(
             "readout_field", "text", "Readout API field",
-            "", required=True,
+            "", required=True, enabled_when=_NEW_FRAMES,
         ),
         AuthoringField(
             "reference_after_field", "text", "Reference after API field",
-            "", required=True,
+            "", required=True, enabled_when=_NEW_FRAMES,
         ),
         AuthoringField(
             "default_model_kind",
@@ -199,7 +216,7 @@ CALIBRATION_SCHEMA = AuthoringSchema(
             "bool",
             "Save every sample",
             False,
-            enabled_when=("frame_source", (FRAMES_FROM_CAMERA,)),
+            enabled_when=_NEW_FRAMES,
         ),
         AuthoringField(
             "review_detected_sites",
@@ -207,7 +224,7 @@ CALIBRATION_SCHEMA = AuthoringSchema(
             "Review detected sites",
             False,
         ),
-        photoelectron_switch(enabled_when=("frame_source", (FRAMES_FROM_CAMERA,))),
+        photoelectron_switch(enabled_when=_NEW_FRAMES),
     ),
     validator=_validate_calibration,
 )
@@ -215,17 +232,37 @@ CALIBRATION_SCHEMA = AuthoringSchema(
 
 def _build(
     *,
-    camera: object,
-    camera_key: str,
-    sequencer: object,
-    sequencer_key: str,
-    pulse_resource: ResolvedWorkspaceResource,
     signal_plane: object,
+    camera: object = None,
+    camera_key: str = "",
+    sequencer: object = None,
+    sequencer_key: str = "",
+    pulse_resource: ResolvedWorkspaceResource | None = None,
     build_figure_host: object = None,
     save_figure_artifact: object = None,
     **values: object,
 ) -> CalibrationTask:
     authored = CALIBRATION_SCHEMA.project_values(values)
+    analysis = dict(
+        default_model_kind=ReadoutModelKind(authored["default_model_kind"]),
+        threshold_method=str(authored["threshold_method"]),
+        box_half_width=int(authored["box_half_width"]),
+        psf_half_width=int(authored["psf_half_width"]),
+        psf_padding=int(authored["psf_padding"]),
+        detection_spot_sigma=float(authored["detection_spot_sigma"]),
+        detection_sigma=float(authored["detection_sigma"]),
+        review_detected_sites=bool(authored["review_detected_sites"]),
+        frame_source=str(authored["frame_source"]),
+        saved_frames_path=str(authored["saved_frames_path"]),
+    )
+    if authored["frame_source"] != FRAMES_FROM_CAMERA:
+        # Saved frames: no bench, no pulse -- the folder says what they were.
+        return CalibrationTask(
+            request=CalibrationRequest(**analysis),
+            signal_plane=signal_plane,
+            build_figure_host=build_figure_host,
+            save_figure_artifact=save_figure_artifact,
+        )
     if (
         not isinstance(pulse_resource, ResolvedWorkspaceResource)
         or pulse_resource.contract_id
@@ -237,6 +274,7 @@ def _build(
         camera=camera,  # type: ignore[arg-type]
         sequencer=sequencer,
         request=CalibrationRequest(
+            **analysis,
             camera_key=camera_key,
             sequencer_key=sequencer_key,
             pulse_template=pulse_resource.path.name,
@@ -255,18 +293,8 @@ def _build(
             reference_before_field=str(authored["reference_before_field"]),
             readout_field=str(authored["readout_field"]),
             reference_after_field=str(authored["reference_after_field"]),
-            default_model_kind=ReadoutModelKind(authored["default_model_kind"]),
-            threshold_method=str(authored["threshold_method"]),
-            box_half_width=int(authored["box_half_width"]),
-            psf_half_width=int(authored["psf_half_width"]),
-            psf_padding=int(authored["psf_padding"]),
-            detection_spot_sigma=float(authored["detection_spot_sigma"]),
-            detection_sigma=float(authored["detection_sigma"]),
             save_frames=bool(authored["save_frames"]),
-            review_detected_sites=bool(authored["review_detected_sites"]),
             photoelectrons=bool(authored[PHOTOELECTRONS]),
-            frame_source=str(authored["frame_source"]),
-            saved_frames_path=str(authored["saved_frames_path"]),
         ),
         pulse_sequence=pulse_resource.value,
         pulse_path=pulse_resource.path,
@@ -286,10 +314,11 @@ def _calibration_editor_factory(parent=None):
 
     class CalibrationForm(FluentParameterForm):
         draft_changed = QtCore.pyqtSignal(object)
-        # Resource pickers keep their existing generic Refresh action.
-        managed_fields = tuple(
-            field.name for field in CALIBRATION_SCHEMA.fields if field.value_type != "resource"
-        )
+        # Every field, the pulse picker included: what Frames chooses greys
+        # the pulse with the rest of what only new frames use, and a form
+        # follows only the fields it holds.  The picker's Refresh reaches
+        # the editor through this form's own refresh_requested.
+        managed_fields = CALIBRATION_SCHEMA.field_names
 
         def __init__(self, parent=None):
             super().__init__(FormSpec(()), parent=parent)
@@ -305,7 +334,12 @@ def _calibration_editor_factory(parent=None):
             try:
                 value = self.read_value(key)
             except (TypeError, ValueError):
-                return
+                # An emptied pulse picker is the vacancy it shows, as on the
+                # editor's own form: Start names the missing file.
+                field = next(field for field in self.spec.fields if field.key == key)
+                if field.kind != "path" or not self.is_empty(key):
+                    return
+                value = ""
             patch = {"values": {key: value}}
             if normalized:
                 # The box's own display normalization, not an operator edit.
@@ -334,7 +368,15 @@ def _calibration_editor_factory(parent=None):
                 selected = str(values.get(key) or "")
                 offered = choices
                 if selected and not any(choice.value == selected for choice in choices):
-                    offered += (FormChoice(f"Unavailable: {selected}", selected),)
+                    # Calibrating saved frames reads no pulse, so a choice
+                    # kept for new frames is named as it stands, not called
+                    # unavailable.
+                    offered += (FormChoice(
+                        f"Unavailable: {selected}"
+                        if values.get("frame_source") == FRAMES_FROM_CAMERA
+                        else selected,
+                        selected,
+                    ),)
                 fields.append(replace(
                     field, kind="choice", default=selected, choices=offered,
                 ))
@@ -380,8 +422,11 @@ def _default_api_fields(values, resources):
 
 
 def _camera_exposure(values):
-    """The derived camera exposure, while the two windows are numbers."""
+    """The derived camera exposure, while the two windows are numbers and
+    the frames are new: calibrating saved ones arms no camera."""
 
+    if values.get("frame_source", FRAMES_FROM_CAMERA) != FRAMES_FROM_CAMERA:
+        return {}
     try:
         reference = float(values.get("reference_exposure_seconds"))
         readout = float(values.get("readout_exposure_seconds"))
@@ -404,7 +449,10 @@ LOGIC_NODE = LogicNodeDescriptor(
         "Acquire long-reference/readout/long-reference camera cycles using the selected "
         "Pulse, detect and optionally review sites, then calibrate per-site readout "
         "classification. Saves a Calibration artifact for Occupancy plus native "
-        "diagnostic Figures; this Task owns camera preparation and Pulse Fire."
+        "diagnostic Figures; this Task owns camera preparation and Pulse Fire. With "
+        "Frames = Saved frames it calibrates the samples a run saved instead, using "
+        "no camera, sequencer or Pulse and claiming no device; the Pulse, Samples, "
+        "exposure and API-field settings then stay in the draft unused."
     ),
     outputs=(CAPTURE_PREVIEW_DECLARATION,),
     # Long reference, short readout, long reference: three frames whose whole
@@ -420,8 +468,12 @@ LOGIC_NODE = LogicNodeDescriptor(
         ArtifactOutputSpec("artifact_path", CALIBRATION_ARTIFACT_CODEC.contract_id),
     ),
     device_requirements=(
-        DeviceRequirement("camera.adapter", "camera", CAMERA_PROTECTED_FIELDS),
-        DeviceRequirement("sequencer.streamer", "sequencer", ("program",)),
+        DeviceRequirement(
+            "camera.adapter", "camera", CAMERA_PROTECTED_FIELDS, enabled_when=_NEW_FRAMES,
+        ),
+        DeviceRequirement(
+            "sequencer.streamer", "sequencer", ("program",), enabled_when=_NEW_FRAMES,
+        ),
     ),
     build=_build,
     workspace_resources=(_CALIBRATION_PULSE_RESOURCE,),

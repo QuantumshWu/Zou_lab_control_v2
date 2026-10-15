@@ -132,6 +132,20 @@ assert set(flow._flow_node_rects) == {
 }
 rects = tuple(flow._flow_node_rects.values())
 assert all(not left.intersects(right) for i, left in enumerate(rects) for right in rects[i + 1:])
+# Badges in sentence case, the root named in words; every Logic card wears
+# one hairline DIVIDER edge -- no accent outline that reads as a selection.
+from zlc_ui.fluent.style import DIVIDER
+items = flow.scene().items()
+words = [item for item in items if isinstance(item, QtWidgets.QGraphicsSimpleTextItem)]
+# A badge is the smallest words on a card.
+smallest = min(item.font().pointSizeF() for item in words)
+badges = sorted(item.text() for item in words if item.font().pointSizeF() == smallest)
+assert badges == ['Device'] * 3 + ['Logic'] * 3 + ['Logic · this figure'], badges
+edges = {item.data(0): item.pen() for item in items
+         if isinstance(item, QtWidgets.QGraphicsPathItem) and item.data(0) is not None}
+for node_id in ('logic:camera', 'logic:left', 'logic:right', 'logic:fit'):
+    assert edges[node_id].color().name() == QtGui.QColor(DIVIDER).name(), node_id
+    assert edges[node_id].widthF() == edges['logic:camera'].widthF(), node_id
 scene = flow.sceneRect()
 assert all(scene.contains(rect) for rect in rects)
 for source, target, path in flow._flow_edge_paths:
@@ -347,6 +361,8 @@ app.processEvents()
 assert editor.page_choice.current() == 'data'
 assert editor.data_group.isVisible() and not editor.axes_group.isVisible()
 assert editor.data_group.width() == card_width
+# The hint under Table shows is a sentence, whoever words it.
+assert editor.blank_help_label.text() == 'Blank removes the value.'
 assert editor.value_model.rowCount() == 100_000
 assert editor.value_model.columnCount() == 1_000
 assert editor.value_table.verticalScrollBar().maximum() > 0
@@ -421,16 +437,23 @@ assert intents[-1] == (
      'cells': ((1, 0, '0.5'),)},
 )
 
+app.processEvents()
+editing_row = (editor.axis_combo.geometry(), editor.apply_axis_button.geometry())
+assert editor.apply_axis_button.text() == 'Apply axis'
 QtTest.QTest.mouseClick(editor.add_axis_button, QtCore.Qt.LeftButton)
+app.processEvents()
+# Apply axis reads Create axis now, in the same slot: nothing beside it moves.
+assert editor.apply_axis_button.text() == 'Create axis'
+assert (editor.axis_combo.geometry(), editor.apply_axis_button.geometry()) == editing_row
 # Add is a mode of the same control group, entered without a presenter
 # round trip: nothing of the selected axis may still be clickable, and the
 # New axis form must be writable even when nothing was selected before.
 assert not editor.remove_axis_button.isEnabled()
 assert not editor.axis_value_table.isEnabled()
 assert editor.axis_name_edit.isEnabled() and editor.apply_axis_button.isEnabled()
-before_delete = len(intents)
+before_remove = len(intents)
 QtTest.QTest.mouseClick(editor.remove_axis_button, QtCore.Qt.LeftButton)
-assert len(intents) == before_delete, 'Delete fired while adding an axis'
+assert len(intents) == before_remove, 'Remove fired while adding an axis'
 editor.axis_name_edit.setText('shot')
 editor.axis_size_spin.setValue(2)
 sent = len(intents)
@@ -704,12 +727,17 @@ for page, table, card in (('dataset', editor.axis_value_table, editor.axes_group
     editor.page_choice.button(page).click(); settle()
     assert page_bar.maximum() == 0 and not page_bar.isVisible(), page
     assert table.verticalScrollBar().maximum() > 0
-    assert box(card, viewport)[3] <= viewport.height(), (page, box(card, viewport), viewport.height())
-    # Every row the room holds is a row of values: under the card, less
-    # than one more -- no room kept for a horizontal bar the axis's one
-    # stretched column never shows.
-    spare = viewport.height() - box(card, viewport)[3]
-    assert spare < table.verticalHeader().sectionSize(0), (page, spare)
+    # The table that scrolls takes the whole room, its last row in part:
+    # its card ends on the page's foot, one section gap over the action
+    # bar, on either page -- switching pages moves no card's foot.
+    assert box(card, viewport)[3] == viewport.height(), (page, box(card, viewport), viewport.height())
+    assert box(editor.discard_button, view)[1] - box(card, view)[3] == section_gap(), page
+    # Its vertical bar stands beside the rows it scrolls, under the column
+    # names, not in their row.
+    rows_bar = table.verticalScrollBar()
+    assert rows_bar.isVisible()
+    assert box(rows_bar, table)[1] >= box(table.horizontalHeader(), table)[3], page
+    assert box(rows_bar, table)[3] <= box(table.viewport(), table)[3], page
 assert editor.axis_value_table.horizontalScrollBar().maximum() == 0
 # A value is never shown in part: the table scrolls by whole columns, and
 # the column the viewport's right edge cuts shows nothing.

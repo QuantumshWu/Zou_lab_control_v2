@@ -34,7 +34,7 @@ from zlc_workbench.pulse_editor import (
     replace_sequence,
     timeline_of,
 )
-from zlc_workbench.pulse_state import PulseEditorState, state_to_tree
+from zlc_workbench.pulse_state import PulseEditorState, read_pulse, state_to_tree
 
 from pulse_fixtures import PULSE_NAME, ordinary_imaging_sequence, write_ordinary_pulse
 
@@ -181,6 +181,7 @@ class _PreviewView:
         self.logical_size = None
         self.placeholder = ""
         self.status = ""
+        self.status_word = ""
         self._include_off = False
 
     @property
@@ -200,8 +201,9 @@ class _PreviewView:
         self.placeholder = str(text)
         self.content = None
 
-    def set_status(self, text: str) -> None:
+    def set_status(self, text: str, word: str) -> None:
         self.status = str(text)
+        self.status_word = str(word)
 
     def set_size_names(self, names) -> None:
         self.size_names = tuple(names)
@@ -219,6 +221,7 @@ class _TargetView:
         self.status = ""
         self.reserved: tuple = ()
         self.feedback = ""
+        self.feedback_word = ""
         self.width_rules = None
 
     def set_ports(self, records, editable, status_text, *, reserved=()) -> None:
@@ -230,8 +233,9 @@ class _TargetView:
     def set_width_rules(self, digital, dac) -> None:
         self.width_rules = (digital, dac)
 
-    def set_feedback(self, text: str) -> None:
+    def set_feedback(self, text: str, word: str) -> None:
         self.feedback = str(text)
+        self.feedback_word = str(word)
 
 
 class _ScanView:
@@ -240,12 +244,14 @@ class _ScanView:
     def __init__(self) -> None:
         self.page = None
         self.progress = ""
+        self.progress_word = ""
 
     def set_page(self, record) -> None:
         self.page = record
 
-    def set_progress_text(self, text: str) -> None:
+    def set_progress_text(self, text: str, word: str) -> None:
         self.progress = str(text)
+        self.progress_word = str(word)
 
 
 class _PreviewHost:
@@ -429,8 +435,8 @@ class _EditorView:
     def set_scan_page(self, record) -> None:
         self.scan_view.set_page(record)
 
-    def set_scan_progress_text(self, text: str) -> None:
-        self.scan_view.set_progress_text(text)
+    def set_scan_progress_text(self, text: str, word: str) -> None:
+        self.scan_view.set_progress_text(text, word)
 
     def set_config_page(self, record) -> None:
         self.config_page = record
@@ -484,8 +490,8 @@ class _EditorView:
     def set_preview_size_names(self, names) -> None:
         self.preview_view.set_size_names(names)
 
-    def set_preview_status(self, text: str) -> None:
-        self.preview_view.set_status(text)
+    def set_preview_status(self, text: str, word: str) -> None:
+        self.preview_view.set_status(text, word)
 
     def show_preview_placeholder(self, text: str) -> None:
         self.preview_view.show_placeholder(text)
@@ -503,8 +509,8 @@ class _EditorView:
     def set_target_width_rules(self, digital, dac) -> None:
         self.target_view.set_width_rules(digital, dac)
 
-    def set_target_feedback(self, text: str) -> None:
-        self.target_view.set_feedback(text)
+    def set_target_feedback(self, text: str, word: str) -> None:
+        self.target_view.set_feedback(text, word)
 
 
 @pytest.fixture
@@ -749,7 +755,7 @@ def test_inserting_a_period_copies_its_neighbour(presenter) -> None:
     assert presenter.sequence.brackets == (PulseBracket("bracket1", ids[3], ids[0], 3),)
     assert presenter.sequence.bracket_bounds == ((1, 1),)
     presenter.insert_period(("bracket", "bracket1:end"))
-    presenter.sequence.require_nonempty_brackets()
+    assert presenter.sequence.loops
     bracket, = presenter.sequence.brackets
     assert bracket.start_period_id == bracket.end_period_id
     assert not presenter.view.warnings
@@ -1180,7 +1186,7 @@ def test_a_shot_that_fails_leaves_the_outputs_safe(sequence) -> None:
     try:
         assert presenter.fire() is False
         assert board.events[-1] == "safe"
-        assert any("firing stopped" in text for text in view.warnings)
+        assert any("Firing stopped" in text for text in view.warnings)
     finally:
         presenter.close()
 
@@ -1410,6 +1416,7 @@ def test_component_instances_and_subpulse_files_share_edits_not_ownership(sequen
         assert presenter._subpulse_draft == exported
         _run_scan(view, "import numpy as np\nscan_table = np.array([[0.002], [0.004]])\n")
         assert len(presenter.state.scan_rows) == 2
+        table = presenter.state.scan_rows, presenter.state.scan_fields
         copies = []
         for _ in range(2):
             view.insert_component_before = ("period", before.period_id)
@@ -1420,8 +1427,10 @@ def test_component_instances_and_subpulse_files_share_edits_not_ownership(sequen
             assert presenter.sequence.periods[0].period_id == copies[0].period_ids[0]
             assert tuple(p.period_id for p in presenter.sequence.periods).index(copies[-1].period_ids[-1]) < tuple(
                 p.period_id for p in presenter.sequence.periods).index(before.period_id)
-            assert presenter.state.scan_rows == ()
-            assert presenter.state.scan_source_dirty
+            # Each copy brings its own Scan field; the table keeps driving the
+            # field it was made for, and the copies play their own values.
+            assert (presenter.state.scan_rows, presenter.state.scan_fields) == table
+        assert len(presenter.sequence.scan_bindings) == 3
         assert len({component.component_id for component in presenter.sequence.components}) == 3
         ids = tuple(period.period_id for period in presenter.sequence.periods)
         assert len(ids) == len(set(ids))
@@ -1549,9 +1558,13 @@ def test_default_config_mode_projects_file_subpulse_without_replacing_defaults(s
     source = group_component(sequence, (first.period_id, second.period_id), "Imaging")
     component, = source.components
     source = replace(source, bindings=(PulseBinding(PulseFieldRef("duration", period_id=outside.period_id),
-                                                   outside.unit, source="config", config_key="wait"),))
+                                                   outside.unit, source="config", config_key="wait"),
+                                       PulseBinding(PulseFieldRef("duration", period_id=second.period_id),
+                                                    second.unit, source="api")))
     fragment = extract_subpulse(source, component.component_id)
-    changed = replace(fragment, periods=(replace(fragment.periods[0], duration=4, unit="ms"), *fragment.periods[1:]))
+    # The file holds the API-marked duration constant: it does not offer it.
+    changed = replace(fragment, periods=(replace(fragment.periods[0], duration=4, unit="ms"), *fragment.periods[1:]),
+                      bindings=())
     path = tmp_path / "imaging.subpulse.json"
     write_subpulse(path, changed)
     values = tmp_path / "values.json"
@@ -1561,11 +1574,26 @@ def test_default_config_mode_projects_file_subpulse_without_replacing_defaults(s
     try:
         assert not presenter.sequence.config_enabled
         assert presenter.load_config_values(str(values))
+        # Config chosen before any file: the Subpulse plays its embedded
+        # default, the Pulse previews and runs, and its contents stay editable.
+        view.component_action_requested.emit("source", (component.component_id, "config", ""))
+        view.config_mode_committed.emit(True)
+        assert not view.config_error
+        assert view.subpulse_sources[0][4] == "No file — plays Default"
+        assert not view.schedule_view.schedule.periods[0].readonly
+        executed, _rows, _repeats = presenter._execution_request()
+        assert (executed.components[0].source, executed.components[0].config_path) == ("default", "")
+        assert executed.period_by_id[first.period_id].duration == first.duration
+        view.config_mode_committed.emit(False)
         view.component_action_requested.emit("source", (component.component_id, "config", str(path)))
         authored = presenter.sequence
         assert view.schedule_view.schedule.periods[0].duration.text == str(first.duration)
         view.config_mode_committed.emit(True)
         assert presenter.sequence.periods == authored.periods
+        assert not view.config_error
+        stale, = (record for record in view.scan_view.page.bindings if record.note)
+        assert (stale.field_id, stale.source, stale.group_label, stale.note) == (
+            f"duration:{second.period_id}", "api", "Imaging", "not in file")
         shown = view.schedule_view.schedule
         assert shown.components[0].config_active
         assert shown.periods[0].duration.text == "4" and shown.periods[0].readonly
@@ -1732,6 +1760,7 @@ def test_connecting_attaches_a_sequencer_and_shows_it(sequence, monkeypatch) -> 
     try:
         initial_connection = view.schedule_view.connection
         assert initial_connection.status == "not connected"
+        assert initial_connection.status_word == "idle"
         assert initial_connection.locked is False
         assert tuple(choice.value for choice in initial_connection.choices) == (
             "virtual", "remote", "offline",
@@ -1751,6 +1780,7 @@ def test_connecting_attaches_a_sequencer_and_shows_it(sequence, monkeypatch) -> 
         )
         status = connection.status
         assert "127.0.0.1:18861" in status and "ports" in status and "MHz" in status
+        assert connection.status_word == "running"
         # Sync and hold need a board; stepping also needs a table to step
         # through, and offering it without one is a button that cannot work.
         assert view.schedule_view.capabilities == (True, True, False)
@@ -1776,8 +1806,10 @@ def test_a_refused_connection_says_so_and_stays_offline(sequence) -> None:
 
         assert presenter.sequencer is None
         assert "failed" in view.schedule_view.connection.status
+        # A failure is written in the error ink, as every failure is.
+        assert view.schedule_view.connection.status_word == "error"
         assert view.schedule_view.capabilities == (False, False, False)
-        assert any("cannot connect" in text for text in view.warnings)
+        assert any("Cannot connect" in text for text in view.warnings)
     finally:
         presenter.close()
 
@@ -1903,7 +1935,7 @@ def test_the_editor_opens_with_no_pulse_at_all() -> None:
 
         # And it refuses the things that need a pulse, by name.
         assert presenter.fire() is False
-        assert any("no pulse is open" in text for text in view.warnings)
+        assert any("No pulse is open" in text for text in view.warnings)
     finally:
         presenter.close()
 
@@ -2561,6 +2593,8 @@ def test_an_open_pulse_is_moved_onto_the_board_by_lane_name(sequence) -> None:
 
     view = _EditorView()
     board = _Sequencer()
+    # Written for a 10 ns clock, so Connect has to move it onto the board's.
+    sequence = replace(sequence, time_step_ns=10.0, config_enabled=True)
     presenter = PulseEditorPresenter(view, sequence, dial=lambda _mode, _endpoint: board)
     try:
         before = {
@@ -2572,6 +2606,8 @@ def test_an_open_pulse_is_moved_onto_the_board_by_lane_name(sequence) -> None:
 
         described = _board_description()
         assert presenter.sequence.target == described.target
+        # The move keeps the pulse's own Config switch.
+        assert presenter.sequence.config_enabled
         after = {
             lane: [period.states[index] for period in presenter.sequence.periods]
             for index, lane in enumerate(presenter.sequence.target.raw_lanes)
@@ -2602,6 +2638,7 @@ def test_a_board_that_will_not_describe_itself_is_reported(sequence) -> None:
     try:
         presenter.connect_to("remote", "127.0.0.1:18861")
         assert "cannot read the board" in view.schedule_view.connection.status
+        assert view.schedule_view.connection.status_word == "error"
         assert any("would not describe itself" in text for text in view.warnings)
     finally:
         presenter.close()
@@ -2621,6 +2658,8 @@ def test_the_preview_offers_its_sizes_and_the_content_picks_one(presenter) -> No
     assert view.size == recommended_pulse_preset(
         _preview_rows(presenter), len(presenter.sequence.periods)
     )
+    # What the drawing shows is a report of the operation just done.
+    assert "period" in view.status and view.status_word == "task"
 
 
 def test_picking_a_size_pins_it_until_the_content_changes_shape(presenter) -> None:
@@ -2784,6 +2823,7 @@ def test_a_board_owns_its_wiring_and_only_names_may_change(presenter, sequence, 
         port for port in presenter.sequence.target.ports if port.label == "renamed"
     ]
     assert renamed, presenter.view.target_view.feedback
+    assert presenter.view.target_view.feedback_word == "task"
     # A rename is metadata: the wiring and its fingerprint do not move.
     assert presenter.sequence.target.raw_lanes == sequence.target.raw_lanes
     assert presenter.sequence.target.package_pins == sequence.target.package_pins
@@ -2813,6 +2853,7 @@ def test_dropping_a_port_while_a_board_is_attached_is_refused(presenter) -> None
 
     assert presenter.sequence.target is before
     assert "cannot be added or removed" in view.feedback
+    assert view.feedback_word == "error"
 
 
 def test_offline_apply_takes_the_wiring_the_page_offers(presenter, sequence) -> None:
@@ -2844,6 +2885,7 @@ def test_offline_apply_takes_the_wiring_the_page_offers(presenter, sequence) -> 
     presenter.view.target_apply_requested.emit(tuple(view.records))
     assert presenter.sequence is before
     assert "nothing to change" in view.feedback
+    assert view.feedback_word == "idle"
 
     dac = next(record for record in view.records if record.kind == "dac")
     spec = before.target.by_key[dac.key]
@@ -3071,9 +3113,9 @@ def test_the_starter_program_matches_the_bound_fields(presenter, sequence) -> No
     presenter.view.binding_committed.emit('duration', period_id, None, True, 'default')
     presenter.view.binding_committed.emit('analog', period_id, dac.key, True, 'default')
 
-    presenter.view.scan_template_requested.emit("column_stack")
+    presenter.view.scan_template_requested.emit("columns")
 
-    assert "np.column_stack" in scan.page.source_text
+    assert "scan_table = {" in scan.page.source_text
     # One column per bound slot, each seeded by its own kind.
     assert scan.page.source_text.count("np.linspace") == 2
     assert "DAC code" in scan.page.source_text
@@ -3094,7 +3136,13 @@ def test_running_the_program_keeps_a_table_of_the_right_width(presenter, sequenc
     assert len(presenter._state.scan_rows) == 7
     assert presenter._state.scan_source_dirty is False
     assert "7 scan point" in scan.page.progress_text
+    assert scan.page.progress_word == "task"
     assert "more point" not in scan.page.table_text
+    # A program that leaves no table says why on the same line, in the
+    # error ink.
+    _run_scan(presenter.view, "x = 1")
+    assert "did not assign scan_table" in scan.page.progress_text
+    assert scan.page.progress_word == "error"
 
 
 def test_a_table_of_the_wrong_width_is_refused(presenter, sequence) -> None:
@@ -3138,20 +3186,31 @@ def test_the_table_is_uploaded_with_the_pulse(presenter, sequence) -> None:
     board.events.clear()
     period_id = sequence.periods[3].period_id
     presenter.view.duration_committed.emit(period_id, 1.0, "s")
-    presenter.view.binding_committed.emit('duration', period_id, None, True, 'default')
+    for marked in (sequence.periods[1], sequence.periods[3], sequence.periods[2]):
+        presenter.view.binding_committed.emit('duration', marked.period_id, None, True, 'default')
+    field = f"duration:{period_id}"
+    # Three fields are marked Scan and the table names one: only that one is
+    # a slot, and the other two play their own values.
     # A whole-second span still fits the row counter at one-tick resolution.
     # The board receives absolute tick counts, while Sync must report the
     # exact values those ticks play rather than the unquantized requests.
     _run_scan(
         presenter.view,
         "import numpy as np\n"
-        "scan_table = np.array([0.500000004, 1.0, 1.499999996]).reshape(-1, 1)\n"
+        f"scan_table = {{'{field}': np.array([0.500000004, 1.0, 1.499999996])}}\n"
     )
 
     assert presenter.fire() is True
     assert uploaded == [((25_000_000,), (50_000_000,), (75_000_000,))]
+    assert [binding.field_id for binding in board._applied.source.scan_bindings] == [field]
     assert presenter.sync_from_sequencer() is True
     assert presenter._state.scan_rows == ((0.5,), (1.0,), (1.5,))
+    assert presenter._state.scan_fields == ((field, "s"),)
+    assert len(presenter.sequence.scan_bindings) == 3
+    # Marking one more field Scan does not touch a table that does not name it.
+    presenter.view.binding_committed.emit('duration', sequence.periods[0].period_id, None, True, 'default')
+    assert presenter._state.scan_rows == ((0.5,), (1.0,), (1.5,))
+    assert presenter.control_state()["scan"]["fields"] == [field]
 
 
 def test_the_status_dot_says_what_the_board_is_doing(presenter, sequence) -> None:
@@ -3303,12 +3362,14 @@ def test_a_loaded_scan_file_is_checked_the_way_a_generated_one_is(presenter, tmp
     assert validate_scan_table(np.full((4, len(columns)), 0.001), columns)
 
     authored = ((0.0041,), (0.0052,), (0.0063,))
-    presenter._take_scan_rows(authored)
+    field, = (binding.field_id for binding in presenter.sequence.scan_bindings)
+    presenter._take_scan_rows(presenter.sequence, authored)
     presenter.path = str(tmp_path / "pulse.json")
     saved = presenter.save_scan_array()
-    np.testing.assert_allclose(np.load(saved), authored)
+    # Saved with its field's id, so it finds its field again.
+    np.testing.assert_allclose(np.load(saved)[field], [row[0] for row in authored])
 
-    presenter._take_scan_rows(((0.01,),))
+    presenter._take_scan_rows(presenter.sequence, ((0.01,),))
     presenter.view.open_answer = saved
     assert presenter.load_scan_array() is True
     assert presenter._state.scan_rows == authored
@@ -3321,10 +3382,28 @@ def test_a_loaded_scan_file_is_checked_the_way_a_generated_one_is(presenter, tmp
     flat = tmp_path / "sweep.npy"
     np.save(flat, np.asarray([row[0] for row in authored]))
     for path in (one_column, flat):
-        presenter._take_scan_rows(((0.01,),))
+        presenter._take_scan_rows(presenter.sequence, ((0.01,),))
         presenter.view.open_answer = str(path)
         assert presenter.load_scan_array() is True, presenter.view.warnings
         assert presenter._state.scan_rows == authored
+
+    # With a second Scan field the unnamed one-column files no longer say
+    # which field they sweep, but a file that names its column -- a header
+    # line, or the .npy Save array wrote -- drives that field alone.
+    presenter.view.binding_committed.emit('duration', presenter.sequence.periods[1].period_id, None, True, 'default')
+    named = tmp_path / "named.csv"
+    named.write_text(f"{field}\n0.0041\n0.0052\n0.0063\n", encoding="utf-8")
+    for path in (one_column, named, Path(saved)):
+        presenter.view.open_answer = str(path)
+        assert presenter.load_scan_array() is (path != one_column)
+        if path == one_column:
+            assert "2 field(s)" in presenter.view.warnings[-1]
+            continue
+        assert presenter._state.scan_rows == authored
+        assert presenter._state.scan_fields == ((field, presenter.sequence.scan_bindings[0].unit),)
+    # Unmarking the field the table does not drive leaves the table alone.
+    presenter.view.binding_committed.emit('duration', presenter.sequence.periods[1].period_id, None, False, 'default')
+    assert presenter._state.scan_rows == authored
 
     # The public API uses the same file/table owner and its existing workers,
     # without the view's picker or a message dialog after the call returned.
@@ -3342,7 +3421,7 @@ def test_a_loaded_scan_file_is_checked_the_way_a_generated_one_is(presenter, tmp
         destination = tmp_path / "explicit.npy"
         assert api.invoke_public("save_scan_array", {"path": str(destination)}) is True
         worker.deliver_until(lambda: not api.control_state()["pending"])
-        np.testing.assert_array_equal(np.load(destination), authored)
+        np.testing.assert_array_equal(np.load(destination)[field], [row[0] for row in authored])
         assert str(destination) in api.control_state()["scan"]["progress"]
 
         program = tmp_path / "scan.py"
@@ -3360,7 +3439,7 @@ def test_a_loaded_scan_file_is_checked_the_way_a_generated_one_is(presenter, tmp
         assert "bad API sweep" in api.last_warning and api.state.scan_rows == kept
         assert api.invoke_public("load_scan_array", {"path": str(tmp_path / "absent.npy")}) is True
         worker.deliver_until(lambda: not api.control_state()["pending"])
-        assert "cannot read" in api.last_warning and api.state.scan_rows == kept
+        assert "Cannot read" in api.last_warning and api.state.scan_rows == kept
         assert api.invoke_public("load_scan_array", {}) is False
         assert api.invoke_public("ask_for_pulse", {}) is False
 
@@ -3532,8 +3611,7 @@ def test_a_bracket_repeats_at_least_the_domains_minimum(sequence, tmp_path) -> N
     view = _EditorView()
     presenter = PulseEditorPresenter(view, sequence, sequencer=board)
     target = tmp_path / "empty.json"
-    asked = []
-    view.ask_save_path = lambda *args: (asked.append(args), str(target))[1]
+    view.ask_save_path = lambda *args: str(target)
     ids = tuple(period.period_id for period in sequence.periods)
     try:
         for start, end, gap in ((ids[0], None, 0), (ids[1], ids[0], 1), (None, ids[-1], len(ids))):
@@ -3548,26 +3626,19 @@ def test_a_bracket_repeats_at_least_the_domains_minimum(sequence, tmp_path) -> N
             order = view.schedule_view.schedule.item_order
             assert order.index(("bracket", "b:end")) == order.index(("bracket", "b:start")) + 1
             assert view.warnings == [], "ordinary empty-bracket editing raised a modal warning"
-            with pytest.raises(ValueError) as refusal:
-                current.require_nonempty_brackets()
-            message = str(refusal.value)
+            # A placeholder waiting for periods: it plays (as nothing), saves
+            # and reopens as written, and the preview draws no loop for it.
             board.events.clear()
-            baseline, path = presenter._saved_state, presenter.path
-            assert presenter.fire() is False
-            view.fire_requested.emit()
-            assert presenter.save_pulse() == ""
-            presenter.save_preview_image()
-            assert view.warnings == [message] * 4
-            assert board.events == [] and asked == [] and not target.exists()
-            assert presenter.sequence is current and presenter._saved_state is baseline and presenter.path == path
-            with pytest.raises(ValueError, match="is empty"):
-                timeline_of(current)
-            view.warnings.clear()
+            assert presenter.fire() is True and "load" in board.events
+            assert board._applied.program.loops == ()
+            presenter.stop()
+            assert presenter.save_pulse() == str(target)
+            assert read_pulse(target).sequence.brackets == presenter.sequence.brackets == current.brackets
+            assert [marker.series for marker in timeline_of(current).loop_markers] == [None]
+            assert view.warnings == []
             presenter.insert_period(("bracket", "b:end"))
-            presenter.sequence.require_nonempty_brackets()
             assert presenter.compile()[1].loops[0][2] == 5
             assert presenter.sequence.run_repeats == sequence.run_repeats
-        assert presenter.save_pulse() == str(target) and target.exists()
     finally:
         presenter.close()
 
@@ -3725,7 +3796,20 @@ def test_field_identity_survives_binding_changes_and_renaming(sequence) -> None:
         presenter.set_config_binding(original, "shared_time")
         assert presenter.sequence.bindings[0].field_id == original
         assert presenter.sequence.bindings[0].config_key == "shared_time"
+        # Default keeps the Config name, unread and listed muted, and Config
+        # finds it again; clearing the kept name lets the binding go.
         presenter.set_binding("duration", period, None, False, "default")
+        kept, = presenter.sequence.bindings
+        assert (kept.source, kept.config_key) == ("default", "shared_time")
+        assert not presenter.sequence.config_bindings
+        page = view.config_page
+        assert page.parked == (original,) and page.bindings[0][2] == "shared_time"
+        assert page.bindings[0][5] == "Default (Config name kept)"
+        presenter.set_binding("duration", period, None, False, "config")
+        assert presenter.sequence.config_bindings[0].config_key == "shared_time"
+        assert view.config_page.parked == ()
+        presenter.set_binding("duration", period, None, False, "default")
+        presenter.set_config_binding(original, "")
         assert presenter.sequence.bindings == ()
         presenter.set_binding("duration", period, None, True, "default")
         assert presenter.sequence.bindings[0].field_id == original
@@ -3845,7 +3929,7 @@ def test_sync_brings_the_board_s_pulse_back_into_the_editor(sequence) -> None:
         assert len(presenter.sequence.periods) == held, (
             "the editor shows what the board is holding, not what it had drifted to"
         )
-        assert any("synced from the board" in text for text in view.done)
+        assert any("Synced from the board" in text for text in view.done)
     finally:
         presenter.close()
 
@@ -4135,6 +4219,116 @@ def test_a_number_shown_in_a_field_is_the_number_the_document_holds(sequence) ->
         assert "e" not in shown.lower(), shown
 
 
+def test_open_array_reads_a_text_file_the_way_it_was_written(presenter, tmp_path) -> None:
+    """Comment and blank lines are not rows, and a header names its columns.
+
+    The header used to be whatever the first line held, so the header
+    np.savetxt writes (a '#' line), a blank first line and a spreadsheet's
+    byte-order mark were all read as field names and refused; a header that
+    named fewer columns than the rows held dropped the rest without a word.
+    """
+
+    import numpy as np
+
+    ids = [period.period_id for period in presenter.sequence.periods]
+    presenter.view.binding_committed.emit('duration', ids[3], None, True, 'default')
+    field = f"duration:{ids[3]}"
+    np.savetxt(tmp_path / "savetxt.csv", np.array([0.0041, 0.0052]), delimiter=",", header=field)
+    written = {
+        "comment_first.csv": "# a sweep of the readout\n0.0041\n0.0052\n",
+        "blank_first.csv": "\n0.0041\n\n0.0052\n",
+        "bom_named.csv": "﻿" + field + "\n0.0041\n0.0052\n",
+        "comment_then_named.txt": f"# made by hand\n\n{field}\n0.0041\n0.0052\n",
+    }
+    for name, text in written.items():
+        (tmp_path / name).write_text(text, encoding="utf-8")
+    for name in ("savetxt.csv", *written):
+        presenter._take_scan_rows(presenter.sequence, ((0.01,),))
+        presenter.view.open_answer = str(tmp_path / name)
+        assert presenter.load_scan_array() is True, (name, presenter.view.warnings)
+        assert presenter._state.scan_rows == ((0.0041,), (0.0052,)), name
+
+    presenter.view.binding_committed.emit('duration', ids[1], None, True, 'default')
+    other = f"duration:{ids[1]}"
+    kept = presenter._state.scan_rows
+    for name, text, problem in (
+        ("fewer.csv", f"{field}\n0.004,0.006\n", "the header names 1 column but each row holds 2"),
+        ("more.csv", f"{field},{other}\n0.004\n", "the header names 2 columns but each row holds 1"),
+        ("twice.csv", f"{field},{field}\n0.004,0.005\n", f"the header names {field!r} more than once"),
+        ("unnamed.csv", f"{field},\n0.004,0.005\n", "column 2 of the header has no name"),
+        ("header_only.csv", f"{field}\n", "the file holds no scan points"),
+    ):
+        (tmp_path / name).write_text(text, encoding="utf-8")
+        presenter.view.open_answer = str(tmp_path / name)
+        assert presenter.load_scan_array() is False
+        assert presenter.view.warnings[-1] == f"Cannot read {name}: {problem}"
+        assert presenter._state.scan_rows == kept
+
+
+def test_a_named_table_ignores_scan_marks_it_does_not_name(sequence, tmp_path) -> None:
+    """Marking or unmarking a field the table does not name, while its
+    program runs or its file loads, leaves the table meaning what it meant.
+
+    Only an unnamed table -- one column per Scan field, in slot order -- is
+    re-read by such a change, and a named table is refused only when one of
+    ITS fields changes.
+    """
+
+    worker, view = _DeviceWorker(), _EditorView()
+    api = PulseEditorPresenter(view, sequence, run_device_work=worker,
+                               run_safe_work=_run_preview_immediately, run_preview_work=worker)
+    ids = [period.period_id for period in sequence.periods]
+    named = f"duration:{ids[3]}"
+    try:
+        for period_id in (ids[1], ids[3]):
+            view.binding_committed.emit('duration', period_id, None, True, 'default')
+        unit = next(binding.unit for binding in api.sequence.scan_bindings if binding.field_id == named)
+
+        def run(source: str) -> None:
+            api.invoke_public("edit_scan_source", {"source": source})
+            assert api.invoke_public("run_scan_program", {}) is True
+            # Marks change while the program is on the worker.
+            view.binding_committed.emit('duration', ids[1], None, False, 'default')
+            view.binding_committed.emit('duration', ids[5], None, True, 'default')
+            worker.deliver_until(lambda: not api.control_state()["scan"]["pending"])
+            view.binding_committed.emit('duration', ids[5], None, False, 'default')
+            view.binding_committed.emit('duration', ids[1], None, True, 'default')
+
+        run(f"scan_table = {{'{named}': [0.004, 0.005]}}\n")
+        assert api.state.scan_rows == ((0.004,), (0.005,))
+        assert api.state.scan_fields == ((named, unit),)
+
+        api.clear_scan_array()
+        run("scan_table = [[0.004, 0.006], [0.005, 0.007]]\n")
+        assert api.state.scan_rows == ()
+        assert api.last_warning == "Scan fields or units changed while generating the table. Generate it again."
+
+        path = tmp_path / "named.csv"
+        path.write_text(f"{named}\n0.004\n0.005\n", encoding="utf-8")
+        assert api.invoke_public("load_scan_array", {"path": str(path)}) is True
+        view.binding_committed.emit('duration', ids[1], None, False, 'default')
+        worker.deliver_until(lambda: not api.control_state()["pending"])
+        assert api.state.scan_rows == ((0.004,), (0.005,))
+        assert api.state.scan_fields == ((named, unit),)
+
+        # A field the table names changing unit under it is still refused.
+        api.clear_scan_array()
+        api.invoke_public("edit_scan_source", {"source": f"scan_table = {{'{named}': [0.004, 0.005]}}\n"})
+        assert api.invoke_public("run_scan_program", {}) is True
+        api._edit_state(sequence=replace(api.sequence, bindings=tuple(
+            replace(binding, unit="ms" if unit != "ms" else "us") if binding.field_id == named else binding
+            for binding in api.sequence.bindings
+        )))
+        worker.deliver_until(lambda: not api.control_state()["scan"]["pending"])
+        assert api.state.scan_rows == ()
+        assert api.last_warning == (
+            "A field the table names stopped being Scan or changed unit while generating the table. "
+            "Generate it again."
+        )
+    finally:
+        api.close()
+
+
 def test_the_edit_page_says_how_many_points_will_be_played(presenter, sequence) -> None:
     """Slots is half the question; the other half is what will actually run."""
 
@@ -4150,6 +4344,14 @@ def test_the_edit_page_says_how_many_points_will_be_played(presenter, sequence) 
         "scan_table = (np.arange(21) + 1).reshape(-1, 1) * 0.001\n"
     )
     assert view.schedule_view.schedule.scan_summary_text == "1 slot · 21 points"
+
+    # The slots are the fields the table drives: two more fields marked Scan
+    # but left out of it play their own values and carry none of its points.
+    for period in (sequence.periods[1], sequence.periods[5]):
+        view.binding_committed.emit('duration', period.period_id, None, True, 'default')
+    assert view.schedule_view.schedule.scan_summary_text == "1 slot · 21 points"
+    view.scan_array_clear_requested.emit()
+    assert view.schedule_view.schedule.scan_summary_text == "3 slots · 0 points"
 
 
 
@@ -4451,7 +4653,7 @@ def test_a_defective_handler_warns_instead_of_killing_the_editor(sequence) -> No
         presenter.reorder_items = detonate
         view.reorder_items_requested.emit((("period", "p0"),))
         assert any(
-            "internal error" in warning and "wired to fail" in warning
+            "Internal error" in warning and "wired to fail" in warning
             for warning in view.warnings
         ), view.warnings
         with pytest.raises(LookupError):
@@ -4754,7 +4956,7 @@ def test_connect_hold_step_and_sync_run_on_the_device_worker(sequence) -> None:
         assert board.events == ["safe", "load", "fire forever"]
         assert {thread for _name, thread in board.callers} == {"pulse-device-worker"}
         assert presenter._held_point == 1
-        assert "held at scan point 2" in presenter._scan_progress  # row 1, as the running line counts it
+        assert "Held at scan point 2" in presenter._scan_progress  # row 1, as the running line counts it
         # The busy sentence comes down with the outcome, though a hold
         # refreshes nothing that would have rewritten it.
         assert view.summary.endswith(f"{SUMMARY_SEPARATOR}{counted(len(presenter.sequence.periods), 'period')}"), view.summary
@@ -4770,7 +4972,7 @@ def test_connect_hold_step_and_sync_run_on_the_device_worker(sequence) -> None:
         assert presenter._device_busy is True
         worker.deliver_until(lambda: not presenter._device_busy)
         assert board.threads_for("applied") == {"pulse-device-worker"}
-        assert not [text for text in view.warnings if "cannot sync" in text]
+        assert not [text for text in view.warnings if "Cannot sync" in text]
         # The board holds row 2 of this very draft: Sync keeps the draft, its
         # scan binding and its table instead of baking the held row in.
         assert presenter.sequence.period_by_id[period_id].duration == pytest.approx(1.0)
@@ -5034,7 +5236,7 @@ def test_control_inspects_edits_and_compiles_loaded_config_without_firing(sequen
             "path": str(tmp_path / "missing.json"), "discard_changes": True,
         })["accepted"]
         worker.deliver_until(lambda: not presenter.control_state()["pending"])
-        assert "cannot update Config" in presenter.control_state()["last_warning"]
+        assert "Cannot update Config" in presenter.control_state()["last_warning"]
         assert presenter.control_state(details=True)["config"]["draft_rows"] == rows
         assert presenter.control_action("config.load", {
             "path": config_path, "discard_changes": True,
@@ -5044,20 +5246,21 @@ def test_control_inspects_edits_and_compiles_loaded_config_without_firing(sequen
 
         path = str(tmp_path / "control-pulse.json")
         assert presenter.control_action("save", {"path": path})["accepted"]
+        played = presenter.control_state()["authored"]["duration_seconds"]
         assert presenter.control_action("bracket_add", {
             "start": sequence.periods[1].period_id, "end": sequence.periods[0].period_id, "count": 1,
         })["accepted"]
-        assert "empty" in presenter.control_state(details=True)["document_error"]
+        # An empty bracket is a draft like any other: it is a document, it
+        # times and it compiles, looping nothing.
+        assert presenter.control_state(details=True)["document"] == state_to_tree(presenter.state)
         assert not presenter.control_state()["validation"]["matches_editor_revision"]
-        assert presenter.control_state()["authored"]["duration_seconds"] is None
-        assert "empty" in presenter.control_catalog()["state"]["authored"]["timing_error"]
+        assert presenter.control_state()["authored"]["duration_seconds"] == played
         assert presenter.control_action("validate", {})["accepted"]
         worker.deliver_until(lambda: not presenter.control_state()["pending"])
-        assert presenter.control_state()["validation"]["valid"] is False
-        assert "empty" in presenter.control_state()["validation"]["error"]
+        assert presenter.control_state()["validation"]["valid"] is True
         refused = presenter.control_action("open", {"path": path})
         assert not refused["accepted"] and "discard_changes" in refused["error"]
-        assert presenter.sequence.brackets, "refused Open must retain the invalid draft"
+        assert presenter.sequence.brackets, "refused Open must retain the draft"
         assert presenter.control_action("open", {"path": path, "discard_changes": True})["accepted"]
         assert not presenter.sequence.brackets and not presenter.dirty
         assert presenter.control_action("open", {"path": path})["accepted"]
@@ -5138,8 +5341,15 @@ def test_editor_config_draft_is_independent_and_only_saved_values_execute(
     parameter = _bind_one_config_parameter(presenter, sequence)
     period = parameter.field_ref.period_id
     default = pulse_field_value(presenter.sequence, parameter.field_ref, parameter.unit)
-    presenter.edit_config_entries((("shared_time", str(default), parameter.unit),))
+    # A row added and never filled stays out of the file and leaves the draft.
+    presenter.edit_config_entries((("", "", ""), ("shared_time", str(default), parameter.unit), ("", " ", "")))
     assert presenter.save_config_values()
+    assert read_config_values(saved) == {"shared_time": (default, parameter.unit)}
+    assert presenter.view.config_page.entries == (("shared_time", str(default).removesuffix(".0"), parameter.unit),)
+    presenter.edit_config_entries((("shared_time", str(default), parameter.unit), ("", "3", "")))
+    assert not presenter.save_config_values()
+    assert presenter.last_warning == "Config row 2 has no name"
+    presenter.edit_config_entries((("shared_time", str(default), parameter.unit),))
     assert presenter._effective_sequence(presenter.sequence) is presenter.sequence
     # A scan-capable field still consumes Config when no Scan table is active.
     presenter.set_binding("duration", period, None, True, "config")

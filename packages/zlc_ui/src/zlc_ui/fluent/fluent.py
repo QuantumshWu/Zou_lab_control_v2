@@ -27,7 +27,7 @@ from zlc_data.units import (
 )
 
 from ..qt import ensure_qt_app
-from ..status import STATUS_SEVERITIES
+from ..status import STATUS_SEVERITIES, STATUS_STATES
 
 from .style import (
     ACCENT,
@@ -58,11 +58,13 @@ from .style import (
     FONT,
     FONT_SIZE,
     GRAPHITE,
+    GREEN,
     GREY,
     HOVER,
     MUTED_LABEL_STYLE,
     ORANGE,
     ORANGE_DARK,
+    ORANGE_TINT,
     PADDING_V,
     PLACEHOLDER,
     RADIUS,
@@ -840,10 +842,60 @@ def status_dot_gap() -> int:
     return scaled_px(8)
 
 
+#: status word -> (dot colour, ink): the ONE table every status dot and the
+#: words beside it are coloured from -- the status strip, a node's row and
+#: its Edit page, the console and Pulse headers, a device field.  ``idle`` is
+#: nothing under way and nothing wrong (a draft still to fill in included);
+#: ``running`` something lasting that is live and healthy; ``task`` a message
+#: about an operation under way or just done; ``warning`` needs attention
+#: but is not a failure; ``error`` failed or unreachable.  Keyed by the two
+#: status vocabularies themselves: a word added there without a colour here
+#: fails at import, not in the first Qt slot that shows it.
+STATUS_CUES: dict[str, tuple[str, str]] = {
+    word: {"idle": (GREY, MUTED_INK), "running": (GREEN, TEXT), "task": (ACCENT, TEXT),
+           "warning": (ORANGE, ORANGE_DARK), "error": (RED, RED_DARK)}[word]
+    for word in dict.fromkeys(STATUS_SEVERITIES + STATUS_STATES)
+}
+
+
+def status_cue(word: str) -> tuple[str, str]:
+    """The ``(dot colour, ink)`` of one status word (:data:`STATUS_CUES`)."""
+
+    return STATUS_CUES[str(word)]
+
+
+def set_status_ink(label: QtWidgets.QWidget, word: str) -> None:
+    """Write ``label`` in the ink of status ``word``, in the body font.
+
+    The whole sheet, so the font is never dropped with the colour, and only
+    when the word CHANGES: a status beat arrives ten times a second, and a
+    sheet write re-parses, repolishes and repaints whatever it says.  A
+    :class:`FluentReadoutEdit` (a status that can be selected and copied)
+    takes the same ink through its own sheet."""
+
+    word = str(word)
+    if label.property("status_word") == word:
+        return
+    ink = STATUS_CUES[word][1]
+    label.setProperty("status_word", word)
+    if isinstance(label, FluentReadoutEdit):
+        label._ink = ink
+        label._apply_style()
+        return
+    label.setStyleSheet(
+        f'QLabel {{ color: {ink}; font: {fluent_font_size()}pt "{FONT}"; '
+        f"background: transparent; border: none; }}"
+    )
+
+
 class FluentStatusDot(QtWidgets.QLabel):
     """A round severity or state mark.  One size by default, the status
     strip's: a header's larger dot beside a strip's smaller one, each with
-    its own gap, started their words 2.7 px apart."""
+    its own gap, started their words 2.7 px apart.
+
+    A status is shown with :meth:`set_state` (one word of
+    :data:`STATUS_CUES`); :meth:`set_color` is for an identity colour that
+    is not a status."""
 
     #: Class attribute: set_color runs from __init__ before any assignment.
     _color = ""
@@ -854,6 +906,11 @@ class FluentStatusDot(QtWidgets.QLabel):
         self._size = scaled_even_px(size)
         self.setFixedSize(self._size, self._size)
         self.set_color(color)
+
+    def set_state(self, word: str) -> None:
+        """The dot of status ``word``, from the one table."""
+
+        self.set_color(STATUS_CUES[str(word)][0])
 
     def set_color(self, color: str) -> None:
         """This colour, written once.
@@ -934,6 +991,10 @@ class FluentLabel(QtWidgets.QLabel):
 
     def __init__(self, text: str = "", parent=None):
         super().__init__(text, parent)
+        # Plain, as it says: text a person typed -- a node's name, "<i>Cam"
+        # -- is shown as typed, never read as markup.  A label that does
+        # carry markup says so (``setTextFormat(Qt.RichText)``).
+        self.setTextFormat(QtCore.Qt.PlainText)
         self.setStyleSheet(f'QLabel {{ color: {TEXT}; font: {fluent_font_size()}pt "{FONT}"; background: transparent; }}')
 
     def paintEvent(self, event) -> None:  # noqa: N802 - Qt naming
@@ -1376,6 +1437,11 @@ class FluentSettingsPopupAnchor:
     The popup itself prevents replay of the one outside press on this anchor;
     closing a row or pressing Escape never delays a subsequent open. ``prepare``
     runs only before showing; ``present`` preserves the caller's placement.
+
+    A :class:`FluentButton` anchor is a toggle command: it wears the active
+    face while its frame is open, told by the frame's own Show and Hide
+    (:meth:`FluentButton.eventFilter`), however the frame was opened or
+    closed.
     """
 
     def __init__(
@@ -1391,6 +1457,9 @@ class FluentSettingsPopupAnchor:
         self._anchor = anchor
         if isinstance(popup, FluentPopup):
             popup._toggle_anchor_ref = weakref.ref(anchor)
+        if isinstance(anchor, FluentButton):
+            anchor._anchored_popup = weakref.ref(popup)
+            popup.installEventFilter(anchor)
 
     def toggle(
         self,
@@ -1567,13 +1636,22 @@ class FluentGroupBox(QtWidgets.QGroupBox):
 #: grey there, blue in the editor -- with white text at 1.65-2.55:1 on top.
 #: ``primary`` is a surface's ONE run or commit action (the deep
 #: ACCENT_STRONG fill, white ink) -- at most one per surface; ``standard``
-#: every other command (the light-blue tint); ``destructive`` a command that
-#: takes something away or stops or shuts something down -- Remove, Delete,
-#: Clear, Unload, a device's Close, Shut down devices, every Stop (a labelled
-#: one sits on the RED_TINT face; a one-glyph remover repeated down rows is
-#: a ghost in quiet ink that turns red only under the pointer, since red at
-#: rest marks problems); and ``destructive_primary`` the confirm of a
-#: destructive question -- the one white-on-red fill.
+#: every other command (the light-blue tint); ``quiet`` a one-glyph command
+#: that closes a view and takes nothing away (a frame's ×: a ghost, never
+#: red); ``destructive`` a command that takes something away or stops or
+#: shuts something down -- Remove, Clear, Unload, Discard, Ungroup, Exclude
+#: selected, Reset (a review's exclusions), Reset wavefront, a device's Close,
+#: Shut down devices, every Stop (a labelled one sits on the RED_TINT face; a
+#: one-glyph remover repeated down rows is a ghost in quiet ink that turns red
+#: only under the pointer, since red at rest marks problems), and it acts on
+#: ONE click;
+#: and ``destructive_primary`` the confirm of a destructive question -- the
+#: one white-on-red fill.
+#: Active (:meth:`FluentButton.set_active`) is not a role but a state: the
+#: SELECTED face a toggle command keeps while what it turned on stands.
+#: Armed (``confirm_twice``) is the destructive_primary face a two-click
+#: remover shows between its first and second click -- only removing a
+#: logic node or a plot panel is armed.
 BUTTON_ROLES = ("primary", "standard", "quiet", "destructive", "destructive_primary")
 
 _BUTTON_STYLE_CACHE: tuple[float, str] | None = None
@@ -1588,6 +1666,26 @@ def _destructive_glyph_faces() -> tuple[str, str]:
     return RED_TINT, _mixed(RED_TINT, RED, 0.3).name()
 
 
+def _quiet_faces() -> tuple[str, str, str, str]:
+    """``(rest ink, hover face, pressed face, ink on a face)`` of every quiet
+    ghost: a glyph that closes a view, a tab's ×, the tab overflow ⋯, a
+    step chip, a stepper cell, a row label or row action that acts.
+
+    MUTED_INK with no face at rest, the ACCENT_TINT wash under the pointer
+    and SELECTED held down, TEXT on either -- the one light-to-medium blue
+    scale, so a quiet thing pressed anywhere looks pressed the same way."""
+
+    return MUTED_INK, ACCENT_TINT, SELECTED, TEXT
+
+
+def arm_interval_ms() -> int:
+    """How long a two-click remover waits for its second click: the
+    system's double-click interval, never under a quarter second -- a
+    double-click is two clicks, and a slower second click still counts."""
+
+    return max(250, int(QtWidgets.QApplication.doubleClickInterval()))
+
+
 def _button_stylesheet() -> str:
     """The one sheet every FluentButton wears; role and state pick the rules.
 
@@ -1597,7 +1695,7 @@ def _button_stylesheet() -> str:
     ink (7.7:1), and held down it is SELECTED, the one colour that means
     "picked"; primary the deep ACCENT_STRONG with white ink (5.2:1), the one
     dark face on its surface.  Destructive has ONE look for every labelled
-    command -- Remove, Delete, Clear, Close, Stop: the RED_TINT face,
+    command -- Remove, Clear, Close, Stop: the RED_TINT face,
     RED_DARK ink (5.4:1), as far from white as the light-blue face is -- so
     a Remove reads the same in a toolbar, a button grid or alone; a
     one-glyph remover repeated down a list of rows (x) stays a ghost with
@@ -1612,8 +1710,11 @@ def _button_stylesheet() -> str:
     command's whole boundary.  Pointer and press each step the face a
     shade.  Dirty (something new to save) is ONE rule for every save or
     commit: clean it is the role it was given, unsaved it is the primary
-    with a trailing star.  Disabled is a flat DIVIDER face with DISABLED_INK
-    and no frame; a disabled ghost stays a ghost.
+    with a trailing star.  Active is the held-down SELECTED face kept while
+    a toggle is on (SELECTED_HOVER under the pointer); it outranks on_tint,
+    because an engaged toggle is state the operator must see even on a
+    green card.  Disabled is a flat DIVIDER face with DISABLED_INK and no
+    frame; a disabled ghost stays a ghost.
     """
 
     global _BUTTON_STYLE_CACHE
@@ -1628,6 +1729,7 @@ def _button_stylesheet() -> str:
     red_strong_hover = QtGui.QColor(RED_DARK).darker(112).name()
     red_strong_pressed = QtGui.QColor(RED_DARK).darker(126).name()
     on_tint_pressed = _mixed(BG, DIVIDER, 0.6).name()
+    quiet_ink, quiet_hover, quiet_pressed, quiet_face_ink = _quiet_faces()
     style = f"""
     QPushButton {{
         background: {BUTTON_TINT};
@@ -1675,13 +1777,13 @@ def _button_stylesheet() -> str:
         background: {red_strong_pressed}; border-color: {red_strong_pressed};
     }}
     QPushButton[role="quiet"] {{
-        background: transparent; border-color: transparent; color: {MUTED_INK};
+        background: transparent; border-color: transparent; color: {quiet_ink};
     }}
     QPushButton[role="quiet"]:hover {{
-        background: {ACCENT_TINT}; border-color: {ACCENT_TINT}; color: {TEXT};
+        background: {quiet_hover}; border-color: {quiet_hover}; color: {quiet_face_ink};
     }}
     QPushButton[role="quiet"]:pressed {{
-        background: {SELECTED}; border-color: {SELECTED}; color: {TEXT};
+        background: {quiet_pressed}; border-color: {quiet_pressed}; color: {quiet_face_ink};
     }}
     QPushButton[glyph="true"] {{
         padding: 0px {scaled_px(4, minimum=2)}px;
@@ -1696,13 +1798,20 @@ def _button_stylesheet() -> str:
     QPushButton[role="destructive"][glyph="true"]:pressed {{
         background: {red_tint_pressed}; border-color: {red_tint_pressed}; color: {RED_DARK};
     }}
+    QPushButton[active="true"] {{
+        background: {SELECTED}; border-color: {SELECTED}; color: {HOVER};
+    }}
+    QPushButton[active="true"]:hover, QPushButton[active="true"]:pressed {{
+        background: {SELECTED_HOVER}; border-color: {SELECTED_HOVER};
+    }}
+    QPushButton[role="quiet"][active="true"] {{ color: {quiet_face_ink}; }}
     QPushButton:disabled, QPushButton[role="primary"]:disabled,
     QPushButton[role="destructive"]:disabled, QPushButton[on_tint="true"]:disabled,
-    QPushButton[role="destructive_primary"]:disabled {{
+    QPushButton[role="destructive_primary"]:disabled, QPushButton[active="true"]:disabled {{
         background: {DIVIDER}; border-color: {DIVIDER}; color: {DISABLED_INK};
     }}
     QPushButton[role="destructive"][glyph="true"]:disabled,
-    QPushButton[role="quiet"]:disabled {{
+    QPushButton[role="quiet"]:disabled, QPushButton[role="quiet"][active="true"]:disabled {{
         background: transparent; border-color: transparent; color: {DISABLED_INK};
     }}
     """
@@ -1713,17 +1822,40 @@ def _button_stylesheet() -> str:
 class FluentButton(QtWidgets.QPushButton):
     """A command, drawn by its ``role`` (see :data:`BUTTON_ROLES`).
 
-    A command only: an on/off setting is a :class:`FluentSwitch`, never a
-    checkable button.  The label is never elided: the button asks for its
-    whole text plus padding, and a layout too narrow for it is the layout's
-    to fix.
+    A command only: an on/off SETTING is a FluentSwitch, never a checkable
+    button.  A toggle command -- one whose next press undoes its last
+    (Expand/Collapse, Pause/Resume, the button that opens a frame) -- stays
+    a command and shows it is ON with :meth:`set_active`, projected by its
+    owner, so the face never runs ahead of the owner.  The label is never
+    elided: the button asks for its whole text plus padding, and a layout
+    too narrow for it is the layout's to fix.
+
+    ``confirm_twice`` (a phrase: "remove this node") makes a remover take
+    two clicks: the first arms it -- the white-on-red destructive_primary
+    face, label and width unchanged -- and a second click within
+    :func:`arm_interval_ms` emits :attr:`confirmed`; a double-click is two
+    clicks.  Left alone, hidden or disabled it returns to rest.  Such a
+    button words its own tooltip ("Click twice to ...", "Click again to
+    ..."), and its owner acts on ``confirmed``, never on ``clicked``.  Only
+    removing a logic node or a plot panel is armed; every other command
+    acts on one click.
     """
 
-    def __init__(self, text: str = "", parent=None, *, role: str = "standard"):
+    #: The second click of an armed button: the one signal to act on.
+    confirmed = QtCore.pyqtSignal()
+
+    def __init__(self, text: str = "", parent=None, *, role: str = "standard",
+                 confirm_twice: str = ""):
         self._label = str(text)
         self._dirty = False
+        self._armed = False
+        self._confirm_what = ""
+        self._arm_timer: QtCore.QTimer | None = None
+        #: The frame a FluentSettingsPopupAnchor opens from this button.
+        self._anchored_popup = None
         super().__init__(text, parent)
         self.setProperty("on_tint", False)
+        self.setProperty("active", False)
         self.setMinimumHeight(control_height())
         # Default sizing is set ONCE here: a caller that opts into Expanding
         # (a button grid) keeps it.
@@ -1732,6 +1864,8 @@ class FluentButton(QtWidgets.QPushButton):
         self._mark_glyph()
         self.set_role(role)
         self.setStyleSheet(_button_stylesheet())
+        self.clicked.connect(self._click_for_arm)
+        self.set_confirm_twice(confirm_twice)
 
     def setText(self, text: str) -> None:  # noqa: N802 - Qt API name
         self._label = str(text)
@@ -1755,8 +1889,10 @@ class FluentButton(QtWidgets.QPushButton):
             hint.setHeight(self.minimumHeight())
         return hint
 
-    def _glyph_ink(self) -> str:
-        """The ink the sheet gives this glyph button's label in its state."""
+    def glyph_ink(self) -> str:
+        """The ink the sheet gives this glyph button's label in its state --
+        also the ink an icon engine paints a symbol in, so an icon-only
+        button follows its role exactly as a one-glyph label does."""
 
         role = self.role()
         if not self.isEnabled():
@@ -1764,7 +1900,7 @@ class FluentButton(QtWidgets.QPushButton):
         if role == "destructive":
             return RED_DARK if self.underMouse() or self.isDown() else MUTED_INK
         if role == "quiet":
-            return TEXT if self.underMouse() or self.isDown() else MUTED_INK
+            return TEXT if self.is_active() or self.underMouse() or self.isDown() else MUTED_INK
         if role in ("primary", "destructive_primary"):
             return SURFACE
         return HOVER
@@ -1800,7 +1936,7 @@ class FluentButton(QtWidgets.QPushButton):
                               QtGui.QIcon.On if self.isChecked() else QtGui.QIcon.Off)
         elif glyph:
             paint_centred_ink(painter, self, QtCore.QRectF(self.rect()), self.font(), option.text,
-                              self._glyph_ink())
+                              self.glyph_ink())
         else:
             style = self.style()
             area = style.subElementRect(QtWidgets.QStyle.SE_PushButtonContents, option, self)
@@ -1835,6 +1971,28 @@ class FluentButton(QtWidgets.QPushButton):
             self.clearFocus()
         super().setVisible(visible)
 
+    def hideEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        # Out of sight -- the button, its row or its tab -- a first click
+        # is forgotten: no second click comes back to an armed remover.
+        self.disarm()
+        super().hideEvent(event)
+
+    def changeEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        # Disabled (a Task taking the console over) disarms as well.
+        if event.type() == QtCore.QEvent.EnabledChange and not self.isEnabled():
+            self.disarm()
+        super().changeEvent(event)
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802 - Qt naming
+        """Active while the frame this button anchors is open: its own Show
+        and Hide say so, however it was opened or closed.  A frame hidden
+        with its page stays open (``isHidden`` is only an explicit hide)."""
+
+        popup = None if self._anchored_popup is None else self._anchored_popup()
+        if watched is popup and event.type() in (QtCore.QEvent.Show, QtCore.QEvent.Hide):
+            self.set_active(not watched.isHidden())
+        return super().eventFilter(watched, event)
+
     def enterEvent(self, event) -> None:  # noqa: N802 - Qt naming
         super().enterEvent(event)
         if self.property("glyph"):
@@ -1849,13 +2007,20 @@ class FluentButton(QtWidgets.QPushButton):
         """A one-symbol label (×, ⋯, ▾) is drawn larger, with little padding.
 
         At body size such a symbol was a speck in the middle of a button
-        padded for a word.
+        padded for a word.  An icon with no words is a glyph too: it takes
+        the same faces, and its engine paints in :meth:`glyph_ink`.
         """
 
-        glyph = len(self._label) == 1 and not self._label.isalnum()
+        glyph = (len(self._label) == 1 and not self._label.isalnum()) or (
+            not self._label and not self.icon().isNull()
+        )
         if self.property("glyph") != glyph:
             self.setProperty("glyph", glyph)
             self._repolish()
+
+    def setIcon(self, icon: QtGui.QIcon) -> None:  # noqa: N802 - Qt API name
+        super().setIcon(icon)
+        self._mark_glyph()
 
     def set_on_tint(self, on_tint: bool) -> None:
         """Whether the button sits on a TINTED card body (a Config
@@ -1872,7 +2037,8 @@ class FluentButton(QtWidgets.QPushButton):
             self._repolish()
 
     def role(self) -> str:
-        """The role it is drawn with now: primary while dirty."""
+        """The role it is drawn with now: primary while dirty,
+        destructive_primary while armed."""
 
         return str(self.property("role"))
 
@@ -1883,13 +2049,68 @@ class FluentButton(QtWidgets.QPushButton):
         if value not in BUTTON_ROLES:
             raise ValueError(f"button role must be one of {BUTTON_ROLES}, not {value!r}")
         self._role = value
+        self.disarm()
         self._show_role()
 
     def _show_role(self) -> None:
-        shown = "primary" if self._dirty else self._role
+        shown = (
+            "primary" if self._dirty
+            else "destructive_primary" if self._armed
+            else self._role
+        )
         if self.property("role") != shown:
             self.setProperty("role", shown)
             self._repolish()
+
+    def set_active(self, active: bool) -> None:
+        """Show a toggle command ON (the SELECTED face) or off; the owner
+        projects it from its own state.  Repolished only on a change."""
+
+        value = bool(active)
+        if bool(self.property("active")) != value:
+            self.setProperty("active", value)
+            self._repolish()
+
+    def is_active(self) -> bool:
+        return bool(self.property("active"))
+
+    def set_confirm_twice(self, what: str) -> None:
+        """Make this remover take two clicks to ``what`` ("remove this
+        node"), or, with ``""``, act on one click again."""
+
+        self.disarm()
+        self._confirm_what = str(what)
+        if self._confirm_what:
+            self.setToolTip(f"Click twice to {self._confirm_what}")
+
+    def is_armed(self) -> bool:
+        return self._armed
+
+    def disarm(self) -> None:
+        """Back to rest: the first click of a two-click remover forgotten."""
+
+        if self._arm_timer is not None:
+            self._arm_timer.stop()
+        if self._armed:
+            self._armed = False
+            self._show_role()
+            self.setToolTip(f"Click twice to {self._confirm_what}")
+
+    def _click_for_arm(self, _checked: bool = False) -> None:
+        if not self._confirm_what:
+            return
+        if self._armed:
+            self.disarm()
+            self.confirmed.emit()
+            return
+        self._armed = True
+        self._show_role()
+        self.setToolTip(f"Click again to {self._confirm_what}")
+        if self._arm_timer is None:
+            self._arm_timer = QtCore.QTimer(self)
+            self._arm_timer.setSingleShot(True)
+            self._arm_timer.timeout.connect(self.disarm)
+        self._arm_timer.start(arm_interval_ms())
 
     def _repolish(self) -> None:
         self.style().unpolish(self)
@@ -1917,6 +2138,25 @@ class FluentButton(QtWidgets.QPushButton):
 
     def is_dirty(self) -> bool:
         return self._dirty
+
+
+def fit_button_words(button: FluentButton, words: tuple[str, ...]) -> None:
+    """Size ``button`` for the widest of the ``words`` it can say.
+
+    Measured through the button itself, so its padding and font count; the
+    slot then keeps one width whatever it says, and what stands beside it
+    never moves -- Stop beside a Start that reads Restart, the header's
+    commands beside a Pause that reads Resume, an axis combo beside an
+    Apply axis that reads Create axis.
+    """
+
+    shown = button.text()
+    widths = []
+    for label in words:
+        button.setText(label)
+        widths.append(button.sizeHint().width())
+    button.setText(shown)
+    button.setMinimumWidth(max(widths))
 
 
 def _apply_fluent_context_menu(widget, event, *, extra=()) -> None:
@@ -2092,6 +2332,10 @@ class FluentLineEdit(QtWidgets.QLineEdit):
         values"), or that nothing is chosen yet is something the operator
         must read, so information is the default; only a field's own name
         repeated inside it ("File name", "role") may stay faint.
+
+        A switched-off field writes either in DISABLED_INK, as it writes its
+        text: a prompt in reading ink invited typing into a box that
+        refuses it.
         """
 
         colour = QtGui.QColor(TEXT if prompt else MUTED_INK)
@@ -2099,6 +2343,7 @@ class FluentLineEdit(QtWidgets.QLineEdit):
             colour.setAlpha(128)
         palette = self.palette()
         palette.setColor(QtGui.QPalette.PlaceholderText, colour)
+        palette.setColor(QtGui.QPalette.Disabled, QtGui.QPalette.PlaceholderText, QtGui.QColor(DISABLED_INK))
         self.setPalette(palette)
 
     def set_display_elide(self, mode) -> None:
@@ -2547,6 +2792,7 @@ class FluentReadoutEdit(FluentLineEdit):
 
     It wore a grey box with a faint edge, which is the disabled button's chrome: a path
     the operator was meant to read looked like a control that was switched off.
+    A readout that reports a status takes its ink from :func:`set_status_ink`.
 
     Inherits FluentLineEdit's sizing / API (``setText`` / ``text``) so it drops into the same
     rows.  A value stands in a column of fields -- a card's Total under its Name, a result
@@ -2573,6 +2819,9 @@ class FluentReadoutEdit(FluentLineEdit):
         self.set_display_elide(QtCore.Qt.ElideMiddle)
         self.setToolTip(self.text())
 
+    #: The text's ink: TEXT, or a status word's (:func:`set_status_ink`).
+    _ink = TEXT
+
     def setText(self, text: str) -> None:  # noqa: N802 - Qt API name
         super().setText(text)
         self.setToolTip(self.text())
@@ -2588,7 +2837,7 @@ class FluentReadoutEdit(FluentLineEdit):
                 border-left-width: 0px;
                 border-right-width: 0px;
                 padding: {scaled_px(PADDING_V)}px 0px;
-                color: {TEXT};
+                color: {self._ink};
                 font: {fluent_font_size()}pt "{FONT}";
             }}
             """
@@ -3237,6 +3486,7 @@ class _FluentMessageDialog(FluentCardDialog):
         confirm: bool = False,
         confirm_text: str = "Confirm",
         cancel_text: str = "Cancel",
+        cancel_role: str = "standard",
     ):
         super().__init__(parent)
         pad = scaled_px(16, minimum=10)
@@ -3257,7 +3507,7 @@ class _FluentMessageDialog(FluentCardDialog):
         row = QtWidgets.QHBoxLayout()
         row.addStretch(1)
         if confirm:
-            cancel = FluentButton(str(cancel_text))
+            cancel = FluentButton(str(cancel_text), role=cancel_role)
             cancel.clicked.connect(self.reject)
             row.addWidget(cancel)
             # A warning question confirms something that cannot be taken
@@ -3356,11 +3606,19 @@ def stamped_file_name(stem: str, extension: str, *, stamp: str | None = None) ->
     saves of the same board are two files and the second must not silently be
     the first.  ONE rule: the Edit tab's Save figure and the console's own
     Save… (layout) and Save image… had begun to grow their own.
+
+    The name is often one an operator gave (a node's, a panel's), so every
+    character a Windows file name cannot hold becomes ``_``: a ``:`` in it
+    wrote the figure into a hidden stream of another file, and ``?``, ``*``
+    or ``|`` refused the save.
     """
 
     from datetime import datetime  # noqa: PLC0415 -- only a save needs the clock
 
-    text = str(stem).strip().replace("/", "_").replace("\\", "_") or "untitled"
+    text = "".join(
+        "_" if char in '<>:"/\\|?*' or ord(char) < 32 else char
+        for char in str(stem).strip()
+    ) or "untitled"
     moment = stamp if stamp is not None else datetime.now().strftime("%Y%m%d_%H%M%S")
     suffix = str(extension).lstrip(".")
     return f"{text}_{moment}.{suffix}" if suffix else f"{text}_{moment}"
@@ -3398,11 +3656,13 @@ def fluent_confirm(
     confirm_text: str = "Confirm",
     cancel_text: str = "Cancel",
     kind: str = "warning",
+    cancel_role: str = "standard",
 ) -> bool:
     """Ask one modal yes/no question with the shared Fluent chrome.
 
-    One question, one dialog: it is retired once the answer has been read,
-    for the reason :func:`fluent_message` gives."""
+    ``cancel_role`` draws the answer that declines: a Stop is destructive,
+    red like every Stop.  One question, one dialog: it is retired once the
+    answer has been read, for the reason :func:`fluent_message` gives."""
     dlg = _FluentMessageDialog(
         parent,
         title,
@@ -3411,6 +3671,7 @@ def fluent_confirm(
         confirm=True,
         confirm_text=confirm_text,
         cancel_text=cancel_text,
+        cancel_role=cancel_role,
     )
     try:
         return dlg.exec_() == QtWidgets.QDialog.Accepted
@@ -3450,15 +3711,12 @@ QAbstractItemView::item {{
     padding: {scaled_px(3, minimum=2)}px {scaled_px(6, minimum=4)}px;
     border: {FIELD_BORDER_PX}px solid transparent;
     border-radius: {_radius()}px;
-    color: {TEXT};
 }}
 QAbstractItemView::item:hover {{
     background-color: {ACCENT_TINT};
-    color: {TEXT};
 }}
 QAbstractItemView::item:selected {{
     background-color: {SELECTED};
-    color: {TEXT};
 }}
 QAbstractItemView::item:selected:hover {{
     background-color: {SELECTED_HOVER};
@@ -3476,6 +3734,61 @@ QAbstractItemView::corner {{
 #: The item role that marks a combo's blank choice -- the row meaning
 #: "nothing chosen yet" (see :meth:`FluentComboBox.add_blank_item`).
 _BLANK_CHOICE_ROLE = QtCore.Qt.UserRole + 2
+#: The item role that holds a checkable combo's tick (see
+#: :meth:`FluentComboBox.set_checkable`).
+_CHECKED_ROLE = QtCore.Qt.UserRole + 3
+_CHECK_ICONS: dict[tuple[float, float, bool], QtGui.QIcon] = {}
+
+
+def _check_icon(checked: bool) -> QtGui.QIcon:
+    """A checkable combo row's box: :class:`FluentCheckBox`'s own indicator.
+
+    A solid rounded fill whose edge is that fill -- NEUTRAL_FILL unticked,
+    ACCENT with a white tick ticked -- drawn as the row's decoration, so the
+    view lays it out and indents the row's text after it.  The row under
+    the pointer (the view's current row) takes the Selected pixmap, one
+    shade deeper, as the check box's indicator does under the pointer.
+    """
+
+    app = QtWidgets.QApplication.instance()
+    ratio = float(app.devicePixelRatio()) if app is not None else 1.0
+    key = (_FLUENT_SCALE, ratio, bool(checked))
+    icon = _CHECK_ICONS.get(key)
+    if icon is not None:
+        return icon
+    side = scaled_even_px(16)
+    icon = QtGui.QIcon()
+    for mode, deeper in ((QtGui.QIcon.Normal, False), (QtGui.QIcon.Selected, True)):
+        pixmap = QtGui.QPixmap(int(round(side * ratio)), int(round(side * ratio)))
+        pixmap.setDevicePixelRatio(ratio)
+        pixmap.fill(QtCore.Qt.transparent)
+        painter = QtGui.QPainter(pixmap)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing)
+        if checked:
+            fill = QtGui.QColor(ACCENT_HOVER if deeper else ACCENT)
+        else:
+            fill = _mixed(NEUTRAL_FILL, ACCENT, 0.4) if deeper else QtGui.QColor(NEUTRAL_FILL)
+        painter.setPen(QtCore.Qt.NoPen)
+        painter.setBrush(fill)
+        radius = float(_radius())
+        painter.drawRoundedRect(QtCore.QRectF(0, 0, side, side), radius, radius)
+        if checked:
+            # The tick of FluentCheckBox.paintEvent, in the same proportions.
+            points = ((0.26, 0.52), (0.43, 0.68), (0.75, 0.34))
+            dx = side / 2.0 - (0.26 + 0.75) / 2.0 * side
+            dy = side / 2.0 - (0.34 + 0.68) / 2.0 * side
+            pen = QtGui.QPen(QtGui.QColor(SURFACE))
+            pen.setWidthF(max(1.5, side / 8.0))
+            pen.setCapStyle(QtCore.Qt.RoundCap)
+            pen.setJoinStyle(QtCore.Qt.RoundJoin)
+            painter.setPen(pen)
+            painter.drawPolyline(QtGui.QPolygonF([
+                QtCore.QPointF(dx + x * side, dy + y * side) for x, y in points
+            ]))
+        painter.end()
+        icon.addPixmap(pixmap, mode)
+    _CHECK_ICONS[key] = icon
+    return icon
 
 
 class FluentComboBox(QtWidgets.QAbstractButton):
@@ -3484,11 +3797,30 @@ class FluentComboBox(QtWidgets.QAbstractButton):
     The collapsed control owns a plain item model.  Its list/tree popup is a
     real :class:`FluentPopup` created only on first use, so Qt cannot silently
     materialize a private QListView while an ancestor stylesheet is polished.
+
+    In CHECKABLE mode (:meth:`set_checkable`) it picks several of its rows:
+    each keyed row carries FluentCheckBox's box.  A click on a row's box
+    ticks or clears it and the list stays open; Shift with it sets every
+    row from the last one clicked to this one as that one is.  A click on a
+    row's words makes it the only ticked row and closes the list -- the
+    one-value pick stays one click -- unless the list's headers pick
+    (``headers_select``): a header's click is then the "only these" gesture,
+    and a row's words tick or clear it as its box does.  Space ticks the
+    current row, Enter (or a double click) means "only this one", Escape or
+    a click outside closes.  :attr:`checked_edited` carries the ticked keys
+    once, when the list closes having changed them.  The collapsed box
+    reads the ticked keys in list order, runs of three or more as
+    ``first–last``.
+
+    In either mode, with nothing chosen (no current row, nothing ticked)
+    the collapsed box says its :meth:`setPlaceholderText` in MUTED_INK.
     """
 
     activated = QtCore.pyqtSignal(int)
     currentIndexChanged = QtCore.pyqtSignal(int)
     currentTextChanged = QtCore.pyqtSignal(str)
+    #: The ticked keys, in list order, when a checkable list closes changed.
+    checked_edited = QtCore.pyqtSignal(object)
     _line_edit = None
 
     def __init__(self, parent=None):
@@ -3499,6 +3831,22 @@ class FluentComboBox(QtWidgets.QAbstractButton):
             QtWidgets.QSizePolicy.Preferred,
             QtWidgets.QSizePolicy.Fixed,
         )
+        self._checkable = False
+        self._placeholder = ""
+        self._headers_select = False
+        #: The ticked keys when the open list opened; None while it is shut.
+        self._checked_at_open: tuple | None = None
+        #: The row whose box a press landed on, until its release; -1 none.
+        self._box_press = -1
+        #: The row a click last ticked or cleared: where a Shift-click's run starts.
+        self._anchor_row = -1
+        #: The ticked rows, as the items' check role holds them: a list of
+        #: thousands of labels is not read row by row on every projection.
+        self._ticked: frozenset[int] = frozenset()
+        #: Each key's first row, and the widest key's width; None until
+        #: asked after the rows changed.
+        self._key_rows: dict | None = None
+        self._widest_key: int | None = None
         self._current_index = -1
         self._minimum_contents_length = 0
         self._model = QtGui.QStandardItemModel(self)
@@ -3519,9 +3867,12 @@ class FluentComboBox(QtWidgets.QAbstractButton):
         if editable:
             text = self.currentText()
             self._line_edit = FluentLineEdit(text, self)
+            # Switched off, its text is DISABLED_INK, as a non-editable
+            # combo's is (its placeholder too: set_placeholder_prompt).
             self._line_edit.setStyleSheet(
                 f'QLineEdit {{ background: transparent; border: none; padding: 0; '
                 f'color: {TEXT}; font: {fluent_font_size()}pt "{FONT}"; }}'
+                f'QLineEdit:disabled {{ color: {DISABLED_INK}; }}'
             )
             # The combo draws the field; its editor takes exactly the text
             # room inside it.  A field's own minimum height made the editor
@@ -3568,11 +3919,15 @@ class FluentComboBox(QtWidgets.QAbstractButton):
         return int(self._model.rowCount())
 
     def addItem(self, text: object, userData: object = None) -> None:  # noqa: N802
+        self._key_rows = self._widest_key = None
         item = QtGui.QStandardItem(str(text))
         item.setData(userData, QtCore.Qt.UserRole)
         item.setEditable(False)
+        if self._checkable and userData is not None:
+            item.setData(False, _CHECKED_ROLE)
+            item.setData(_check_icon(False), QtCore.Qt.DecorationRole)
         self._model.appendRow(item)
-        if self._current_index < 0:
+        if self._current_index < 0 and not self._checkable:
             self.setCurrentIndex(0)
 
     def addItems(self, texts) -> None:  # noqa: N802 - Qt API name
@@ -3585,8 +3940,8 @@ class FluentComboBox(QtWidgets.QAbstractButton):
         It carries the empty key like any other keyed row, and while it is
         current the collapsed box paints its words as an empty field paints
         its placeholder, in MUTED_INK: a missing input must not look like a
-        value someone picked.  A row whose empty key IS a choice ("Subpulse
-        file") is an ordinary ``addItem``.
+        value someone picked.  A row whose empty key IS a choice
+        ("Independent file") is an ordinary ``addItem``.
         """
 
         self.addItem(text, "")
@@ -3597,7 +3952,198 @@ class FluentComboBox(QtWidgets.QAbstractButton):
 
         return self.currentData(_BLANK_CHOICE_ROLE) is True
 
+    def setPlaceholderText(self, text: str) -> None:  # noqa: N802 - Qt API name
+        """What the collapsed box says, in MUTED_INK, while nothing is chosen."""
+
+        self._placeholder = str(text)
+        self._invalidate_content_width()
+        self.update()
+
+    def placeholderText(self) -> str:  # noqa: N802 - Qt API name
+        return self._placeholder
+
+    def set_checkable(self, checkable: bool, *, headers_select: bool = False) -> None:
+        """Pick several keyed rows instead of one (see the class).
+
+        A row keyed None is a header: it carries no box and ends a run of
+        the collapsed text.  With ``headers_select`` a header is a choice of
+        its own -- clicking it ticks exactly the rows under it, up to the
+        next header, and closes the list -- and a row's words tick or clear
+        it as its box does.
+        """
+
+        self._checkable = bool(checkable)
+        self._headers_select = self._checkable and bool(headers_select)
+        self._ticked = frozenset()
+        for row in range(self.count()):
+            item = self._model.item(row)
+            keyed = self._checkable and item.data(QtCore.Qt.UserRole) is not None
+            item.setData(False if keyed else None, _CHECKED_ROLE)
+            item.setData(_check_icon(False) if keyed else None, QtCore.Qt.DecorationRole)
+        if self._popup_view is not None:
+            self._configure_checkable_view(self._popup_view)
+        self._checked_changed()
+
+    def checked_data(self) -> tuple:
+        """The keys of the ticked rows, in list order."""
+
+        return tuple(self.itemData(row) for row in sorted(self._ticked))
+
+    def set_checked_data(self, values) -> None:
+        """Tick exactly the rows keyed ``values``, without emitting.  Ignored
+        while the list is open: what the operator is ticking stands."""
+
+        if self._popup is not None and self._popup.isVisible():
+            return
+        if self._key_rows is None:
+            self._key_rows = {}
+            for row in range(self.count()):
+                key = self.itemData(row)
+                if key is not None:
+                    self._key_rows.setdefault(key, row)
+        self._tick_rows(self._key_rows[value] for value in values if value in self._key_rows)
+
+    def _tick_rows(self, rows) -> None:
+        """Tick exactly ``rows`` (keyed ones); every other keyed row is cleared."""
+
+        ticked = frozenset(row for row in rows if self.itemData(row) is not None)
+        changed = ticked ^ self._ticked
+        if not changed:
+            return
+        for row in changed:
+            item = self._model.item(row)
+            item.setData(row in ticked, _CHECKED_ROLE)
+            item.setData(_check_icon(row in ticked), QtCore.Qt.DecorationRole)
+        self._ticked = ticked
+        self._checked_changed()
+
+    def _toggle_row(self, row: int, extend: bool = False) -> None:
+        """Tick or clear ``row``; with ``extend``, set every keyed row from
+        the last one clicked to ``row`` as that one now is."""
+
+        item = self._model.item(int(row))
+        if item is None or item.data(QtCore.Qt.UserRole) is None or not item.isEnabled():
+            return
+        ticked = set(self._ticked)
+        anchor = self._model.item(self._anchor_row) if 0 <= self._anchor_row < self.count() else None
+        if extend and anchor is not None and anchor.data(QtCore.Qt.UserRole) is not None:
+            low, high = sorted((self._anchor_row, int(row)))
+            run = {
+                other for other in range(low, high + 1)
+                if self.itemData(other) is not None and self._model.item(other).isEnabled()
+            }
+            ticked = ticked | run if self._anchor_row in ticked else ticked - run
+        else:
+            ticked ^= {int(row)}
+            self._anchor_row = int(row)
+        self._tick_rows(ticked)
+
+    def _header_rows(self, row: int) -> tuple[int, ...]:
+        """The enabled keyed rows under the header at ``row``, up to the next one."""
+
+        rows = []
+        for other in range(int(row) + 1, self.count()):
+            item = self._model.item(other)
+            if item.data(QtCore.Qt.UserRole) is None:
+                break
+            if item.isEnabled():
+                rows.append(other)
+        return tuple(rows)
+
+    def _checked_text(self) -> str:
+        """The ticked keys in list order, a run of three or more consecutive
+        rows (unbroken by a header, which is never ticked) written
+        ``first–last``."""
+
+        parts: list[str] = []
+        run: list[int] = []
+
+        def close_run() -> None:
+            keys = [str(self.itemData(row)) for row in run]
+            parts.extend((f"{keys[0]}–{keys[-1]}",) if len(keys) >= 3 else keys)
+            run.clear()
+
+        for row in sorted(self._ticked):
+            if run and row != run[-1] + 1:
+                close_run()
+            run.append(row)
+        if run:
+            close_run()
+        return ", ".join(parts)
+
+    def _checked_changed(self) -> None:
+        if not self._checkable:
+            return
+        ticked = ", ".join(str(value) for value in self.checked_data())
+        if self.toolTip() != ticked:
+            self.setToolTip(ticked)
+        self._invalidate_content_width()
+        self.update()
+
+    def _configure_checkable_view(self, view: QtWidgets.QAbstractItemView) -> None:
+        """Boxes as the rows' decoration; the current row follows the
+        pointer and wears the hover wash, never the chosen fill."""
+
+        side = scaled_even_px(16)
+        view.setIconSize(QtCore.QSize(side, side) if self._checkable else QtCore.QSize())
+        view.setMouseTracking(self._checkable)
+        view.viewport().installEventFilter(self)
+        view.setStyleSheet(_combo_popup_stylesheet() + (
+            f"QAbstractItemView::item:selected, QAbstractItemView::item:selected:hover "
+            f"{{ background-color: {ACCENT_TINT}; }}" if self._checkable else ""
+        ))
+
+    def _box_hit(self, view: QtWidgets.QAbstractItemView, index: QtCore.QModelIndex, pos: QtCore.QPoint) -> bool:
+        """Whether ``pos`` is on the row's box: anything before its words."""
+
+        option = view.viewOptions()
+        option.rect = view.visualRect(index)
+        option.features |= (
+            QtWidgets.QStyleOptionViewItem.HasDecoration | QtWidgets.QStyleOptionViewItem.HasDisplay
+        )
+        option.decorationSize = view.iconSize()
+        option.icon = index.data(QtCore.Qt.DecorationRole)
+        option.text = str(index.data(QtCore.Qt.DisplayRole) or "")
+        words = view.style().subElementRect(QtWidgets.QStyle.SE_ItemViewItemText, option, view)
+        return int(pos.x()) < words.left()
+
+    def _checkable_mouse(self, view: QtWidgets.QAbstractItemView, event) -> bool:
+        """A press and release on a row's box tick it, the list open; any
+        other click goes on to the view (``clicked``: only this one)."""
+
+        kind = event.type()
+        index = view.indexAt(event.pos())
+        if kind == QtCore.QEvent.MouseMove:
+            if index.isValid() and index.flags() & QtCore.Qt.ItemIsEnabled and index != view.currentIndex():
+                view.setCurrentIndex(index)
+            return False
+        if event.button() != QtCore.Qt.LeftButton:
+            return False
+        on_box = (
+            index.isValid()
+            and index.data(QtCore.Qt.UserRole) is not None
+            and bool(index.flags() & QtCore.Qt.ItemIsEnabled)
+            and self._box_hit(view, index, event.pos())
+        )
+        if kind in (QtCore.QEvent.MouseButtonPress, QtCore.QEvent.MouseButtonDblClick):
+            self._box_press = index.row() if on_box else -1
+            return on_box
+        pressed, self._box_press = self._box_press, -1
+        if pressed < 0:
+            return False
+        if on_box and index.row() == pressed:
+            self._toggle_row(pressed, bool(event.modifiers() & QtCore.Qt.ShiftModifier))
+        return True
+
     def clear(self) -> None:
+        self._key_rows = self._widest_key = None
+        if self._checkable:
+            # A refill closes an open list without emitting: what was
+            # ticked belonged to rows that are gone.
+            self._checked_at_open = None
+            self._anchor_row = -1
+            self._ticked = frozenset()
+            self.hidePopup()
         previous = self._current_index
         if self.count():
             self._model.removeRows(0, self.count())
@@ -3629,6 +4175,8 @@ class FluentComboBox(QtWidgets.QAbstractButton):
     ) -> None:  # noqa: N802
         model_index = self._model.index(int(index), 0)
         if model_index.isValid():
+            if role == QtCore.Qt.UserRole:
+                self._key_rows = self._widest_key = None
             self._model.setData(model_index, value, role)
 
     def findData(
@@ -3711,14 +4259,43 @@ class FluentComboBox(QtWidgets.QAbstractButton):
     def _popup_view_created(self, view: QtWidgets.QAbstractItemView) -> None:
         """Subclass hook for signals owned by the one materialized view."""
 
-        view.clicked.connect(self._commit_flat_index)
+        view.clicked.connect(self._row_clicked)
         view.activated.connect(self._commit_flat_index)
+        if self._checkable:
+            self._configure_checkable_view(view)
+
+    def _row_clicked(self, index: QtCore.QModelIndex) -> None:
+        """A click on a row's words: in a list whose headers pick, it ticks
+        or clears the row as its box does; otherwise it is the choice."""
+
+        if (
+            self._checkable and self._headers_select and index.isValid()
+            and index.data(QtCore.Qt.UserRole) is not None
+            and index.flags() & QtCore.Qt.ItemIsEnabled
+        ):
+            self._toggle_row(
+                index.row(),
+                bool(QtWidgets.QApplication.keyboardModifiers() & QtCore.Qt.ShiftModifier),
+            )
+            return
+        self._commit_flat_index(index)
 
     def _commit_flat_index(self, index: QtCore.QModelIndex) -> None:
         if not index.isValid() or not (
             index.flags() & QtCore.Qt.ItemIsEnabled
             and index.flags() & QtCore.Qt.ItemIsSelectable
         ):
+            return
+        if self._checkable:
+            # The words of a row: only this one; of a header: its rows.
+            if index.data(QtCore.Qt.UserRole) is not None:
+                self._tick_rows((index.row(),))
+            elif self._headers_select:
+                self._tick_rows(self._header_rows(index.row()))
+            else:
+                return
+            self.hidePopup()
+            QtCore.QTimer.singleShot(0, self._restore_collapsed_focus)
             return
         self.setCurrentIndex(index.row())
         self.hidePopup()
@@ -3774,6 +4351,25 @@ class FluentComboBox(QtWidgets.QAbstractButton):
             elif event.type() == QtCore.QEvent.KeyPress and event.key() in (QtCore.Qt.Key_Up, QtCore.Qt.Key_Down, QtCore.Qt.Key_F4):
                 self.keyPressEvent(event)
                 return True
+        if self._checkable and self._popup_view is not None:
+            view = self._popup_view
+            if watched is view.viewport() and event.type() in (
+                QtCore.QEvent.MouseMove, QtCore.QEvent.MouseButtonPress,
+                QtCore.QEvent.MouseButtonRelease, QtCore.QEvent.MouseButtonDblClick,
+            ):
+                return self._checkable_mouse(view, event)
+            if watched is view and event.type() == QtCore.QEvent.KeyPress:
+                if event.key() == QtCore.Qt.Key_Space:
+                    if view.currentIndex().isValid():
+                        self._toggle_row(view.currentIndex().row())
+                    return True
+                if event.key() in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
+                    self._commit_flat_index(view.currentIndex())
+                    return True
+            if watched is self._popup and event.type() == QtCore.QEvent.Hide:
+                opened, self._checked_at_open = self._checked_at_open, None
+                if opened is not None and self.checked_data() != opened:
+                    self.checked_edited.emit(self.checked_data())
         if (
             watched is self._popup_view
             and event.type() == QtCore.QEvent.KeyPress
@@ -3910,7 +4506,17 @@ class FluentComboBox(QtWidgets.QAbstractButton):
         )
 
     def _collapsed_text_candidates(self) -> tuple[str, ...]:
-        return tuple(self.itemText(index) for index in range(self.count()))
+        if self._checkable:
+            # What the box may say: its placeholder, or what is ticked; any
+            # one key alone is measured once per list (_widest_key_width).
+            return (self._placeholder, self._checked_text())
+        # What the box may say: its placeholder, or a row that can be
+        # chosen as it says it (without a grouped list's indent); a header
+        # nobody can choose never widens it.
+        return (self._placeholder, *(
+            self.itemText(index).lstrip() for index in range(self.count())
+            if self._model.item(index).isEnabled()
+        ))
 
     def _collapsed_content_width(self) -> int:
         if self._cached_content_width is None:
@@ -3928,7 +4534,25 @@ class FluentComboBox(QtWidgets.QAbstractButton):
                 ),
                 default=0,
             )
+            if self._checkable:
+                self._cached_content_width = max(self._cached_content_width, self._widest_key_width(metrics))
         return self._cached_content_width
+
+    def _widest_key_width(self, metrics: QtGui.QFontMetricsF) -> int:
+        """The widest key of a checkable list, as the box would say it
+        alone; measured once per list, and only up to the widest box a
+        checkable combo takes (a long sampled axis has thousands)."""
+
+        if self._widest_key is None:
+            cap, widest = scaled_px(200), 0
+            for row in range(self.count()):
+                key = self.itemData(row)
+                if key is not None:
+                    widest = max(widest, int(math.ceil(metrics.horizontalAdvance(str(key)))))
+                    if widest >= cap:
+                        break
+            self._widest_key = widest
+        return self._widest_key
 
     def sizeHint(self):  # noqa: N802 - Qt API name
         font = self._collapsed_font()
@@ -3940,10 +4564,11 @@ class FluentComboBox(QtWidgets.QAbstractButton):
         )
         content_width = max(self._collapsed_content_width(), minimum_text)
         left, right, drop_width = self._collapsed_text_chrome()
-        return QtCore.QSize(
-            content_width + left + right + drop_width,
-            max(self.minimumHeight(), metrics.height() + scaled_px(4)),
-        )
+        width = content_width + left + right + drop_width
+        if self._checkable:
+            # Many ticked keys elide; the whole list is in the tooltip.
+            width = min(width, scaled_px(200))
+        return QtCore.QSize(width, max(self.minimumHeight(), metrics.height() + scaled_px(4)))
 
     def minimumSizeHint(self):  # noqa: N802 - Qt API name
         return self.sizeHint()
@@ -3979,8 +4604,13 @@ class FluentComboBox(QtWidgets.QAbstractButton):
 
         if self._line_edit is None:
             text_rect = self._collapsed_text_rect()
-            # The blank choice reads as an empty field's placeholder does.
-            ink = DISABLED_INK if not enabled else MUTED_INK if self.current_is_blank() else TEXT
+            # The blank choice reads as an empty field's placeholder does,
+            # and so does a box with nothing chosen.
+            blank = (
+                not self._ticked if self._checkable
+                else bool(self._placeholder) and self._current_index < 0 or self.current_is_blank()
+            )
+            ink = DISABLED_INK if not enabled else MUTED_INK if blank else TEXT
             painter.setPen(QtGui.QColor(ink))
             painter.setFont(self._collapsed_font())
             text = painter.fontMetrics().elidedText(
@@ -4018,6 +4648,9 @@ class FluentComboBox(QtWidgets.QAbstractButton):
         self._sync_popup_selection()
         self._resize_popup_to_contents()
         self._place_popup()
+        if self._checkable:
+            self._checked_at_open = self.checked_data()
+            popup.installEventFilter(self)
         popup.show()
         popup.raise_()
         view.setFocus(QtCore.Qt.PopupFocusReason)
@@ -4159,14 +4792,20 @@ class FluentComboBox(QtWidgets.QAbstractButton):
         view.ensurePolished()
         column = self.modelColumn()
         rows = self._visible_popup_row_count()
-        row_height = int(view.sizeHintForRow(0)) if rows > 0 else 0
-        if rows > 0 and row_height <= 0:
-            row_height = view.fontMetrics().height() + scaled_px(8)
+        # A list's rows each as tall as it is: a header without a box is
+        # shorter than a row with one, and a list as tall as its first row
+        # times the count cut its last row off.  A tree's revealed rows are
+        # not its model's top rows, and are all one height.
+        if isinstance(view, QtWidgets.QListView):
+            heights = [int(view.sizeHintForRow(row)) for row in range(rows)]
+        else:
+            heights = [int(view.sizeHintForRow(0))] * rows
+        fallback = view.fontMetrics().height() + scaled_px(8)
         # The view's frame is its border with the stylesheet padding folded
         # in, on every side; above the view the popup keeps one gap.
         side = int(view.frameWidth())
         content_width = max(0, int(view.sizeHintForColumn(column)))
-        content_height = popup_gap() + 2 * side + rows * row_height
+        content_height = popup_gap() + 2 * side + sum(height if height > 0 else fallback for height in heights)
         below, _available = self._popup_space_below()
         bar = fluent_scrollbar_thickness()
         needs_vertical = self._popup_row_total() > rows or content_height > below
@@ -4215,16 +4854,25 @@ class FluentComboBox(QtWidgets.QAbstractButton):
 
     def _display_text(self) -> str:
         """The text painted in the COLLAPSED combo (the seam a tree combo overrides to show a
-        fuller source-qualified name).  Default: the current item's own text."""
-        return self.currentText()
+        fuller source-qualified name).  Default: the current item's own text, without the
+        indent a grouped list gives the rows under a header; checkable: what is ticked."""
+        if self._checkable:
+            return self._checked_text() or self._placeholder
+        return self.currentText().lstrip() if self._current_index >= 0 else self._placeholder
 
     def _sync_popup_selection(self) -> None:
-        """Project the collapsed flat selection into the materialized view."""
+        """Project the collapsed flat selection into the materialized view.
+
+        A checkable list opens on its first ticked row, else its first row
+        to pick."""
 
         view = self._popup_view
         if view is None:
             return
-        index = self._model.index(self._current_index, 0)
+        row = self._current_index
+        if self._checkable:
+            row = min(self._ticked, default=self._selectable_row(0, 1))
+        index = self._model.index(row, 0)
         if not index.isValid():
             view.clearSelection()
             view.setCurrentIndex(QtCore.QModelIndex())
@@ -4264,6 +4912,11 @@ class FluentComboBox(QtWidgets.QAbstractButton):
             return
         if key == QtCore.Qt.Key_Escape and self._popup is not None:
             self.hidePopup()
+            event.accept()
+            return
+        if self._checkable and key in (QtCore.Qt.Key_Up, QtCore.Qt.Key_Down, QtCore.Qt.Key_Home, QtCore.Qt.Key_End):
+            # Several rows are picked in the list, never by stepping the box.
+            self.showPopup()
             event.accept()
             return
         if key in (
@@ -5213,13 +5866,14 @@ class _FluentTabCloseButton(QtWidgets.QToolButton):
         del event
         disk = self.disk_rect()
         washed = self.isEnabled() and (self.isDown() or self.underMouse())
+        rest_ink, hover_face, pressed_face, face_ink = _quiet_faces()
         painter = QtGui.QPainter(self)
         if washed:
             painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
             painter.setPen(QtCore.Qt.NoPen)
-            painter.setBrush(QtGui.QColor(SELECTED if self.isDown() else ACCENT_TINT))
+            painter.setBrush(QtGui.QColor(pressed_face if self.isDown() else hover_face))
             painter.drawEllipse(disk)
-        paint_centred_ink(painter, self, disk, self._glyph, self.text(), TEXT if washed else MUTED_INK)
+        paint_centred_ink(painter, self, disk, self._glyph, self.text(), face_ink if washed else rest_ink)
         painter.end()
 
 
@@ -5485,12 +6139,13 @@ class FluentTabWidget(QtWidgets.QTabWidget):
         font.setBold(True)
         btn.setFont(font)
         radius = _radius()
+        rest_ink, hover_face, pressed_face, face_ink = _quiet_faces()
         btn.setStyleSheet(
             f"""
-            QToolButton {{ border: none; background: transparent; color: {MUTED_INK};
+            QToolButton {{ border: none; background: transparent; color: {rest_ink};
                            border-radius: {radius}px; padding: 0px; }}
-            QToolButton:hover {{ background: {ACCENT_TINT}; color: {TEXT}; }}
-            QToolButton:pressed {{ background: {SELECTED}; color: {TEXT}; }}
+            QToolButton:hover {{ background: {hover_face}; color: {face_ink}; }}
+            QToolButton:pressed {{ background: {pressed_face}; color: {face_ink}; }}
             QToolButton::menu-indicator {{ image: none; width: 0px; }}
             """
         )
@@ -5965,7 +6620,7 @@ def field_room_end(widget: QtWidgets.QWidget) -> float:
 
 
 def _paint_fluent_spin_buttons(widget: QtWidgets.QAbstractSpinBox) -> None:
-    """Paint the stepper: the hovered cell's tint and two chevrons.
+    """Paint the stepper: the hovered or pressed cell's tile and two chevrons.
 
     The field is a two-cell frame, the classic numeric up-down, shown by its
     chevrons and the tint under the pointer -- no line divides it from the
@@ -5975,9 +6630,12 @@ def _paint_fluent_spin_buttons(widget: QtWidgets.QAbstractSpinBox) -> None:
     the frame's inner rect, each in the middle of its half: placed on the
     cells' own centres, an odd number of rows inside the frame gave one
     cell a row more and put one chevron a pixel further from the middle
-    than the other.  A direction the box cannot move in (``stepEnabled``: a
-    bound, or no grid point left inside it) has its chevron dimmed and
-    takes no tint.  Nothing is offset from a sub-control rectangle.
+    than the other.  Under the pointer the cell is the hover wash, held
+    down it is SELECTED -- the faces of every quiet thing that acts
+    (:func:`_quiet_faces`).  A direction the box cannot move in
+    (``stepEnabled``: a bound, or no grid point left inside it) has its
+    chevron dimmed and takes no tile.  Nothing is offset from a
+    sub-control rectangle.
     """
 
     if widget.buttonSymbols() == QtWidgets.QAbstractSpinBox.NoButtons:
@@ -5994,13 +6652,16 @@ def _paint_fluent_spin_buttons(widget: QtWidgets.QAbstractSpinBox) -> None:
         False: bool(directions & QtWidgets.QAbstractSpinBox.StepDownEnabled),
     }
     painter = QtGui.QPainter(widget)
-    hovered = (
-        live and bool(option.state & QtWidgets.QStyle.State_MouseOver)
-        and int(option.activeSubControls)
-        & int(QtWidgets.QStyle.SC_SpinBoxUp | QtWidgets.QStyle.SC_SpinBoxDown)
+    stepper = int(option.activeSubControls) & int(
+        QtWidgets.QStyle.SC_SpinBoxUp | QtWidgets.QStyle.SC_SpinBoxDown
     )
+    # Qt reports the pressed cell as the active one with State_Sunken, and
+    # the hovered one as active with State_MouseOver otherwise.
+    pressed = live and bool(stepper) and bool(option.state & QtWidgets.QStyle.State_Sunken)
+    hovered = live and bool(stepper) and bool(option.state & QtWidgets.QStyle.State_MouseOver)
     up_hovered = bool(option.activeSubControls & QtWidgets.QStyle.SC_SpinBoxUp)
-    if hovered and movable[up_hovered]:
+    if (pressed or hovered) and movable[up_hovered]:
+        _rest_ink, hover_face, pressed_face, _face_ink = _quiet_faces()
         cell = up_cell if up_hovered else down_cell
         corner = max(0.0, _radius() - FIELD_BORDER_PX)
         inner = QtGui.QPainterPath()
@@ -6009,7 +6670,7 @@ def _paint_fluent_spin_buttons(widget: QtWidgets.QAbstractSpinBox) -> None:
         tile.addRect(cell)
         painter.save()
         painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
-        painter.fillPath(inner.intersected(tile), QtGui.QColor(ACCENT_TINT))
+        painter.fillPath(inner.intersected(tile), QtGui.QColor(pressed_face if pressed else hover_face))
         painter.restore()
     inner = frame_inner_rect(widget)
     middle = inner.center().y()
@@ -6450,8 +7111,8 @@ class _StepChip(QtWidgets.QAbstractButton):
 
     A quiet ghost left of the stepper -- MUTED_INK, smaller than the digits
     -- that says what one notch does and is the way to change it: under
-    the pointer it becomes a light-blue pill in TEXT ink, and a click asks
-    for a new step.  On a box that cannot be edited it is DISABLED_INK and
+    the pointer it becomes a light-blue pill in TEXT ink, SELECTED while
+    held down (:func:`_quiet_faces`), and a click asks for a new step.  On a box that cannot be edited it is DISABLED_INK and
     takes no pointer.  Its geometry is the box's (see
     ``FluentDoubleSpinBox._place_step_chip``).
 
@@ -6531,16 +7192,18 @@ class _StepChip(QtWidgets.QAbstractButton):
     def paintEvent(self, event) -> None:  # noqa: N802 - Qt naming
         del event
         live = self.isEnabled()
-        hovered = live and (self.underMouse() or self.isDown())
+        pressed = live and self.isDown()
+        hovered = pressed or (live and self.underMouse())
+        rest_ink, hover_face, pressed_face, face_ink = _quiet_faces()
         pill = self.pill()
         painter = QtGui.QPainter(self)
         if hovered:
             painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
             painter.setPen(QtCore.Qt.NoPen)
-            painter.setBrush(QtGui.QColor(ACCENT_TINT))
+            painter.setBrush(QtGui.QColor(pressed_face if pressed else hover_face))
             painter.drawRoundedRect(pill, pill.height() / 2.0, pill.height() / 2.0)
         paint_centred_ink(painter, self, pill, self._ink_font, self.text(),
-                          TEXT if hovered else MUTED_INK if live else DISABLED_INK)
+                          face_ink if hovered else rest_ink if live else DISABLED_INK)
         painter.end()
 
 
@@ -6840,8 +7503,11 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
         super().setValue(float(number))
         # Qt only rewrites the text when the double changed; a decimal that
         # differs in a digit the double cannot hold would otherwise be shown
-        # from the float.
-        self.lineEdit().setText(self.textFromValue(float(number)))
+        # from the float.  At the minimum a special value text ("∞" for a
+        # count whose 0 runs forever) is shown, as Qt's own edit shows it.
+        special = self.specialValueText()
+        self.lineEdit().setText(special if special and float(number) == self.minimum()
+                                else self.textFromValue(float(number)))
         # The chip shows only beside a number it leaves room for.
         self._place_step_chip()
         if notify_normalized and number != requested:
@@ -7668,6 +8334,8 @@ class FluentScrollArea(QtWidgets.QScrollArea):
         #: viewport made the bar appear and narrowed EVERY control by the
         #: bar's width, in the same instant the operator added that row.
         self._bounded = False
+        #: Hold the vertical bar's gutter without bounding the width.
+        self._gutter = False
         self._reserving = False
         self.verticalScrollBar().rangeChanged.connect(self._reserve_scrollbar_gutter)
         self.setWidgetResizable(True)
@@ -7706,6 +8374,15 @@ class FluentScrollArea(QtWidgets.QScrollArea):
         self.setWidget(widget)
         self._reserve_scrollbar_gutter()
 
+    def reserve_vertical_gutter(self) -> None:
+        """Keep the viewport as wide whether or not the vertical bar shows,
+        without bounding the content's width: a Monitor board may be wider
+        than its viewport and scroll sideways, but a carried card's spare
+        row must not bring the bar in and narrow the board under the drag."""
+
+        self._gutter = True
+        self._reserve_scrollbar_gutter()
+
     @QtCore.pyqtSlot()
     def _reserve_scrollbar_gutter(self) -> None:
         """Hold the vertical bar's width whether or not the bar is there.
@@ -7715,7 +8392,7 @@ class FluentScrollArea(QtWidgets.QScrollArea):
         changes, and this must be a function of the content alone.
         """
 
-        if not self._bounded or self._reserving:
+        if not (self._bounded or self._gutter) or self._reserving:
             return
         self._reserving = True
         try:
@@ -7832,7 +8509,10 @@ class _TableRules(QtWidgets.QWidget):
     pixels, so the cross and both joints with the frame are exact.
 
     The widget is transparent to the pointer and masked to the two rules,
-    so it covers no cell and the viewport still scrolls by blitting.
+    so it covers no cell and the viewport still scrolls by blitting.  The
+    header rule always runs into the right edge: the vertical bar stands
+    beside the rows, under the header (``FluentTableView``), so nothing
+    stands between the header's end and the frame.
     """
 
     def __init__(self, table: "FluentTableView"):
@@ -7862,9 +8542,7 @@ class _TableRules(QtWidgets.QWidget):
         header = table.horizontalHeader()
         if not header.isHidden():
             y = device_snap(table, header.geometry().bottom() + 1, axis="y") - edge
-            right = device_snap(table, viewport.right() + 1)
-            right = outer_right if right >= inner.right() else right
-            rules.append(QtCore.QRectF(outer_left, y, right - outer_left, edge))
+            rules.append(QtCore.QRectF(outer_left, y, outer_right - outer_left, edge))
         side = table.verticalHeader()
         if not side.isHidden():
             x = device_snap(table, side.geometry().right() + 1) - edge
@@ -7926,6 +8604,9 @@ class FluentTableView(QtWidgets.QTableView):
     #: The header rules' layer; None until __init__ makes it (Qt resizes
     #: the view while its base constructor runs).
     _rules = None
+    #: The blank over the vertical bar, the column header's height; None
+    #: until __init__ makes it, for the same reason.
+    _header_room = None
     #: Rows read per fit, from the top of the view: a fit is a sample of what
     #: is on screen, coalesced to one per turn, never a scan of the model.
     _FIT_SAMPLE_ROWS = 8
@@ -8031,6 +8712,12 @@ class FluentTableView(QtWidgets.QTableView):
             """
         )
         apply_fluent_scrollbars(self)
+        # The vertical bar scrolls the rows, so it stands beside them: a
+        # blank the column header's height stands over it, in the header's
+        # row.  Spanning the header too, its resting handle sat beside the
+        # column names at the table's top and read as a stray grey bar.
+        self._header_room = QtWidgets.QWidget()
+        self.addScrollBarWidget(self._header_room, QtCore.Qt.AlignTop)
         self._rules = _TableRules(self)
         for bar in (self.horizontalScrollBar(), self.verticalScrollBar()):
             bar.valueChanged.connect(self._schedule_value_fit)
@@ -8164,6 +8851,11 @@ class FluentTableView(QtWidgets.QTableView):
     def updateGeometries(self) -> None:  # noqa: N802
         super().updateGeometries()
         self._fit_content_height()
+        if self._header_room is not None:
+            header = self.horizontalHeader()
+            room = 0 if header.isHidden() else header.height()
+            if self._header_room.maximumHeight() != room:
+                self._header_room.setFixedHeight(room)
         if self._rules is not None:
             self._rules.place()
 
@@ -8530,12 +9222,17 @@ _GRID_STATE_ROLE = QtCore.Qt.UserRole + 1
 _GRID_NOTE_ROLE = QtCore.Qt.UserRole + 2
 #: The value a trailing action cell reports; None on every other cell.
 _GRID_ACTION_ROLE = QtCore.Qt.UserRole + 3
+#: Whether a row label reads as a row kept but not in use.
+_GRID_MUTED_ROLE = QtCore.Qt.UserRole + 4
+#: How a trailing action cell looks: "destructive" (the ghost ×) or "quiet".
+_GRID_ACTION_FACE_ROLE = QtCore.Qt.UserRole + 5
 #: Cell states besides chosen/unchosen: reached by a rule rather than marked
 #: (a cell may be chosen AND derived: a pair a rule chose); marked but not
-#: honoured; wanted by nobody (an empty card in red dashes, so a name in a
-#: cell still means it was chosen); held by another row (an empty dashed
-#: outline that cannot be chosen here).
-GRID_CELL_STATES = ("derived", "warning", "missing", "held")
+#: honoured; marked and kept, with nothing to act on this time (amber, the
+#: ink of a note: nothing is wrong); wanted by nobody (an empty card in red
+#: dashes, so a name in a cell still means it was chosen); held by another
+#: row (an empty dashed outline that cannot be chosen here).
+GRID_CELL_STATES = ("derived", "warning", "kept", "missing", "held")
 
 
 def _mixed(first: str, second: str, weight: float) -> QtGui.QColor:
@@ -8551,9 +9248,10 @@ def _mixed(first: str, second: str, weight: float) -> QtGui.QColor:
 class _SelectionGridModel(QtCore.QAbstractTableModel):
     """Read-only labels; only cells given a label can be selected.
 
-    ``actions`` -- ``(value, glyph, tooltip)`` -- add, after a gap column,
-    one trailing cell per action to every row.  Action cells are never
-    selectable, so neither the selection nor the keyboard lands on them.
+    ``actions`` -- ``(value, glyph, tooltip, role)`` -- add, after a gap
+    column, one trailing cell per action to every row.  Action cells are
+    never selectable, so neither the selection nor the keyboard lands on
+    them.
     """
 
     def __init__(self, parent=None, *, actions=(), label_tip: str = ""):
@@ -8567,12 +9265,14 @@ class _SelectionGridModel(QtCore.QAbstractTableModel):
         self._tips: dict[tuple[int, int], str] = {}
         self._row_notes: tuple[str, ...] = ()
         self._row_tips: tuple[str, ...] = ()
+        self._muted_rows: frozenset[int] = frozenset()
 
-    def reset(self, rows, columns, cells, *, row_notes=(), row_tips=()) -> None:
+    def reset(self, rows, columns, cells, *, row_notes=(), row_tips=(), muted_rows=()) -> None:
         self.beginResetModel()
         self._rows, self._columns, self._cells = tuple(rows), tuple(columns), dict(cells)
         self._states, self._tips = {}, {}
         self._row_notes, self._row_tips = tuple(row_notes), tuple(row_tips)
+        self._muted_rows = frozenset(int(row) for row in muted_rows)
         self.endResetModel()
 
     def set_states(self, states, tips) -> None:
@@ -8603,9 +9303,9 @@ class _SelectionGridModel(QtCore.QAbstractTableModel):
         cell = (index.row(), index.column())
         action = index.column() - len(self._columns) - 1
         if 0 <= action < len(self._actions):
-            value, glyph, tip = self._actions[action]
+            value, glyph, tip, face = self._actions[action]
             return {QtCore.Qt.DisplayRole: glyph, QtCore.Qt.ToolTipRole: tip,
-                    _GRID_ACTION_ROLE: value}.get(role)
+                    _GRID_ACTION_ROLE: value, _GRID_ACTION_FACE_ROLE: face}.get(role)
         if role == QtCore.Qt.DisplayRole:
             return self._cells.get(cell)
         if role == QtCore.Qt.ToolTipRole:
@@ -8621,6 +9321,8 @@ class _SelectionGridModel(QtCore.QAbstractTableModel):
             return labels[section] if 0 <= section < len(labels) else None
         if rows and role == _GRID_NOTE_ROLE and 0 <= section < len(self._row_notes):
             return self._row_notes[section]
+        if rows and role == _GRID_MUTED_ROLE:
+            return section in self._muted_rows
         if rows and role == QtCore.Qt.ToolTipRole and 0 <= section < len(self._rows):
             tip = self._row_tips[section] if section < len(self._row_tips) else ""
             return "\n".join(part for part in (tip, self._label_tip) if part) or None
@@ -8737,7 +9439,9 @@ class _SelectionGridDelegate(QtWidgets.QStyledItemDelegate):
     and its name in DERIVED_INK: the dashes say "a rule put this here".  A
     WARNING cell -- chosen but not honoured -- is RED_TINT with its name in
     RED_DARK, chosen or not, so the problem is never hidden under the
-    selection; a MISSING cell is an empty card in red dashes and a HELD one
+    selection; a KEPT cell -- chosen, kept, with nothing to act on this
+    time -- is the same card in amber (ORANGE_TINT, its name in
+    ORANGE_DARK), the ink of a note rather than a problem; a MISSING cell is an empty card in red dashes and a HELD one
     an empty dashed outline (somebody else's frame).  A disabled grid shows
     every card on the BG face with the chosen names in DISABLED_INK, so
     what is chosen still reads but nothing invites a click.  Names sit on
@@ -8759,6 +9463,7 @@ class _SelectionGridDelegate(QtWidgets.QStyledItemDelegate):
         hovered = bool(option.state & QtWidgets.QStyle.State_MouseOver) and not held and live
         derived = state == "derived"
         warning = state == "warning"
+        kept = state == "kept"
         edge = None
         if held:
             fill, edge = None, DIVIDER
@@ -8766,6 +9471,8 @@ class _SelectionGridDelegate(QtWidgets.QStyledItemDelegate):
             fill = BG
         elif warning:
             fill = _mixed(RED_TINT, RED, 0.19).name() if hovered else RED_TINT
+        elif kept:
+            fill = _mixed(ORANGE_TINT, ORANGE, 0.19).name() if hovered else ORANGE_TINT
         elif derived:
             fill, edge = (_mixed(ACCENT_TINT, SELECTED, 0.4).name() if hovered else ACCENT_TINT), SELECTION_EDGE
         elif selected:
@@ -8778,10 +9485,10 @@ class _SelectionGridDelegate(QtWidgets.QStyledItemDelegate):
         rect = _paint_grid_card(painter, grid.viewport(), cell, fill, edge)
         # A name says the row has the cell; the empty states say nobody, or
         # somebody else, has it -- named only as the preview under the pointer.
-        if selected or hovered or derived or warning:
+        if selected or hovered or derived or warning or kept:
             ink = (
                 DISABLED_INK if not live
-                else RED_DARK if warning else DERIVED_INK if derived
+                else RED_DARK if warning else ORANGE_DARK if kept else DERIVED_INK if derived
                 else TEXT if selected else MUTED_INK
             )
             # The font the grid sizes its columns with (set_grid).
@@ -8792,10 +9499,12 @@ class _SelectionGridDelegate(QtWidgets.QStyledItemDelegate):
         painter.restore()
 
     def _paint_action(self, painter, option, index) -> None:
-        """The quiet destructive glyph every remove-row x is -- the same
-        object as FluentButton's ghost ×: no face and no edge at rest, its
-        glyph in MUTED_INK; under the pointer the RED_TINT face and RED_DARK
-        ink, held down one shade deeper -- red at rest belongs to problems.
+        """A row action's glyph, the same object as a FluentButton glyph of
+        its role.  A destructive one is the ghost × every remove-row x is:
+        no face and no edge at rest, its glyph in MUTED_INK; under the
+        pointer the RED_TINT face and RED_DARK ink, held down one shade
+        deeper -- red at rest belongs to problems.  A quiet one takes the
+        hover wash and the SELECTED press of every quiet thing, in TEXT ink.
         Its face is a square as tall as a control, on its row's band like
         the cards beside it: the whole cell of a two-line row made it a
         tall bar.  The glyph is centred on its ink."""
@@ -8805,7 +9514,11 @@ class _SelectionGridDelegate(QtWidgets.QStyledItemDelegate):
         live = grid.isEnabled()
         hovered = live and grid.hovered_action() == cell
         pressed = live and grid.pressed_action() == cell
-        hover_face, pressed_face = _destructive_glyph_faces()
+        if index.data(_GRID_ACTION_FACE_ROLE) == "quiet":
+            rest_ink, hover_face, pressed_face, face_ink = _quiet_faces()
+        else:
+            hover_face, pressed_face = _destructive_glyph_faces()
+            rest_ink, face_ink = MUTED_INK, RED_DARK
         # A one-line row's cell, insets and all, centred in this one.
         square = QtCore.QRect(0, 0, grid.action_width(), grid.row_height())
         square.moveCenter(grid._card_cell(option.rect, index.row()).center())
@@ -8818,7 +9531,7 @@ class _SelectionGridDelegate(QtWidgets.QStyledItemDelegate):
         font.setPointSize(round(fluent_font_size() * 1.35))
         paint_centred_ink(
             painter, grid.viewport(), rect, font, str(index.data()),
-            DISABLED_INK if not live else RED_DARK if hovered or pressed else MUTED_INK,
+            DISABLED_INK if not live else face_ink if hovered or pressed else rest_ink,
         )
         painter.restore()
 
@@ -8854,6 +9567,10 @@ class _SelectionGridRowHeader(QtWidgets.QHeaderView):
         label = model.headerData(section, QtCore.Qt.Vertical, QtCore.Qt.DisplayRole)
         note = model.headerData(section, QtCore.Qt.Vertical, _GRID_NOTE_ROLE)
         return str(label or ""), str(note or "")
+
+    def _muted(self, section: int) -> bool:
+        model = self.model()
+        return model is not None and bool(model.headerData(section, QtCore.Qt.Vertical, _GRID_MUTED_ROLE))
 
     def two_line_height(self) -> int:
         label, note = self._fonts()
@@ -8907,11 +9624,12 @@ class _SelectionGridRowHeader(QtWidgets.QHeaderView):
             )
             painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
             painter.setPen(QtCore.Qt.NoPen)
-            painter.setBrush(QtGui.QColor(ACCENT_TINT))
+            painter.setBrush(QtGui.QColor(_quiet_faces()[1]))
             painter.drawRoundedRect(wash, _radius(), _radius())
+        # A muted row -- kept, not in use -- reads quieter until the pointer is on it.
         ink = (
             DISABLED_INK if not self.isEnabled()
-            else TEXT if self.activatable or hovered else MUTED_INK
+            else TEXT if hovered or self.activatable and not self._muted(section) else MUTED_INK
         )
         painter.setFont(label_font)
         painter.setPen(QtGui.QColor(ink))
@@ -8969,13 +9687,18 @@ class FluentSelectionGrid(QtWidgets.QTableView):
     ``toggle=True`` is the grid for marking many cells one by one: a click
     turns one cell on or off and a drag sweeps a run of them, headers select
     nothing, and ``selection_edited`` comes once the gesture is over.  Rows
-    may carry a muted second line (:meth:`set_grid` ``row_notes``).
-    ``row_actions`` -- ``(value, glyph, tooltip)`` -- end every row with one
-    small glyph cell per action, after a narrow gap; ``label_action`` --
+    may carry a muted second line (:meth:`set_grid` ``row_notes``), and a row
+    kept but not in use reads muted (``muted_rows``).
+    ``row_actions`` -- ``(value, glyph, tooltip)`` or ``(value, glyph,
+    tooltip, role)`` -- end every row with one small glyph cell per action,
+    after a narrow gap; ``role`` is ``"destructive"`` (the default: the
+    ghost × that turns red) or ``"quiet"`` (an action that takes nothing
+    away); either acts on one click.  ``label_action`` --
     ``(value, tooltip)`` -- makes each row label a link.  Both are reported
     as ``row_action(row, value)`` and never change the selection.
     :meth:`set_cell_states` marks cells a rule reached ("derived"), that
-    cannot be honoured ("warning"), that nobody has ("missing") or that
+    cannot be honoured ("warning"), that are kept with nothing to act on
+    this time ("kept"), that nobody has ("missing") or that
     another row holds ("held", not choosable: the pointer says so, and a
     click shows the cell's tooltip at once).  :meth:`set_label_width` ends
     the row-label column where a form's label column ends, so the first
@@ -8986,13 +9709,19 @@ class FluentSelectionGrid(QtWidgets.QTableView):
     row_action = QtCore.pyqtSignal(int, object)
 
     def __init__(self, parent=None, *, cell_width: int = 52,
-                 toggle: bool = False, row_actions: Sequence[tuple[object, str, str]] = (),
+                 toggle: bool = False, row_actions: Sequence[tuple] = (),
                  label_action: tuple[object, str] | None = None):
         super().__init__(parent)
         self._cell_width = cell_width
         self._toggle = bool(toggle)
+        actions = []
+        for value, glyph, tip, *face in row_actions:
+            role = str(face[0]) if face else "destructive"
+            if role not in ("destructive", "quiet"):
+                raise ValueError(f"a row action is 'destructive' or 'quiet', not {role!r}")
+            actions.append((value, str(glyph), str(tip), role))
         self._grid_model = _SelectionGridModel(
-            self, actions=tuple((value, str(glyph), str(tip)) for value, glyph, tip in row_actions),
+            self, actions=tuple(actions),
             label_tip="" if label_action is None else str(label_action[1]),
         )
         #: The action cell under the pointer, and the one a press began on.
@@ -9037,6 +9766,7 @@ class FluentSelectionGrid(QtWidgets.QTableView):
                 background: transparent;
                 border: none;
                 outline: none;
+                selection-background-color: transparent;
                 font: {fluent_font_size()}pt "{FONT}";
             }}
             QHeaderView {{ background: transparent; }}
@@ -9059,16 +9789,19 @@ class FluentSelectionGrid(QtWidgets.QTableView):
     def set_grid(self, rows: Sequence[str], columns: Sequence[str],
                  cells: "dict[tuple[int, int], str]", *,
                  row_notes: Sequence[str] = (), row_tips: Sequence[str] = (),
+                 muted_rows: Sequence[int] = (),
                  narrow_columns: Sequence[int] = ()) -> None:
         """Header labels, and the label of every selectable ``(row, column)``.
 
         ``row_notes`` puts a muted second line under row labels;
+        ``muted_rows`` are rows kept but not in use, whose labels read muted;
         ``narrow_columns`` are gaps between column groups, holding no cells.
         """
 
         self._programmatic = True
         try:
-            self._grid_model.reset(rows, columns, cells, row_notes=row_notes, row_tips=row_tips)
+            self._grid_model.reset(rows, columns, cells, row_notes=row_notes, row_tips=row_tips,
+                                   muted_rows=muted_rows)
         finally:
             self._programmatic = False
         # Wide enough for the longest label: a frame may be named, not numbered.
@@ -10023,6 +10756,8 @@ class ElidedLabel(QtWidgets.QLabel):
         super().__init__(parent)
         self._full = str(text)
         self._mode = mode
+        # Plain, as FluentLabel is: a path or a name is never markup.
+        self.setTextFormat(QtCore.Qt.PlainText)
         self.setAlignment(align)
         self.setStyleSheet(f'QLabel {{ color: {TEXT}; font: {fluent_font_size()}pt "{FONT}"; background: transparent; }}')
         self.setMinimumWidth(scaled_px(8))
@@ -10089,14 +10824,8 @@ class FluentStatusStrip(FluentFrame):
     consciously by adding severity colour + the action slot, which its separate popup/timer
     channels carried instead."""
 
-    #: severity -> (dot colour, text colour); the ONE mapping every consumer shares.  Keyed
-    #: by the status vocabulary itself: a word added there without a colour here fails at
-    #: import, not in the first Qt slot that shows it.
-    SEVERITIES = {
-        word: {"idle": (GREY, MUTED_INK), "task": (ACCENT, TEXT),
-               "warning": (ORANGE, ORANGE_DARK), "error": (RED, RED_DARK)}[word]
-        for word in STATUS_SEVERITIES
-    }
+    #: severity -> (dot colour, text colour): the strip's words of the ONE status table.
+    SEVERITIES = {word: STATUS_CUES[word] for word in STATUS_SEVERITIES}
 
     action_clicked = QtCore.pyqtSignal()
 
@@ -10145,10 +10874,8 @@ class FluentStatusStrip(FluentFrame):
             raise ValueError(f"unknown severity {severity!r}; choose from {tuple(self.SEVERITIES)}.")
         if severity != self._severity:
             self._severity = severity
-            dot, colour = self.SEVERITIES[severity]
-            self.dot.set_color(dot)
-            self.message.setStyleSheet(
-                f'QLabel {{ color: {colour}; font: {fluent_font_size()}pt "{FONT}"; background: transparent; }}')
+            self.dot.set_state(severity)
+            set_status_ink(self.message, severity)
         if str(text) != self.message.text():
             self.message.setText(str(text))
 

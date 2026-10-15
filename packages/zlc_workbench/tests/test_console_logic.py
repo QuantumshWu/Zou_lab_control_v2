@@ -8,6 +8,7 @@ a notebook running beside the window.
 from __future__ import annotations
 
 import ast
+from copy import deepcopy
 import json
 import time
 from dataclasses import replace
@@ -17,6 +18,7 @@ from types import SimpleNamespace
 import pytest
 
 from zlc_runtime import SignalDataPlane, stable_signal_key
+from zlc_workbench.device_use import DeviceUseCoordinator
 from zlc_workbench.logic import (
     LogicCatalog,
     LogicDraft,
@@ -24,12 +26,17 @@ from zlc_workbench.logic import (
     device_key_options,
     finalize_logic_draft,
     make_host,
+    source_label,
 )
 
 from test_console_presenter import (  # noqa: F401 -- fixtures
     _LogicRowView,
+    _box_calibration,
     _console_over,
     _one_shot,
+    _settle_panel_hosts,
+    _started_camera,
+    _settle_logic,
     presenter,
     session,
 )
@@ -55,6 +62,18 @@ def test_workbench_never_imports_a_concrete_logic_node_leaf() -> None:
                             (str(path.relative_to(root)), alias.name)
                         )
     assert not violations, violations
+
+
+def test_a_source_row_names_a_bundle_as_a_bundle_and_an_input_as_words() -> None:
+    """A bundle input is chosen as a whole producer's bundle: "Signal
+    bundle".  Any other input reads like the form labels beside it:
+    sentence case, the lab's acronyms in capitals -- never str.title()."""
+
+    from zlc_atom.nodes import DatasetInputSpec
+
+    assert source_label(DatasetInputSpec("bundle", None, "exact", select_bundle=True)) == "Signal bundle"
+    assert source_label(DatasetInputSpec("frames", None, "exact")) == "Frames"
+    assert source_label(DatasetInputSpec("roi_frame", None, "exact")) == "ROI frame"
 
 
 #: Cameras, so they answer what a camera answers: a draft's units are decided
@@ -103,6 +122,7 @@ def bench(tmp_path):
             # session answers in exactly that case.
             device_labels={},
             nodes=(),
+            device_use=DeviceUseCoordinator(),
         )
     finally:
         plane.close()
@@ -168,6 +188,34 @@ def test_scan_estimate_uses_the_read_worker_without_starting_a_node(session, mon
             assert session.sequencer.applied() is before
 
 
+def test_a_parked_scan_axis_blocks_nothing_and_a_scanned_one_waits_at_the_draft(session) -> None:
+    """An axis the pulse or the bench cannot reach is a draft issue the Edit
+    page says while it is scanned -- Start waits instead of the build
+    refusing -- and nothing at all once it is switched off (parked)."""
+
+    with _console_over(session) as control:
+        node_id = control.add_logic("seamless_scan")
+
+        def issues(*axes) -> tuple[str, ...]:
+            control.update_logic_draft(node_id, values={
+                "pulse_template": PULSE_NAME + ".json", "plan": json.dumps({"axes": list(axes)}),
+            })
+            return tuple(control.logic_editor_projection(node_id)["issues"])
+
+        hand = {"port": "manual:power", "values": [1.0, 2.0]}
+        gone = {"port": "pulse:param:duration:gone", "values": [1.0, 2.0]}
+        absent = {"port": "device:absent:frequency", "values": [1.0]}
+        empty = {"port": "manual:angle", "values": [], "mode": "values", "value_text": ""}
+        assert any("offers no scan port named 'pulse:param:duration:gone'" in issue
+                   and "switch that axis off" in issue for issue in issues(hand, gone))
+        assert any("no installed device 'absent'" in issue for issue in issues(hand, absent))
+        assert any("Values is empty" in issue for issue in issues(hand, empty))
+        parked = issues(hand, *({**axis, "enabled": False} for axis in (gone, absent, empty)))
+        assert not [issue for issue in parked if any(
+            word in issue for word in ("gone", "absent", "Values", "parked"))], parked
+        assert any("every scan axis is parked" in issue for issue in issues({**hand, "enabled": False}))
+
+
 def test_adding_a_node_creates_only_a_stopped_draft_and_opens_edit(bench_presenter) -> None:
     """Add is authoring, so it cannot build or acquire before Start.
 
@@ -190,7 +238,7 @@ def test_adding_a_node_creates_only_a_stopped_draft_and_opens_edit(bench_present
     assert presenter.logic[node_id].host is None
     assert presenter.logic[node_id].node is None
     assert [name for name, _by, _state in row.publishes] == ["frames"]
-    assert stable_signal_key(node_id, "frames") in row.publishes[0][2]
+    assert row.publishes[0][2] == f"waiting · {node_id}/frames"
     assert presenter.view.focused_logic_editor == node_id
     projection = presenter.view.logic_editors[node_id]
     assert projection["form_spec"].keys == tuple(
@@ -209,6 +257,18 @@ def test_adding_a_node_creates_only_a_stopped_draft_and_opens_edit(bench_present
     assert updated["state"]["logic"][0]["draft_revision"] == 1
     stale = presenter.control_action("logic.start", {"node_id": node_id}, expected_draft_revision=0)
     assert not stale["accepted"] and "draft changed" in stale["error"]
+    missing = presenter.control_action("logic.start", {"node_id": "missing"})
+    assert missing["error"] == "unknown logic node 'missing'"
+    # A refusal without an error of its own answers with the most severe
+    # report since the request, not a progress line a refresh added after it.
+    def refused_start(selected):
+        presenter._report(f"{selected}: Frames must be selected", severity="error")
+        presenter._report("calibration: running", severity="task")
+        return False
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(presenter, "start_logic", refused_start)
+        refused = presenter.control_action("logic.start", {"node_id": node_id})
+    assert not refused["accepted"] and refused["error"] == f"{node_id}: Frames must be selected"
     draft = presenter.logic[node_id].draft
     assert set(draft.values) == set(
         presenter.logic[node_id].descriptor.authoring_schema.field_names
@@ -238,6 +298,17 @@ def test_adding_a_node_creates_only_a_stopped_draft_and_opens_edit(bench_present
     assert artifact["relative_to"] == str(presenter.session.workspace.data)
     assert "do not prepend" in artifact["path_rule"]
     assert presenter.control_catalog(api_name="camera_measurement")["logic"][0]["fields"]
+    # A control client sends values: no field, column or form field says
+    # how a GUI control draws it (side-by-side choices, a wheel notch).
+    def keys(fields):
+        for field in fields:
+            yield from field
+            yield from keys(field.get("columns", ()))
+    for fields in (catalog["logic"][0]["fields"], catalog["logic"][0]["form_spec"]["fields"],
+                   catalog["node"]["form_spec"]["fields"], occupancy["logic"][0]["fields"],
+                   occupancy["logic"][0]["form_spec"]["fields"]):
+        assert fields and {"name", "key"} & set(keys(fields))
+        assert not {"segmented", "step"} & set(keys(fields))
     presenter.add_logic("camera_measurement", node_id="other_camera")
     selected = presenter.control_state(node_id=node_id)
     assert [item["node_id"] for item in selected["logic"]] == [node_id]
@@ -427,22 +498,53 @@ def test_a_missing_device_is_a_repairable_draft_until_start(presenter) -> None:
 
 
 def test_editing_a_running_row_changes_only_its_shared_draft(presenter, session) -> None:
+    """The run keeps the configuration it started with and the draft is the
+    next run's.  While the two differ the row, the page and lab_state say so,
+    and Revert puts the run's configuration back without touching the run."""
 
     session.load_pulse(PULSE_NAME)
     node_id = presenter.add_logic("camera_measurement", values={"repeat": 0})
     presenter.start_logic(node_id)
+    started = deepcopy(presenter.logic[node_id].draft)
     current_host = presenter.logic[node_id].host
     current_node = presenter.logic[node_id].node
+    row = presenter.view._rows[node_id]
 
+    def edited():
+        return (
+            presenter.view.logic_editors[node_id]["edited"],
+            row.state[1].endswith(" · edited"),
+            presenter.control_state(node_id=node_id)["logic"][0]["edited_since_start"],
+        )
+
+    assert edited() == (False, False, False)
     assert presenter.update_logic_draft(node_id, values={"repeat": 9}) is True
     assert presenter.edit_logic(node_id) is True
     assert presenter.logic[node_id].draft.values["repeat"] == 9
     assert presenter.logic[node_id].host is current_host
     assert presenter.logic[node_id].node is current_node
-    presenter.update_logic_draft(node_id, values={"repeat": -1})
+    assert edited() == (True, True, True)
+    # Typed back to the value the run uses, the draft is the run's again.
+    presenter.view.logic_draft_changed.emit(node_id, {"values": {"repeat": 0}})
+    assert edited() == (False, False, False)
+    refused = presenter.control_action("logic.revert", {"node_id": node_id})
+    assert not refused["accepted"] and "nothing to revert" in refused["error"], refused
+
+    presenter.update_logic_draft(node_id, values={"repeat": -1, "exposure_seconds": 0.02})
     assert presenter.start_logic(node_id) is False
     assert presenter.logic[node_id].host is current_host
     assert current_host.running, "invalid Restart stopped the valid current run"
+    # A refused Restart left the run -- and the configuration it uses -- alone,
+    # and says why where it was pressed: on the row, not only in the log.
+    assert presenter.view.logic_editors[node_id]["edited"] is True
+    assert row.state[0] == "running" and " · edited; Restart refused: " in row.state[1], row.state
+    reverted = presenter.control_action("logic.revert", {"node_id": node_id})
+    assert reverted["accepted"], reverted
+    assert presenter.logic[node_id].draft == started
+    assert presenter.view.logic_editors[node_id]["form_values"]["repeat"] == 0
+    assert edited() == (False, False, False)
+    assert "Restart refused" not in row.state[1], "Revert is an edit: the refusal was the old draft's"
+    assert presenter.logic[node_id].host is current_host and current_host.running
     # The run keeps declaring what IT shows.  A half-typed draft is not even a
     # valid request -- asking it what to plot raised out of the console's poll.
     presenter.beat()
@@ -452,6 +554,362 @@ def test_editing_a_running_row_changes_only_its_shared_draft(presenter, session)
         for spec in presenter.logic[node_id].preview_specs
     ) == (("frames", "facet_grid"),), "the running node's declaration is the run's"
     presenter.stop_logic(node_id)
+
+
+def test_revert_replaces_the_draft_whole_and_a_draft_holds_only_its_fields(
+    presenter, session
+) -> None:
+    """Revert makes the running configuration the draft; it does not write it
+    over the draft.  A device or artifact input the edit named and the run
+    never had goes with the rest -- merged, it stayed forever, the node read
+    "edited" for good and every Revert answered accepted and changed nothing.
+    A value name the node's schema does not declare never gets into a draft:
+    logic.add, logic.update and the Edit page are refused with the names it
+    has.  An added row that carried one could never Start ("unknown authoring
+    fields") and no update could take the name out again."""
+
+    session.load_pulse(PULSE_NAME)
+    names = ", ".join(
+        presenter.catalog.get("camera_measurement").authoring_schema.field_names
+    )
+    refused = presenter.control_action("logic.add", {
+        "api_name": "camera_measurement", "values": {"exposure": 0.01, "repeat": 0},
+    })
+    assert not refused["accepted"] and refused["node_id"] is None, refused
+    assert refused["error"] == (
+        f"camera_measurement has no field 'exposure'; its fields are {names}"
+    )
+    assert not presenter.logic and not presenter.view._rows, "a refused add left a row"
+
+    node_id = presenter.add_logic("camera_measurement", values={"repeat": 0})
+    assert presenter.start_logic(node_id)
+    binding = presenter.logic[node_id]
+    started = deepcopy(binding.draft)
+    revision = binding.draft_revision
+
+    refused = presenter.control_action(
+        "logic.update", {"node_id": node_id, "values": {"exposure": 0.01, "repeat": 4}}
+    )
+    assert not refused["accepted"], refused
+    assert refused["error"] == f"{node_id} has no field 'exposure'; its fields are {names}"
+    presenter.view.logic_draft_changed.emit(node_id, {"values": {"not_a_field": 3}})
+    assert presenter.view.status[-1] == (
+        "error", f"{node_id} has no field 'not_a_field'; its fields are {names}"
+    )
+    assert binding.draft == started and binding.draft_revision == revision
+
+    def edited() -> tuple[bool, bool]:
+        return (
+            presenter.view.logic_editors[node_id]["edited"],
+            presenter.control_state(node_id=node_id)["logic"][0]["edited_since_start"],
+        )
+
+    presenter.view.logic_draft_changed.emit(node_id, {
+        "values": {"repeat": 4},
+        "device_keys": {"spare": "mot_camera"},
+        "artifact_inputs": {"extra": "extra.json"},
+    })
+    assert edited() == (True, True)
+    presenter.view.logic_revert_requested.emit(node_id)
+    assert binding.draft == started, binding.draft
+    assert edited() == (False, False)
+    again = presenter.control_action("logic.revert", {"node_id": node_id})
+    assert not again["accepted"] and "nothing to revert" in again["error"], again
+    assert binding.host.running, "Revert restarted nothing"
+    presenter.stop_logic(node_id)
+
+
+def test_a_discarded_queued_restart_leaves_the_old_runs_configuration(
+    presenter, session
+) -> None:
+    """A queued Restart carries its own configuration until it runs.  Thrown
+    away before then -- by the operator's Stop, or by another node's Start
+    taking the camera -- it takes that configuration with it: the run still
+    stopping is the old one, so the draft is an edit again, lab_state shows
+    the old run's configuration beside it, and Revert restores the old one,
+    not the one that never ran."""
+
+    session.load_pulse(PULSE_NAME)
+
+    def running(node_id: str, camera: str):
+        presenter.add_logic(
+            "camera_measurement", node_id=node_id, values={"repeat": 0},
+            device_keys={"camera": camera},
+        )
+        assert presenter.start_logic(node_id), presenter.logic[node_id].draft_error
+        return presenter.logic[node_id]
+
+    def queue_restart(binding):
+        old_host, started = binding.host, deepcopy(binding.draft)
+        presenter.view.logic_draft_changed.emit(
+            binding.node_id, {"values": {"exposure_seconds": 0.031}}
+        )
+        assert presenter.start_logic(binding.node_id)
+        assert binding.pending is not None and binding.host is old_host
+        # Queued, the Restart's configuration is the one the node runs.
+        assert presenter.view.logic_editors[binding.node_id]["edited"] is False
+        return old_host, started
+
+    def the_old_run_is_what_runs(binding, old_host, started) -> None:
+        assert binding.pending is None and old_host.running, "still stopping"
+        assert presenter.view.logic_editors[binding.node_id]["edited"] is True
+        row = presenter.control_state(node_id=binding.node_id, details=True)["logic"][0]
+        assert row["edited_since_start"]
+        assert row["draft"]["values"]["exposure_seconds"] == 0.031
+        assert row["running_draft"]["values"]["exposure_seconds"] is None, row["running_draft"]
+        reverted = presenter.control_action("logic.revert", {"node_id": binding.node_id})
+        assert reverted["accepted"], reverted
+        assert binding.draft == started
+        assert presenter.view.logic_editors[binding.node_id]["edited"] is False
+
+    stopped = running("stopped", "camera")
+    old_host, started = queue_restart(stopped)
+    assert presenter.stop_logic(stopped.node_id)
+    the_old_run_is_what_runs(stopped, old_host, started)
+
+    superseded = running("superseded", "mot_camera")
+    old_host, started = queue_restart(superseded)
+    presenter.add_logic(
+        "camera_measurement", node_id="taker", values={"repeat": 0},
+        device_keys={"camera": "mot_camera"},
+    )
+    assert presenter.start_logic("taker")
+    the_old_run_is_what_runs(superseded, old_host, started)
+
+    # Nothing runs once the old runs have stopped: nothing to revert to.
+    for node_id in ("stopped", "superseded", "taker"):
+        presenter.stop_logic(node_id)
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline and any(
+        binding.host is not None and binding.host.running
+        for binding in presenter.logic.values()
+    ):
+        presenter.beat()
+        time.sleep(0.005)
+    row = presenter.control_state(node_id="stopped", details=True)["logic"][0]
+    assert row["running_draft"] is None and not row["edited_since_start"]
+
+
+def test_a_follow_restart_runs_the_configuration_the_follow_started_with(
+    presenter, session, tmp_path
+) -> None:
+    """A following processor restarts by itself when its source does -- from
+    the configuration it was started with.  An edit made meanwhile and never
+    restarted stays an edit: the follow does not run it behind the operator's
+    back (it used to, and the cue cleared with nobody pressing anything), a
+    half-typed one with issues neither fails the follow nor ends it, and
+    "· edited", Restart* and Revert stay until the operator decides."""
+
+    import shutil
+
+    from test_console_presenter import _follow_calibration_artifact
+
+    first = Path(_follow_calibration_artifact(session, tmp_path)).resolve()
+    second = tmp_path / "second-calibration.json"
+    shutil.copyfile(first, second)
+    camera_id = presenter.add_logic(
+        "camera_measurement", node_id="cm-live",
+        values={"exposure_seconds": 0.002, "repeat": 0, "frames_per_cycle": 1},
+        device_keys={"camera": "camera"}, open_editor=False,
+    )
+    source = stable_signal_key(camera_id, "frames")
+    occupancy_id = presenter.add_logic("occupancy")
+    assert presenter.update_logic_draft(
+        occupancy_id, source_signal=source,
+        artifact_inputs={"calibrations": [{"path": str(first), "frames": ["rest"]}]},
+    )
+    binding = presenter.logic[occupancy_id]
+    session.load_pulse(PULSE_NAME)
+    assert presenter.start_logic(occupancy_id), binding.draft_error
+    started = deepcopy(binding.draft)
+
+    def source_runs_again() -> None:
+        """Start the camera; the follower restarts on the new generation."""
+
+        before = binding.host
+        assert presenter.start_logic(camera_id)
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            session.fire(shots=1)
+            presenter.beat()
+            if binding.host is not before and binding.host is not None and binding.host.running:
+                break
+            time.sleep(0.005)
+        assert binding.host is not before and binding.host.running, (
+            binding.draft_error, None if binding.host is None else binding.host.observation
+        )
+
+    def source_stops() -> None:
+        assert presenter.stop_logic(camera_id)
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline and binding.host.running:
+            presenter.beat()
+            time.sleep(0.005)
+        assert not binding.host.running
+
+    source_runs_again()
+    for calibration, issues in ((second, False), (tmp_path / "missing.json", True)):
+        presenter.view.logic_draft_changed.emit(occupancy_id, {"artifact_inputs": {
+            "calibrations": [{"path": str(calibration), "frames": ["rest"]}],
+        }})
+        assert bool(presenter.view.logic_editors[occupancy_id]["issues"]) is issues
+        source_stops()
+        # Its source stopped, the follower says it follows -- an edit's
+        # issues are the next run's -- and that it is edited.
+        assert presenter.view._rows[occupancy_id].state == (
+            "running", f"following {presenter._signal_text(source)} (source stopped) · edited"
+        )
+        source_runs_again()
+        assert binding.following, "the edit ended the follow"
+        assert [reading.path for reading in binding.node.readings] == [first], (
+            "the follow ran an edit nobody restarted"
+        )
+        projection = presenter.view.logic_editors[occupancy_id]
+        assert projection["edited"] is True, "the edit's cue cleared by itself"
+        assert projection["status"].endswith(" · edited"), projection["status"]
+
+    presenter.view.logic_revert_requested.emit(occupancy_id)
+    assert binding.draft == started
+    assert presenter.view.logic_editors[occupancy_id]["edited"] is False
+    presenter.stop_logic(occupancy_id)
+    presenter.stop_logic(camera_id)
+
+
+@pytest.mark.parametrize("queued", (False, True), ids=("running", "queued"))
+def test_a_restart_onto_a_source_not_yet_published_ends_the_run_it_replaces(
+    presenter, session, tmp_path, queued
+) -> None:
+    """A Restart onto a source that has not published is a standing follow,
+    and still a Restart: the run on the old source ends and a Restart queued
+    behind it is dropped, as any Restart's are.  It used to record the new
+    source beside a run that went on reading the old one -- "running", no
+    "· edited", Revert "nothing to revert" -- and a queued Restart then ran
+    and replaced the record, so the operator's last Restart was lost."""
+
+    from test_console_presenter import _follow_calibration_artifact
+
+    calibration = Path(_follow_calibration_artifact(session, tmp_path)).resolve()
+    camera_id, other_id = (
+        presenter.add_logic(
+            "camera_measurement", node_id=node_id,
+            values={"exposure_seconds": 0.002, "repeat": 0, "frames_per_cycle": 1},
+            device_keys={"camera": camera}, open_editor=False,
+        )
+        for node_id, camera in (("cm-live", "camera"), ("cm-other", "mot_camera"))
+    )
+    source, other = (stable_signal_key(node_id, "frames") for node_id in (camera_id, other_id))
+    occupancy_id = presenter.add_logic("occupancy", open_editor=False)
+    assert presenter.update_logic_draft(
+        occupancy_id, source_signal=source,
+        artifact_inputs={"calibrations": [{"path": str(calibration), "frames": ["rest"]}]},
+    )
+    binding = presenter.logic[occupancy_id]
+    session.load_pulse(PULSE_NAME)
+
+    def beat_until(condition) -> None:
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline and not condition():
+            session.fire(shots=1)
+            presenter.beat()
+            time.sleep(0.005)
+        assert condition()
+
+    assert presenter.start_logic(camera_id)
+    beat_until(lambda: presenter.logic[camera_id].host.running)
+    assert presenter.start_logic(occupancy_id), binding.draft_error
+    beat_until(lambda: binding.host is not None and binding.host.running)
+    old_host = binding.host
+    if queued:
+        presenter.view.logic_draft_changed.emit(occupancy_id, {"values": {"model_kind": "box"}})
+        assert presenter.start_logic(occupancy_id) and binding.pending is not None
+    presenter.view.logic_draft_changed.emit(occupancy_id, {"source_signal": other})
+    restarted = deepcopy(binding.draft)
+    assert presenter.start_logic(occupancy_id), binding.draft_error
+    assert binding.pending is None, "a queued Restart outlived the Restart after it"
+
+    beat_until(lambda: not old_host.running)
+    assert binding.host is old_host and binding.pending is None and binding.following
+    assert binding.started_draft == restarted
+    row = presenter.control_state(node_id=occupancy_id, details=True)["logic"][0]
+    assert row["running_draft"]["source_signal"] == other, row["running_draft"]
+    assert not row["edited_since_start"], row
+    assert presenter.view._rows[occupancy_id].state == (
+        "running", f"following {presenter._signal_text(other)} (waiting for the signal)"
+    )
+    refused = presenter.control_action("logic.revert", {"node_id": occupancy_id})
+    assert not refused["accepted"] and "nothing to revert" in refused["error"], refused
+
+    # The follow completes on the new source once that one runs.
+    assert presenter.start_logic(other_id)
+    beat_until(lambda: binding.host is not old_host and binding.host is not None and binding.host.running)
+    assert binding.started_draft == restarted
+    assert binding.host.source_publication.event_ref.stream_id == (
+        presenter.session.signal_plane.latest_publication(other).event_ref.stream_id
+    )
+    for node_id in (occupancy_id, camera_id, other_id):
+        presenter.stop_logic(node_id)
+
+
+def test_revert_restores_a_following_processors_source_and_calibration_rows(
+    presenter, tmp_path
+) -> None:
+    """Revert puts back the WHOLE configuration a node was started with -- an
+    Occupancy's source and calibration rows as well as its values -- and a
+    Restart makes the edited draft the configuration it runs."""
+
+    from test_console_presenter import _box_calibration
+
+    def calibration(name: str) -> str:
+        return str(_box_calibration(
+            ("site_0001",), ((64.0, 48.0),), (0.0,), (96, 128)
+        ).save(tmp_path / name))
+
+    first, second = calibration("first.json"), calibration("second.json")
+    node_id = presenter.add_logic("occupancy")
+    presenter.update_logic_draft(
+        node_id,
+        source_signal=stable_signal_key("camera-a", "frames"),
+        artifact_inputs={"calibrations": [{"path": first, "frames": ["rest"]}]},
+    )
+    refused = presenter.control_action("logic.revert", {"node_id": node_id})
+    assert not refused["accepted"] and "no running configuration" in refused["error"], refused
+
+    # No camera yet: the Start is a standing follow, which is a current run.
+    assert presenter.start_logic(node_id), presenter.logic[node_id].draft_error
+    binding = presenter.logic[node_id]
+    assert binding.following and binding.host is None
+    started = deepcopy(binding.draft)
+    assert presenter.view.logic_editors[node_id]["edited"] is False
+
+    presenter.view.logic_draft_changed.emit(node_id, {"values": {"model_kind": "box"}})
+    presenter.view.logic_draft_changed.emit(
+        node_id, {"source_signal": stable_signal_key("camera-b", "frames")}
+    )
+    presenter.view.logic_draft_changed.emit(node_id, {"artifact_inputs": {"calibrations": [
+        {"path": first, "frames": ["first"]}, {"path": second, "frames": ["rest"]},
+    ]}})
+    projection = presenter.view.logic_editors[node_id]
+    assert projection["edited"] is True and projection["status"].endswith(" · edited"), projection["status"]
+
+    presenter.view.logic_revert_requested.emit(node_id)
+    assert binding.draft == started
+    projection = presenter.view.logic_editors[node_id]
+    assert projection["edited"] is False
+    assert projection["source_signal"] == stable_signal_key("camera-a", "frames")
+    assert projection["form_values"]["model_kind"] == "default"
+    assert projection["artifact_claims"]["calibrations"]["entries"] == (
+        {"path": first, "frames": ("rest",)},
+    )
+    assert binding.following and binding.host is None, "Revert restarted nothing"
+
+    presenter.view.logic_draft_changed.emit(node_id, {"values": {"model_kind": "box"}})
+    assert presenter.view.logic_editors[node_id]["edited"] is True
+    assert presenter.start_logic(node_id)
+    assert presenter.view.logic_editors[node_id]["edited"] is False
+    assert binding.started_draft.values["model_kind"] == "box"
+    presenter.stop_logic(node_id)
+    presenter.view.logic_draft_changed.emit(node_id, {"values": {"model_kind": "default"}})
+    assert presenter.view.logic_editors[node_id]["edited"] is False, "nothing runs"
 
 
 def test_a_build_is_handed_only_what_it_asks_for(bench) -> None:
@@ -961,15 +1419,20 @@ def test_restart_is_queued_and_keeps_the_stable_signal_key(presenter, session) -
     assert old_host is not None
     old_key = old_host.signal_key("frames")
     old_generation = old_host.generation
-    presenter.update_logic_draft(
-        node_id,
-        values={"exposure_seconds": 0.031},
-        device_keys={"camera": "mot_camera"},
-    )
+    started = deepcopy(presenter.logic[node_id].draft)
+    edit = {"values": {"exposure_seconds": 0.031}, "device_keys": {"camera": "mot_camera"}}
+    presenter.update_logic_draft(node_id, **edit)
+    # Revert puts the run's camera back as well as its numbers.
+    assert presenter.revert_logic_draft(node_id)
+    assert presenter.logic[node_id].draft == started
+    presenter.update_logic_draft(node_id, **edit)
+    assert presenter.logic_editor_projection(node_id)["edited"] is True
 
     assert presenter.start_logic(node_id) is True
     assert presenter.logic[node_id].host is old_host
     assert presenter.logic[node_id].pending is not None
+    # Queued, the Restart's draft is already the configuration the node runs.
+    assert presenter.logic_editor_projection(node_id)["edited"] is False
 
     deadline = time.monotonic() + 5.0
     while time.monotonic() < deadline and presenter.logic[node_id].host is old_host:
@@ -1086,6 +1549,67 @@ def test_task_acquisition_waits_for_its_own_scan_and_stops_nested_ready_source(p
     assert camera_stops
     if ending == "failed":
         assert "scan hardware failed" in presenter.logic[task_id].host.observation.error
+
+
+def test_a_task_restarting_its_acquisition_runs_the_configuration_that_ran(presenter) -> None:
+    """A restart the operator did not press -- a Task restarting the
+    Measurement it acquires -- runs that Measurement's current configuration;
+    an edit nobody restarted stays an edit, as for a follow restart."""
+    from threading import Event
+    from zlc_atom.authoring import AuthoringField, AuthoringSchema
+    from zlc_atom.nodes import LogicNodeDescriptor, NodeKind
+
+    built, acquired = [], Event()
+
+    def camera_build(*, level):
+        def execute(context):
+            built.append(level)
+            context.report_ready()
+            while not context.cancel_requested():
+                time.sleep(.001)
+        return SimpleNamespace(execute=execute)
+
+    def task_build(*, acquisition_logic, restart_logic):
+        def execute(context):
+            restart_logic(acquisition_logic, context)
+            acquired.set()
+            while not context.cancel_requested():
+                time.sleep(.001)
+        return SimpleNamespace(execute=execute)
+
+    camera = LogicNodeDescriptor("ready_source", NodeKind.MEASUREMENT,
+        AuthoringSchema((AuthoringField("level", "int", "Level", 1),)),
+        description="Report readiness at a level and hold until cancelled.",
+        build=camera_build, reports_ready=True)
+    task = LogicNodeDescriptor("feedback", NodeKind.TASK,
+        AuthoringSchema((AuthoringField("acquisition_logic", "str", "Acquisition", ""),)),
+        description="Acquire the selected ready source once.", build=task_build,
+        acquisition_input="acquisition_logic", node_previews=())
+    presenter.catalog = LogicCatalog((camera, task))
+    camera_id = presenter.add_logic("ready_source")
+    task_id = presenter.add_logic("feedback", values={"acquisition_logic": camera_id})
+    assert presenter.start_logic(camera_id)
+    deadline = time.monotonic() + 5
+    while built != [1] and time.monotonic() < deadline:
+        presenter.beat()
+        time.sleep(.002)
+    assert presenter.update_logic_draft(camera_id, values={"level": 7})
+    assert presenter.control_state(node_id=camera_id)["logic"][0]["edited_since_start"]
+
+    assert presenter.start_logic(task_id)
+    deadline = time.monotonic() + 5
+    while not acquired.is_set() and time.monotonic() < deadline:
+        presenter.beat()
+        time.sleep(.002)
+    assert acquired.is_set() and built == [1, 1], built
+    row = presenter.control_state(node_id=camera_id)["logic"][0]
+    assert row["edited_since_start"], "the Task's restart applied an edit nobody restarted"
+    presenter.stop_logic(task_id)
+    deadline = time.monotonic() + 5
+    while any(b.host is not None and b.host.running for b in presenter.logic.values()) and time.monotonic() < deadline:
+        presenter.beat()
+        presenter.stop_logic(camera_id)
+        time.sleep(.002)
 
 
 def test_saved_artifact_paths_are_visible_and_seed_matching_input_drafts(
@@ -1273,6 +1797,7 @@ def test_a_processor_adds_with_an_unresolved_source_and_no_modal(
     derived_id = presenter.add_logic("derive")
     projection = presenter.logic_editor_projection(derived_id)
     assert projection["source_bundle"] is True
+    assert projection["source_label"] == "Signal bundle"
     bundle_members = [
         name for name in projection["source_options"]
         if name.startswith(f"@logic/{node_id}/")
@@ -1291,8 +1816,9 @@ def test_an_occupancys_frame_claims_survive_its_camera_changing_frame_count(pres
     """The camera's draft says how many frames a cycle has -- before anything
     is published -- and the claims are resolved against it without ever being
     rewritten: Last follows the count, a middle number keeps its place, and a
-    middle number the cycle no longer has between its ends is named, not deleted.  The same
-    claims are valid again once the count that suits them returns."""
+    middle number the cycle no longer has between its ends is noted, kept and
+    stops nothing.  The same claims read it again once the count that suits
+    them returns."""
 
     camera_id = presenter.add_logic("camera_measurement", values={"frames_per_cycle": 3})
     node_id = presenter.add_logic("occupancy")
@@ -1303,7 +1829,8 @@ def test_an_occupancys_frame_claims_survive_its_camera_changing_frame_count(pres
     assert presenter.view.logic_editors[node_id]["source_frames"] == ("0", "1", "2")
     survival_id = presenter.add_logic("frame_survival", source_signal=stable_signal_key(node_id, "occupied"))
     assert presenter.view.logic_editors[survival_id]["source_frames"] == ("0", "1", "2")
-    selection = {"selection": "from_first", "pairs": ({"start": "0", "end": "last", "selected": False},)}
+    selection = {"selection": "from_first", "pairs": ({"start": "0", "end": "last", "selected": False},),
+                 "custom_pairs": ()}
     presenter.view.logic_draft_changed.emit(survival_id, {"values": selection})
     claims = (
         {"path": "load.json", "frames": (2,)},
@@ -1312,25 +1839,25 @@ def test_an_occupancys_frame_claims_survive_its_camera_changing_frame_count(pres
     )
     presenter.view.logic_draft_changed.emit(node_id, {"artifact_inputs": {"calibrations": claims}})
     editor = presenter.view.logic_editors[node_id]["artifact_claims"]["calibrations"]
-    assert editor["problems"] == (
-        "load names middle frame 2, but the source carries 3 frames (0-2); "
-        "a numbered middle frame never stands for the first or the last",)
+    assert editor["problems"] == ()
+    assert editor["notes"] == (
+        "load's middle frame 2 is not in this source (frames 0-2); it is kept for a cycle that has it",)
     assert editor["reads"] == ((), (2,), (0, 1))
     presenter.view.logic_draft_changed.emit(camera_id, {"values": {"frames_per_cycle": 2}})
     assert presenter.view.logic_editors[survival_id]["source_frames"] == ("0", "1")
     editor = presenter.view.logic_editors[node_id]["artifact_claims"]["calibrations"]
-    assert editor["problems"] == (
-        "load names middle frame 2, but the source carries 2 frames (0-1); "
-        "a numbered middle frame never stands for the first or the last",)
+    assert editor["problems"] == ()
+    assert editor["notes"] == (
+        "load's middle frame 2 is not in this source (frames 0-1); it is kept for a cycle that has it",)
     assert editor["reads"] == ((), (1,), (0,))
     assert presenter.logic[node_id].draft.artifact_inputs == {"calibrations": claims}, (
         "a frame count never edits the draft"
     )
     issues = presenter.logic_editor_projection(node_id)["issues"]
-    assert any("load names middle frame 2, but the source carries 2 frames (0-1)" in issue for issue in issues)
+    assert not any("middle frame 2" in issue for issue in issues), "a note never refuses Start"
     presenter.view.logic_draft_changed.emit(camera_id, {"values": {"frames_per_cycle": 4}})
     editor = presenter.view.logic_editors[node_id]["artifact_claims"]["calibrations"]
-    assert editor["problems"] == ()
+    assert editor["problems"] == () and editor["notes"] == ()
     assert editor["reads"] == ((2,), (3,), (0, 1))
     assert presenter.logic[node_id].draft.artifact_inputs == {"calibrations": claims}
     assert presenter.view.logic_editors[survival_id]["source_frames"] == ("0", "1", "2", "3")
@@ -1350,8 +1877,212 @@ def test_an_occupancys_frame_claims_survive_its_camera_changing_frame_count(pres
     assert presenter.logic[node_id].draft.artifact_inputs == {"calibrations": claims}
 
 
+def test_a_frame_survival_after_derive_is_edited_before_anything_starts(presenter, session) -> None:
+    """The user's chain with nothing started: a camera's three frames reach
+    Frame Survival through Occupancy and Derive's draft (``same`` internal,
+    ``alive`` -- the verdicts where frames 0 and 2 agree -- published), so
+    its pairs are marked at once, and a camera edit re-projects them
+    through Derive.  Derive's own editor offers the frame pick before data.
+    A variable picking one frame passes one frame, and Frame Survival says
+    why there is no pair.  Then the whole chain runs, Frame Survival too;
+    afterwards, while Derive's draft cannot say, what it published answers."""
+
+    from PyQt5 import QtCore, QtTest
+    from zlc_ui.qt import ensure_qt_app
+
+    app = ensure_qt_app(["zlc-derive-frames-test"])
+    camera_id = presenter.add_logic(
+        "camera_measurement", values={"repeat": 1, "frames_per_cycle": 3, "exposure_seconds": 0.005})
+    occupancy_id = presenter.add_logic("occupancy", source_signal=stable_signal_key(camera_id, "frames"))
+    same = {"name": "same", "publish": False, "terms": (
+        {"of": "occupied", "at": "frame", "labels": ("0",)},
+        {"op": "==", "of": "occupied", "at": "frame", "labels": ("2",)})}
+    alive = {"name": "alive", "terms": ({"of": "occupied"}, {"op": "where", "of": "same"})}
+    derive_id = presenter.add_logic(
+        "derive", source_signal=stable_signal_key(occupancy_id, "occupied"), values={"variables": (same, alive)})
+    survival_id = presenter.add_logic("frame_survival", source_signal=stable_signal_key(derive_id, "alive"))
+    editors = presenter.view.logic_editors
+    assert editors[survival_id]["source_frames"] == ("0", "1", "2")
+
+    derive = presenter.logic_editor_projection(derive_id)
+    assert derive["source_frames"] == ("0", "1", "2"), "every occupancy output carries the camera's frames"
+    assert derive["input_bundle"] == (("counts", None, None), ("occupied", None, None), ("frame_judged", None, None))
+    derive_editor = presenter.logic[derive_id].descriptor.ui_contributions[0]()
+    form = presenter.logic[survival_id].descriptor.ui_contributions[0]()
+    form.draft_changed.connect(lambda patch: presenter.view.logic_draft_changed.emit(survival_id, patch))
+
+    def texts(combo):
+        return [combo.itemText(row) for row in range(combo.count())]
+
+    def show(widget, projection):
+        widget.update_projection(projection)
+        app.processEvents()
+
+    try:
+        # Derive's own editor, untyped: the members by name, and on each the
+        # frame axis its source's draft declares, with those labels.
+        show(derive_editor, derive)
+        head = derive_editor._cards[1].head
+        assert texts(head["operand"])[:4] == ["Inputs", "    counts", "    occupied", "    frame_judged"]
+        assert texts(head["axis"]) == ["All", "Point", "    frame"]
+        assert texts(derive_editor._cards[0].head["labels"]) == ["0", "1", "2"]
+        assert not derive_editor._cards[1].terms_ui[1]["axis"].isVisibleTo(derive_editor), "same keeps no frame"
+
+        # Frame Survival's pairs, marked by a click before anything runs.
+        form.resize(520, 260)
+        form.show()
+        show(form, editors[survival_id])
+        assert form.table.isEnabled() and form.summary.text() == "All · 3 of 3 pairs"
+        view = form.table.viewport()
+        QtTest.QTest.mouseClick(view, QtCore.Qt.LeftButton, QtCore.Qt.NoModifier,
+                                form.table.visualRect(form.model.index(0, 0)).center())
+        app.processEvents()
+        selection = presenter.logic[survival_id].draft.values
+        assert selection["selection"] == "all" and sorted(
+            (row["start"], row["end"], row["selected"]) for row in selection["pairs"]) == [
+            ("0", "last", False), ("1", "last", False)]
+        show(form, editors[survival_id])
+        assert form.summary.text() == "All · 1 of 3 pairs"
+
+        # A camera edit reaches Frame Survival through Derive's draft.
+        presenter.view.logic_draft_changed.emit(camera_id, {"values": {"frames_per_cycle": 4}})
+        assert editors[survival_id]["source_frames"] == ("0", "1", "2", "3")
+        assert editors[derive_id]["source_frames"] == ("0", "1", "2", "3")
+        show(form, editors[survival_id])
+        assert form.summary.text() == "All · 4 of 6 pairs"
+
+        # One frame picked: one frame passed on, and why there is no pair.
+        one = {"name": "alive", "terms": ({"of": "occupied", "at": "frame", "labels": ("1",)},
+                                          {"op": "where", "of": "same"})}
+        presenter.view.logic_draft_changed.emit(derive_id, {"values": {"variables": (same, one)}})
+        assert editors[survival_id]["source_frames"] == ("0",)
+        show(form, editors[survival_id])
+        assert not form.table.isEnabled()
+        assert form.summary.text() == "One frame per cycle: no pairs"
+        assert presenter.logic[survival_id].draft.values == selection, "a frame count never edits the draft"
+        assert all(binding.host is None for binding in presenter.logic.values())
+
+        # Run it, Frame Survival on Derive's verdicts too.  Afterwards the
+        # draft says what it can; where it cannot -- a formula being edited
+        # -- what Derive published answers.
+        calibration = presenter.session.workspace.data / "box-calibration.json"
+        _box_calibration(("site-0", "site-1"), ((12.0, 10.0), (30.0, 20.0)), (100.0, 100.0), (96, 128)).save(
+            calibration)
+        presenter.view.logic_draft_changed.emit(occupancy_id, {"artifact_inputs": {"calibrations": (
+            {"path": str(calibration), "frames": ("rest",)},)}})
+        presenter.view.logic_draft_changed.emit(camera_id, {"values": {"frames_per_cycle": 3}})
+        presenter.view.logic_draft_changed.emit(derive_id, {"values": {"variables": (same, alive)}})
+        session.load_pulse(PULSE_NAME)
+        assert presenter.start_logic(camera_id)
+        session.fire(shots=1)
+        for node_id in (camera_id, occupancy_id, derive_id, survival_id):
+            if node_id != camera_id:
+                assert presenter.start_logic(node_id), presenter.view.status[-3:]
+            _settle_logic(presenter, node_id)
+            assert presenter.logic[node_id].host.observation.error is None, node_id
+        assert session.signal_plane.latest_publication(stable_signal_key(derive_id, "alive")) is not None
+        assert session.signal_plane.latest_publication(stable_signal_key(survival_id, "survival")) is not None
+        presenter.view.logic_draft_changed.emit(camera_id, {"values": {"frames_per_cycle": 4}})
+        assert editors[survival_id]["source_frames"] == ("0", "1", "2", "3"), "the draft says"
+        editing = {"name": "alive", "terms": (*alive["terms"], {"op": "+"})}
+        presenter.view.logic_draft_changed.emit(derive_id, {"values": {"variables": (same, editing)}})
+        binding = presenter.logic[derive_id]
+        assert binding.descriptor.describe_output_frames(binding.draft.values, "alive", ("0", "1", "2", "3")) is None
+        assert editors[survival_id]["source_frames"] == ("0", "1", "2"), "what Derive published"
+    finally:
+        for widget in (derive_editor, form):
+            widget.close()
+            widget.deleteLater()
+        app.processEvents()
+
+
+def test_a_derive_over_a_derive_says_frames_only_when_its_whole_bundle_agrees(presenter, session) -> None:
+    """A Derive reads its source's whole bundle, not only the member its
+    source names.  When the members carry different frames -- ``alive``
+    the camera's three, ``one`` a picked frame, ``rate`` none -- one answer
+    cannot say them all: before data the second Derive's frames, and the
+    frames of everything it publishes, are unknown whichever member its
+    source names, and its editor offers no frame pick.  A bundle that
+    agrees passes its frames on.  Once the chain has run, each of the
+    second Derive's signals answers from the plane with what it carries."""
+
+    from zlc_data import READOUT_EVENT
+    from zlc_ui.qt import ensure_qt_app
+
+    app = ensure_qt_app(["zlc-derive-frames-test"])
+    camera_id = presenter.add_logic(
+        "camera_measurement", values={"repeat": 1, "frames_per_cycle": 3, "exposure_seconds": 0.005})
+    occupancy_id = presenter.add_logic("occupancy", source_signal=stable_signal_key(camera_id, "frames"))
+    same = {"name": "same", "publish": False, "terms": (
+        {"of": "occupied", "at": "frame", "labels": ("0",)},
+        {"op": "==", "of": "occupied", "at": "frame", "labels": ("2",)})}
+    alive = {"name": "alive", "terms": ({"of": "occupied"}, {"op": "where", "of": "same"})}
+    one = {"name": "one", "terms": ({"of": "occupied", "at": "frame", "labels": ("1",)},)}
+    rate = {"name": "rate", "terms": ({"of": "occupied"},), "statistic": "mean", "over": ("frame",)}
+    first = presenter.add_logic(
+        "derive", source_signal=stable_signal_key(occupancy_id, "occupied"),
+        values={"variables": (same, alive, one, rate)})
+    x = {"name": "x", "terms": ({"of": "one"},)}
+    y = {"name": "y", "terms": ({"of": "alive"},)}
+    second = presenter.add_logic(
+        "derive", source_signal=stable_signal_key(first, "alive"), values={"variables": (x, y)})
+    on_x = presenter.add_logic("frame_survival", source_signal=stable_signal_key(second, "x"))
+    on_y = presenter.add_logic("frame_survival", source_signal=stable_signal_key(second, "y"))
+    editors = presenter.view.logic_editors
+    assert editors[first]["source_frames"] == ("0", "1", "2")
+    for source in ("alive", "rate"):
+        presenter.view.logic_draft_changed.emit(second, {"source_signal": stable_signal_key(first, source)})
+        assert editors[second]["source_frames"] is None, source
+        assert editors[on_x]["source_frames"] is None and editors[on_y]["source_frames"] is None, source
+
+    editor = presenter.logic[second].descriptor.ui_contributions[0]()
+    try:
+        editor.update_projection(presenter.logic_editor_projection(second))
+        app.processEvents()
+        assert [card.head["axis"].isVisibleTo(editor) for card in editor._cards] == [False, False]
+    finally:
+        editor.close()
+        editor.deleteLater()
+        app.processEvents()
+
+    # Only alive published: the bundle agrees, and its frames pass on.
+    parked = tuple({**variable, "publish": False} for variable in (one, rate))
+    presenter.view.logic_draft_changed.emit(first, {"values": {"variables": (same, alive, *parked)}})
+    presenter.view.logic_draft_changed.emit(second, {"values": {"variables": (y,)}})
+    assert editors[second]["source_frames"] == ("0", "1", "2")
+    assert editors[on_y]["source_frames"] == ("0", "1", "2")
+
+    calibration = presenter.session.workspace.data / "box-calibration.json"
+    _box_calibration(("site-0", "site-1"), ((12.0, 10.0), (30.0, 20.0)), (100.0, 100.0), (96, 128)).save(
+        calibration)
+    presenter.view.logic_draft_changed.emit(occupancy_id, {"artifact_inputs": {"calibrations": (
+        {"path": str(calibration), "frames": ("rest",)},)}})
+    presenter.view.logic_draft_changed.emit(first, {"values": {"variables": (same, alive, one, rate)}})
+    presenter.view.logic_draft_changed.emit(second, {"values": {"variables": (x, y)}})
+    assert presenter.logic_editor_projection(on_y)["source_frames"] is None
+    session.load_pulse(PULSE_NAME)
+    assert presenter.start_logic(camera_id)
+    session.fire(shots=1)
+    for node_id in (camera_id, occupancy_id, first, second):
+        if node_id != camera_id:
+            assert presenter.start_logic(node_id), presenter.view.status[-3:]
+        _settle_logic(presenter, node_id)
+        assert presenter.logic[node_id].host.observation.error is None, node_id
+
+    def carried(name):
+        key = stable_signal_key(second, name)
+        value = session.signal_plane.latest_publication(key).value(key)
+        schema = value.canonical_schema or value.snapshot.block.schema
+        return [axis.labels() for axis in schema.point_domain.axes if axis.role == READOUT_EVENT]
+
+    assert carried("x") == [] and carried("y") == [("0", "1", "2")]
+    assert presenter.logic_editor_projection(second)["source_frames"] is None
+    assert presenter.logic_editor_projection(on_x)["source_frames"] == ("0",)
+    assert presenter.logic_editor_projection(on_y)["source_frames"] == ("0", "1", "2")
+
+
 def test_a_producers_new_output_reaches_every_open_editors_sources(presenter) -> None:
-    """A derive publishes what its rows name.  Naming another signal changes
+    """A derive publishes the variables it names.  Naming another changes
     what every other node may choose as its source, so every other open
     editor is re-projected -- the way adding or removing a node already
     re-projects them.  A draft edit that leaves the outputs alone reaches
@@ -1368,7 +2099,7 @@ def test_a_producers_new_output_reaches_every_open_editors_sources(presenter) ->
     assert total not in presenter.view.logic_editors[consumer_id]["source_options"]
     presenter.view.logic_draft_changed.emit(
         producer_id,
-        {"values": {"outputs": ({"name": "total", "value": "frames"},)}},
+        {"values": {"variables": ({"name": "total", "terms": ({"of": "frames"},)},)}},
     )
     assert total in presenter.view.logic_editors[consumer_id]["source_options"]
 
@@ -1422,7 +2153,7 @@ def test_a_calibrations_api_fields_come_from_its_pulse_unless_chosen(presenter, 
 def test_make_host_hands_the_descriptor_contract_to_its_node_host() -> None:
     """The host takes what the descriptor declares, never a node attribute.
 
-    A derive reads the outputs its rows name: the declaration says
+    A derive reads the members its variables name: the declaration says
     there is an input, the instance says which siblings of it to fetch, and
     what it publishes is named by its draft, not by its kind.
     """
@@ -1591,6 +2322,19 @@ def test_calibration_pulse_is_a_workspace_file_picker(
     )
     projection = presenter.logic_editor_projection(node_id)
     assert projection["can_start"] is False
+    assert any("not-calibration.json" in issue for issue in projection["issues"])
+
+    # Calibrating saved frames reads no pulse and holds no device: the
+    # broken pulse it still names stays in the draft and refuses nothing,
+    # no camera or sequencer is offered or claimed, and New frames brings
+    # the refusal back with the pulse.
+    presenter.update_logic_draft(node_id, values={"frame_source": "saved"})
+    projection = presenter.logic_editor_projection(node_id)
+    assert projection["can_start"] is True, projection["issues"]
+    assert projection["device_options"] == {}
+    assert presenter.logic[node_id].draft.values["pulse_template"] == str(invalid)
+    presenter.update_logic_draft(node_id, values={"frame_source": "new"})
+    projection = presenter.logic_editor_projection(node_id)
     assert any("not-calibration.json" in issue for issue in projection["issues"])
 
 
@@ -1912,16 +2656,19 @@ def test_an_armed_silent_source_admits_a_scan_draft(bench) -> None:
             source_options=(signal,) if offered else (),
         )
 
+    # An issue names the source by its row on the page, never by the
+    # producer, whose name may change while the issue stands.
     source_issues = [
-        text for text in finalized(armed=True).issues if signal in text
+        text for text in finalized(armed=True).issues if "not declared" in text
     ]
     assert source_issues == []
     waiting_issues = [
-        text for text in finalized(armed=False).issues if signal in text
+        text for text in finalized(armed=False).issues if "not declared" in text
     ]
     assert waiting_issues == []
-    assert any(signal in text and "not declared" in text
-               for text in finalized(armed=False, offered=False).issues)
+    refused = [text for text in finalized(armed=False, offered=False).issues
+               if "not declared" in text]
+    assert refused and not [text for text in refused if "camera" in text], refused
 
     with _console_over(bench) as presenter:
         panel = presenter.add_blank_panel("curve")
@@ -1945,15 +2692,293 @@ def test_an_armed_silent_source_admits_a_scan_draft(bench) -> None:
         assert {choice.value for choice in field.choices} == {"", camera_id}
         assert "settle_seconds" not in projection["form_values"]
         presenter.update_logic_draft(scan_id, values={"acquisition_logic": scan_id})
-        assert any("acquisition Measurement" in text for text in
+        assert any("not an available Measurement" in text for text in
                    presenter.logic_editor_projection(scan_id)["issues"])
         presenter.update_logic_draft(scan_id, values={
             "acquisition_logic": camera_id,
         })
-        assert not any("acquisition Measurement" in text for text in
+        assert not any("not an available Measurement" in text for text in
                        presenter.logic_editor_projection(scan_id)["issues"])
         saved = presenter.layout()
         assert presenter.apply_layout(saved)
         restored = presenter.logic_editor_projection(scan_id)
         assert restored["form_values"]["acquisition_logic"] == camera_id
         assert "settle_seconds" not in restored["form_values"]
+
+
+def test_a_renamed_node_is_called_by_its_name_and_addressed_by_its_id(presenter, session) -> None:
+    """The operator renames a node; everything a person reads follows, on the
+    same turn, and nothing that addresses it moves -- not while it runs.
+
+    One name, kept on the node's binding: its row, its Edit page, every
+    picker that offers it, the panels showing its signals, the status lines
+    and MCP all read it from there.  Its id stays every signal key, lease,
+    reference and run record's address.
+    """
+
+    from zlc_workbench.device_use import DeviceClaim, DeviceUseBusy
+
+    camera_id, frames, before_rename = _started_camera(presenter, session)
+    assert camera_id == "camera_measurement"
+    _settle_panel_hosts(presenter, lambda: any(
+        panel.state.signal == frames and panel.accepted_surface is not None
+        for panel in presenter.panels.values()
+    ))
+    panel = next(panel for panel in presenter.panels.values() if panel.state.signal == frames)
+    occupancy_id = presenter.add_logic("occupancy", source_signal=frames)
+    scan_id = presenter.add_logic("seamless_scan", values={"acquisition_logic": camera_id})
+    presenter.edit_logic(camera_id)
+    assert presenter.edit_panel(panel.panel_id)
+    binding = presenter.logic[camera_id]
+    host, generation, revision = binding.host, binding.host.generation, binding.draft_revision
+    record, published = panel.state, host.published_signals()
+    shown_from = len(presenter.view.status)
+
+    presenter.view.logic_name_committed.emit(camera_id, "  Camera A ")
+
+    # Identity: the same run, the same keys, the same panel record.
+    assert binding.name == "Camera A" and binding.host is host and host.running
+    assert (host.instance_id, host.generation) == (camera_id, generation)
+    assert host.published_signals() == published == (frames,)
+    assert panel.state == record and binding.draft_revision == revision
+    # What a person reads: the row, every Edit page, the pickers, the panel.
+    row = presenter.view._rows[camera_id]
+    assert row.title == "Camera A"
+    assert row.publishes[0][2].endswith("· Camera A/frames")
+    camera_page = presenter.view.logic_editors[camera_id]
+    assert (camera_page["name"], camera_page["name_problem"]) == ("Camera A", "")
+    occupancy_page = presenter.view.logic_editors[occupancy_id]
+    assert occupancy_page["source_signal"] == frames
+    assert occupancy_page["source_groups"][frames] == "Camera A"
+    scan_field = next(field for field in presenter.view.logic_editors[scan_id]["form_spec"].fields
+                      if field.key == "acquisition_logic")
+    assert ("Camera A", camera_id) in {(choice.label, choice.value) for choice in scan_field.choices}
+    surface = presenter.view.panel_parameter_surfaces[panel.panel_id]
+    assert surface["caption"] == f"{panel.panel_id}@Camera A/frames"
+    assert surface["panel_name"] == "Camera A/frames"
+    headings = {heading for heading, _leaves in presenter.view._cards[panel.panel_id].choices}
+    assert "Camera A" in headings and camera_id not in headings
+    panel_page = presenter.view.panel_editors[panel.panel_id]
+    assert (panel_page["producer_node_id"], panel_page["producer_name"]) == (camera_id, "Camera A")
+    assert panel_page["frozen_signal"] == frames
+    assert panel_page["frozen_signal_text"] == "Camera A/frames"
+    state = presenter.control_state()
+    assert {(row["node_id"], row["name"]) for row in state["logic"]} >= {(camera_id, "Camera A")}
+    assert next(item["name"] for item in state["panels"] if item["panel_id"] == panel.panel_id) == "Camera A/frames"
+    assert presenter.view.status[shown_from] == ("task", f"renamed {camera_id} to Camera A")
+    # Nowhere a person reads -- after the line that states the rename --
+    # still calls it by its id.
+    pages = [presenter.view.logic_editors[node] for node in (camera_id, occupancy_id, scan_id)]
+    said = [
+        *(text for _severity, text in presenter.view.status[shown_from + 1:]),
+        *(text for row in presenter.view.logic_rows for text in (row.title, *row.state)),
+        *(text for row in presenter.view.logic_rows for item in row.publishes for text in item),
+        *(str(page[key]) for page in pages for key in ("name", "status", "issues")),
+        *(text for page in pages for text in (*page["source_groups"].values(), *page["source_labels"].values())),
+        *(choice.label for choice in scan_field.choices),
+        surface["caption"], surface["panel_name"], *headings, panel_page["producer_name"],
+    ]
+    assert not [text for text in said if camera_id in text], said
+
+    # The Panel name field shows "Camera A/frames"; sent back as shown, it is
+    # still the automatic title -- the signal's key -- and follows the next
+    # rename, instead of freezing this one into the panel record.
+    assert presenter.update_panel_state(panel.panel_id, {"title": "Camera A/frames"}) is False
+    assert panel.state.title == frames
+    assert presenter.rename_logic(camera_id, "Camera B")
+    surface = presenter.view.panel_parameter_surfaces[panel.panel_id]
+    assert (surface["caption"], surface["panel_name"]) == (
+        f"{panel.panel_id}@Camera B/frames", "Camera B/frames"
+    )
+    assert presenter.update_panel_state(panel.panel_id, {"title": "MOT shot"})
+    assert panel.state.title == "MOT shot"
+    presenter.beat()
+    # Its publisher row on the Logic page says the panel's name too.
+    assert presenter.view.panel_publisher_names[panel.panel_id] == "MOT shot"
+    assert presenter.update_panel_state(panel.panel_id, {"title": "Camera B/frames"})
+    assert panel.state.title == frames
+    assert presenter.rename_logic(camera_id, "Camera A")
+
+    # A device refusal names the owner as the operator calls it.
+    with pytest.raises(DeviceUseBusy, match="device is in use by Camera A$"):
+        session.device_use.acquire_command(
+            object(), "probe", (DeviceClaim("camera", "camera", session.camera),)
+        )
+    # History: a run is stamped with the name it was built under.
+    assert before_rename.run_record["node"] == camera_id
+    assert before_rename.run_record["node_name"] == camera_id
+    assert presenter.start_logic(camera_id)
+    deadline = time.monotonic() + 10.0
+    latest = None
+    while time.monotonic() < deadline:
+        session.fire(shots=1)
+        presenter.beat()
+        latest = session.signal_plane.latest_publication(frames)
+        if latest is not None and latest.run_record.get("node_name") == "Camera A":
+            break
+        time.sleep(0.005)
+    assert latest.run_record["node"] == camera_id
+    assert latest.run_record["node_name"] == "Camera A"
+
+    # A second camera on the same device waits for the first: by its name.
+    second = presenter.add_logic(
+        "camera_measurement", values={"exposure_seconds": 0.002, "repeat": 0},
+        device_keys={"camera": "camera"}, open_editor=False,
+    )
+    assert second == "camera_measurement2"
+    holder = presenter.logic[camera_id].host
+    assert presenter.start_logic(second)
+    assert presenter.logic[second].pending is not None
+    assert presenter.view._rows[second].state[1] == "waiting for Camera A"
+    assert presenter.view.status[-1] == ("task", f"{second} queued while Camera A stops")
+    # Renamed while its Start is queued, the run it starts carries the new
+    # name: the name is asked when the run declares its record.
+    assert presenter.rename_logic(second, "Camera C")
+    deadline = time.monotonic() + 10.0
+    second_frames = stable_signal_key(second, "frames")
+    latest = None
+    while time.monotonic() < deadline and (latest is None or holder.running):
+        session.fire(shots=1)
+        presenter.beat()
+        latest = session.signal_plane.latest_publication(second_frames)
+        time.sleep(0.005)
+    assert not holder.running
+    assert latest.run_record["node"] == second
+    assert latest.run_record["node_name"] == "Camera C"
+    assert presenter.stop_logic(second)
+    # An empty name is the internal ID, as the empty Name box's hint says.
+    assert presenter.rename_logic(second, "")
+    assert presenter.logic[second].name == second
+    assert presenter.view.status[-1] == ("task", f"renamed Camera C to {second}")
+
+    # Refusals from the Edit page: one sentence each, under its Name line
+    # and on the strip; the name is unchanged.  Names a person reads alike
+    # -- another case, a no-break or doubled space, full-width letters -- are
+    # one name.  The current name needs no report and clears the sentence.
+    presenter.edit_logic(second)
+    for typed, problem in (
+        ("a/b", "A name is one line of text without “/”."),
+        ("a\u200bb", "A name is one line of text without “/”."),
+        ("Panel-2", "“Panel-2” is how a panel is named; choose another name."),
+        ("CAMERA A", "Another node is already called “Camera A”."),
+        ("Camera\u00a0A", "Another node is already called “Camera A”."),
+        ("Camera  A", "Another node is already called “Camera A”."),
+        ("\uff23\uff41\uff4d\uff45\uff52\uff41 \uff21", "Another node is already called “Camera A”."),
+        ("Camera_Measurement", "“camera_measurement” is another node's internal ID; choose another name."),
+        ("Signals", "“Signals” already names a signal producer; choose another name."),
+    ):
+        presenter.view.logic_name_committed.emit(second, typed)
+        assert presenter.logic[second].name == second, typed
+        assert presenter.view.logic_editors[second]["name_problem"] == problem
+        assert presenter.view.status[-1] == ("warning", f"{second}: {problem}")
+    reports = len(presenter.view.status)
+    presenter.view.logic_name_committed.emit(second, second)
+    assert len(presenter.view.status) == reports
+    assert presenter.view.logic_editors[second]["name_problem"] == ""
+    # An agent's refusal is the agent's error, not a sentence under the
+    # operator's Name line; a name that is not text is refused outright.
+    refused = presenter.control_action("logic.rename", {"node_id": second, "name": "camera a"})
+    assert (refused["accepted"], refused["status"]) == (False, "rejected")
+    assert refused["error"] == f"{second}: Another node is already called “Camera A”."
+    assert presenter.view.logic_editors[second]["name_problem"] == ""
+    for action, arguments in (
+        ("logic.rename", {"node_id": second, "name": None}),
+        ("logic.add", {"api_name": "occupancy", "name": 5}),
+    ):
+        refused = presenter.control_action(action, arguments)
+        assert not refused["accepted"] and "must be text" in refused["error"], refused
+    assert presenter.logic[second].name == second and "None" not in presenter.logic_names().values()
+    renamed = presenter.control_action("logic.rename", {"node_id": occupancy_id, "name": "Loading"})
+    assert (renamed["accepted"], renamed["status"]) == (True, "renamed")
+    assert renamed["state"]["logic"][0]["name"] == "Loading"
+    # A draft's issues name no node -- the acquisition's picker beside them
+    # says which, by its name now -- so the refusal a Start leaves on the
+    # row, a copy of the first, never keeps a name a rename changed.
+    assert presenter.update_logic_draft(scan_id, values={"acquisition_logic": occupancy_id})
+    issues = presenter.logic_editor_projection(scan_id)["issues"]
+    assert "the selected acquisition is not an available Measurement" in issues
+    assert not [text for text in issues if "Loading" in text or occupancy_id in text], issues
+    assert presenter.start_logic(scan_id) is False
+    refusal = presenter.logic[scan_id].draft_error
+    assert refusal in issues
+    assert presenter.rename_logic(occupancy_id, "Counting")
+    assert presenter.view._rows[scan_id].state == ("error", refusal)
+    assert presenter.control_state(node_id=scan_id)["logic"][0]["error"] == refusal
+    assert presenter.rename_logic(occupancy_id, "Loading")
+
+    # Minting skips every name and id; an added node may be named at once.
+    assert presenter.rename_logic(second, "occupancy2")
+    assert presenter.add_logic("occupancy", open_editor=False) == "occupancy3"
+    named = presenter.add_logic("occupancy", name="Counting", open_editor=False)
+    assert presenter.logic[named].name == "Counting"
+    assert presenter.add_logic("occupancy", name="panel-1", open_editor=False) == ""
+    assert presenter.add_logic("occupancy", node_id="a/b", open_editor=False) == ""
+
+    # A node that is gone has no name left: what named it reads its id.
+    assert presenter.remove_logic(camera_id)
+    surface = presenter.view.panel_parameter_surfaces[panel.panel_id]
+    assert surface["caption"] == f"{panel.panel_id}@{camera_id}/frames"
+
+
+def test_a_board_keeps_its_names_and_refuses_one_no_operator_could_type(
+    bench_presenter, tmp_path
+) -> None:
+    """A saved board writes each node's name beside its id; a file without
+    names reads every node by its id, and a name the console would refuse
+    makes the whole file one sentence."""
+
+    from zlc_workbench.console_layout import (
+        LayoutDocument, LayoutError, read_experiment_recipe, resolve_layout,
+    )
+
+    presenter = bench_presenter
+    camera_id = presenter.add_logic("camera_measurement", open_editor=False)
+    occupancy_id = presenter.add_logic(
+        "occupancy", source_signal=stable_signal_key(camera_id, "frames"), open_editor=False,
+    )
+    assert presenter.rename_logic(camera_id, "Camera A")
+    path = tmp_path / "board.json"
+    assert presenter.save_layout(str(path))
+    tree = json.loads(path.read_text(encoding="utf-8"))
+    entry = tree["logic"][0]
+    assert list(entry)[:3] == ["node_id", "name", "api_name"]
+    assert (entry["node_id"], entry["name"]) == (camera_id, "Camera A")
+
+    assert presenter.rename_logic(camera_id, camera_id)
+    assert presenter.load_layout(str(path))
+    assert presenter.logic[camera_id].name == "Camera A"
+    assert presenter.view._rows[camera_id].title == "Camera A"
+    assert presenter.logic_editor_projection(occupancy_id)["source_groups"][
+        stable_signal_key(camera_id, "frames")
+    ] == "Camera A"
+
+    del entry["name"]
+    assert LayoutDocument.from_tree(tree).logic[0].name == camera_id
+    tree["logic"][1]["name"] = "Loading"
+    for name, problem in (
+        ("LOADING", "logic entry 1: Another node is already called “Loading”."),
+        ("Occupancy", "logic entry 1: “occupancy” is another node's internal ID; choose another name."),
+        ("panel-3", "logic entry 1: “panel-3” is how a panel is named; choose another name."),
+        ("a/b", "logic entry 1: A name is one line of text without “/”."),
+    ):
+        entry["name"] = name
+        with pytest.raises(LayoutError) as refused:
+            LayoutDocument.from_tree(tree)
+        assert str(refused.value) == problem
+    assert read_experiment_recipe(Path(presenter.session.workspace.root), "trap_lifetime")
+    # A name a notebook's producer heads on this session would merge with it
+    # in every picker: that row is called by its internal ID, and the load
+    # says so.
+    entry["name"] = "Calibration"
+    loaded = resolve_layout(
+        LayoutDocument.from_tree(tree),
+        catalog=presenter.catalog,
+        installation=presenter.session.installation,
+        panel_ids=tuple(f"panel-{index + 1}" for index in range(len(tree["panels"]))),
+        external_outputs=(("@logic/calibration/frames", "camera.frames"),),
+    )
+    assert loaded.logic[0].name == camera_id
+    assert (
+        f"logic {camera_id} is called by its internal ID: “Calibration” already "
+        "names a signal producer; choose another name."
+    ) in loaded.notes

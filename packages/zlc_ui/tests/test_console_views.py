@@ -211,9 +211,15 @@ QtTest.QTest.mouseClick(card.edit_button, QtCore.Qt.LeftButton)
 app.processEvents()
 QtTest.QTest.mouseClick(card.settings_button, QtCore.Qt.LeftButton)
 app.processEvents()
+# Setting's Remove removes the same panel, so it takes two clicks too:
+# the first arms it and removes nothing.
+before = events.count(('remove',))
+QtTest.QTest.mouseClick(card.remove_button, QtCore.Qt.LeftButton)
+assert card.remove_button.is_armed() and events.count(('remove',)) == before
 QtTest.QTest.mouseClick(card.remove_button, QtCore.Qt.LeftButton)
 assert ('edit',) in events
-assert ('remove',) in events
+assert events.count(('remove',)) == before + 1, events
+assert card.remove_button.role() == 'destructive'
 assert any(event[0] == 'state' and event[1]['title'] == 'Card changed' for event in events)
 assert ('state', {'interval_ms': 800}) in events
 popup.close(); card.close(); card.deleteLater()
@@ -643,8 +649,8 @@ app.processEvents()
 
 
 def test_board_qtest_drop_uses_the_slot_under_the_pointer_and_keeps_every_place_a_drop_authored(run_qt) -> None:
-    """A drop lands in the slot under the pointer, commits the new order, and
-    keeps every place a drop authored.
+    """A card carried by its strip lands in the slot under the pointer,
+    commits the new order, and keeps every place a drop authored.
 
     The board packed every card into the first free slot on the board and
     exempted exactly one -- whichever had been dropped last -- so it could
@@ -696,10 +702,11 @@ assert all(card.geometry().x() == 10 for card in cards)
 board.resize(3 * w + 4 * 10, 2 * h + 3 * 10); app.processEvents()
 assert tuple(card.geometry().getRect()[:2] for card in cards) == second_row
 
+# Onto panel-0: the two change places.
 drop_top_left_at(board, cards[2], (12, 14))
-assert events[-1] == ('panel-2', 'panel-0', 'panel-1'), events
+assert events[-1] == ('panel-2', 'panel-1', 'panel-0'), events
 by_id = {card.panel_id: card for card in cards}
-assert tuple(by_id[panel_id].geometry().getRect()[:2] for panel_id in events[-1]) == row
+assert tuple(by_id[panel_id].geometry().getRect()[:2] for panel_id in events[-1]) == second_row
 
 # Every place a drop authored stands through the next drop.
 board.close()
@@ -723,8 +730,8 @@ assert cards[2].geometry().getRect()[:2] == (10, 30 + 2 * h), cards[2].geometry(
 
 def test_board_qtest_drag_previews_the_drop_while_the_card_follows_the_pointer(run_qt) -> None:
     """While a card is carried it follows the pointer, and the board already
-    stands as the drop will leave it: the other cards closed up ahead of the
-    slot under the pointer, and that slot drawn where the card will rest."""
+    stands as the drop will leave it: the card it is let go onto in the place
+    it left, and the slot drawn where the card will rest."""
 
     run_qt(
         """
@@ -758,18 +765,20 @@ def places(ids):
 
 drag_to(cards[0], (w + 60, h + 60))
 assert cards[0].pos() == QtCore.QPoint(w + 42, h + 42)
-assert places(('panel-1', 'panel-2', 'panel-3')) == slots[:3]
+# Over panel-3: panel-3 already stands in the place panel-0 left, and the
+# other two have not moved.
+assert places(('panel-3', 'panel-1', 'panel-2')) == slots[:3]
 assert board._drop_rect == QtCore.QRect(20 + w, 20 + h, w, h), board._drop_rect
 drop_at(cards[0], (w + 60, h + 60))
-assert board._order == ('panel-1', 'panel-2', 'panel-3', 'panel-0')
+assert board._order == ('panel-3', 'panel-1', 'panel-2', 'panel-0')
 assert places(board._order) == slots and board._drop_rect is None
 
-# Over the slot panel-3 stands in: panel-0 goes there and panel-3 after it.
+# Over panel-2: the two change places.
 drag_to(cards[0], (35, 2 * h))
-assert places(('panel-1', 'panel-2', 'panel-3')) == (slots[0], slots[1], slots[3])
+assert places(('panel-3', 'panel-1', 'panel-2')) == (slots[0], slots[1], slots[3])
 assert board._drop_rect == QtCore.QRect(10, 20 + h, w, h), board._drop_rect
 drop_at(cards[0], (35, 2 * h))
-assert board._order == ('panel-1', 'panel-2', 'panel-0', 'panel-3')
+assert board._order == ('panel-3', 'panel-1', 'panel-0', 'panel-2')
 assert places(board._order) == slots
 """
     )
@@ -869,9 +878,9 @@ QtTest.QTest.mouseClick(start, QtCore.Qt.LeftButton)
 QtTest.QTest.mouseClick(stop, QtCore.Qt.LeftButton)
 # A draft that cannot start is a state of its own, drawn as the node's Edit
 # page draws it -- a word the row refused would raise out of a Qt slot.
-from zlc_ui.console.logic_row_view import STATE_COLOURS
+from zlc_ui.fluent import STATUS_CUES
 row.set_state('draft', 'Draft: select a compatible source')
-dot, ink = STATE_COLOURS['draft']
+dot, ink = STATUS_CUES['idle']
 assert dot in row.dot.styleSheet() and ink in row.status_label.styleSheet()
 row.set_state('idle', 'stopped')
 row.set_commands(can_start=True, can_stop=False)
@@ -880,6 +889,9 @@ assert start.text() == 'Start' and not stop.isEnabled() and stop.isVisible()
 assert slots() == idle, (slots(), idle)
 QtTest.QTest.mouseClick(start, QtCore.Qt.LeftButton)
 QtTest.QTest.mouseClick(row.edit_button, QtCore.Qt.LeftButton)
+# Removing a node takes two clicks: the first only arms the x.
+QtTest.QTest.mouseClick(row.remove_button, QtCore.Qt.LeftButton)
+assert events == ['start', 'stop', 'start', 'edit'] and row.remove_button.is_armed()
 QtTest.QTest.mouseClick(row.remove_button, QtCore.Qt.LeftButton)
 assert events == ['start', 'stop', 'start', 'edit', 'remove']
 """
@@ -898,7 +910,7 @@ view = TaskConsoleView()
 handle = TaskConsoleHandle(None, view)
 handle.set_panel_sizes(('2x2',), '2x2')
 handle.add_logic_row('camera-1', 'measurement')
-handle.set_panel_publishers((('panel-1', (
+handle.set_panel_publishers((('panel-1', 'panel-1', (
     ('center_x', '35', 'held · @logic/panel-1/center_x'),
     ('roi', '4', 'live · @logic/panel-1/roi'),
 )),))
@@ -971,19 +983,27 @@ assert editor.artifact_form.widget_for('calibration_path').mapTo(editor, QtCore.
 # one run of rows a form gap apart, whichever widget holds them; a section
 # gap follows the header and precedes the action bar; every control starts
 # on one column; and the content sits a window pad inside the page on both
-# sides, the scrollbar's gutter held although no bar shows.
-from zlc_ui.fluent import FluentSettingRow, window_pad
+# sides, the scrollbar's gutter held although no bar shows.  The header and
+# the action bar stand outside the scrolling rows, on the same edges.
+from zlc_ui.fluent import FluentScrollArea, FluentSettingRow, section_gap, window_pad
 from zlc_ui.fluent import row_gap
 top_of = lambda widget: widget.mapTo(editor, QtCore.QPoint()).y()
+left_of = lambda widget: widget.mapTo(editor, QtCore.QPoint()).x()
 rows = sorted((row for row in editor.findChildren(FluentSettingRow) if row.isVisible()), key=top_of)
 assert len(rows) == 5, [row.layout().itemAt(0).widget().text() for row in rows]
 gaps = [top_of(below) - top_of(above) - above.height() for above, below in zip(rows, rows[1:])]
 assert gaps == [row_gap()] * 4, gaps
-assert top_of(rows[0]) - top_of(editor.status_label) - editor.status_label.height() == window_pad()
-assert top_of(editor.remove_button) - top_of(rows[-1]) - rows[-1].height() == window_pad()
+assert top_of(rows[0]) - top_of(editor.status_label) - editor.status_label.height() == section_gap()
 assert len({row.layout().itemAt(1).widget().mapTo(editor, QtCore.QPoint()).x() for row in rows}) == 1
 left = rows[0].mapTo(editor, QtCore.QPoint()).x()
 assert (left, editor.width() - left - rows[0].width()) == (window_pad(), window_pad())
+scroll = editor.findChild(FluentScrollArea)
+viewport_bottom = scroll.viewport().mapTo(editor, QtCore.QPoint(0, scroll.viewport().height())).y()
+assert top_of(editor.remove_button) - viewport_bottom == section_gap()
+assert editor.height() - top_of(editor.remove_button) - editor.remove_button.height() == window_pad()
+assert left_of(editor.title_label) == left_of(editor.remove_button) == window_pad()
+assert editor.width() - left_of(editor.stop_button) - editor.stop_button.width() == window_pad()
+assert not scroll.isAncestorOf(editor.status_label) and not scroll.isAncestorOf(editor.start_button)
 publisher = handle._panel_publisher_rows['panel-1']
 assert tuple(view._logic_rows) == (handle._rows['camera-1'], publisher)
 assert not publisher.publishes_label.isHidden()
@@ -1029,7 +1049,10 @@ handle.panel_publisher_draft_changed.connect(
 handle.open_panel_publisher_editor('panel-1', publisher_projection)
 publisher_editor = handle._panel_publisher_editors['panel-1']
 assert publisher_editor.source_combo is None
-assert publisher_editor.start_button.isHidden() and publisher_editor.stop_button.isHidden()
+# Nothing to start or remove on a publisher's page: no action bar at all.
+assert not any(button.isVisibleTo(publisher_editor) for button in (
+    publisher_editor.start_button, publisher_editor.stop_button, publisher_editor.remove_button,
+))
 publisher_editor.form.widget_for('roi_max').click()
 assert publisher_patches == [('panel-1', {'values': {'roi_max': False}})]
 assert view.tabs.indexOf(editor) >= 0
@@ -1133,19 +1156,23 @@ handle.update_logic_editor('camera-1', dict(
     projection, artifact_claims=claims, issues=('Frames must be selected', *claims['calibrations']['problems'])))
 assert editor.status_label.text() == 'Draft: Frames must be selected'
 # So is one a contribution states under the line it is about (Derive's
-# typing errors), by the section it names.
+# typing errors), by the section it names -- each one it shows, though
+# Start's check stopped at the first.
 from PyQt5 import QtWidgets
-typed = ('bright · where: the mask does not fit the value', 'same · combine: booleans do not mix with numbers')
+typed = ('bright · term 2: the mask has frame, which counts[frame 1] does not; pick one frame value of the mask',
+         'same · term 2: booleans do not mix with numbers', 'band · statistic: choose the statistic')
 class Typed(QtWidgets.QWidget):
     draft_changed = QtCore.pyqtSignal(object)
     def update_projection(self, projection):
         pass
     def shown_problems(self):
-        return {problem: 'Outputs' for problem in typed}
+        return {problem: 'Variables' for problem in typed}
 def typed_editor(parent):
     return Typed(parent)
 handle.update_logic_editor('camera-1', dict(projection, ui_contributions=(typed_editor,), issues=typed))
-assert editor.status_label.text() == 'Draft: 2 problems in Outputs'
+assert editor.status_label.text() == 'Draft: 3 problems in Variables'
+handle.update_logic_editor('camera-1', dict(projection, ui_contributions=(typed_editor,), issues=typed[:1]))
+assert editor.status_label.text() == 'Draft: 3 problems in Variables'
 handle.update_logic_editor('camera-1', dict(
     projection, ui_contributions=(typed_editor,), issues=('Frames must be selected', *typed)))
 assert editor.status_label.text() == 'Draft: Frames must be selected'
@@ -1201,6 +1228,191 @@ assert tuple(handle._rows) == ('camera-1',)
 view.editor_close_requested.emit(publisher_editor)
 app.processEvents()
 assert 'panel-1' not in handle._panel_publisher_editors
+"""
+    )
+
+
+def test_a_logic_node_is_renamed_on_its_edit_page_and_called_by_its_name(run_qt) -> None:
+    run_qt(
+        """
+from PyQt5 import QtCore, QtTest, QtWidgets
+from zlc_ui.console import TaskConsoleHandle, TaskConsoleView
+from zlc_ui.fluent import FluentSettingRow
+from zlc_ui.form import FormFieldProps, FormSpec
+from zlc_ui.qt import ensure_qt_app
+app = ensure_qt_app(['logic-name'])
+view = TaskConsoleView()
+handle = TaskConsoleHandle(None, view)
+handle.set_panel_sizes(('2x2',), '2x2')
+# A row is made blank; what the node is called arrives by one channel, and
+# its tooltip says what the node is and the ID it is addressed by.
+handle.add_logic_row('occupancy2', 'processor')
+row = handle._rows['occupancy2']
+assert row.name_label.text() == ''
+handle.set_logic_name('occupancy2', 'Loading', 'occupancy')
+assert row.name_label.text() == 'Loading'
+assert row.name_label.toolTip() == 'Loading · occupancy · internal ID occupancy2'
+# A name is shown as typed, never read as markup.
+handle.set_logic_name('occupancy2', '<i>Cam', 'occupancy')
+assert row.name_label.textFormat() == QtCore.Qt.PlainText
+handle.set_logic_name('occupancy2', 'Loading', 'occupancy')
+# Two names that differ at their end still read differently in the column.
+handle.add_logic_row('occupancy3', 'processor')
+handle.set_logic_name('occupancy2', 'Loading occupancy of the upper MOT, shot 1', 'occupancy')
+handle.set_logic_name('occupancy3', 'Loading occupancy of the upper MOT, shot 2', 'occupancy')
+view.resize(1000, 700)
+view.show()
+app.processEvents()
+shown = lambda label: QtWidgets.QLabel.text(label)
+assert '…' in shown(row.name_label)
+assert shown(row.name_label) != shown(handle._rows['occupancy3'].name_label)
+handle.set_logic_name('occupancy2', 'Loading', 'occupancy')
+handle.remove_logic_row('occupancy3')
+projection = {
+    'node_id': 'occupancy2', 'name': 'Loading', 'name_problem': '',
+    'api_name': 'occupancy', 'kind': 'processor',
+    'form_spec': FormSpec((FormFieldProps(key='repeat', kind='int', label='Repeat', default=0, minimum=0),)),
+    'form_values': {'repeat': 0},
+    'source_required': True, 'source_label': 'Frames', 'source_signal': '@logic/camera_measurement/frames',
+    'source_options': ('@logic/camera_measurement/frames',),
+    'source_labels': {'@logic/camera_measurement/frames': 'frames'},
+    'source_groups': {'@logic/camera_measurement/frames': 'Camera A'},
+    'device_options': {}, 'device_keys': {},
+    'preview_offered': False, 'auto_preview': False,
+    'running': True, 'pending': False, 'can_start': False, 'can_stop': True,
+    'issues': (), 'error': '', 'status': 'following Camera A/frames', 'state': 'running',
+}
+sent = []
+def answer(node_id, text):
+    # The presenter's part: refuse a slash, an empty name is the internal
+    # ID, an unchanged one withdraws a standing refusal.
+    sent.append((node_id, text))
+    if '/' in text:
+        projection['name_problem'] = 'A name is one line of text without “/”.'
+    else:
+        projection.update(name=text or node_id, name_problem='')
+    handle.update_logic_editor(node_id, projection)
+handle.logic_name_committed.connect(answer)
+handle.open_logic_editor('occupancy2', projection)
+editor = handle._logic_editors['occupancy2']
+app.processEvents()
+tab = lambda: view.tabs.tabText(view.tabs.indexOf(editor))
+assert tab() == 'Edit · Loading'
+assert editor.title_label.text() == 'Loading'
+assert editor.kind_label.text() == '(occupancy · processor)'
+# The Name is the first row, in the one label column and the one control
+# column, and the first stop of Tab on the page's rows.
+top = lambda widget: widget.mapTo(editor, QtCore.QPoint()).y()
+left = lambda widget: widget.mapTo(editor, QtCore.QPoint()).x()
+rows = sorted((r for r in editor.findChildren(FluentSettingRow) if r.isVisible()), key=top)
+box = editor.name_form.widget_for('name')
+assert rows[0].isAncestorOf(box), [r.layout().itemAt(0).widget().text() for r in rows]
+assert editor.name_form._labels['name'].text() == 'Name'
+assert left(box) == left(editor.source_combo) == left(editor.form.widget_for('repeat'))
+assert box.text() == 'Loading' and box.toolTip() == 'Internal ID: occupancy2'
+chain, widget = [], box.nextInFocusChain()
+while widget is not box and len(chain) < 500:
+    chain.append(widget)
+    widget = widget.nextInFocusChain()
+assert chain.index(editor.source_combo) < chain.index(editor.start_button), 'Tab from Name goes to the rows'
+view.activateWindow()
+def type_in(text):
+    box.setFocus()
+    app.processEvents()
+    assert QtWidgets.QApplication.focusWidget() is box
+    box.selectAll()
+    QtTest.QTest.keyClicks(box, text)
+def leave():
+    editor.form.widget_for('repeat').setFocus()
+    app.processEvents()
+# Return sends what was typed, once, stripped; leaving afterwards sends
+# nothing more, and the box then shows the name the node has.
+type_in('  Counts ')
+QtTest.QTest.keyClick(box, QtCore.Qt.Key_Return)
+assert sent == [('occupancy2', 'Counts')], sent
+assert tab() == 'Edit · Counts' and editor.title_label.text() == 'Counts'
+leave()
+assert sent == [('occupancy2', 'Counts')], sent
+assert box.text() == 'Counts'
+# A box nobody typed in sends nothing, even when an agent renamed the node
+# while the focus stood in it: leaving shows the agent's name, not the old.
+box.setFocus()
+app.processEvents()
+projection.update(name='Agent name')
+handle.update_logic_editor('occupancy2', projection)
+assert box.text() == 'Counts'
+leave()
+assert sent == [('occupancy2', 'Counts')], sent
+assert box.text() == 'Agent name' and tab() == 'Edit · Agent name'
+# Escape takes back what was typed.
+type_in('Oops')
+QtTest.QTest.keyClick(box, QtCore.Qt.Key_Escape)
+app.processEvents()
+assert box.text() == 'Agent name' and not box.hasFocus()
+assert sent == [('occupancy2', 'Counts')], sent
+# A refusal is one sentence under the line, in the control column, while
+# the refused text is in the box; leaving it puts the name back and the
+# refusal goes with the text it answered.
+assert editor.name_problem_label.isHidden()
+below = top(editor.source_combo)
+type_in('a/b')
+QtTest.QTest.keyClick(box, QtCore.Qt.Key_Return)
+app.processEvents()
+assert sent[-1] == ('occupancy2', 'a/b')
+assert box.text() == 'a/b'
+assert editor.name_problem_label.isVisible()
+assert editor.name_problem_label.text() == 'A name is one line of text without “/”.'
+assert left(editor.name_problem_label) == left(box)
+assert top(box) < top(editor.name_problem_label) < top(editor.source_combo)
+assert top(editor.source_combo) > below, 'the sentence takes its own line'
+leave()
+app.processEvents()
+assert sent[-1] == ('occupancy2', 'Agent name')
+assert box.text() == 'Agent name' and editor.name_problem_label.isHidden()
+# An emptied box is sent as it is: the node is then called by its ID.
+type_in('')
+QtTest.QTest.keyClick(box, QtCore.Qt.Key_Backspace)
+QtTest.QTest.keyClick(box, QtCore.Qt.Key_Return)
+leave()
+assert sent[-1] == ('occupancy2', ''), sent
+assert box.text() == 'occupancy2' and tab() == 'Edit · occupancy2'
+# Called by its type's own name, the header does not say the type twice.
+projection.update(name='occupancy')
+handle.update_logic_editor('occupancy2', projection)
+assert editor.kind_label.text() == '(processor)'
+# A long name gives up its middle in the header; it never widens the page.
+narrowest = editor.minimumSizeHint().width()
+projection.update(name='Loading occupancy of the upper MOT ' * 5)
+handle.update_logic_editor('occupancy2', projection)
+app.processEvents()
+assert editor.minimumSizeHint().width() == narrowest
+assert '…' in QtWidgets.QLabel.text(editor.title_label) or editor.title_label.width() >= editor.title_label.maximumWidth()
+projection.update(name='Loading')
+handle.update_logic_editor('occupancy2', projection)
+# A Task holding the console leaves the Name editable, and the row's Edit,
+# the way to it.
+handle.set_task_takeover('another_task')
+assert box.isEnabled() and not editor.form.isEnabled()
+assert row.edit_button.isEnabled() and not row.remove_button.isEnabled()
+handle.set_task_takeover('')
+# A panel publisher's row says the panel's name, its id in the tooltip; its
+# page has nothing to rename.
+handle.set_panel_publishers((('panel-1', 'Camera A/frames', (('roi', '4', 'live · panel-1/roi'),)),))
+publisher_row = handle._panel_publisher_rows['panel-1']
+assert publisher_row.name_label.text() == 'Camera A/frames'
+assert publisher_row.name_label.toolTip() == 'Camera A/frames · panel-1'
+handle.open_panel_publisher_editor('panel-1', {
+    'node_id': 'panel-1', 'api_name': 'Camera A/frames outputs', 'kind': 'panel publisher',
+    'form_spec': FormSpec((FormFieldProps(key='roi_mean', kind='bool', label='Mean', default=True),)),
+    'form_values': {'roi_mean': True}, 'source_required': False,
+    'device_options': {}, 'device_keys': {},
+    'preview_offered': False, 'auto_preview': False,
+    'running': False, 'pending': False, 'can_start': False, 'can_stop': False,
+    'issues': (), 'error': '', 'status': '',
+})
+publisher = handle._panel_publisher_editors['panel-1']
+assert not publisher._name_frame.isVisibleTo(publisher)
+assert view.tabs.tabText(view.tabs.indexOf(publisher)) == 'Edit · Camera A/frames outputs'
 """
     )
 
@@ -1679,9 +1891,12 @@ row = scan_readout._rows[0]
 assert row.start_spin.value() == 1 and row.stop_spin.value() == 3
 assert scan_readout._rows[1].start_spin.valueUnit() == 'MHz'
 assert scan_readout._rows[2].stop_spin.value() == 6
-assert scan_readout._rows[2].input_stack.currentIndex() == 0
+# A Values axis reads as it plays: its list on screen, the choice on Values,
+# and no note about a Range bank the run does not use.
+assert scan_readout._rows[2].input_stack.currentIndex() == 1
+assert scan_readout._rows[2].values_edit.text() == '10, 20'
 assert scan_readout._rows[2].mode_choice.button('values').property('current') is True
-assert scan_readout._rows[2].custom_label.text() == 'Range off'
+assert scan_readout._rows[2].custom_label.isHidden()
 assert 'not in this pulse' not in scan_readout._rows[1].port_combo.currentText()
 plan['axes'][0]['values'] = [4, 5, 6]
 handle.set_panel_producer_projection('panel-1', dict(linked_scan, form_values={'plan': json.dumps(plan)}))
@@ -1947,9 +2162,9 @@ for widget in (
     view.name_label,
     view.summary_label,
     view.kind_combo,
-    view.add_panel_button,
+    view.add_button,
     view.selectors_switch,
-    view.pause_switch,
+    view.pause_button,
     view.save_screenshot_button,
     view.save_layout_button,
     view.load_layout_button,
@@ -2056,10 +2271,19 @@ assert view.kind_combo.itemText(2) == 'Measurement: camera_measurement'
 assert view.kind_combo.itemText(3) == 'Processor: occupancy'
 assert view.kind_combo.itemText(4) == 'Task: calibration'
 assert view.kind_combo.currentData() == ('plot', 'image')
-QtTest.QTest.mouseClick(view.add_panel_button, QtCore.Qt.LeftButton)
+# The command names what it adds, from the family chosen beside it, in one
+# slot: the commands after it stand still when the words change.
+assert view.add_button.text() == 'Add panel'
+add_slot = lambda: (view.add_button.geometry(), view.selectors_switch.geometry())
+plot_slot = add_slot()
+QtTest.QTest.mouseClick(view.add_button, QtCore.Qt.LeftButton)
 view.kind_combo.setCurrentIndex(2)
-QtTest.QTest.mouseClick(view.add_panel_button, QtCore.Qt.LeftButton)
-QtTest.QTest.mouseClick(view.pause_switch, QtCore.Qt.LeftButton)
+app.processEvents()
+assert view.add_button.text() == 'Add node'
+assert add_slot() == plot_slot, (add_slot(), plot_slot)
+assert 'click Add node' in view.logic_hint.text()
+QtTest.QTest.mouseClick(view.add_button, QtCore.Qt.LeftButton)
+QtTest.QTest.mouseClick(view.pause_button, QtCore.Qt.LeftButton)
 QtTest.QTest.mouseClick(view.save_screenshot_button, QtCore.Qt.LeftButton)
 QtTest.QTest.mouseClick(view.save_layout_button, QtCore.Qt.LeftButton)
 QtTest.QTest.mouseClick(view.clear_board_button, QtCore.Qt.LeftButton)
@@ -2092,17 +2316,18 @@ app.processEvents()
 assert view.status_strip.action_button is not None
 assert view.status_strip.action_button.isVisible()
 assert view.kind_combo.isEnabled()
-assert not view.add_panel_button.isEnabled()
+assert not view.add_button.isEnabled()
 assert view.save_layout_button.isEnabled()
 assert not view.load_layout_button.isEnabled()
 assert not view.clear_board_button.isEnabled()
 assert view.selectors_switch.isEnabled()
-assert view.pause_switch.isEnabled()
+assert view.pause_button.isEnabled()
 assert view.save_screenshot_button.isEnabled()
 assert preview.settings_button.isEnabled()
 for row in (task_row, camera_row):
     assert not row.start_button.isEnabled()
-    assert not row.edit_button.isEnabled()
+    # Edit stays: its page is read-only under the Task but for the Name.
+    assert row.edit_button.isEnabled()
     assert not row.remove_button.isEnabled()
 # The running Task's own row keeps its Stop, in its place; every other
 # row's Stop waits for the Task like the rest of its commands.
@@ -2110,7 +2335,7 @@ assert task_row.stop_button.isVisible() and task_row.stop_button.isEnabled()
 assert slots(task_row) == before_takeover, (slots(task_row), before_takeover)
 assert camera_row.stop_button.isVisible() and not camera_row.stop_button.isEnabled()
 before = list(events)
-QtTest.QTest.mouseClick(view.add_panel_button, QtCore.Qt.LeftButton)
+QtTest.QTest.mouseClick(view.add_button, QtCore.Qt.LeftButton)
 QtTest.QTest.mouseClick(camera_row.start_button, QtCore.Qt.LeftButton)
 QtTest.QTest.mouseClick(camera_row.stop_button, QtCore.Qt.LeftButton)
 assert events == before
@@ -2118,8 +2343,8 @@ QtTest.QTest.mouseClick(task_row.stop_button, QtCore.Qt.LeftButton)
 assert events[-1] == ('stop', 'calibration')
 view.kind_combo.setCurrentIndex(0)
 assert view.kind_combo.currentData()[0] == 'plot'
-assert view.add_panel_button.isEnabled()
-QtTest.QTest.mouseClick(view.add_panel_button, QtCore.Qt.LeftButton)
+assert view.add_button.isEnabled()
+QtTest.QTest.mouseClick(view.add_button, QtCore.Qt.LeftButton)
 assert events[-1] == ('panel', 'curve')
 QtTest.QTest.mouseClick(view.status_strip.action_button, QtCore.Qt.LeftButton)
 assert events[-1] == ('stop-task',)
@@ -2127,12 +2352,27 @@ assert events[-1] == ('stop-task',)
 handle.set_task_takeover('')
 assert not view.status_strip.action_button.isVisible()
 assert view.kind_combo.isEnabled()
-assert view.add_panel_button.isEnabled()
+assert view.add_button.isEnabled()
 assert preview.settings_button.isEnabled()
 assert camera_row.start_button.isEnabled()
 assert camera_row.stop_button.isEnabled()
 assert camera_row.edit_button.isEnabled()
 assert camera_row.remove_button.isEnabled()
+
+# The header dot is the worst of the nodes': a failure anywhere, else a run
+# anywhere, else grey -- from the one status table.
+from zlc_ui.fluent import STATUS_CUES
+def header_is(word):
+    return f"background:{STATUS_CUES[word][0]};" in view.status_dot.styleSheet()
+assert header_is('idle'), view.status_dot.styleSheet()
+handle.set_logic_state('camera', 'running')
+assert header_is('running')
+handle.set_logic_state('calibration', 'error', 'broke')
+assert header_is('error')
+handle.set_logic_state('calibration', 'idle')
+assert header_is('running')
+handle.remove_logic_row('camera')
+assert header_is('idle')
 
 """
     )
@@ -2155,13 +2395,17 @@ app = ensure_qt_app(['pause'])
 view = TaskConsoleView(); view.show(); app.processEvents()
 asked = []
 view.pause_toggled.connect(asked.append)
-QtTest.QTest.mouseClick(view.pause_switch, QtCore.Qt.LeftButton)
+QtTest.QTest.mouseClick(view.pause_button, QtCore.Qt.LeftButton)
 assert asked == [True], asked
-assert view.pause_switch.text() == 'Pause', 'the label moved before the presenter agreed'
+assert view.pause_button.text() == 'Pause', 'the label moved before the presenter agreed'
+assert not view.pause_button.is_active(), 'nor did its face'
 view.set_paused(True)
-assert view.pause_switch.text() == 'Resume'
-QtTest.QTest.mouseClick(view.pause_switch, QtCore.Qt.LeftButton)
+assert view.pause_button.text() == 'Resume'
+assert view.pause_button.is_active(), 'paused, the toggle is held down'
+QtTest.QTest.mouseClick(view.pause_button, QtCore.Qt.LeftButton)
 assert asked == [True, False], asked
+view.set_paused(False)
+assert view.pause_button.text() == 'Pause' and not view.pause_button.is_active()
 """
     )
 
@@ -2545,16 +2789,40 @@ assert start.role() == 'primary' and start.text() == 'Start' and start.isEnabled
 # always there, disabled while there is nothing to stop.
 assert stop.isVisible() and not stop.isEnabled() and stop.role() == 'destructive'
 assert abs(stop.y() - start.y()) <= 2 and start.x() + start.width() < stop.x()
-slots = lambda: (switch.x(), start.x(), start.width(), stop.x(), stop.width())
+# Revert has its own fixed slot left of the Plot group, always there and
+# disabled while there is no running configuration the draft differs from.
+revert = editor.revert_button
+assert revert.isVisible() and not revert.isEnabled() and revert.role() == 'standard'
+assert abs(revert.y() - start.y()) <= 2 and revert.x() + revert.width() < switch.x()
+assert revert.toolTip() == 'Restore the configuration the running node uses'
+slots = lambda: (revert.x(), revert.width(), switch.x(), start.x(), start.width(),
+                 stop.x(), stop.width())
 idle = slots()
 
-# Running, Start says Restart and stays this page's primary; nothing on the
-# row moves -- no button appears beside it.
+# Running what the page shows, Start says Restart and is a standard command:
+# pressing it would put nothing new in place.  Nothing on the row moves.
 editor.update_projection(dict(projection, running=True, can_stop=True))
 app.processEvents()
-assert start.text() == 'Restart' and start.role() == 'primary', (start.text(), start.role())
-assert start.isEnabled() and stop.isEnabled()
+assert start.text() == 'Restart' and start.role() == 'standard', (start.text(), start.role())
+assert start.isEnabled() and stop.isEnabled() and not revert.isEnabled()
 assert slots() == idle, (slots(), idle)
+
+# Edited under the run: Restart is the page's one thing to press -- primary,
+# with the star every save wears -- and Revert puts the run's configuration
+# back.  Still nothing moves.
+editor.update_projection(dict(projection, running=True, can_stop=True, edited=True))
+app.processEvents()
+assert start.text() == 'Restart*' and start.role() == 'primary', (start.text(), start.role())
+assert start.toolTip() == 'Restart to run the edited configuration'
+assert revert.isEnabled()
+assert slots() == idle, (slots(), idle)
+reverts = []
+editor.revert_requested.connect(lambda: reverts.append('revert'))
+QtTest.QTest.mouseClick(revert, QtCore.Qt.LeftButton)
+assert reverts == ['revert']
+editor.update_projection(dict(projection, running=True, can_stop=True))
+assert start.text() == 'Restart' and start.role() == 'standard' and not start.toolTip()
+assert not revert.isEnabled()
 
 # A follower waiting for its source has no host yet, but it IS active: the
 # page says what the row says, Restart and an enabled Stop.
@@ -2564,27 +2832,41 @@ app.processEvents()
 assert start.text() == start_label(pending=False, active=True) == 'Restart'
 assert stop.isEnabled()
 
-# A start queued behind a device release can be cancelled from here.
-editor.update_projection(dict(projection, pending=True, can_start=False, can_stop=True))
+# A start queued behind a device release can be cancelled from here, and an
+# edit made meanwhile reverted; the disabled Starting… wears no star.
+editor.update_projection(dict(projection, pending=True, can_start=False, can_stop=True, edited=True))
 app.processEvents()
 assert start.text() == 'Starting…' and not start.isEnabled() and stop.isEnabled()
+assert revert.isEnabled()
 assert slots() == idle, (slots(), idle)
 stops = []
 editor.stop_requested.connect(lambda: stops.append('stop'))
 QtTest.QTest.mouseClick(stop, QtCore.Qt.LeftButton)
 assert stops == ['stop']
 
-# While a Task owns the console only that Task's own Stop stays live.
-editor.update_projection(dict(projection, running=True, can_stop=True))
+# Remove takes two clicks, as the row's x does: the same node.
+removes = []
+editor.remove_requested.connect(lambda: removes.append('remove'))
+QtTest.QTest.mouseClick(editor.remove_button, QtCore.Qt.LeftButton)
+assert removes == [] and editor.remove_button.role() == 'destructive_primary'
+
+# While a Task owns the console only that Task's own Stop stays live, and an
+# armed Remove forgets its first click.
+editor.update_projection(dict(projection, running=True, can_stop=True, edited=True))
 editor.set_mutation_enabled(False, owns_task=True)
 assert stop.isEnabled() and not start.isEnabled() and not editor.remove_button.isEnabled()
+assert not revert.isEnabled() and start.text() == 'Restart'
+assert not editor.remove_button.is_armed() and editor.remove_button.role() == 'destructive'
 editor.set_mutation_enabled(False)
 assert not stop.isEnabled()
 editor.set_mutation_enabled(True)
 editor.update_projection(projection)
 app.processEvents()
-assert start.text() == 'Start' and not stop.isEnabled()
+assert start.text() == 'Start' and start.role() == 'primary' and not stop.isEnabled()
 assert slots() == idle, (slots(), idle)
+QtTest.QTest.mouseClick(editor.remove_button, QtCore.Qt.LeftButton)
+QtTest.QTest.mouseClick(editor.remove_button, QtCore.Qt.LeftButton)
+assert removes == ['remove'], removes
 
 raised = []
 switch.toggled.connect(raised.append)
@@ -2602,6 +2884,64 @@ assert not switch.isEnabled(), 'a Task owns the console: nothing here re-aims St
 
 editor.update_projection(dict(projection, preview_offered=False))
 assert not switch.isVisible(), 'no switch where the node opens nothing'
+"""
+    )
+
+
+def test_a_tall_logic_edit_page_keeps_its_header_and_action_bar_and_opens_at_its_top(run_qt) -> None:
+    """Only the rows scroll.  On a page taller than its tab the node's name,
+    the status line that says why Start is off, and Start, Stop and Remove
+    stay on screen; and a newly opened page starts at its first row, even
+    when something moved its bar while it opened."""
+
+    run_qt(
+        """
+from PyQt5 import QtCore, QtGui
+from zlc_ui.qt import ensure_qt_app
+from zlc_ui.fluent import FluentScrollArea
+from zlc_ui.form import FormFieldProps, FormSpec
+from zlc_ui.console import LogicEditorView
+
+app = ensure_qt_app(['test'])
+fields = tuple(FormFieldProps(key=f'value_{index}', kind='int', label=f'Value {index}', default=index)
+               for index in range(30))
+projection = {
+    'api_name': 'seamless_scan', 'kind': 'measurement',
+    'form_spec': FormSpec(fields), 'form_values': {field.key: field.default for field in fields},
+    'artifact_form_spec': FormSpec(()), 'artifact_values': {}, 'artifact_results': (),
+    'auto_preview': False, 'preview_offered': True,
+    'can_start': False, 'can_stop': True, 'running': True,
+    'issues': ('Signal must be selected',),
+}
+editor = LogicEditorView('scan-1', projection)
+editor.resize(700, 360)
+scroll = editor.findChild(FluentScrollArea)
+bar = scroll.verticalScrollBar()
+editor.show()
+# A wheel turned over the window while the page opened.
+viewport = scroll.viewport()
+centre = QtCore.QPointF(viewport.width() / 2, viewport.height() / 2)
+app.sendEvent(viewport, QtGui.QWheelEvent(
+    centre, QtCore.QPointF(viewport.mapToGlobal(centre.toPoint())), QtCore.QPoint(), QtCore.QPoint(0, -120),
+    QtCore.Qt.NoButton, QtCore.Qt.NoModifier, QtCore.Qt.NoScrollPhase, False,
+))
+assert bar.maximum() > 0 and bar.value() > 0, (bar.maximum(), bar.value())
+app.processEvents()
+assert bar.value() == 0, 'a newly opened page starts at its first row'
+inside = lambda widget: QtCore.QRect(QtCore.QPoint(), editor.size()).contains(
+    QtCore.QRect(widget.mapTo(editor, QtCore.QPoint()), widget.size()))
+# Scrolled to the end, the header and the action bar are still there.
+bar.setValue(bar.maximum())
+app.processEvents()
+for widget in (editor.title_label, editor.status_label, editor.remove_button,
+               editor.preview_switch, editor.start_button, editor.stop_button):
+    assert widget.isVisible() and inside(widget), widget
+assert editor.status_label.text() == 'Draft: Signal must be selected'
+assert editor.start_button.text() == 'Restart' and editor.stop_button.isEnabled()
+# After that the bar is the operator's: a tab switch keeps it.
+editor.hide(); editor.show(); app.processEvents()
+assert bar.value() == bar.maximum() > 0
+editor.close()
 """
     )
 
@@ -2649,7 +2989,18 @@ assert card._caption() == 'panel-2@camera_measurement/frames', card._caption()
 line = card._band_fragments()[0]
 # The card's own id leads in muted ink; the name the operator reads follows it.
 assert line[0][:2] == ('panel-2', tested_module.MUTED_INK), line
-assert line[0][0] + line[1][0] == 'panel-2@camera_measurement/frames', line
+assert ''.join(text for text, _colour, _elide in line[:3]) == 'panel-2@camera_measurement/frames', line
+# Too long for the strip, the producer -- a name the operator chose --
+# gives up its middle; which of its signals this is stays whole.
+long = 'panel-2@Camera A upper MOT loading fluorescence, shot 1/frames'
+project(card, signal, signal, long)
+from PyQt5 import QtGui
+shown = tested_module.elide_fragments(
+    card._band_fragments()[0], QtGui.QFontMetrics(card._title_label.font()), 200,
+)
+assert shown[2][0] == '/frames' and '\u2026' in shown[1][0], shown
+assert shown[1][0].endswith('shot 1'), shown
+project(card, signal, signal, 'panel-2@camera_measurement/frames')
 
 # The name itself is untouched, everywhere it is the NAME and not a caption.
 assert card._base_title == signal

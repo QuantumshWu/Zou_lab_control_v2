@@ -160,7 +160,7 @@
 ## AI 开始实验前的阅读顺序
 
 1. 读取本文，确认适用装置和核实日期；只对当前任务必需的缺失信息询问，不要求填完全部空白。
-2. 已知且已授权的常规操作直接执行，不反复查目录或重新规划。未知字段才查 `lab_catalog`／`lab_api`；复用动作已经返回的状态，不另抄一套配置。
+2. 已知且已授权的常规操作直接执行，不反复查目录或重新规划。未知字段才查 `lab_catalog`／`lab_guide`（`lab_api` 只在 `--tools developer` 时提供）；复用动作已经返回的状态，不另抄一套配置。
 3. 操作 Pulse 前读取详细草稿与已加载 Config，必要时运行不触发硬件的 `validate`；检查编译结果是否仍匹配当前草稿／Config。
 4. 按选定实验方法操作，执行后检查实际运行身份、完成状态、错误与数据有效性；结果不确定时先查状态，不自动重复 Fire／Start／Apply。
 
@@ -184,7 +184,7 @@
 **A · 初始化、SLM 准备。** 输入为本轮 apparatus 与 Science Context，前提是无冲突的活动任务。
 
 ```json
-{"tool":"lab_call","arguments":{"handle":"devices","method":"load","arguments":{"path":"apparatus.json"}}}
+{"tool":"lab_devices","arguments":{"action":"load","path":"apparatus.json"}}
 {"tool":"lab_initialize","arguments":{}}
 {"tool":"lab_wait_for","arguments":{"tool_name":"lab_state","arguments":{},"path":["session_open"],"equals":true}}
 ```

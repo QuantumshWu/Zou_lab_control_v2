@@ -29,14 +29,14 @@ from zlc_ui.fluent import (
     FluentSegmentedButtons,
     FluentSettingRow,
     FluentSwitch,
-    MUTED_INK,
-    ORANGE_DARK,
+    MUTED_LABEL_STYLE,
     card_pad,
     card_title_row,
     muted_note_label,
     row_gap,
     scaled_px,
     section_gap,
+    set_status_ink,
     setting_label_width,
     stamped_file_name,
     retire_widget,
@@ -107,7 +107,6 @@ class PanelEditorView(QtWidgets.QWidget):
         #: reconciled from.  A shot that changes neither rebuilds nothing.
         self._applied_structure: dict[str, object] | None = None
         self._applied_producer: dict[str, object] | None = None
-        self._snapshot_colour = ""
         self._state: dict[str, Any] = {}
         self._parameter_fields: dict[str, dict[str, dict[str, object]]] = {
             "semantic": {},
@@ -119,7 +118,11 @@ class PanelEditorView(QtWidgets.QWidget):
         self._selectors_on = True
         self._save_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         self._save_directory_initialized = False
-        self._save_name_initialized = False
+        #: Whether the operator wrote the file name themselves; until they
+        #: do, it is what the panel is called.
+        self._save_name_typed = False
+        #: What the panel is called, as last projected.
+        self._panel_name = ""
         self._snapshot_can_save = False
         self._signal_groups = ()
         self._overlay_groups = ()
@@ -152,9 +155,7 @@ class PanelEditorView(QtWidgets.QWidget):
         header_layout.setSpacing(row_gap())
         self.title_label = FluentSectionLabel(self.panel_id)
         self.kind_label = FluentLabel("")
-        self.kind_label.setStyleSheet(
-            f"color: {MUTED_INK}; background: transparent; border: none;"
-        )
+        self.kind_label.setStyleSheet(MUTED_LABEL_STYLE)
         self.kind_label.setToolTip("The plot kind is fixed when the panel is added")
         header_layout.addWidget(self.title_label)
         header_layout.addWidget(self.kind_label)
@@ -223,13 +224,10 @@ class PanelEditorView(QtWidgets.QWidget):
         producer_layout.setContentsMargins(pad, pad, pad, pad)
         producer_layout.setSpacing(row_gap())
         producer_layout.addLayout(card_title_row("Direct producer")[0])
-        self.producer_summary = FluentLabel(
+        self.producer_summary = muted_note_label(
             "This signal has no editable direct producer."
         )
         self.producer_summary.setWordWrap(True)
-        self.producer_summary.setStyleSheet(
-            f"color: {MUTED_INK}; background: transparent; border: none;"
-        )
         producer_layout.addWidget(self.producer_summary)
         self.producer_form = FluentParameterForm(FormSpec(()), {})
         self.producer_form.setEnabled(False)
@@ -302,6 +300,7 @@ class PanelEditorView(QtWidgets.QWidget):
         self.save_directory.changed.connect(self._update_save_controls)
         self.save_auto_name.toggled.connect(self._update_save_controls)
         self.save_name.textChanged.connect(self._update_save_controls)
+        self.save_name.textEdited.connect(self._save_name_edited)
         self.save_format.activated.connect(self._save_format_picked)
         self.save_button.clicked.connect(self._save_figure)
         body_layout.addStretch(1)
@@ -321,7 +320,13 @@ class PanelEditorView(QtWidgets.QWidget):
         paints_images = bool(
             isinstance(surface, Mapping) and surface.get("paints_images")
         )
-        self.title_label.setText(state["title"] or self.panel_id)
+        # What the panel is called -- composed by the presenter, so a
+        # renamed node renames it; the record's title stays its own.
+        name = (
+            str(surface.get("panel_name") or "") if isinstance(surface, Mapping) else ""
+        ) or state["title"] or self.panel_id
+        self._panel_name = name
+        self.title_label.setText(name)
         kind_text = state["kind"].replace("_", " ") or "automatic"
         if state["cell_kind"]:
             kind_text += f" · {state['cell_kind'].replace('_', ' ')} cells"
@@ -329,13 +334,12 @@ class PanelEditorView(QtWidgets.QWidget):
         if not self._save_directory_initialized:
             self.save_directory.setText(str(incoming.get("save_directory") or ""))
             self._save_directory_initialized = True
-        if not self._save_name_initialized:
-            self.save_name.setText(state["title"] or self.panel_id)
-            self._save_name_initialized = True
+        if not self._save_name_typed and self.save_name.text() != name:
+            self.save_name.setText(name)
 
         fields: list[FormFieldProps] = [
             FormFieldProps(
-                "title", "text", "Panel name", default=state["title"]
+                "title", "text", "Panel name", default=name
             ),
             FormFieldProps(
                 "signal",
@@ -358,7 +362,7 @@ class PanelEditorView(QtWidgets.QWidget):
             state["interval_ms"],
         ))
         values: dict[str, object] = {
-            "title": state["title"],
+            "title": name,
             "signal": state["signal"],
             "size": state["size"],
         }
@@ -417,7 +421,7 @@ class PanelEditorView(QtWidgets.QWidget):
         self._update_snapshot_status()
         producer_node_id = str(incoming.get("producer_node_id") or "")
         self.producer_summary.setText(
-            f"Logic node: {producer_node_id}"
+            f"Logic node: {incoming.get('producer_name') or producer_node_id}"
             if producer_node_id
             else "This signal has no editable direct producer."
         )
@@ -498,13 +502,11 @@ class PanelEditorView(QtWidgets.QWidget):
         snapshot = self._projection.get("frozen_snapshot")
         aged = bool(self._projection.get("data_advanced") or self._projection.get("source_status"))
         self.snapshot_label.setText(self._snapshot_text(self._projection, stale=stale))
-        # Written when it CHANGES: two values, a re-parse and a repolish.
-        colour = ORANGE_DARK if stale or aged or self._projection.get("snapshot_error") else MUTED_INK
-        if colour != self._snapshot_colour:
-            self._snapshot_colour = colour
-            self.snapshot_label.setStyleSheet(
-                f"color: {colour}; background: transparent; border: none;"
-            )
+        set_status_ink(
+            self.snapshot_label,
+            "error" if self._projection.get("snapshot_error")
+            else "warning" if stale or aged else "idle",
+        )
         self._snapshot_can_save = snapshot is not None and not stale
         self.save_button.setToolTip(
             "Refresh the stale snapshot before saving" if stale else ""
@@ -580,7 +582,7 @@ class PanelEditorView(QtWidgets.QWidget):
         extension = self._save_extension
         if self.save_auto_name.isChecked():
             name = stamped_file_name(
-                str(self._state.get("title") or self.panel_id),
+                self._panel_name,
                 extension,
                 stamp=self._save_stamp,
             )
@@ -590,6 +592,9 @@ class PanelEditorView(QtWidgets.QWidget):
                 return None
             name = f"{Path(typed).stem}.{extension}"
         return Path(directory_text).expanduser() / name
+
+    def _save_name_edited(self, _text: str) -> None:
+        self._save_name_typed = True
 
     def _save_format_picked(self, extension: str) -> None:
         self._save_extension = str(extension)
@@ -648,7 +653,7 @@ class PanelEditorView(QtWidgets.QWidget):
         snapshot = projection.get("frozen_snapshot")
         if snapshot is None:
             return "No frozen snapshot is displayed."
-        pieces = [f"Signal: {str(projection.get('frozen_signal') or '(unknown)')}"]
+        pieces = [f"Signal: {str(projection.get('frozen_signal_text') or '(unknown)')}"]
         ref = getattr(snapshot, "ref", None)
         revision = getattr(getattr(ref, "revision", None), "value", None)
         if revision is not None:

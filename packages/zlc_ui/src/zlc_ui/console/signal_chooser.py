@@ -19,6 +19,7 @@ from zlc_ui.fluent import (
     ACCENT_TINT,
     DIVIDER,
     MUTED_INK,
+    MUTED_LABEL_STYLE,
     RADIUS,
     SELECTED,
     SELECTED_HOVER,
@@ -86,7 +87,7 @@ class SignalChooser(FluentCardDialog):
 
         if not self._rows:
             empty = FluentLabel("Nothing has published yet.")
-            empty.setStyleSheet(f"color: {MUTED_INK}; background: transparent; border: none;")
+            empty.setStyleSheet(MUTED_LABEL_STYLE)
             layout.addWidget(empty)
 
         buttons = QtWidgets.QHBoxLayout()

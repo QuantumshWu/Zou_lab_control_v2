@@ -16,6 +16,7 @@ from zlc_plot import (
     normalize_classifier_threshold_targets,
 )
 from zlc_plot.specs import FACET_FIT_PARAMETER, GRID_CELL_KINDS, limit_pair_for
+from zlc_ui.status import name_words
 from zlc_plot.state import normalize_interaction
 from zlc_plot.semantics import (
     FATE_PREFIX,
@@ -88,7 +89,7 @@ def panel_data_shape(
 
     def declared_label(field: object, coordinate: object) -> str | None:
         """The producer's own name for a pinned coordinate -- a Frame
-        Survival pair is ``0-5``, not its position ``3`` on the pair axis."""
+        Survival pair is ``0→5``, not its position ``3`` on the pair axis."""
 
         domain, _colon, axis_id = str(field.name).removeprefix(FATE_PREFIX).partition(":")
         resolved = resolve_axis(schema, AxisRef(AxisDomain(domain), axis_id))
@@ -414,7 +415,7 @@ def fit_output_fields(
             # parameter written the way the operator can also type it.
             label = str(
                 getattr(parameter, "symbol", None)
-                or name.replace("_", " ").title()
+                or name_words(name)
             )
             # ONE switch per parameter.  There used to be a second, for a
             # separately published "<name>_err" signal; a parameter now

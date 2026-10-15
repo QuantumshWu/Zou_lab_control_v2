@@ -157,8 +157,9 @@ def test_a_slot_id_is_never_a_name_in_the_starter_program() -> None:
     ``np``, ``for`` and ``N`` are all legal slot ids.  A starter that spelled
     its axes after them shadowed its own import, was a syntax error, or made
     the point count an array -- the product's own template could not run.
-    ``scan_table`` is the contract with whoever runs the program: one table of
-    the right width, and a DAC column of integer codes, not fractions of one.
+    ``scan_table`` is the contract with whoever runs the program: one column
+    for every field, named by its id, and a DAC column of integer codes, not
+    fractions of one.
     """
 
     for columns in (
@@ -168,14 +169,14 @@ def test_a_slot_id_is_never_a_name_in_the_starter_program() -> None:
         (ScanColumnSpec("a", 20.0, 200.0), ScanColumnSpec("b", -512.0, 511.0, True, "value")),
     ):
         names = tuple(column.name for column in columns)
-        for kind in ("column_stack", "grid"):
+        for kind in ("columns", "grid"):
             source = scan_table_template(kind, columns)
             # The id is still said, where a person reads it.
             assert all(name in source for name in names), source
             namespace: dict = {}
             exec(source, namespace)  # noqa: S102
-            table = np.asarray(namespace["scan_table"])
-            assert table.ndim == 2 and table.shape[1] == len(columns), (kind, names)
+            assert tuple(namespace["scan_table"]) == names, (kind, names)
+            table = np.column_stack([namespace["scan_table"][name] for name in names])
             assert table.shape[0] > 1
             for index, column in enumerate(columns):
                 if column.is_dac:
@@ -187,7 +188,7 @@ def test_a_grid_sweeps_every_combination_and_says_its_shape() -> None:
     namespace: dict = {}
     exec(scan_table_template("grid", columns), namespace)  # noqa: S102
 
-    table = np.asarray(namespace["scan_table"])
+    table = np.column_stack([namespace["scan_table"][column.name] for column in columns])
     shape = namespace["scan_shape"]
     assert table.shape == (int(np.prod(shape)), len(columns))
     assert len({tuple(row) for row in table}) == table.shape[0], "a grid repeated a point"
@@ -287,6 +288,6 @@ def test_a_template_for_nothing_is_refused_rather_than_invented() -> None:
     click later than the file had already implied it.
     """
 
-    for kind in ("column_stack", "grid"):
+    for kind in ("columns", "grid"):
         with pytest.raises(ValueError, match="at least one bound field"):
             scan_table_template(kind, ())

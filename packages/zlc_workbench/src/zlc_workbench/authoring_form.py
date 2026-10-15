@@ -41,6 +41,9 @@ _FIELD_KINDS = {
     "bool": "bool",
     "choice": "choice",
     "numeric_tuple": "text",
+    #: A list of names or labels (a Derive pick's labels), edited only by
+    #: the node's own editor: as a form field it would read as text.
+    "text_tuple": "text",
     #: A pair is two integers, edited as the text "y, x".  It stays one field
     #: because it is one fact -- a frame shape with a half-edited width is not a
     #: state worth being able to reach -- and its box is a number's width.
@@ -83,6 +86,7 @@ def project_logic_schema(
     acquisition_options: Sequence[str] = (),
     acquisition_selected: str = "",
     acquisition_enabled: bool = True,
+    acquisition_labels: Mapping[str, str] | None = None,
 ) -> FormSpec:
     """Project a logic schema, rooting resource pickers in the workspace.
 
@@ -90,7 +94,8 @@ def project_logic_schema(
     take and puts the reason on the control.  An unavailable boolean is shown
     at its neutral effective value, False, without mutating the authored
     draft; other unavailable authored values still participate in Start
-    admission.
+    admission.  ``acquisition_labels`` says what each acquisition node is
+    called ({node id: name}); the choice's value stays the id.
     """
 
     schema = getattr(descriptor, "authoring_schema", None)
@@ -107,10 +112,15 @@ def project_logic_schema(
     fields: list[FormFieldProps] = []
     for field in schema.fields:
         if field.name == descriptor.acquisition_input:
+            labels = dict(acquisition_labels or {})
             choices = [FormChoice("None", "")]
-            choices.extend(FormChoice(name, name) for name in acquisition_options)
+            choices.extend(
+                FormChoice(labels.get(name, name), name) for name in acquisition_options
+            )
             if acquisition_selected and acquisition_selected not in acquisition_options:
-                choices.append(FormChoice(f"{acquisition_selected} (unavailable)", acquisition_selected))
+                # A node that is gone has no name left: its id.
+                shown = labels.get(acquisition_selected, acquisition_selected)
+                choices.append(FormChoice(f"{shown} (unavailable)", acquisition_selected))
             fields.append(replace(
                 _project_field(field), kind="choice", choices=tuple(choices),
                 unavailable_reason="" if acquisition_enabled else "Not used by the selected mode.",

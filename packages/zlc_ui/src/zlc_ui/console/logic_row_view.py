@@ -1,7 +1,7 @@
 """Pure operator chrome for one console logic row.
 
 Also what the row shares with its node's Edit page and with the Logic list
-around it -- the status look, the Start words, the gaps and the page edges --
+around it -- the status words, the Start words, the gaps and the page edges --
 so the list and every Edit page are built from one set of numbers.
 """
 
@@ -11,12 +11,7 @@ from PyQt5 import QtCore, QtWidgets
 
 from zlc_ui.fluent import (
     CARD_PAD,
-    GREEN,
-    GREY,
-    MUTED_INK,
-    RED,
-    RED_DARK,
-    TEXT,
+    MUTED_LABEL_STYLE,
     ElidedLabel,
     FluentButton,
     FluentFrame,
@@ -25,13 +20,16 @@ from zlc_ui.fluent import (
     FluentStatusDot,
     FluentSwitch,
     add_row_switch,
+    fit_button_words,
     scaled_px,
+    set_status_ink,
     setting_label_width,
     status_dot_gap,
     window_pad,
 )
 from zlc_ui.fluent import PublishedItemsLegend
 from zlc_ui.fluent import row_gap
+from zlc_ui.status import SUMMARY_SEPARATOR
 
 #: Every kind a row can carry, so the kind column is one width on every row
 #: and the status beside it starts at one x down the page.
@@ -45,21 +43,28 @@ START_LABELS = ("Start", "Restart", "Starting…")
 #: and the same node's dot on its Edit page are one mark.
 STATUS_DOT = 12
 
-#: How each node state looks, as (dot, ink).  ONE table for the row and the
-#: node's Edit page: a draft that was grey on its row and orange on its page
-#: was one status drawn two ways.  A draft is drawn as calmly as a stopped
-#: node: what keeps it from starting is something still to fill in, not a
-#: fault, and amber is what reads as "something is wrong".  A run wears the
-#: plain ink of something under way, and only a failure is red.
-STATE_COLOURS = {
-    "idle": (GREY, MUTED_INK),
-    "draft": (GREY, MUTED_INK),
-    "running": (GREEN, TEXT),
-    "error": (RED, RED_DARK),
+#: Each node state as the status word it is drawn with (``STATUS_CUES``).
+#: ONE table for the row and the node's Edit page: a draft that was grey on
+#: its row and orange on its page was one status drawn two ways.  A draft is
+#: drawn as calmly as a stopped node: what keeps it from starting is
+#: something still to fill in, not a fault, and amber is what reads as
+#: "something is wrong".  A run wears the plain ink of something under way,
+#: and only a failure is red.
+STATE_WORDS = {
+    "idle": "idle",
+    "draft": "idle",
+    "running": "running",
+    "error": "error",
 }
 
 
-def mount_logic_page(scroll: FluentScrollArea, body: QtWidgets.QWidget) -> None:
+def mount_logic_page(
+    scroll: FluentScrollArea,
+    body: QtWidgets.QWidget,
+    *,
+    top: bool = True,
+    bottom: bool = True,
+) -> None:
     """Put ``body`` -- a Logic page: the list, or one node's Edit -- in ``scroll``.
 
     Every page has ONE content edge on each side, a window pad inside the tab
@@ -68,11 +73,17 @@ def mount_logic_page(scroll: FluentScrollArea, body: QtWidgets.QWidget) -> None:
     shows (a width-bounded mount), and the right margin is the pad less that
     gutter: the content ends at the same x with or without a bar, instead of
     every stretching control jumping left the moment a page outgrew its tab.
+
+    ``top`` and ``bottom`` say whether the body's own edge is the page's: an
+    Edit page pins its header above the scroll and its action bar below it,
+    and those carry the pads there instead.
     """
 
     pad = window_pad()
     gutter = scroll.verticalScrollBar().sizeHint().width()
-    body.layout().setContentsMargins(pad, pad, max(0, pad - gutter), pad)
+    body.layout().setContentsMargins(
+        pad, pad if top else 0, max(0, pad - gutter), pad if bottom else 0,
+    )
     scroll.set_width_bounded_widget(body)
 
 
@@ -87,23 +98,6 @@ def start_label(*, pending: bool, active: bool) -> str:
     if pending:
         return "Starting…"
     return "Restart" if active else "Start"
-
-
-def fit_start_button(button: FluentButton) -> None:
-    """Size ``button`` for the widest of :data:`START_LABELS`.
-
-    Measured through the button itself, so its padding and font count; the
-    slot then keeps one width whatever it says, and Stop beside it never
-    moves.
-    """
-
-    shown = button.text()
-    widths = []
-    for label in START_LABELS:
-        button.setText(label)
-        widths.append(button.sizeHint().width())
-    button.setText(shown)
-    button.setMinimumWidth(max(widths))
 
 
 class LogicRowView(FluentFrame):
@@ -125,10 +119,11 @@ class LogicRowView(FluentFrame):
 
     def __init__(self, title: str = "Logic", kind: str = "logic", parent=None) -> None:
         super().__init__(parent)
-        self.title = str(title)
         self.kind = str(kind)
         self._status_text = "idle"
-        self._status_colour = ""
+        #: The status word the row shows now; the console's own dot is the
+        #: worst of its rows'.
+        self.state_word = "idle"
         self._can_start = False
         self._can_stop = False
         self._pending = False
@@ -145,13 +140,15 @@ class LogicRowView(FluentFrame):
 
         top = QtWidgets.QHBoxLayout()
         top.setSpacing(row_gap())
-        self.dot = FluentStatusDot(size=STATUS_DOT, color=GREY)
-        self.name_label = ElidedLabel(self.title)
+        self.dot = FluentStatusDot(size=STATUS_DOT)
+        # Elided in the MIDDLE: names that differ at their end ("... shot 1",
+        # "... shot 2") still read differently in the column.
+        self.name_label = ElidedLabel(str(title), mode=QtCore.Qt.ElideMiddle)
         # Name and kind are fixed columns: every row's kind and status start
         # at the same x, instead of floating with the length of the name.
         self.name_label.setFixedWidth(scaled_px(200, minimum=150))
         self.kind_label = FluentLabel(f"({self.kind})")
-        self.kind_label.setStyleSheet(f"color: {MUTED_INK}; background: transparent; border: none;")
+        self.kind_label.setStyleSheet(MUTED_LABEL_STYLE)
         self.kind_label.setFixedWidth(setting_label_width(_KINDS))
         self.status_label = ElidedLabel("idle")
         self.status_label.setMinimumWidth(0)
@@ -165,7 +162,7 @@ class LogicRowView(FluentFrame):
         )
         self.preview_switch.toggled.connect(self.auto_preview_changed.emit)
         self.start_button = FluentButton("Start")
-        fit_start_button(self.start_button)
+        fit_button_words(self.start_button, START_LABELS)
         self.start_button.setEnabled(False)
         self.start_button.clicked.connect(self.start_requested.emit)
         self.stop_button = FluentButton("Stop", role="destructive")
@@ -173,12 +170,14 @@ class LogicRowView(FluentFrame):
         self.stop_button.clicked.connect(self.stop_requested.emit)
         self.edit_button = FluentButton("Edit")
         self.edit_button.clicked.connect(self.edit_requested.emit)
-        # On the row, where it is looked for: a per-row delete is the quiet
-        # ghost x that turns red under the pointer, as on every other list.
-        self.remove_button = FluentButton("×", role="destructive")
+        # On the row, where it is looked for: the quiet ghost x that turns
+        # red under the pointer, as on every other list.  Removing a node
+        # takes two clicks: the first arms the white-on-red confirm.
+        self.remove_button = FluentButton(
+            "×", role="destructive", confirm_twice="remove this node"
+        )
         self.remove_button.setFixedWidth(self.remove_button.minimumHeight())
-        self.remove_button.setToolTip("Remove this node")
-        self.remove_button.clicked.connect(self.remove_requested.emit)
+        self.remove_button.confirmed.connect(self.remove_requested.emit)
         top.addWidget(self.dot)
         # A dot's words stand a status gap after it, as on the node's Edit
         # page and in the status strip: one status look wherever it is.
@@ -200,6 +199,17 @@ class LogicRowView(FluentFrame):
         self.publishes_label = PublishedItemsLegend()
         outer.addWidget(self.publishes_label)
         self._project_commands()
+
+    def set_name(self, text: str, details: tuple[str, ...] = ()) -> None:
+        """Show what the node is called; elided in its column, whole in the
+        tooltip with ``details`` after it -- what the node is and its
+        internal ID, which a name the operator chose no longer says.  The
+        row is not where it is renamed: its Edit page is."""
+
+        self.name_label.setText(str(text))
+        self.name_label.setToolTip(
+            SUMMARY_SEPARATOR.join((str(text), *(str(item) for item in details if item)))
+        )
 
     def set_preview_offered(self, offered: bool) -> None:
         """Show the switch only for a node that declares something to open.
@@ -226,21 +236,13 @@ class LogicRowView(FluentFrame):
 
     def set_state(self, state: str, status_text: str = "") -> None:
         state = str(state)
-        if state not in STATE_COLOURS:
-            raise ValueError(f"state must be one of {tuple(STATE_COLOURS)}")
+        if state not in STATE_WORDS:
+            raise ValueError(f"state must be one of {tuple(STATE_WORDS)}")
         self._status_text = str(status_text or state)
-        dot, colour = STATE_COLOURS[state]
-        self.dot.set_color(dot)
+        self.state_word = STATE_WORDS[state]
+        self.dot.set_state(self.state_word)
         self.status_label.setText(self._status_text)
-        # Written only when it CHANGES.  A status tick arrives ten times a
-        # second, so almost every write said what the last one said -- and a
-        # stylesheet write re-parses the sheet, repolishes the widget and
-        # schedules a repaint regardless.
-        if colour != self._status_colour:
-            self._status_colour = colour
-            self.status_label.setStyleSheet(
-                f"color: {colour}; background: transparent; border: none;"
-            )
+        set_status_ink(self.status_label, self.state_word)
 
     def set_commands(self, *, can_start: bool, can_stop: bool, pending: bool = False) -> None:
         """Project presenter-owned command admission onto this row.
@@ -273,7 +275,8 @@ class LogicRowView(FluentFrame):
         # It says what the next Start will do, so a row that cannot Start
         # cannot re-aim Start either.
         self.preview_switch.setEnabled(enabled)
-        self.edit_button.setEnabled(enabled)
+        # Edit stays: a page opened under a Task is read-only but its Name,
+        # which is not part of what the Task runs.
         self.remove_button.setEnabled(enabled)
 
     def set_publishes(self, rows: tuple[tuple[str, str, str], ...]) -> None:
@@ -282,10 +285,9 @@ class LogicRowView(FluentFrame):
 
 __all__ = [
     "START_LABELS",
-    "STATE_COLOURS",
+    "STATE_WORDS",
     "STATUS_DOT",
     "LogicRowView",
-    "fit_start_button",
     "mount_logic_page",
     "start_label",
 ]

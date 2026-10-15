@@ -3700,13 +3700,13 @@ class SlmFeedbackTask:
                         device_event_record=device_record,
                     )
                 context.report_progress(
-                    f"Ramsey candidate {candidate}: running {self.acquisition_logic}"
+                    f"Ramsey candidate {candidate}: running the acquisition"
                 )
                 final_publications = self._restart_logic(
                     self.acquisition_logic, context, completion="terminal",
                 )
                 context.report_progress(
-                    f"Ramsey candidate {candidate}: waiting for final {self.source_signal}"
+                    f"Ramsey candidate {candidate}: waiting for the source's final result"
                 )
                 measured = _wait_for_external_fit(
                     context, signal_plane=self.signal_plane, fit_signal=self.source_signal,

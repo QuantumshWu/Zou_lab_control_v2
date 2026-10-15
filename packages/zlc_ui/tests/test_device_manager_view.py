@@ -60,6 +60,18 @@ QtTest.QTest.keyClicks(card.role_edit, 'output')
 QtTest.QTest.keyClick(card.role_edit, QtCore.Qt.Key_Return)
 card.type_combo.setCurrentIndex(1)
 card.form.widget_for('count').setValue(3)
+# The fold is a disclosure: its chevron's direction is its state, and it
+# never wears the held-down (active) face a toggle command does.
+fold = card.collapse_button
+assert fold.toolTip() == 'Hide parameters' and not fold.is_active()
+QtTest.QTest.mouseClick(fold, QtCore.Qt.LeftButton)
+assert card.form.isHidden() and fold.toolTip() == 'Show parameters'
+assert not fold.is_active()
+QtTest.QTest.mouseClick(fold, QtCore.Qt.LeftButton)
+assert not card.form.isHidden() and fold.toolTip() == 'Hide parameters'
+# Remove takes the device out on ONE click: only a logic node and a plot
+# panel are armed.
+assert card.remove_button.role() == 'destructive'
 QtTest.QTest.mouseClick(card.remove_button, QtCore.Qt.LeftButton)
 assert ('add', 'sensor.fake') in events
 assert ('role', 'id-1', 'output') in events
@@ -106,14 +118,18 @@ view.set_device_choices((
     ('Virtual camera', 'camera.virtual', 'camera'),
     ('Hardware camera', 'camera.dcam', 'camera'),
     ('Virtual sequencer', 'sequencer.virtual', 'sequencer'),
+    ('Simulation RF', 'rf.simulation', 'rf'),
+    ('Simulation SLM', 'slm.simulation', 'slm'),
 ))
 view.set_templates((('Virtual', 'virtual'), ('Hardware', 'hardware')))
 view.resize(1100, 700); view.show(); app.processEvents()
 assert view.tabs.tabText(0) == 'Config'
 assert view.heading_label.text() == 'Devices'
 assert view.document_name.text() == 'untitled'
-assert tuple(view.domain_groups) == ('camera', 'sequencer')
-assert tuple(group.title() for group in view.domain_groups.values()) == ('Camera', 'Sequencer')
+assert tuple(view.domain_groups) == ('camera', 'sequencer', 'rf', 'slm')
+# A domain reads as words with its acronym kept, not str.title()'s 'Rf'.
+assert tuple(group.title() for group in view.domain_groups.values()) == (
+    'Camera', 'Sequencer', 'RF', 'SLM')
 assert all(button.text() == 'Add device' for button in view.domain_add_buttons.values())
 assert view.discovered_group.title() == 'Discovered hardware'
 assert view.discover_button.text() == 'Scan hardware'
@@ -214,7 +230,7 @@ control = open_device_control(
     title='qCMOS control',
     spec=spec,
     projection={
-        'owners': ('Camera Measurement',),
+        'owners': ('camera_measurement',), 'owner_names': ('Camera Measurement',),
         'reason': 'gain is unclaimed but requires operator risk acceptance',
         'risk_enabled': True,
         'risk_accepted': False,
@@ -275,7 +291,7 @@ assert not widget.isEnabled()
 assert control._view._field_rows['gain'][0].text() == '2'
 
 control.set_projection(spec, {
-    'owners': ('Camera Measurement',),
+    'owners': ('camera_measurement',), 'owner_names': ('Camera Measurement',),
     'reason': 'risk accepted for unclaimed fields',
     'risk_enabled': True,
     'risk_accepted': True,
@@ -283,7 +299,7 @@ control.set_projection(spec, {
         'gain': {
             'current': 2, 'desired': 2, 'editable': True,
             'live_apply': False, 'live_enabled': True, 'apply_enabled': True,
-            'status': 'Ready', 'severity': 'ready', 'reason': '',
+            'status': 'Ready', 'severity': 'idle', 'reason': '',
         },
     },
 })
@@ -307,7 +323,7 @@ assert live_events[-1] == ('gain', True)
 widget.setValue(5); widget.setValue(6)
 QtTest.QTest.qWait(30)
 control.set_projection(spec, {
-    'owners': ('Camera Measurement',),
+    'owners': ('camera_measurement',), 'owner_names': ('Camera Measurement',),
     'reason': 'unchanged policy projection',
     'risk_enabled': True,
     'risk_accepted': True,
@@ -315,7 +331,7 @@ control.set_projection(spec, {
         'gain': {
             'current': 2, 'desired': 6, 'editable': True,
             'live_apply': True, 'live_enabled': True, 'apply_enabled': True,
-            'status': 'Ready', 'severity': 'ready', 'reason': '',
+            'status': 'Ready', 'severity': 'idle', 'reason': '',
         },
     },
 })
@@ -325,7 +341,7 @@ assert apply_events.count(('gain', 5)) == 0
 assert control._view._field_rows['gain'][0].text() == '2'
 
 control.set_projection(spec, {
-    'owners': ('Camera Measurement',),
+    'owners': ('camera_measurement',), 'owner_names': ('Camera Measurement',),
     'reason': 'exposure working point is claimed',
     'risk_enabled': True,
     'risk_accepted': True,
@@ -523,7 +539,7 @@ spec = FormSpec((
 def state(current, limits):
     return {'current': current, 'desired': current, 'editable': True,
             'live_apply': False, 'live_enabled': True, 'apply_enabled': False,
-            'status': '', 'severity': 'ready', 'reason': '', 'device_limits': limits}
+            'status': '', 'severity': 'idle', 'reason': '', 'device_limits': limits}
 initial = {
     'fields': {'power': state(-3.0, (-120.0, 30.0)), 'output': state(False, None),
                'frequency': state(1000.0, (1e-6, 160e6))},

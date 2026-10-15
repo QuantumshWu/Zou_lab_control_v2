@@ -9,6 +9,7 @@ only :mod:`zlc_ui.pulse.models` records.
 from __future__ import annotations
 
 import json
+import weakref
 from dataclasses import replace
 
 from PyQt5 import QtCore, QtGui, QtWidgets
@@ -16,12 +17,13 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 from zlc_ui.form import FormChoice, being_edited
 from zlc_ui.fluent import (
     retire_widget,
-    ACCENT, BG, DERIVED_INK, DISABLED_INK, FIELD_BORDER_PX, HOVER, MUTED_INK, SELECTION_EDGE, TEXT, CONFIG_GREEN,
+    ACCENT, ACCENT_TINT, BG, DERIVED_INK, DISABLED_INK, FIELD_BORDER_PX, HOVER, MUTED_INK,
+    SELECTION_EDGE, TEXT, CONFIG_GREEN,
     CONFIG_GREEN_DARK, CONFIG_GREEN_TINT, FluentButton, FluentCheckBox, FluentSegmentedButtons,
     FluentSwitch, FluentComboBox, FluentFrame, FluentGroupBox, fluent_count_box,
     FluentLabel, FluentLineEdit, FluentReadoutEdit, FluentScrollArea, LinkedScrollPanes,
     ElidedLabel, FluentPopup, FluentSettingsPopupAnchor, field_text_inset,
-    show_fluent_popup_for_anchor, signals_blocked,
+    set_status_ink, show_fluent_popup_for_anchor, signals_blocked,
 )
 
 from ._layout import (
@@ -48,7 +50,7 @@ from .models import (
 
 #: The address the pulse server prints for a client on the same machine.  One
 #: constant so the seeded field, the tooltip and any host default agree.
-from .scan_line_edit import FluentScanLineEdit, _BindingButton
+from .scan_line_edit import FluentScanLineEdit, _BindingButton, popup_label_width
 from zlc_ui.status import counted
 
 
@@ -81,15 +83,24 @@ class _PortToggleIcon(QtGui.QIconEngine):
     it for "on".  Two characters (a disc and a ring) never matched -- the
     small disc read as a dot beside a circle, the large one as a dark blot
     heavier than every word on the page -- so both are drawn: the same
-    ring, the same stroke, in the command's own ink."""
+    ring, the same stroke, in the command's own ink -- its button's
+    :meth:`FluentButton.glyph_ink`, so the ring follows the button's state
+    exactly as a one-glyph label does.  The button is held weakly (it owns
+    its icon); a copy Qt paints after the button is gone takes the
+    standard command's ink."""
 
-    def __init__(self, on: bool) -> None:
+    def __init__(self, on: bool, button: "weakref.ref[FluentButton]") -> None:
         super().__init__()
         self._on = bool(on)
+        self._button = button
 
     def paint(self, painter, rect, mode, state) -> None:  # noqa: N802 - Qt API name
         del state
-        ink = QtGui.QColor(DISABLED_INK if mode == QtGui.QIcon.Disabled else HOVER)
+        button = self._button()
+        if button is not None:
+            ink = QtGui.QColor(button.glyph_ink())
+        else:
+            ink = QtGui.QColor(DISABLED_INK if mode == QtGui.QIcon.Disabled else HOVER)
         side = float(min(rect.width(), rect.height()))
         stroke = max(1.0, side / 9.0)
         centre = QtCore.QRectF(rect).center()
@@ -115,12 +126,18 @@ class _PortToggleIcon(QtGui.QIconEngine):
         return QtGui.QPixmap.fromImage(image)
 
     def clone(self):
-        return _PortToggleIcon(self._on)
+        return _PortToggleIcon(self._on, self._button)
+
+
+def _show_port_ring(button: FluentButton, on: bool) -> None:
+    """Draw ``button`` as the ring (``on``: with its dot), in its own ink."""
+
+    button.setIcon(QtGui.QIcon(_PortToggleIcon(on, weakref.ref(button))))
 
 
 def _port_toggle_button(on: bool, tooltip: str) -> FluentButton:
     button = FluentButton("")
-    button.setIcon(QtGui.QIcon(_PortToggleIcon(on)))
+    _show_port_ring(button, on)
     side = row_height()
     # About half the face, of the face's parity: an odd ring in an even
     # face has no centred place, and stood half a pixel off on every row.
@@ -646,7 +663,7 @@ class ChannelPanel(FluentGroupBox):
     """The pulse's clock, scan and repeat count, then one delay row per port.
 
     The rows are a form: ONE label column (its widest shown label, a port's
-    or "Repeat", and the air after it) and ONE control column, where the
+    or "Repeats", and the air after it) and ONE control column, where the
     clock and scan readouts start their text, the repeat box and the Config
     switch start, and every delay field starts.  The delay rows had a
     second column of their own ten pixels to the left, under labels
@@ -683,10 +700,13 @@ class ChannelPanel(FluentGroupBox):
         # Control group beside it holds.  Reading it directly under the scan
         # summary says the one sentence they make together: what will be
         # played, and how many times.
+        # A count of 0 runs forever, and the box says so where it is typed:
+        # it shows ∞.
         self.run_repeats_spin = fluent_count_box()
+        self.run_repeats_spin.setSpecialValueText("∞")
         self.run_repeats_spin.setToolTip(
             "Complete Pulse runs per scan point (or per On Pulse without a "
-            "scan); 0 runs indefinitely"
+            "scan); ∞ (0) runs indefinitely"
         )
         # A count, not a stretch of the column: as wide as every repeat box
         # (its stepper beside its digits), from the column's left edge, and
@@ -713,7 +733,7 @@ class ChannelPanel(FluentGroupBox):
         self._labels = [
             add_labeled_widget(top_layout, text, widget)
             for text, widget in (("Clock", self.clock_label), ("Scan", self.scan_summary_label),
-                                 ("Repeat", self.run_repeats_spin), ("Config", mode_row))
+                                 ("Repeats", self.run_repeats_spin), ("Config", mode_row))
         ]
         top_layout.addStretch(1)
         self._layout.addWidget(top)
@@ -807,6 +827,18 @@ class ChannelPanel(FluentGroupBox):
             digital = port.kind == "digital"
             # Inapplicable actions keep their column in every port row.
             fill.setEnabled(digital)
+            # On an analog row there is no "off" to turn it to: the button
+            # takes the output's steps away, so it is the row remover every
+            # row has -- the ghost x, red under the pointer, one click --
+            # not a ring that read as a radio button beside the disabled fill.
+            if digital and clear.text():
+                clear.setText("")
+                _show_port_ring(clear, False)
+                clear.set_role("standard")
+            elif not digital and not clear.text():
+                clear.setIcon(QtGui.QIcon())
+                clear.setText("×")
+                clear.set_role("destructive")
             clear.setToolTip(
                 "Turn this output off in every period"
                 if digital
@@ -861,6 +893,28 @@ class ChannelPanel(FluentGroupBox):
 
     def set_scan_summary(self, text: str) -> None:
         self.scan_summary_label.setText(str(text))
+
+
+def _reading_ink(stroke: str) -> str:
+    """A bracket's stroke colour as words: mixed toward TEXT, a twentieth
+    at a time, until it reads 4.5:1 on the ACCENT_TINT body of a selected
+    post, the paler of a post's two faces.  The stroke edges the post and
+    draws the preview's loop; as a title it read 3.1:1 there (2.9:1 for the
+    green), under every other card title."""
+
+    def luminance(color: QtGui.QColor) -> float:
+        channels = [value / 12.92 if value <= 0.04045 else ((value + 0.055) / 1.055) ** 2.4
+                    for value in color.getRgbF()[:3]]
+        return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2]
+
+    face = luminance(QtGui.QColor(ACCENT_TINT)) + 0.05
+    start, end = QtGui.QColor(stroke), QtGui.QColor(TEXT)
+    for step in range(21):
+        ink = QtGui.QColor(*(round(a + (b - a) * step / 20) for a, b in zip(
+            start.getRgb()[:3], end.getRgb()[:3])))
+        if face / (luminance(ink) + 0.05) >= 4.5:
+            break
+    return ink.name()
 
 
 class BracketPost(FluentGroupBox):
@@ -977,16 +1031,17 @@ class BracketPost(FluentGroupBox):
     def set_bracket_style(self, ordinal: int, color: str) -> None:
         """Say which bracket this post frames.
 
-        Its number goes in the title pill and its ink on the title and the
-        edge; both posts of a bracket wear the same, and the preview draws
-        that bracket's loop in it.  Renumbered in place when a bracket is
-        added or removed before it, the way a card's "Period k/N" is.
+        Its number goes in the title pill and its colour on the edge; both
+        posts of a bracket wear the same, and the preview draws that
+        bracket's loop in it.  The title wears that hue at reading strength
+        (:func:`_reading_ink`).  Renumbered in place when a bracket is added
+        or removed before it, the way a card's "Period k/N" is.
         """
 
         self.ordinal = int(ordinal)
         self.color = str(color or "")
         self.setTitle(f"Bracket {self.ordinal}")
-        self.set_title_color(self.color or TEXT)
+        self.set_title_color(_reading_ink(self.color) if self.color else TEXT)
         self.set_surface(edge=self.color or None)
         self.setToolTip(f"Bracket {self.ordinal}: drag to move this boundary")
 
@@ -1108,8 +1163,13 @@ class ComponentCard(FluentGroupBox):
         self.edit_button = FluentButton("Edit")
         self.edit_button.setToolTip("Edit this Subpulse")
         self.edit_button.clicked.connect(lambda: self.action_requested.emit("edit", self.component_id))
-        self.ungroup_button = FluentButton("Ungroup")
-        self.ungroup_button.setToolTip("Keep the default contents as ordinary Pulse items")
+        # Ungroup dissolves the Subpulse: red like every command that takes
+        # something away, and one click.
+        self.ungroup_button = FluentButton("Ungroup", role="destructive")
+        self.ungroup_button.setToolTip(
+            "Dissolve this Subpulse: its embedded (Default) periods become "
+            "ordinary Pulse items; a Config source link is dropped"
+        )
         self.ungroup_button.clicked.connect(lambda: self.action_requested.emit("ungroup", self.component_id))
         # One command per port row, from the first: as tall as a row and
         # the rows' spacing apart, so none straddles two rows of the cards
@@ -1147,8 +1207,11 @@ class ComponentCard(FluentGroupBox):
             layout = QtWidgets.QHBoxLayout(self._source_popup)
             layout.setContentsMargins(px(10), px(10), px(10), px(10))
             layout.setSpacing(px(6))
-            layout.addWidget(FluentLabel("Source"))
-            # The same choice, in the same control, as a value slot's Source.
+            # The same choice, in the same control and at the same x, as a
+            # value slot's Source: the two popups share one label column.
+            label = FluentLabel("Source")
+            label.setFixedWidth(popup_label_width())
+            layout.addWidget(label)
             self.source_switch = FluentSegmentedButtons((("default", "Default"), ("config", "Config")))
             layout.addWidget(self.source_switch)
             self.source_switch.activated.connect(self._commit_source)
@@ -1183,10 +1246,12 @@ class ComponentCard(FluentGroupBox):
         """The commands' face for the body under them.  On a tinted body --
         the green of a Config Subpulse, the selection wash -- a light-blue
         face lays a second hue on the card (on the wash it read 1.09:1 and
-        nearly vanished): there the commands wear a white face, no edge."""
+        nearly vanished): there the commands wear a white face, no edge.
+        Ungroup keeps its red face on any body, and an expanded Subpulse's
+        Collapse its active face."""
 
         tinted = self._component.config_active or self.is_selected()
-        for button in (self.expand_button, self.edit_button, self.ungroup_button):
+        for button in (self.expand_button, self.edit_button):
             button.set_on_tint(tinted)
 
     def set_selected(self, selected: bool) -> None:
@@ -1223,6 +1288,8 @@ class ComponentCard(FluentGroupBox):
         self.name_label.setText(component.name)
         self.summary_label.setText(component.summary_text if self.mode == "closed" else "")
         self.expand_button.setText("Expand" if self.mode == "closed" else "Collapse")
+        # A toggle: held down while it is expanded, its label the next press.
+        self.expand_button.set_active(self.mode != "closed")
         self._project_source()
 
 
@@ -1897,7 +1964,8 @@ class PulseScheduleView(QtWidgets.QWidget):
         self.save_button = FluentButton("Save Pulse")
         # Asks for the file to read: the ellipsis says more comes first.
         self.load_button = FluentButton("Open…")
-        # Names what it hides: "Collapse" is the Subpulse's own command.
+        # Names what it hides: "Collapse" is the Subpulse's own command.  A
+        # toggle: active while the side panels are hidden.
         self.collapse_button = FluentButton("Hide side panels")
         self.group_button = FluentButton("Group Subpulse")
         # Three compact rows: execute; edit the timeline; save and organize.
@@ -2412,6 +2480,7 @@ class PulseScheduleView(QtWidgets.QWidget):
         self._sync_endpoint_enabled()
         self.connection_status.setText(vm.status)
         self.connection_status.setToolTip(vm.status)
+        set_status_ink(self.connection_status, vm.status_word)
 
     def _request_connection(self) -> None:
         """Emit the selected presenter-supplied connection intent."""
@@ -2663,7 +2732,7 @@ class PulseScheduleView(QtWidgets.QWidget):
         if not driven:
             # Hiding every row is not a view of the board.  Say so instead.
             self.feedback_requested.emit(
-                "nothing is driven yet, so there is nothing to hide"
+                "Nothing is driven yet, so there is nothing to hide."
             )
             return
         self.visible_ports_committed.emit(
@@ -2711,6 +2780,7 @@ class PulseScheduleView(QtWidgets.QWidget):
         self.channel_panel_holder.setVisible(not visible)
         self.left_panel_stub_holder.setVisible(visible)
         self.collapse_button.setText("Show side panels" if visible else "Hide side panels")
+        self.collapse_button.set_active(visible)
         self._settle_left_pane_width()
 
     def _show_left_panels(self) -> None:
@@ -2718,6 +2788,7 @@ class PulseScheduleView(QtWidgets.QWidget):
         self.channel_panel_holder.show()
         self.left_panel_stub_holder.hide()
         self.collapse_button.setText("Hide side panels")
+        self.collapse_button.set_active(False)
         self._settle_left_pane_width()
 
 

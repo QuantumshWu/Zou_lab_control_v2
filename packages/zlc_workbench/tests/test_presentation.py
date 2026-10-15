@@ -933,8 +933,8 @@ def test_a_cancelled_render_is_never_remembered_as_a_panel_error(
     wanted = stable_signal_key("panel-1", "frequency")
     context = SimpleNamespace(instance_id="consumer", generation=generation, cancel_requested=lambda: False)
     console.logic = {
-        "consumer": SimpleNamespace(host=SimpleNamespace(generation=generation, running=True), draft=SimpleNamespace(source_signal=wanted)),
-        split_signal_key(signal)[0]: SimpleNamespace(descriptor=SimpleNamespace(kind=SimpleNamespace(value="measurement")), host=None),
+        "consumer": SimpleNamespace(name="consumer", host=SimpleNamespace(generation=generation, running=True), draft=SimpleNamespace(source_signal=wanted)),
+        split_signal_key(signal)[0]: SimpleNamespace(name=split_signal_key(signal)[0], descriptor=SimpleNamespace(kind=SimpleNamespace(value="measurement")), host=None),
     }
     state = SimpleNamespace(signal=signal, fit={"model": "gaussian"}, published_outputs={})
     console.panels = {"panel-1": SimpleNamespace(state=state, port=port, bridge=None)}

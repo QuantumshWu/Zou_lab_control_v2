@@ -8,11 +8,6 @@ from zlc_ui.fluent import (
     fluent_open_path,
     fluent_save_path,
     fluent_confirm,
-    ACCENT,
-    GREEN,
-    GREY,
-    ORANGE,
-    RED,
     FluentButton,
     fluent_message,
     FluentFrame,
@@ -32,6 +27,18 @@ from .config_view import PulseConfigView
 from .component_view import PulseComponentView
 from .schedule_view import PulseScheduleView
 from .target_view import PulseTargetView
+from zlc_ui.status import sentence
+
+#: The board token the presenter projects -> the status word its dot shows.
+#: An open pulse on an idle board is idle: nothing is running yet.  Attached
+#: and silent is a failure, not a calm grey.
+PULSE_BOARD_STATES = {
+    "idle": "idle",
+    "dirty-ready": "idle",
+    "running-synced": "running",
+    "running-stale": "warning",
+    "unreachable": "error",
+}
 
 
 class PulseEditorView(QtWidgets.QWidget):
@@ -139,14 +146,7 @@ class PulseEditorView(QtWidgets.QWidget):
         self.summary_label.setText(str(text))
 
     def set_status_color(self, token: str) -> None:
-        colors = {
-            "running-synced": GREEN,
-            "running-stale": ORANGE,
-            "failed": RED,
-            "dirty-ready": ACCENT,
-            "idle": GREY,
-        }
-        self.status_dot.set_color(colors.get(str(token), GREY))
+        self.status_dot.set_state(PULSE_BOARD_STATES[str(token)])
 
     def set_capabilities(self, can_sync: bool, can_hold: bool, can_step: bool) -> None:
         self.schedule_view.set_capabilities(can_sync, can_hold, can_step)
@@ -174,9 +174,10 @@ class PulseEditorView(QtWidgets.QWidget):
         )
 
     def show_done(self, text: str) -> None:
-        """Say that something asked for has happened."""
+        """Say that something asked for has happened, as a sentence: the
+        dialog reads every message in one form, whoever worded it."""
 
-        self.done_requested.emit(str(text))
+        self.done_requested.emit(sentence(text))
 
     def show_warning(self, text: str) -> None:
         """Say what was refused, where it stays until something else happens.
@@ -184,9 +185,13 @@ class PulseEditorView(QtWidgets.QWidget):
         It used to also overwrite the summary -- a derived line about the pulse
         -- so the message survived only until the next redraw, and the summary
         then lied about the pulse until something recomputed it.
+
+        Written as a sentence, ending in a full stop, as every message the
+        dialog shows; the words are the sender's, a name at the start kept
+        as it is written.
         """
 
-        self.warning_requested.emit(str(text))
+        self.warning_requested.emit(sentence(text))
 
     def finish_close(self) -> None:
         self._closing = True

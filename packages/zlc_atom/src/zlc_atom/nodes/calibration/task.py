@@ -130,20 +130,16 @@ def camera_exposure_seconds(
 
 @dataclass(frozen=True)
 class CalibrationRequest:
-    """One frozen calibration protocol and analysis request."""
+    """One frozen calibration protocol and analysis request.
 
-    camera_key: str
-    sequencer_key: str
-    pulse_template: str
-    repeats: int
-    reference_exposure_seconds: float
-    readout_exposure_seconds: float
-    #: What the camera is armed with; see :func:`camera_exposure_seconds`.
-    camera_exposure_seconds: float
-    #: Stable field references selected explicitly in the task's form.
-    reference_before_field: str
-    readout_field: str
-    reference_after_field: str
+    The analysis settings come first: every calibration has them.  The bench
+    settings after them -- which camera and sequencer, which pulse, how many
+    samples, the three windows and the API fields that drive them -- belong
+    to taking NEW frames.  A replay of saved ones takes its crop, exposure
+    and pulse facts from the record saved beside them and uses none of these,
+    so it neither needs nor checks them.
+    """
+
     default_model_kind: ReadoutModelKind
     threshold_method: str
     box_half_width: int
@@ -151,6 +147,18 @@ class CalibrationRequest:
     psf_padding: int
     detection_spot_sigma: float
     detection_sigma: float
+    camera_key: str = ""
+    sequencer_key: str = ""
+    pulse_template: str = ""
+    repeats: int | None = None
+    reference_exposure_seconds: float | None = None
+    readout_exposure_seconds: float | None = None
+    #: What the camera is armed with; see :func:`camera_exposure_seconds`.
+    camera_exposure_seconds: float | None = None
+    #: Stable field references selected explicitly in the task's form.
+    reference_before_field: str = ""
+    readout_field: str = ""
+    reference_after_field: str = ""
     #: Read the camera in photoelectrons instead of counts.  Calibration
     #: keeps no conversion of its own -- it asks the measurement for the
     #: frames it wants -- and the thresholds it fits are in whatever it got.
@@ -165,46 +173,6 @@ class CalibrationRequest:
     saved_frames_path: str = ""
 
     def __post_init__(self) -> None:
-        camera_key = _non_empty_key(self.camera_key, "camera_key")
-        sequencer_key = _non_empty_key(self.sequencer_key, "sequencer_key")
-        pulse_template = _non_empty_key(self.pulse_template, "pulse_template")
-        repeats = int(self.repeats)
-        if repeats <= 0:
-            raise ValueError("repeats must be positive")
-        reference_exposure = _positive_float(
-            self.reference_exposure_seconds,
-            "reference_exposure_seconds",
-        )
-        readout_exposure = _positive_float(
-            self.readout_exposure_seconds,
-            "readout_exposure_seconds",
-        )
-        if readout_exposure >= reference_exposure:
-            # Not a rule about numbers: the readout frame is recognised in the
-            # compiled program by being the SHORT one, so a run whose three
-            # windows are the same length has no readout frame to find.
-            raise ValueError("readout exposure must be shorter than the reference exposure")
-        camera_exposure = _positive_float(
-            self.camera_exposure_seconds,
-            "camera_exposure_seconds",
-        )
-        if camera_exposure < reference_exposure:
-            raise ValueError(
-                "the camera exposure must cover the reference window, the longest of the three"
-            )
-        fields = tuple(
-            _non_empty_key(value, name)
-            for value, name in (
-                (self.reference_before_field, "reference_before_field"),
-                (self.readout_field, "readout_field"),
-                (self.reference_after_field, "reference_after_field"),
-            )
-        )
-        if len(set(fields)) != len(fields):
-            raise ValueError(
-                "the three calibration exposures must be driven by three "
-                "different pulse API fields"
-            )
         if not isinstance(self.default_model_kind, ReadoutModelKind):
             raise TypeError("default_model_kind must be ReadoutModelKind")
         threshold_method = str(self.threshold_method).lower()
@@ -233,16 +201,59 @@ class CalibrationRequest:
             raise ValueError(
                 "calibrating from saved frames needs the folder they were saved in"
             )
-        object.__setattr__(self, "camera_key", camera_key)
-        object.__setattr__(self, "sequencer_key", sequencer_key)
-        object.__setattr__(self, "pulse_template", pulse_template)
-        object.__setattr__(self, "repeats", repeats)
-        object.__setattr__(self, "reference_exposure_seconds", reference_exposure)
-        object.__setattr__(self, "readout_exposure_seconds", readout_exposure)
-        object.__setattr__(self, "camera_exposure_seconds", camera_exposure)
-        object.__setattr__(self, "reference_before_field", fields[0])
-        object.__setattr__(self, "readout_field", fields[1])
-        object.__setattr__(self, "reference_after_field", fields[2])
+        # What taking new frames needs: a bench, a pulse and its three
+        # windows.  A replay reads none of it.
+        if frame_source == FRAMES_FROM_CAMERA:
+            camera_key = _non_empty_key(self.camera_key, "camera_key")
+            sequencer_key = _non_empty_key(self.sequencer_key, "sequencer_key")
+            pulse_template = _non_empty_key(self.pulse_template, "pulse_template")
+            repeats = int(self.repeats)
+            if repeats <= 0:
+                raise ValueError("repeats must be positive")
+            reference_exposure = _positive_float(
+                self.reference_exposure_seconds,
+                "reference_exposure_seconds",
+            )
+            readout_exposure = _positive_float(
+                self.readout_exposure_seconds,
+                "readout_exposure_seconds",
+            )
+            if readout_exposure >= reference_exposure:
+                # Not a rule about numbers: the readout frame is recognised in the
+                # compiled program by being the SHORT one, so a run whose three
+                # windows are the same length has no readout frame to find.
+                raise ValueError("readout exposure must be shorter than the reference exposure")
+            camera_exposure = _positive_float(
+                self.camera_exposure_seconds,
+                "camera_exposure_seconds",
+            )
+            if camera_exposure < reference_exposure:
+                raise ValueError(
+                    "the camera exposure must cover the reference window, the longest of the three"
+                )
+            fields = tuple(
+                _non_empty_key(value, name)
+                for value, name in (
+                    (self.reference_before_field, "reference_before_field"),
+                    (self.readout_field, "readout_field"),
+                    (self.reference_after_field, "reference_after_field"),
+                )
+            )
+            if len(set(fields)) != len(fields):
+                raise ValueError(
+                    "the three calibration exposures must be driven by three "
+                    "different pulse API fields"
+                )
+            object.__setattr__(self, "camera_key", camera_key)
+            object.__setattr__(self, "sequencer_key", sequencer_key)
+            object.__setattr__(self, "pulse_template", pulse_template)
+            object.__setattr__(self, "repeats", repeats)
+            object.__setattr__(self, "reference_exposure_seconds", reference_exposure)
+            object.__setattr__(self, "readout_exposure_seconds", readout_exposure)
+            object.__setattr__(self, "camera_exposure_seconds", camera_exposure)
+            object.__setattr__(self, "reference_before_field", fields[0])
+            object.__setattr__(self, "readout_field", fields[1])
+            object.__setattr__(self, "reference_after_field", fields[2])
         object.__setattr__(self, "threshold_method", threshold_method)
         object.__setattr__(self, "box_half_width", box_half_width)
         object.__setattr__(self, "psf_half_width", psf_half_width)
@@ -258,6 +269,28 @@ class CalibrationRequest:
         object.__setattr__(self, "saved_frames_path", saved_frames_path)
 
     def to_dict(self) -> dict[str, object]:
+        """What this request uses, as a run records it.
+
+        The same settings a hosted run's input summary keeps: those of its
+        own frame source.  A replay of saved frames records the analysis and
+        the folder only -- its bench fields hold nothing, and its
+        ``photoelectrons`` is the dataclass default, not the units the saved
+        frames are in (those are in the run record saved beside them).
+        """
+
+        analysis: dict[str, object] = {
+            "default_model_kind": self.default_model_kind.value,
+            "threshold_method": self.threshold_method,
+            "box_half_width": self.box_half_width,
+            "psf_half_width": self.psf_half_width,
+            "psf_padding": self.psf_padding,
+            "detection_spot_sigma": self.detection_spot_sigma,
+            "detection_sigma": self.detection_sigma,
+            "review_detected_sites": self.review_detected_sites,
+            "frame_source": self.frame_source,
+        }
+        if self.frame_source == FRAMES_FROM_FOLDER:
+            return {**analysis, "saved_frames_path": self.saved_frames_path}
         return {
             "camera_key": self.camera_key,
             "sequencer_key": self.sequencer_key,
@@ -269,18 +302,9 @@ class CalibrationRequest:
             "reference_before_field": self.reference_before_field,
             "readout_field": self.readout_field,
             "reference_after_field": self.reference_after_field,
-            "default_model_kind": self.default_model_kind.value,
-            "threshold_method": self.threshold_method,
-            "box_half_width": self.box_half_width,
-            "psf_half_width": self.psf_half_width,
-            "psf_padding": self.psf_padding,
-            "detection_spot_sigma": self.detection_spot_sigma,
-            "detection_sigma": self.detection_sigma,
             PHOTOELECTRONS: self.photoelectrons,
             "save_frames": self.save_frames,
-            "review_detected_sites": self.review_detected_sites,
-            "frame_source": self.frame_source,
-            "saved_frames_path": self.saved_frames_path,
+            **analysis,
         }
 
 
@@ -1136,24 +1160,27 @@ class CalibrationTask:
     def __init__(
         self,
         *,
-        camera: CameraAdapter,
-        sequencer: object,
         request: CalibrationRequest,
-        pulse_sequence: PulseSequence,
-        pulse_path: str | Path,
         signal_plane: object,
+        camera: CameraAdapter | None = None,
+        sequencer: object = None,
+        pulse_sequence: PulseSequence | None = None,
+        pulse_path: str | Path | None = None,
         build_figure_host: object = None,
         save_figure_artifact: object = None,
     ) -> None:
-        if not isinstance(camera, CameraAdapter):
-            raise TypeError("camera must implement CameraAdapter")
-        for name in ("describe", "load", "fire", "wait_done", "safe", "snapshot"):
-            if not callable(getattr(sequencer, name, None)):
-                raise TypeError(f"sequencer must expose {name}")
         if not isinstance(request, CalibrationRequest):
             raise TypeError("request must be CalibrationRequest")
-        if not isinstance(pulse_sequence, PulseSequence):
-            raise TypeError("pulse_sequence must be PulseSequence")
+        # The bench is for taking new frames; a replay of saved ones needs
+        # none and touches none.
+        if request.frame_source == FRAMES_FROM_CAMERA:
+            if not isinstance(camera, CameraAdapter):
+                raise TypeError("camera must implement CameraAdapter")
+            for name in ("describe", "load", "fire", "wait_done", "safe", "snapshot"):
+                if not callable(getattr(sequencer, name, None)):
+                    raise TypeError(f"sequencer must expose {name}")
+            if not isinstance(pulse_sequence, PulseSequence):
+                raise TypeError("pulse_sequence must be PulseSequence")
         if build_figure_host is not None and not callable(build_figure_host):
             raise TypeError("build_figure_host must be callable or None")
         if save_figure_artifact is not None and not callable(save_figure_artifact):
@@ -1162,7 +1189,9 @@ class CalibrationTask:
         self.sequencer = sequencer
         self._request = request
         self.pulse_sequence = pulse_sequence
-        self.pulse_path = Path(pulse_path).expanduser().resolve()
+        self.pulse_path = (
+            None if pulse_path is None else Path(pulse_path).expanduser().resolve()
+        )
         if signal_plane is None:
             raise TypeError("signal_plane must be supplied by the runtime owner")
         self.signal_plane = signal_plane
@@ -1461,8 +1490,9 @@ class CalibrationTask:
         """
 
         cycles, run_record = read_saved_samples(self.request.saved_frames_path)
+        self._cycles_requested = len(cycles)
         saved_request = dict(run_record.get("request") or {})
-        camera_key = str(saved_request.get("camera_key") or self.request.camera_key)
+        camera_key = str(saved_request.get("camera_key") or "")
         devices = dict(run_record.get("actual_devices") or {})
         camera = devices.get(camera_key)
         if not isinstance(camera, Mapping):
@@ -1619,7 +1649,7 @@ class CalibrationTask:
             request_record = run_record.get("request")
             actual_devices = run_record.get("actual_devices")
             camera_record = (
-                actual_devices.get(self.request.camera_key, {})
+                actual_devices.get(contract.camera_id, {})
                 if isinstance(actual_devices, Mapping)
                 else {}
             )
@@ -1738,6 +1768,9 @@ class CalibrationTask:
         self._actual_working_point = None
         self._result = None
         self._partial_cycles_completed = 0
+        # A replay asks for the samples its folder holds; it says how many
+        # once it has read them.
+        self._cycles_requested = self.request.repeats
         self._partial_result: CalibrationRunResult | None = None
         self._partial_run_record: dict[str, object] | None = None
         self._site_review_record = None
@@ -1881,8 +1914,8 @@ class CalibrationTask:
                 context.report_progress(line)
             context.report_progress(
                 "Calibration complete",
-                current=self.request.repeats,
-                total=self.request.repeats,
+                current=len(capture.cycles),
+                total=len(capture.cycles),
             )
         return result
 
@@ -1911,7 +1944,7 @@ class CalibrationTask:
                 "format": "zlc.calibration.partial-summary",
                 "status": str(status),
                 "cycles_completed": self._partial_cycles_completed,
-                "cycles_requested": self.request.repeats,
+                "cycles_requested": self._cycles_requested,
                 "error": f"{type(error).__name__}: {error}",
             },
         )

@@ -51,6 +51,7 @@ from .plan import (
     hardware_scan_ports_for,
     port_label,
     split_outer_axes,
+    unscannable_api_ports,
 )
 from .source import check_cancelled, wait_for_board
 
@@ -130,11 +131,11 @@ def estimate_scan_time(
     if geometry is None or clock_hz is None:
         result["reason"] = "Board geometry and clock are not known."
         return result
-    sequence = apply_api_overrides(sequence, api_overrides_from_authored(api_values))
+    sequence, _unapplied = apply_api_overrides(sequence, api_overrides_from_authored(api_values))
     pulse_axes = tuple(axis for axis in plan.axes if axis.port.startswith((API_PARAM_FAMILY, PULSE_PARAM_FAMILY)))
     ports = bind_plan(ScanPlan(pulse_axes), (
         *hardware_scan_ports_for(sequence), *api_scan_ports_for(sequence),
-    )) if pulse_axes else ()
+    ), withheld=unscannable_api_ports(sequence)) if pulse_axes else ()
     planned = {axis.port[len(PULSE_PARAM_FAMILY):] for axis in board_axes}
     sequence = replace(sequence, bindings=tuple(
         replace(binding, scan=binding.field_id in planned) for binding in sequence.bindings
@@ -218,8 +219,18 @@ class SeamlessScanMeasurement:
         shots_per_point: int,
         acquisition_logic: str = "",
         restart_logic: object = None,
+        unapplied_api_values: Mapping[str, float] | None = None,
+        parked_axes: Sequence[Mapping[str, object]] = (),
     ) -> None:
         self.sequencer = sequencer
+        #: API values the draft keeps for names this pulse does not declare:
+        #: applied to nothing, and named in the run record as such.
+        self.unapplied_api_values = dict(unapplied_api_values or {})
+        #: The plan rows the operator parked, as authored: kept for the run
+        #: record, scanned by nothing.
+        self.parked_axes = tuple(
+            {key: value for key, value in row.items() if key != "enabled"} for row in parked_axes
+        )
         self.sequencer_key = str(sequencer_key)
         self.source = source
         self.acquisition_logic = str(acquisition_logic).strip()
@@ -674,7 +685,9 @@ class SeamlessScanMeasurement:
             self.sequencer.safe()
             check_cancelled(context)
             if self.acquisition_logic:
-                context.report_progress(f"Preparing {self.acquisition_logic}")
+                # Its own row says which node it is; a node's status never
+                # names another, whose name only the console knows.
+                context.report_progress("Preparing the acquisition")
                 self._restart_logic(self.acquisition_logic, context)
             if not self.outer_axes:
                 self._play_table(
@@ -823,6 +836,10 @@ class SeamlessScanMeasurement:
             "scan_repeats": self.repeats,
             "run_repeats": self.shots_per_point,
             "acquisition_logic": self.acquisition_logic or None,
+            **({"unapplied_api_values": dict(self.unapplied_api_values)}
+               if self.unapplied_api_values else {}),
+            **({"parked_axes": [dict(row) for row in self.parked_axes]}
+               if self.parked_axes else {}),
         }
 
 
