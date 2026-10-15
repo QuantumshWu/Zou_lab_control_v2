@@ -269,6 +269,28 @@ class CalibrationRequest:
         object.__setattr__(self, "saved_frames_path", saved_frames_path)
 
     def to_dict(self) -> dict[str, object]:
+        """What this request uses, as a run records it.
+
+        The same settings a hosted run's input summary keeps: those of its
+        own frame source.  A replay of saved frames records the analysis and
+        the folder only -- its bench fields hold nothing, and its
+        ``photoelectrons`` is the dataclass default, not the units the saved
+        frames are in (those are in the run record saved beside them).
+        """
+
+        analysis: dict[str, object] = {
+            "default_model_kind": self.default_model_kind.value,
+            "threshold_method": self.threshold_method,
+            "box_half_width": self.box_half_width,
+            "psf_half_width": self.psf_half_width,
+            "psf_padding": self.psf_padding,
+            "detection_spot_sigma": self.detection_spot_sigma,
+            "detection_sigma": self.detection_sigma,
+            "review_detected_sites": self.review_detected_sites,
+            "frame_source": self.frame_source,
+        }
+        if self.frame_source == FRAMES_FROM_FOLDER:
+            return {**analysis, "saved_frames_path": self.saved_frames_path}
         return {
             "camera_key": self.camera_key,
             "sequencer_key": self.sequencer_key,
@@ -280,18 +302,9 @@ class CalibrationRequest:
             "reference_before_field": self.reference_before_field,
             "readout_field": self.readout_field,
             "reference_after_field": self.reference_after_field,
-            "default_model_kind": self.default_model_kind.value,
-            "threshold_method": self.threshold_method,
-            "box_half_width": self.box_half_width,
-            "psf_half_width": self.psf_half_width,
-            "psf_padding": self.psf_padding,
-            "detection_spot_sigma": self.detection_spot_sigma,
-            "detection_sigma": self.detection_sigma,
             PHOTOELECTRONS: self.photoelectrons,
             "save_frames": self.save_frames,
-            "review_detected_sites": self.review_detected_sites,
-            "frame_source": self.frame_source,
-            "saved_frames_path": self.saved_frames_path,
+            **analysis,
         }
 
 

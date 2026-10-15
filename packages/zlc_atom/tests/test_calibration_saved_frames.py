@@ -12,14 +12,17 @@ import numpy as np
 import pytest
 
 from zlc_atom.devices.camera.contract import CameraFrameRecord, CameraWorkingPoint
+from zlc_atom.devices.camera.photoelectrons import PHOTOELECTRONS
 from zlc_atom.nodes.calibration.outputs import (
     CAPTURE_PREVIEW_DECLARATION,
     SITE_REVIEW_DECLARATION,
 )
 from zlc_atom.nodes.calibration.logic_node import LOGIC_NODE as CALIBRATION_LOGIC_NODE
 from zlc_atom.nodes.calibration.task import (
+    FRAMES_FROM_CAMERA,
     FRAMES_FROM_FOLDER,
     SITE_REVIEW_REQUEST,
+    CalibrationRequest,
     CalibrationRunResult,
     SampleWriter,
     CalibrationTask,
@@ -152,6 +155,14 @@ def test_saved_samples_are_written_as_they_arrive_and_calibrate_again(
 
     replayed = replay()
     assert replayed.calibration.site_map.n_sites == first.calibration.site_map.n_sites
+    # Its own run record names what it used: the analysis and the folder.
+    # The bench fields the request still carries are not part of it, nor
+    # is a units claim -- the units are the saved frames' own.
+    recorded = json.loads(
+        (replayed.artifact_path.parents[1] / "run.json").read_text(encoding="utf-8")
+    )["input"]
+    assert recorded["saved_frames_path"] == str(folder)
+    assert not {"camera_key", "pulse_template", "repeats", PHOTOELECTRONS} & set(recorded)
     np.testing.assert_allclose(
         replayed.calibration.site_map.centers_xy,
         first.calibration.site_map.centers_xy,
@@ -792,6 +803,70 @@ def test_a_preview_event_carries_the_settings_its_frames_were_frozen_with() -> N
     )
     with pytest.raises(ValueError, match="mixed settings-aware and unaware"):
         output((*steady[:2], _sample_cycle()[2]))
+
+
+def test_a_request_records_only_what_its_frame_source_uses() -> None:
+    """A replay's record says nothing about a bench it did not use.
+
+    Built from a draft in Saved frames, the request carries no bench fields
+    and the dataclass default ``photoelectrons=True``; written into a
+    notebook run's ``run.json`` as it stood, a replay of count frames was
+    recorded as "photoelectrons: True".  The record keeps what the hosted
+    run's input summary keeps: the settings of its own frame source.
+    """
+
+    analysis = {
+        "default_model_kind": "box",
+        "threshold_method": "gaussian",
+        "box_half_width": 1,
+        "psf_half_width": 3,
+        "psf_padding": 3,
+        "detection_spot_sigma": 1.0,
+        "detection_sigma": 6.0,
+        "review_detected_sites": False,
+    }
+    full = calibration_request()
+    saved = CalibrationRequest(
+        default_model_kind=full.default_model_kind,
+        threshold_method="gaussian",
+        box_half_width=1,
+        psf_half_width=3,
+        psf_padding=3,
+        detection_spot_sigma=1.0,
+        detection_sigma=6.0,
+        frame_source=FRAMES_FROM_FOLDER,
+        saved_frames_path="run/figures",
+    )
+    replay_record = {
+        **analysis,
+        "frame_source": FRAMES_FROM_FOLDER,
+        "saved_frames_path": "run/figures",
+    }
+    assert saved.to_dict() == replay_record
+    # The same with the bench fields still kept in the request.
+    assert replace(
+        full, frame_source=FRAMES_FROM_FOLDER, saved_frames_path="run/figures",
+    ).to_dict() == replay_record
+
+    # New frames keep every bench setting, and a folder kept for a later
+    # replay is not part of it.
+    acquired = replace(full, saved_frames_path="run/figures").to_dict()
+    assert acquired == {
+        "camera_key": "camera",
+        "sequencer_key": "sequencer",
+        "pulse_template": full.pulse_template,
+        "repeats": 30,
+        "reference_exposure_seconds": 0.02,
+        "readout_exposure_seconds": 0.005,
+        "camera_exposure_seconds": 0.02,
+        "reference_before_field": "duration:long_before",
+        "readout_field": "duration:short",
+        "reference_after_field": "duration:long_after",
+        PHOTOELECTRONS: True,
+        "save_frames": False,
+        **analysis,
+        "frame_source": FRAMES_FROM_CAMERA,
+    }
 
 
 def test_calibrating_from_a_folder_needs_the_folder() -> None:
