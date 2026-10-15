@@ -32,11 +32,11 @@ class _BindingButton(QtWidgets.QAbstractButton):
     line edit's rect, which inside a spin box is shorter than the frame
     and sits padding away from the stepper.  The column ends one ``gap``
     before what ends the field's room (:func:`field_room_end`: the frame's
-    inner edge, or the stepper), so a badge stands as far from the stepper
-    in a repeat box as from the edge in a plain field.  The badges are
-    centred on the frame's inner rect, never taller together than it with
-    at least a device pixel clear above and below, and each letter is
-    centred on its own ink (:func:`paint_centred_ink`).
+    inner edge, or the stepper's chevron ink), so a badge stands as far
+    from the chevrons in a repeat box as from the edge in a plain field.
+    The badges are centred on the frame's inner rect, never taller
+    together than it with at least a device pixel clear above and below,
+    and each letter is centred on its own ink (:func:`paint_centred_ink`).
     """
 
     def __init__(self, parent=None) -> None:

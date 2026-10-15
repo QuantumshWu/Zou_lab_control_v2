@@ -12,12 +12,16 @@ from PyQt5 import QtCore, QtWidgets
 
 from zlc_ui.fluent import (
     card_pad, row_gap, section_gap,
-    FONT, MUTED_LABEL_STYLE, ElidedLabel,
+    FONT, MUTED_LABEL_STYLE, ElidedLabel, FluentLabel,
     fluent_font_size, scaled_px, setting_label_width,
 )
+from zlc_ui.fluent.fluent import _numeric_text_width
 
 
 ROW_HEIGHT = 30
+#: The count every repeat box is sized for: a common count shows whole, and
+#: a longer one widens its box as it is shown or typed (:func:`count_box_width`).
+COUNT_SAMPLE = "10000"
 #: The widest a side panel's label column grows: a longer port name elides
 #: there (whole in its tooltip) rather than pushing every field away.
 CHANNEL_LABEL_WIDTH = 100
@@ -140,6 +144,43 @@ def spacer_control_width(card_width: int) -> int:
     return card_width - 2 * card_pad()
 
 
+def card_caption(text: str) -> FluentLabel:
+    """A card's header caption ("Duration", a bracket's "Repeats"): one row
+    tall, its words on the card's content edge -- the x of the card's title
+    and of the field boxes under it, as a side panel's labels stand on
+    theirs -- so a card stacks its words on one left edge."""
+
+    label = FluentLabel(text)
+    label.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
+    label.setFixedHeight(row_height())
+    return label
+
+
+def count_box_width(box: QtWidgets.QAbstractSpinBox, text: str = "") -> int:
+    """The width of a box for a whole count: :data:`COUNT_SAMPLE` or
+    ``text``, whichever is wider, shown whole.
+
+    One measure for every repeat box of the editor (a Pulse's Repeat, the
+    Scan repeats, a bracket's Repeats): the digits' advance and the chrome
+    the box and its line edit keep beside them -- frame, padding, stepper
+    and the edit's own text margins (a binding badge's room) -- read from
+    the style without resizing the box, since a resize refits a half-typed
+    number.  A box that shows or takes a longer count is re-sized from it.
+    """
+
+    edit = box.lineEdit()
+    box.ensurePolished()
+    edit.ensurePolished()
+    option = QtWidgets.QStyleOptionSpinBox()
+    box.initStyleOption(option)
+    area = box.style().subControlRect(
+        QtWidgets.QStyle.CC_SpinBox, option, QtWidgets.QStyle.SC_SpinBoxEditField, box)
+    chrome = box.width() - area.width() + edit.width() - _numeric_text_width(edit)
+    metrics = edit.fontMetrics()
+    digits = max(metrics.horizontalAdvance(COUNT_SAMPLE), metrics.horizontalAdvance(str(text)))
+    return digits + 2 + chrome
+
+
 def form_label(text: str) -> ElidedLabel:
     """A side panel's row label: left-aligned at the card's content edge,
     centred on the row's height, elided beyond its column -- whose width
@@ -190,8 +231,9 @@ def add_labeled_widget(layout, label_text: str, widget: QtWidgets.QWidget) -> El
 
 
 __all__ = [
-    "add_labeled_widget", "bound_field_width", "channel_label_width", "channel_name_edit_width",
-    "config_name_width", "form_control_cell", "form_label",
+    "COUNT_SAMPLE", "add_labeled_widget", "bound_field_width", "card_caption",
+    "channel_label_width", "channel_name_edit_width",
+    "config_name_width", "count_box_width", "form_control_cell", "form_label",
     "label_column_width", "panel_top_height", "quiet",
     "period_card_width", "period_control_width", "px", "row_height",
     "row_spacing", "spacer_card_width",

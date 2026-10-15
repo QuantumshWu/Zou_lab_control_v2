@@ -65,12 +65,12 @@ class PulseComponentView(QtWidgets.QWidget):
         head.setContentsMargins(pad, pad, pad, pad)
         head.setSpacing(row_gap())
         # The two rows are one form: one label column, so the Subpulse
-        # choice and the Config file start on one x, and both rows end on
+        # choice and its file start on one x, and both rows end on
         # the card's right edge, Browse under the last command.  The choice
         # names the Subpulse; it is renamed where a Pulse is, in the Port
         # catalog's Name field below, so the page says its name twice, not
         # three times.
-        label_width = setting_label_width(("Subpulse", "Config file"), minimum=0)
+        label_width = setting_label_width(("Subpulse", "Subpulse file"), minimum=0)
         top = QtWidgets.QHBoxLayout()
         top.setSpacing(row_gap())
         subpulse_label = FluentLabel("Subpulse")
@@ -96,7 +96,9 @@ class PulseComponentView(QtWidgets.QWidget):
         file_row = QtWidgets.QHBoxLayout(self.config_file_row)
         file_row.setContentsMargins(0, 0, 0, 0)
         file_row.setSpacing(row_gap())
-        file_label = FluentLabel("Config file")
+        # The file is named as the selector and the placeholder name it;
+        # "Config" is the source that reads it (the scope line says so).
+        file_label = FluentLabel("Subpulse file")
         file_label.setFixedWidth(label_width)
         file_row.addWidget(file_label)
         self.config_path_edit = FluentLineEdit("")
@@ -134,10 +136,10 @@ class PulseComponentView(QtWidgets.QWidget):
         self.placeholder.setWordWrap(True)
         self.placeholder.setAlignment(QtCore.Qt.AlignCenter)
         self._page.addWidget(self.placeholder, 1)
-        # The references read like Value Config's bindings: the field's
-        # label in a column as wide as the widest, the Config name beside it
-        # in a box of the same width as there.
-        self.bindings_box = FluentGroupBox("Numeric Config references")
+        # The bindings read like Value Config's Pulse bindings, and are
+        # titled alike: the field's label in a column as wide as the widest,
+        # the Config name beside it in a box of the same width as there.
+        self.bindings_box = FluentGroupBox("Subpulse bindings")
         self._binding_layout = QtWidgets.QGridLayout(self.bindings_box)
         self._binding_layout.setContentsMargins(pad, pad, pad, pad)
         self._binding_layout.setHorizontalSpacing(row_gap())
@@ -278,7 +280,7 @@ class PulseComponentView(QtWidgets.QWidget):
         self.path_label.setToolTip(path)
         self.scope_label.setText(
             "Default in Pulse — Save Pulse keeps these edits."
-            if instance else "Config file — Save writes this Subpulse file."
+            if instance else "Config source — Save writes this Subpulse file."
             if self._selected_id else "Subpulse file — Save writes this independent file."
         )
         self.path_label.setVisible(schedule is not None and not self._selected_id)

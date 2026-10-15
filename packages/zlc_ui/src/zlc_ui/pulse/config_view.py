@@ -132,9 +132,9 @@ class PulseConfigView(QtWidgets.QWidget):
         self.mode_label = FluentLabel("Config is off. Pulse defaults are used.")
         self.mode_label.setWordWrap(True)
         bindings_layout.addWidget(self.mode_label)
-        hint = ElidedLabel("Choose a value name for each field. Save the Pulse to keep these bindings.")
+        hint = ElidedLabel("Choose a Config name for each field. Save the Pulse to keep these bindings.")
         bindings_layout.addWidget(hint)
-        # Each column as wide as what it holds, so a value name sits beside
+        # Each column as wide as what it holds, so a Config name sits beside
         # the field it binds: the field column is its widest label, the name
         # and the two values have fixed widths, and the status takes the
         # rest.  Stretch shares put a page width between them.
@@ -144,13 +144,15 @@ class PulseConfigView(QtWidgets.QWidget):
         self._binding_grid.setColumnStretch(_STATUS, 1)
         self._grid_headers = tuple(
             column_header_label(title)
-            for title in ("Pulse field", "Value name", "Default", "Config value", "Status")
+            for title in ("Pulse field", "Config name", "Default", "Config value", "Status")
         )
-        # A header stands over its column's TEXT: the value names start a
+        # A header stands over its column's TEXT: the Config names start a
         # field's text inset inside their boxes; the read values start at
-        # their own edge.
+        # their own edge.  It is a row like the rows under it, so the grid
+        # keeps one pitch from its header down.
         self._grid_headers[_NAME].setIndent(field_text_inset())
         for column, header in enumerate(self._grid_headers):
+            header.setFixedHeight(row_height())
             self._binding_grid.addWidget(header, 0, column)
         bindings_layout.addLayout(self._binding_grid)
         self.bindings_placeholder = FluentLabel("No value bindings yet. Choose Config from a field's source control in Edit.")

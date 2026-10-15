@@ -5,12 +5,12 @@ from __future__ import annotations
 from PyQt5 import QtCore, QtWidgets
 
 from zlc_ui.fluent import (
-    ElidedLabel, FluentButton, FluentCodeEdit, FluentFrame, FluentGroupBox, FluentLabel,
+    ElidedLabel, FluentButton, FluentCodeEdit, FluentGroupBox, FluentLabel,
     FluentSectionLabel, centred_line_top, fluent_count_box, retire_widget, signals_blocked,
 )
 from zlc_ui.form import being_edited
 
-from ._layout import quiet, row_height
+from ._layout import count_box_width, quiet, row_height
 from zlc_ui.fluent import card_pad, row_gap, section_gap
 from .models import BindingRecord, ScanPageRecord
 from .scan_line_edit import _SOURCES
@@ -40,7 +40,9 @@ class PulseScanView(QtWidgets.QWidget):
         layout.setSpacing(section_gap())
         pad = card_pad()
 
-        info = FluentFrame()
+        # Titled like every card on the page: the list's intro is the
+        # card's first row, under the title, not standing in for it.
+        info = FluentGroupBox("Bound fields")
         info_layout = QtWidgets.QVBoxLayout(info)
         info_layout.setContentsMargins(pad, pad, pad, pad)
         info_layout.setSpacing(row_gap())
@@ -75,6 +77,10 @@ class PulseScanView(QtWidgets.QWidget):
         run_row.setSpacing(row_gap())
         run_row.addWidget(FluentLabel("Scan repeats (0 = ∞)"))
         self.scan_repeats_spin = fluent_count_box()
+        # As wide as every repeat box, wider only while it shows or takes a
+        # longer count.
+        self._size_repeats()
+        self.scan_repeats_spin.lineEdit().textChanged.connect(self._size_repeats)
         self._minimum_repeats = 0
         self._committed_repeats = 0
         self.set_repeats_range(0, 0)
@@ -193,6 +199,9 @@ class PulseScanView(QtWidgets.QWidget):
         self.scan_repeats_spin.setMinimum(minimum)
         self.set_repeats(default)
 
+    def _size_repeats(self, text: str = "") -> None:
+        self.scan_repeats_spin.setFixedWidth(count_box_width(self.scan_repeats_spin, text))
+
     def set_repeats(self, repeats: int) -> None:
         value = max(self._minimum_repeats, int(repeats))
         self._committed_repeats = value
@@ -200,6 +209,8 @@ class PulseScanView(QtWidgets.QWidget):
         # is what a projection says, and it lands when they are done.
         if being_edited(self.scan_repeats_spin):
             return
+        # Wide enough first: a count wider than the box is refused by it.
+        self._size_repeats(str(value))
         with signals_blocked(self.scan_repeats_spin):
             self.scan_repeats_spin.setValue(float(value))
 
