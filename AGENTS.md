@@ -38,6 +38,24 @@ They constrain implementation method; product and architecture truth remain in
   「把什么文件放进哪个文件夹、或在 vendor.json 里写什么」。禁止裸靠 PATH 搜索
   或写死一个操作者看不见、改不了的路径。此后所有 device 一律照此办理。
 
+- **代码不随整理变多（2026-10-15 用户裁决）。** 起因：一轮以整理、美化为主的
+  344 个提交，源码净增约 1.55 万行、测试约 1.1 万行，其中约 2,500 行本可避免。
+  - 注释与 docstring 只写现行约定，外加一句「为什么」。不写「以前、曾经、used
+    to、was」之类的改动史，历史留在 git log。一条规则只在它的 owner 写一次，
+    调用点最多一行指向它。
+  - 先找后写。新写 helper、样式或度量之前，先在 `zlc_ui.fluent` 和现有 owner
+    里搜（`control_height`、`row_gap`、`card_pad`、`muted_note_label`、
+    `set_status_ink`、`FluentSettingRow`、`share_label_column`、
+    `mount_logic_page` 等）。同一规则第二次出现时，当场收进 owner，不复制第二份。
+  - 删功能要连根删。调用方去掉某个用法时，同一个提交里删掉库中只为它服务的
+    参数、状态和导出；一次重设计结束时，先清残留，再合并。
+  - 一条规则只测一层：owner 层或用户路径层二选一。MCP/HTTP 只测路由，不复测
+    presenter 语义。审查发现的边角缺陷只修代码，不加新测试，除非用户点名。
+  - 审查轮不加功能。审查提出的体验改进，以及 agent 自定的产品语义，先列给
+    用户，不直接实现。
+  - 每轮合并前，在给用户的总结里写一行：本轮 src 代码、注释、测试各净增多少，
+    其中多少对应用户要的新功能。这是汇报，不是门禁；数字超出预期时先自查再合并。
+
 以上约束适用于本仓库此后的每一次任务和上下文恢复，除非用户本人明确修改。
 
 ## Read the current authority before designing
