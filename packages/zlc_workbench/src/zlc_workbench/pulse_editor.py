@@ -668,7 +668,12 @@ def project_schedule(
         period for period in (() if sequence is None else sequence.periods)
         if period.kind != PERIOD_KIND_SPACER
     )
-    slots = () if sequence is None else sequence.scan_bindings
+    # With a table armed, the slots are the fields it drives: a Scan field
+    # it leaves out plays its own value and carries none of its points.
+    slots = () if sequence is None else tuple(
+        binding for binding in sequence.scan_bindings
+        if not scanned or binding.field_id in scanned
+    )
     return ScheduleVM(
         document_generation=int(generation),
         revision=int(revision),

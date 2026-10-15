@@ -4194,6 +4194,14 @@ def test_the_edit_page_says_how_many_points_will_be_played(presenter, sequence) 
     )
     assert view.schedule_view.schedule.scan_summary_text == "1 slot · 21 points"
 
+    # The slots are the fields the table drives: two more fields marked Scan
+    # but left out of it play their own values and carry none of its points.
+    for period in (sequence.periods[1], sequence.periods[5]):
+        view.binding_committed.emit('duration', period.period_id, None, True, 'default')
+    assert view.schedule_view.schedule.scan_summary_text == "1 slot · 21 points"
+    view.scan_array_clear_requested.emit()
+    assert view.schedule_view.schedule.scan_summary_text == "3 slots · 0 points"
+
 
 
 def test_hold_and_step_play_the_point_they_hold(presenter, sequence) -> None:
