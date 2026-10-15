@@ -2561,6 +2561,8 @@ def test_an_open_pulse_is_moved_onto_the_board_by_lane_name(sequence) -> None:
 
     view = _EditorView()
     board = _Sequencer()
+    # Written for a 10 ns clock, so Connect has to move it onto the board's.
+    sequence = replace(sequence, time_step_ns=10.0, config_enabled=True)
     presenter = PulseEditorPresenter(view, sequence, dial=lambda _mode, _endpoint: board)
     try:
         before = {
@@ -2572,6 +2574,8 @@ def test_an_open_pulse_is_moved_onto_the_board_by_lane_name(sequence) -> None:
 
         described = _board_description()
         assert presenter.sequence.target == described.target
+        # The move keeps the pulse's own Config switch.
+        assert presenter.sequence.config_enabled
         after = {
             lane: [period.states[index] for period in presenter.sequence.periods]
             for index, lane in enumerate(presenter.sequence.target.raw_lanes)

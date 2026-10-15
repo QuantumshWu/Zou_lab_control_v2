@@ -3364,16 +3364,17 @@ class PulseEditorPresenter:
             field_label(current, b.field_ref) for b in current.bindings if b not in bindings
         )
         try:
-            candidate = PulseSequence(
-                name=current.name,
+            # replace(), so what the move does not touch -- the Config switch,
+            # the brackets, the components -- rides along without being
+            # listed.  A field-by-field rebuild left config_enabled out, and
+            # every Connect to another board turned the pulse's Config off.
+            candidate = replace(
+                current,
                 target=target,
                 time_step_ns=float(board.time_step_ns),
                 periods=periods,
                 bindings=bindings,
                 delays=delays,
-                brackets=current.brackets,
-                components=current.components,
-                run_repeats=current.run_repeats,
             )
         except ValueError as error:
             self._warn(
