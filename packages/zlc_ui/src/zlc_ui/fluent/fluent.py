@@ -335,6 +335,24 @@ def fluent_stepper_extent() -> int:
     return scaled_px(COMBO_WIDTH) + 2 * FIELD_BORDER_PX
 
 
+def _chevron_metrics() -> tuple[float, float]:
+    """``(half span, stroke width)`` of the one chevron, in logical px."""
+
+    return scaled_px(COMBO_TRI_SIZE) / 2.0, max(1.0, scaled_px(3) / 2.0)
+
+
+def _chevron_centre_x(widget: QtWidgets.QWidget, x: float) -> float:
+    """Where a chevron asked to centre on ``x`` centres its ink: on a
+    device pixel, or on a pixel's middle when its stroke is an odd number
+    of device pixels wide."""
+
+    ratio = float(widget.devicePixelRatioF())
+    cx = device_snap(widget, x)
+    if round(_chevron_metrics()[1] * ratio) % 2:
+        cx += 0.5 / ratio
+    return cx
+
+
 def paint_chevron(
     painter: QtGui.QPainter,
     widget: QtWidgets.QWidget,
@@ -350,12 +368,8 @@ def paint_chevron(
     number of device rows inside it is centred on them, not half a pixel
     low)."""
 
-    ratio = float(widget.devicePixelRatioF())
-    half = scaled_px(COMBO_TRI_SIZE) / 2.0
-    width = max(1.0, scaled_px(3) / 2.0)
-    cx = device_snap(widget, centre.x())
-    if round(width * ratio) % 2:
-        cx += 0.5 / ratio
+    half, width = _chevron_metrics()
+    cx = _chevron_centre_x(widget, centre.x())
     cy = device_snap(widget, centre.y(), axis="y", grid=0.5)
     sign = -1.0 if up else 1.0
     pen = QtGui.QPen(colour)
@@ -1748,17 +1762,29 @@ class FluentButton(QtWidgets.QPushButton):
         field and the label beside the button put their text on -- the
         style centred its line box, two device pixels from theirs.  A
         one-symbol label is centred on its INK (:func:`paint_centred_ink`).
-        A button with an icon is the style's to lay out."""
+        An icon with no words is centred on the face, at its icon size: the
+        style's layout of it is integer and padded for a label, and put an
+        icon of the face's other parity half a pixel off.  An icon beside
+        words is the style's to lay out."""
 
         option = QtWidgets.QStyleOptionButton()
         self.initStyleOption(option)
         glyph = bool(self.property("glyph"))
-        if not glyph and not option.icon.isNull():
+        if not glyph and not option.icon.isNull() and option.text:
             super().paintEvent(event)
             return
         painter = QtWidgets.QStylePainter(self)
         painter.drawControl(QtWidgets.QStyle.CE_PushButtonBevel, option)
-        if glyph:
+        if not option.icon.isNull() and not option.text:
+            size = option.iconSize
+            face = self.rect()
+            area = QtCore.QRect(face.left() + (face.width() - size.width()) // 2,
+                                face.top() + (face.height() - size.height()) // 2,
+                                size.width(), size.height())
+            option.icon.paint(painter, area, QtCore.Qt.AlignCenter,
+                              QtGui.QIcon.Normal if self.isEnabled() else QtGui.QIcon.Disabled,
+                              QtGui.QIcon.On if self.isChecked() else QtGui.QIcon.Off)
+        elif glyph:
             paint_centred_ink(painter, self, QtCore.QRectF(self.rect()), self.font(), option.text,
                               self._glyph_ink())
         else:
@@ -1818,7 +1844,8 @@ class FluentButton(QtWidgets.QPushButton):
             self._repolish()
 
     def set_on_tint(self, on_tint: bool) -> None:
-        """Whether the button sits on a TINTED card (a config Subpulse).
+        """Whether the button sits on a TINTED card body (a Config
+        Subpulse's green, a selected card's wash).
 
         There a light-blue face laid a second hue on the card's; it wears a
         plain white face instead, whose contrast with the card is its whole
@@ -5865,15 +5892,19 @@ def _spin_stepper_cells(widget: QtWidgets.QAbstractSpinBox) -> tuple[float, QtCo
 
 def field_room_end(widget: QtWidgets.QWidget) -> float:
     """Where the room inside a field's frame ends on the right, in logical
-    px: the frame's inner edge, or the left of a spin box's stepper cells.
+    px: the frame's inner edge, or the left edge of a spin box's chevron
+    ink -- what the eye measures to, not the wider cell that takes the
+    pointer around it.
 
     A part seated at a field's right end (a binding badge) keeps ONE gap
-    from this, so it stands as far from the stepper in a spin box as from
+    from this, so it stands as far from the chevrons in a spin box as from
     the edge in a plain field."""
 
     if (isinstance(widget, QtWidgets.QAbstractSpinBox)
             and widget.buttonSymbols() != QtWidgets.QAbstractSpinBox.NoButtons):
-        return _spin_stepper_cells(widget)[1].left()
+        half, width = _chevron_metrics()
+        cell = _spin_stepper_cells(widget)[1]
+        return _chevron_centre_x(widget, cell.center().x()) - half - width / 2.0
     return frame_inner_rect(widget).right()
 
 
@@ -6310,8 +6341,11 @@ class FluentCodeEdit(QtWidgets.QPlainTextEdit):
         self.setReadOnly(read_only)
         self.document().setDocumentMargin(0)
         pad = field_text_inset() - FIELD_BORDER_PX
+        # An editor wears an input's edge; a read-only view of what a
+        # program produced is a block of the page, edged like a table.
+        edge = DIVIDER if read_only else PLACEHOLDER
         self.setStyleSheet(
-            f'QPlainTextEdit {{ background: white; color: {TEXT}; border: {FIELD_BORDER_PX}px solid {PLACEHOLDER}; '
+            f'QPlainTextEdit {{ background: white; color: {TEXT}; border: {FIELD_BORDER_PX}px solid {edge}; '
             f'border-radius: {scaled_px(4)}px; font: {fluent_font_size()}pt "Consolas", "Courier New", '
             f'monospace; padding: {pad}px; }}')
         apply_fluent_scrollbars(self)

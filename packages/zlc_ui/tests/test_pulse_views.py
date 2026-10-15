@@ -1503,6 +1503,8 @@ assert open_width == view.left_body.sizeHint().width(), (
     "the pane is not the width of the panels it holds"
 )
 open_timeline = view.timeline_scroll.width()
+# It names what it hides: "Collapse" is the Subpulse's own command.
+assert view.collapse_button.text() == "Hide side panels"
 
 view.collapse_button.click()
 for _ in range(40):
@@ -1513,7 +1515,8 @@ assert collapsed_width == view.left_body.sizeHint().width(), (
     f"the pane kept {collapsed_width} px for panels that want "
     f"{view.left_body.sizeHint().width()}"
 )
-assert collapsed_width < open_width, "Collapse freed no width at all"
+assert collapsed_width < open_width, "hiding the side panels freed no width at all"
+assert view.collapse_button.text() == "Show side panels"
 assert view.timeline_scroll.width() > open_timeline, (
     "the freed width went nowhere: the periods are no wider than before"
 )
@@ -1521,7 +1524,8 @@ assert view.timeline_scroll.width() > open_timeline, (
 view.collapse_button.click()
 for _ in range(40):
     app.processEvents()
-assert view.left_scroll.width() == open_width, "Show left did not give it back"
+assert view.left_scroll.width() == open_width, "Show side panels did not give it back"
+assert view.collapse_button.text() == "Hide side panels"
 
 view.close()
 app.processEvents()
@@ -1578,6 +1582,11 @@ def rows(card):
 tops = {name: rows(card) for name, card in cards.items()}
 shortest = min(len(value) for value in tops.values())
 assert shortest >= 3, tops
+# Every card's rhythm: the title band, the card pad, then the first row.
+from zlc_ui.fluent import card_pad
+for name, card in cards.items():
+    band_end = card.mapTo(view, card.contentsRect().topLeft()).y()
+    assert tops[name][0] - band_end == card_pad(), (name, tops[name][0] - band_end, card_pad())
 for index in range(shortest):
     values = {name: value[index] for name, value in tops.items()}
     assert len(set(values.values())) == 1, (
@@ -2480,8 +2489,11 @@ assert page.source_status.isVisible() and page.source_status.text() == "Applied"
 page.set_document(vm, contexts=(("load", "Loading"),), context_id="", selected_id="load")
 page.set_sources((("load", "Loading", "default", "", "Default"),), enabled=True)
 app.processEvents()
-assert page.scope_label.text().startswith("Config file")
+assert page.scope_label.text().startswith("Config source")
 assert page.source_status.isVisible(), "beside the file's scope, Default says the file is not in use"
+from PyQt5 import QtWidgets
+row_labels = [label.text() for label in page.config_file_row.findChildren(QtWidgets.QLabel)]
+assert "Subpulse file" in row_labels, "the file is named as the selector and placeholder name it"
 page.close()
 ''')
 
@@ -2526,4 +2538,276 @@ assert min(gutter) >= 245, "nothing of a scrolled card in the gap after the pane
 bar.setValue(0); app.processEvents()
 assert viewport.mask().isEmpty(), "unscrolled, the gap is the strip's again"
 view.close()
+''')
+
+
+def test_a_cards_caption_stands_on_its_content_edge(run_qt) -> None:
+    """A Period card's, a closed Subpulse's and a bracket end post's header
+    caption starts on the card's content edge, where the field boxes under
+    it start: one left edge per card, whatever the card's width."""
+
+    run_qt(_schedule_source() + r'''
+from PyQt5 import QtCore, QtGui, QtWidgets
+from zlc_ui.qt import ensure_qt_app
+from zlc_ui.fluent import card_pad
+from zlc_ui.pulse import BracketPost, ComponentVM, PulseScheduleView
+from zlc_ui.pulse.schedule_view import ComponentCard
+app = ensure_qt_app(["pulse-card-captions"])
+view = PulseScheduleView()
+view.resize(1100, 600); view.show()
+view.set_schedule(vm)
+host = QtWidgets.QWidget(); host.resize(400, 300)
+component = ComponentCard(ComponentVM("mot", "MOT", ("p1",), "4 us", "1 period"), host)
+post = BracketPost("b", "end", parent=host)
+post.move(component.width() + 10, 0)
+host.show()
+app.processEvents()
+
+def caption_of(card):
+    return card.layout().itemAt(0).widget().layout().itemAt(0).widget()
+
+def ink_left(label):
+    image = label.grab().toImage()
+    ratio = image.devicePixelRatio()
+    for x in range(image.width()):
+        if any(QtGui.QColor(image.pixel(x, y)).lightness() < 160 for y in range(image.height())):
+            return x / ratio
+    raise AssertionError(f"no ink in {label.text()!r}")
+
+card = next(iter(view._cards.values()))
+for owner, field, text in ((card, card.duration_edit, "Duration"),
+                           (component, component.name_edit, "Duration"),
+                           (post, post.count_spin, "Repeats")):
+    caption = caption_of(owner)
+    assert caption.text() == text
+    assert caption.alignment() & QtCore.Qt.AlignLeft, text
+    x = caption.mapTo(owner, QtCore.QPoint()).x()
+    assert x == card_pad() == field.mapTo(owner, QtCore.QPoint()).x(), (text, x)
+    assert ink_left(caption) < 2, (text, ink_left(caption), "the words start at the edge")
+host.close(); view.close()
+''')
+
+
+def test_a_tinted_subpulse_card_gives_its_commands_the_white_face(run_qt) -> None:
+    """The selection wash under a plain Subpulse is the light blue of the
+    standard face: there, as on a Config Subpulse's green, the commands
+    wear the white on-tint face, and they go back when the card does."""
+
+    run_qt(r'''
+from PyQt5 import QtGui, QtWidgets
+from zlc_ui.qt import ensure_qt_app
+from zlc_ui.fluent.style import BUTTON_TINT, SURFACE
+from zlc_ui.pulse import ComponentVM
+from zlc_ui.pulse.schedule_view import ComponentCard
+app = ensure_qt_app(["pulse-subpulse-faces"])
+host = QtWidgets.QWidget(); host.resize(300, 400)
+card = ComponentCard(ComponentVM("mot", "MOT", ("p1",), "4 us", "1 period"), host)
+host.show(); app.processEvents()
+buttons = (card.expand_button, card.edit_button, card.ungroup_button)
+
+def faces():
+    app.processEvents()
+    found = set()
+    for button in buttons:
+        image = button.grab().toImage()
+        ratio = image.devicePixelRatio()
+        found.add(QtGui.QColor(image.pixel(int(3 * ratio), int(button.height() / 2 * ratio))).name().upper())
+    return found
+
+assert faces() == {BUTTON_TINT.upper()}, faces()
+card.set_selected(True)
+assert faces() == {SURFACE.upper()}, faces()
+card.set_selected(False)
+assert faces() == {BUTTON_TINT.upper()}, faces()
+card.set_component(ComponentVM("mot", "MOT", ("p1",), "4 us", "1 period",
+                               source="config", config_path="a.json", config_active=True))
+assert faces() == {SURFACE.upper()}, "a Config Subpulse is tinted whether or not it is selected"
+host.close()
+''')
+
+
+def test_a_delay_rows_ring_is_centred_on_its_face(run_qt) -> None:
+    """The on/off ring takes its face's parity and is centred on it: an odd
+    ring in an even face stood half a pixel right and up on every row."""
+
+    run_qt(r'''
+from PyQt5 import QtGui, QtWidgets
+from zlc_ui.qt import ensure_qt_app
+from zlc_ui.pulse.schedule_view import _port_toggle_button
+app = ensure_qt_app(["pulse-ring-centre"])
+host = QtWidgets.QWidget(); host.resize(200, 100)
+buttons = [_port_toggle_button(on, "") for on in (True, False)]
+for index, button in enumerate(buttons):
+    button.setParent(host); button.move(index * 40, 0)
+host.show(); app.processEvents()
+for button in buttons:
+    assert (button.width() - button.iconSize().width()) % 2 == 0, "the ring takes the face's parity"
+    image = button.grab().toImage()
+    ratio = image.devicePixelRatio()
+    inked = [(x, y) for y in range(image.height()) for x in range(image.width())
+             if QtGui.QColor(image.pixel(x, y)).lightness() < 150]
+    xs = [x for x, _y in inked]; ys = [y for _x, y in inked]
+    centre = ((min(xs) + max(xs) + 1) / 2 / ratio, (min(ys) + max(ys) + 1) / 2 / ratio)
+    face = (button.width() / 2, button.height() / 2)
+    assert abs(centre[0] - face[0]) <= 0.5 / ratio and abs(centre[1] - face[1]) <= 0.5 / ratio, (centre, face)
+host.close()
+''')
+
+
+def test_a_count_badge_stands_as_far_from_the_chevrons_as_a_field_badge_from_its_edge(run_qt) -> None:
+    """Read off a grab: the clear room from a bracket count's badge to the
+    stepper's chevron ink equals the room from a field's badge to the
+    field's edge, and the badge is centred on the box's inner rect."""
+
+    run_qt(r'''
+from PyQt5 import QtGui, QtWidgets
+from zlc_ui.qt import ensure_qt_app
+from zlc_ui.fluent import frame_inner_rect
+from zlc_ui.pulse import BracketPost, FluentScanLineEdit
+from zlc_ui.pulse._layout import row_height
+from zlc_ui.pulse.scan_line_edit import _BindingButton
+app = ensure_qt_app(["pulse-count-badge"])
+host = QtWidgets.QWidget(); host.resize(400, 200)
+field = FluentScanLineEdit("", host)
+field.resize(130, row_height())
+field.set_field_state(editable=True, source="config")
+post = BracketPost("b", "end", count=3, parent=host)
+post.move(200, 0)
+post.count_edit.set_field_state(editable=True, source="config")
+host.show()
+for _ in range(10):
+    app.processEvents()
+
+def darkness(image, x, rows):
+    return max(255 - QtGui.QColor(image.pixel(x, y)).lightness() for y in rows)
+
+def room_after_badge(frame):
+    """(badge's right ink edge, next ink edge, room above and below the badge), in device px."""
+    image = frame.grab().toImage()
+    ratio = image.devicePixelRatio()
+    inner = frame_inner_rect(frame)
+    middle = [int(inner.center().y() * ratio)]
+    rows = range(int(inner.top() * ratio) + 1, int(inner.bottom() * ratio) - 1)
+    badge = frame.findChild(_BindingButton).geometry()
+    x = int(badge.center().x() * ratio)
+    while darkness(image, x, middle):
+        x += 1
+    right = x
+    while not darkness(image, x, rows if frame is post.count_spin else middle):
+        x += 1
+    column = int(badge.center().x() * ratio)
+    inked = [y for y in range(int(inner.top() * ratio), int(inner.bottom() * ratio))
+             if darkness(image, column, [y])]
+    return right, x, inked[0] - inner.top() * ratio, inner.bottom() * ratio - inked[-1] - 1
+
+field_right, field_edge, *_ = room_after_badge(field)
+count_right, chevron, above, below = room_after_badge(post.count_spin)
+assert chevron - count_right == field_edge - field_right, (chevron - count_right, field_edge - field_right)
+assert abs(above - below) <= 1, (above, below)
+host.close()
+''')
+
+
+def test_the_repeat_boxes_share_one_count_width(run_qt) -> None:
+    """The Pulse's Repeat and the Scan repeats are one measure of box -- a
+    common count whole, the stepper beside it -- standing at the start of
+    their column rather than stretched across it; a longer count widens
+    the box and shows whole."""
+
+    run_qt(_schedule_source() + r'''
+from dataclasses import replace
+from PyQt5 import QtCore
+from zlc_ui.qt import ensure_qt_app
+from zlc_ui.pulse import PulseScanView, PulseScheduleView
+from zlc_ui.pulse._layout import count_box_width
+app = ensure_qt_app(["pulse-count-width"])
+view = PulseScheduleView()
+view.resize(1100, 600); view.show()
+view.set_schedule(vm)
+scan = PulseScanView()
+scan.resize(900, 600); scan.show()
+app.processEvents()
+repeat = view.channel_panel.run_repeats_spin
+assert repeat.width() == scan.scan_repeats_spin.width() == count_box_width(repeat), (
+    repeat.width(), scan.scan_repeats_spin.width())
+clock = view.channel_panel.clock_label
+assert repeat.mapTo(view, QtCore.QPoint()).x() == clock.mapTo(view, QtCore.QPoint()).x()
+assert repeat.width() < clock.width(), "a count box, not a stretch of the column"
+narrow = repeat.width()
+view.set_schedule(replace(vm, revision=vm.revision + 1, run_repeats=(1 << 32) - 1))
+app.processEvents()
+assert repeat.width() > narrow and repeat.text() == str((1 << 32) - 1)
+scan.scan_repeats_spin.clearFocus()  # a projection waits while the operator types
+scan.set_repeats((1 << 32) - 1)
+app.processEvents()
+assert scan.scan_repeats_spin.text() == str((1 << 32) - 1)
+assert scan.scan_repeats_spin.width() == repeat.width()
+scan.close(); view.close()
+''')
+
+
+def test_value_config_names_one_key_and_keeps_one_pitch(run_qt) -> None:
+    """The key a field binds to is a "Config name" in the grid's header and
+    its boxes, the header is a row like the rows under it, and the
+    Subpulse page's table of these bindings is titled like this one."""
+
+    run_qt(r'''
+from PyQt5 import QtCore
+from zlc_ui.qt import ensure_qt_app
+from zlc_ui.fluent import row_gap
+from zlc_ui.pulse import ConfigPageRecord, PulseConfigView, PulseComponentView
+from zlc_ui.pulse._layout import row_height
+app = ensure_qt_app(["pulse-config-pitch"])
+config = PulseConfigView()
+config.resize(1100, 700); config.show()
+config.set_page(ConfigPageRecord(
+    available_names=("bias",),
+    bindings=(("a", "MOT.bias_x", "bias", "0", "100", "Applied"),
+              ("b", "PGC.bias_x", "bias", "10", "100", "Applied")),
+    binding_groups=(("b", "pgc", "PGC"),),
+))
+app.processEvents()
+headers = config._grid_headers
+assert headers[1].text() == "Config name"
+assert all(header.height() == row_height() for header in headers)
+grid = config._binding_grid
+column = [headers[0]] + [grid.itemAtPosition(row, 0).widget() for row in range(1, grid.rowCount())
+                         if grid.itemAtPosition(row, 0) is not None]
+tops = [widget.mapTo(config, QtCore.QPoint()).y() for widget in column]
+assert len(tops) >= 4 and {b - a for a, b in zip(tops, tops[1:])} == {row_height() + row_gap()}, tops
+assert config._binding_rows["a"][1].lineEdit().placeholderText() == "Config name"
+config.close()
+page = PulseComponentView()
+assert page.bindings_box.title() == "Subpulse bindings"
+''')
+
+
+def test_the_scan_page_titles_its_first_card_and_edges_the_table_as_a_block(run_qt) -> None:
+    """Every card on the Scan page opens with a title, the bound-field list's
+    too; the read-only scan table wears a block's edge, not the editable
+    code box's input edge."""
+
+    run_qt(r'''
+from PyQt5 import QtGui
+from zlc_ui.qt import ensure_qt_app
+from zlc_ui.fluent import FluentGroupBox
+from zlc_ui.fluent.style import DIVIDER, PLACEHOLDER
+from zlc_ui.pulse import PulseScanView
+app = ensure_qt_app(["pulse-scan-cards"])
+scan = PulseScanView()
+scan.resize(900, 600); scan.show(); app.processEvents()
+cards = scan.findChildren(FluentGroupBox)
+assert sorted(box.title() for box in cards) == sorted(
+    ("Bound fields", "Generate the scan table (Python)", "Scan table")), [box.title() for box in cards]
+first = next(box for box in cards if box.title() == "Bound fields")
+assert first.isAncestorOf(scan.scan_slots_label) and first.isAncestorOf(scan.scan_repeats_spin)
+
+def edge(widget):
+    image = widget.grab().toImage()
+    ratio = image.devicePixelRatio()
+    return QtGui.QColor(image.pixel(0, int(widget.height() / 2 * ratio))).name().upper()
+
+assert edge(scan.scan_table_view) == DIVIDER.upper()
+assert edge(scan.scan_code) == PLACEHOLDER.upper()
+scan.close()
 ''')

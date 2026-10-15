@@ -25,9 +25,9 @@ from zlc_ui.fluent import (
 )
 
 from ._layout import (
-    add_labeled_widget, channel_name_edit_width, form_label, label_column_width,
-    panel_top_height, px, period_card_width, period_control_width, quiet, row_height, row_spacing,
-    spacer_card_width, spacer_control_width, time_unit_width,
+    add_labeled_widget, card_caption, channel_name_edit_width, count_box_width, form_label,
+    label_column_width, panel_top_height, px, period_card_width, period_control_width, quiet,
+    row_height, row_spacing, spacer_card_width, spacer_control_width, time_unit_width,
 )
 from zlc_ui.fluent import card_pad, row_gap, section_gap
 from .models import (
@@ -122,7 +122,10 @@ def _port_toggle_button(on: bool, tooltip: str) -> FluentButton:
     button = FluentButton("")
     button.setIcon(QtGui.QIcon(_PortToggleIcon(on)))
     side = row_height()
-    glyph = max(8, round(side * 0.5))
+    # About half the face, of the face's parity: an odd ring in an even
+    # face has no centred place, and stood half a pixel off on every row.
+    glyph = side // 2
+    glyph = max(8 + side % 2, glyph - (side - glyph) % 2)
     button.setIconSize(QtCore.QSize(glyph, glyph))
     button.setFixedSize(side, side)
     button.setToolTip(tooltip)
@@ -213,7 +216,7 @@ class PeriodCard(FluentGroupBox):
         top_layout.setSpacing(row_gap())
         # The duration box sits on the same line on every card: a spacer
         # leaves the label's line empty rather than moving the box up into it.
-        top_layout.addWidget(self._blank_line() if spacer else self._center_label("Duration"))
+        top_layout.addWidget(self._blank_line() if spacer else card_caption("Duration"))
         self.duration_edit = FluentScanLineEdit(
             "",
             tooltip="Edit value source" if spacer else "Edit Scan and value source",
@@ -258,13 +261,6 @@ class PeriodCard(FluentGroupBox):
             analog_mode_choices=analog_mode_choices,
         )
         column.addStretch(1)
-
-    @staticmethod
-    def _center_label(text: str) -> FluentLabel:
-        label = FluentLabel(text)
-        label.setAlignment(QtCore.Qt.AlignCenter)
-        label.setFixedHeight(row_height())
-        return label
 
     @staticmethod
     def _blank_line() -> QtWidgets.QWidget:
@@ -692,6 +688,11 @@ class ChannelPanel(FluentGroupBox):
             "Complete Pulse runs per scan point (or per On Pulse without a "
             "scan); 0 runs indefinitely"
         )
+        # A count, not a stretch of the column: as wide as every repeat box
+        # (its stepper beside its digits), from the column's left edge, and
+        # wider only while it shows or takes a longer count.
+        self._size_run_repeats()
+        self.run_repeats_spin.lineEdit().textChanged.connect(self._size_run_repeats)
         self.run_repeats_spin.editingFinished.connect(
             lambda: self.run_repeats_committed.emit(
                 int(self.run_repeats_spin.value())
@@ -723,6 +724,17 @@ class ChannelPanel(FluentGroupBox):
         self._delay_models: dict[str, DelayRowVM] = {}
         self._layout.addStretch(1)
         self._fit_label_column()
+
+    def _size_run_repeats(self, text: str = "") -> None:
+        self.run_repeats_spin.setFixedWidth(count_box_width(self.run_repeats_spin, text))
+
+    def set_run_repeats(self, count: int) -> None:
+        """Show the Pulse's run count, the box first made wide enough to
+        hold it whole: a count wider than the box is refused by it."""
+
+        self._size_run_repeats(str(int(count)))
+        with signals_blocked(self.run_repeats_spin):
+            self.run_repeats_spin.setValue(float(count))
 
     @staticmethod
     def _delay_width() -> int:
@@ -869,12 +881,9 @@ class BracketPost(FluentGroupBox):
     layout happened to give -- the thing marking a span lined up with nothing
     in the span it marked.
 
-    Normally as wide as five count digits plus the source badge and actual
-    style margins. Longer authored counts grow the post without rounding.
+    As wide as every repeat box (:func:`count_box_width`) plus its source
+    badge: a longer authored count grows the post without rounding.
     """
-
-    #: Common counts stay compact; larger values grow only as needed.
-    COUNT_SAMPLE = "10000"
 
     count_committed = QtCore.pyqtSignal(object)
     binding_committed = QtCore.pyqtSignal(bool, str)
@@ -913,10 +922,7 @@ class BracketPost(FluentGroupBox):
         # The post's name is its title pill, where a card says "Period 3/6".
         # The header line under it names the count on the end post and stays
         # empty on the start post, so both posts stay level with the cards.
-        label = FluentLabel("Repeats" if kind == "end" else "")
-        label.setAlignment(QtCore.Qt.AlignCenter)
-        label.setFixedHeight(row_height())
-        top_layout.addWidget(label)
+        top_layout.addWidget(card_caption("Repeats" if kind == "end" else ""))
         # The count belongs to the end post: a span is closed by saying how
         # many times.  The start post keeps an empty line of the same height so
         # the two posts stay level with each other and with the cards.
@@ -953,15 +959,7 @@ class BracketPost(FluentGroupBox):
             self.count_spin.setValue(float(int(field.text)))
 
     def _size_count_editor(self, text: str) -> None:
-        # Measure the spin chrome without resizing it: width_for() explicitly
-        # delivers a resize, which would rewrite a half-typed line's text.
-        option = QtWidgets.QStyleOptionSpinBox()
-        self.count_spin.initStyleOption(option)
-        area = self.count_spin.style().subControlRect(
-            QtWidgets.QStyle.CC_SpinBox, option, QtWidgets.QStyle.SC_SpinBoxEditField, self.count_spin)
-        chrome = self.count_spin.width() - area.width()
-        width = max(self.count_edit.width_for(self.COUNT_SAMPLE),
-                    self.count_edit.width_for(text)) + chrome
+        width = count_box_width(self.count_spin, text)
         self.count_spin.setFixedWidth(width)
         self.setFixedWidth(width + 2 * card_pad())
 
@@ -1072,9 +1070,7 @@ class ComponentCard(FluentGroupBox):
         top_layout = QtWidgets.QVBoxLayout(top)
         top_layout.setContentsMargins(0, 0, 0, 0)
         top_layout.setSpacing(row_gap())
-        self.duration_label = FluentLabel("Duration")
-        self.duration_label.setAlignment(QtCore.Qt.AlignCenter)
-        self.duration_label.setFixedHeight(row_height())
+        self.duration_label = card_caption("Duration")
         top_layout.addWidget(self.duration_label)
         self.total_label = ElidedLabel("")
         self.source_button = _BindingButton()
@@ -1183,15 +1179,26 @@ class ComponentCard(FluentGroupBox):
             # name or retained this VM. Never leave a refused draft on the card.
             self.name_edit.setText(self._component.name)
 
+    def _show_command_faces(self) -> None:
+        """The commands' face for the body under them.  On a tinted body --
+        the green of a Config Subpulse, the selection wash -- a light-blue
+        face lays a second hue on the card (on the wash it read 1.09:1 and
+        nearly vanished): there the commands wear a white face, no edge."""
+
+        tinted = self._component.config_active or self.is_selected()
+        for button in (self.expand_button, self.edit_button, self.ungroup_button):
+            button.set_on_tint(tinted)
+
+    def set_selected(self, selected: bool) -> None:
+        super().set_selected(selected)
+        self._show_command_faces()
+
     def set_component(self, component: ComponentVM) -> None:
         self._component = component
         self.set_surface(fill=CONFIG_GREEN_TINT if component.config_active else None,
                          edge=CONFIG_GREEN if component.config_active else SELECTION_EDGE)
         self.set_title_color(CONFIG_GREEN_DARK if component.config_active else DERIVED_INK)
-        # On the green card a light-blue face would lay a second hue on it:
-        # the commands go white with a hairline in the card's own green.
-        for button in (self.expand_button, self.edit_button, self.ungroup_button):
-            button.set_on_tint(component.config_active)
+        self._show_command_faces()
         self.source_button.source = component.source
         self.source_button.setToolTip(component.error or f"Subpulse source: {component.source.title()}")
         self.source_button.update()
@@ -1862,11 +1869,10 @@ class PulseScheduleView(QtWidgets.QWidget):
         # row height, the gap between rows and the top inset are single
         # numbers here rather than three cards' private choices -- they were
         # three, and by the fourth row Control had drifted six pixels below
-        # the boxes it is read against.  The cards' sides are the card pad
-        # every card has (their titles are painted there); the title band's
-        # own air stands above the first row.
+        # the boxes it is read against.  Each card keeps every card's rhythm:
+        # the title band, the card pad, then the first row.
         control_height = row_height()
-        card_margins = (pad, px(2), pad, pad)
+        card_margins = (pad, pad, pad, pad)
         control_area = FluentGroupBox("Control")
         control_layout = QtWidgets.QVBoxLayout(control_area)
         control_layout.setContentsMargins(*card_margins)
@@ -1891,7 +1897,8 @@ class PulseScheduleView(QtWidgets.QWidget):
         self.save_button = FluentButton("Save Pulse")
         # Asks for the file to read: the ellipsis says more comes first.
         self.load_button = FluentButton("Open…")
-        self.collapse_button = FluentButton("Collapse")
+        # Names what it hides: "Collapse" is the Subpulse's own command.
+        self.collapse_button = FluentButton("Hide side panels")
         self.group_button = FluentButton("Group Subpulse")
         # Three compact rows: execute; edit the timeline; save and organize.
         control_buttons = (
@@ -2240,13 +2247,12 @@ class PulseScheduleView(QtWidgets.QWidget):
             self.drag_container.show_selection((("period", next(iter(arrived))),))
         self._expect_new_card = False
         if not being_edited(self.channel_panel.run_repeats_spin):
-            with signals_blocked(self.channel_panel.run_repeats_spin):
-                self.channel_panel.run_repeats_spin.setValue(float(vm.run_repeats))
+            self.channel_panel.set_run_repeats(vm.run_repeats)
         self.channel_panel.run_repeats_spin.setEnabled(bool(vm.periods))
         self._rebuild_hidden_ports(vm)
         # A renamed port or a different set of delay rows changes how wide the
         # operator columns want to be, and the pane's cached hint is just as
-        # stale for that as it is for Collapse.
+        # stale for that as it is for hiding the side panels.
         self._settle_left_pane_width()
 
     def _connect_card(self, card: PeriodCard) -> None:
@@ -2674,9 +2680,9 @@ class PulseScheduleView(QtWidgets.QWidget):
         A QScrollArea does NOT shrink-wrap.  ``AdjustToContents`` computes the
         area's size hint once and caches it, and neither hiding the widget's
         children, nor a LayoutRequest, nor re-setting ``widgetResizable``
-        clears that cache -- so Collapse hid two 380 px panels and the pane
-        stayed 466 px wide, leaving the freed space blank between an 82 px
-        stub and period cards that never moved.  Collapse bought nothing.
+        clears that cache -- so hiding the two 380 px side panels left the
+        pane 466 px wide, the freed space blank between an 82 px stub and
+        period cards that never moved.
 
         The width is not the scroll area's to remember: it is the width of the
         panels inside it, set here whenever it may have changed.  Set, not
@@ -2704,14 +2710,14 @@ class PulseScheduleView(QtWidgets.QWidget):
         self.names_panel_holder.setVisible(not visible)
         self.channel_panel_holder.setVisible(not visible)
         self.left_panel_stub_holder.setVisible(visible)
-        self.collapse_button.setText("Show left" if visible else "Collapse")
+        self.collapse_button.setText("Show side panels" if visible else "Hide side panels")
         self._settle_left_pane_width()
 
     def _show_left_panels(self) -> None:
         self.names_panel_holder.show()
         self.channel_panel_holder.show()
         self.left_panel_stub_holder.hide()
-        self.collapse_button.setText("Collapse")
+        self.collapse_button.setText("Hide side panels")
         self._settle_left_pane_width()
 
 

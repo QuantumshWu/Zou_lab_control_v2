@@ -61,8 +61,18 @@ row. It applies to the whole Pulse; switching it off restores embedded defaults.
 Value Config and Subpulse Config remain adjacent. A Subpulse's small source
 control on the main timeline selects Default or Config. The three vertical
 operations remain Expand, Edit and Ungroup. Edit selects that Subpulse in the
-original single-object editor: a selector, one Config file/Browse row and the
-horizontal Period/Bracket surface. There is no bindings table.
+original single-object editor: a selector, one Subpulse file/Browse row and the
+horizontal Period/Bracket surface, then its Subpulse bindings (a field and the
+Config name it binds, as in Value Config's Pulse bindings).
+
+Every card stacks its words on one left edge: the title, the header caption
+(a Period's or Subpulse's Duration, an end post's Repeats) and the field boxes
+start on the content edge, the values at the field text inset.  The three
+repeat boxes -- Delay / Scan's Repeat, Scan repeats and a bracket's Repeats --
+share one measure, `count_box_width`: a five-digit count whole beside the
+stepper, widened before a longer count is shown and while one is typed.  The
+Control card's Hide side panels / Show side panels hides and restores the
+Port catalog and Delay / Scan; Collapse is only an expanded Subpulse's command.
 
 `set_subpulse_sources` supplies selector/reference metadata; `selected_id` in
 `set_component_document` identifies the selected Subpulse independently of
