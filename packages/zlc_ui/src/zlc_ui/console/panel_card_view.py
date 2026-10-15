@@ -1511,10 +1511,12 @@ class PanelCardView(FluentGroupBox):
             # not be removed at all and its Edit signal could not be raised.
             self.edit_button = FluentButton("Edit", body)
             self.edit_button.clicked.connect(self._request_edit)
-            # One click: opening Setting is already the deliberate step, so
-            # only the header × -- one stray click away -- takes two.
-            self.remove_button = FluentButton("Remove", body, role="destructive")
-            self.remove_button.clicked.connect(self._request_remove)
+            # Removing a plot panel takes two clicks from wherever it is
+            # removed -- this Remove as well as the header ×.
+            self.remove_button = FluentButton(
+                "Remove", body, role="destructive", confirm_twice="remove this panel"
+            )
+            self.remove_button.confirmed.connect(self._request_remove)
             buttons.addWidget(self.edit_button)
             buttons.addStretch(1)
             buttons.addWidget(self.remove_button)

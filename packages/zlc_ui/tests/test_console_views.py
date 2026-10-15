@@ -211,11 +211,14 @@ QtTest.QTest.mouseClick(card.edit_button, QtCore.Qt.LeftButton)
 app.processEvents()
 QtTest.QTest.mouseClick(card.settings_button, QtCore.Qt.LeftButton)
 app.processEvents()
-# Setting's Remove takes ONE click: only the header x is armed.
-assert not card.remove_button.is_armed()
+# Setting's Remove removes the same panel, so it takes two clicks too:
+# the first arms it and removes nothing.
+before = events.count(('remove',))
+QtTest.QTest.mouseClick(card.remove_button, QtCore.Qt.LeftButton)
+assert card.remove_button.is_armed() and events.count(('remove',)) == before
 QtTest.QTest.mouseClick(card.remove_button, QtCore.Qt.LeftButton)
 assert ('edit',) in events
-assert events.count(('remove',)) == 2, events
+assert events.count(('remove',)) == before + 1, events
 assert card.remove_button.role() == 'destructive'
 assert any(event[0] == 'state' and event[1]['title'] == 'Card changed' for event in events)
 assert ('state', {'interval_ms': 800}) in events

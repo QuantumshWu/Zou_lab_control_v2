@@ -93,8 +93,8 @@ Removing a **logic node** or a **plot panel** takes two clicks — a
 double-click, or two clicks within the system double-click interval. The first
 click turns the control into the white-on-red confirm; if the second click does
 not come, it returns to rest. This applies to the node's × in the Logic list
-and the Remove on its Edit page, and to the panel's × on its card; Setting's
-Remove takes one click, because opening Setting is the deliberate step. Every
+and the Remove on its Edit page, and to the panel's × on its card and the
+Remove in its Setting frame: every control that removes one of the two. Every
 other remover in the application is red and acts on one click. Stop always
 acts on one click. Commands that already ask in a dialog are not armed as well.
 
