@@ -82,7 +82,7 @@ TERM_COLUMNS = (
     AuthoringField("number", "float", "Number", None, description="a number instead of of"),
     AuthoringField("boolean", "choice", "Boolean", "", choices=(
         AuthoringChoice("", "None"), AuthoringChoice("true", "true"), AuthoringChoice("false", "false"),
-    ), description="true or false instead of of; only after == or !="),
+    ), description="true or false instead of of; only after a comparison (false < true)"),
     AuthoringField("at", "text", "At", "",
                    description="what of is picked on: the name of one of its axes, in any domain, or a domain "
                                "(Repeat, Point or Cell) with two or more axes; empty picks nothing"),
@@ -112,7 +112,7 @@ _VARIABLE_DEFAULTS = {column.name: () if column.default is None else column.defa
 #: A term with nothing written: every column at its default, as a draft projects it.
 TERM_DEFAULTS = MappingProxyType({column.name: () if column.value_type == "text_tuple" else column.default
                                   for column in TERM_COLUMNS})
-_BOOLEANS_MIX = ("booleans do not mix with numbers; compare booleans with = or ≠, "
+_BOOLEANS_MIX = ("booleans do not mix with numbers; compare booleans with booleans, "
                  "or count them with a statistic")
 _DOMAINS = ("repeat_domain", "point_domain", "cell_domain")
 #: The three domains as a pick names them, in domain order.
@@ -488,11 +488,11 @@ def _operator(op, left, right, texts):
     elif any(booleans):
         if kind == "arithmetic":
             raise TypeError(f"{label} needs numbers; {texts[booleans.index(True)]} is a boolean; count booleans "
-                            "with a statistic, or compare them with = or ≠")
+                            "with a statistic, or compare them")
+        # Two booleans take every comparison, ordered false < true as NumPy
+        # orders them: a > b is a and not b.
         if not all(booleans):
             raise TypeError(_BOOLEANS_MIX)
-        if op not in ("==", "!="):
-            raise TypeError("booleans compare only with = and ≠")
     if all(data):
         try:
             base, steps = schemas[0], (None, _alignment(schemas[0], schemas[1]))
@@ -950,8 +950,8 @@ def _formula_problem(row, closing=None) -> DeriveError | None:
             problem = "the first term takes no operator"
         elif k and not term["op"]:
             problem = "choose an operator"
-        elif term["boolean"] and term["op"] not in ("==", "!="):
-            problem = "true and false follow = or ≠ only"
+        elif term["boolean"] and OPERATORS.get(term["op"], ("",))[0] != "comparison":
+            problem = "true and false follow a comparison only"
         elif (term["at"] or term["labels"]) and not term["of"]:
             problem = "a number or true/false has no axis to pick"
         elif term["at"] and not term["labels"]:

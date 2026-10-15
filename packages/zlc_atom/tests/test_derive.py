@@ -146,7 +146,9 @@ def test_the_users_example_keeps_the_counts_of_sites_whose_frames_0_and_2_agree(
 def test_operators_keep_their_precedence_and_repeat_within_one_variable() -> None:
     """Arithmetic binds tighter than one comparison, which binds tighter than
     and/and not, then or, then where; each level reads left to right.  The
-    note says the grouping only when it differs from reading left to right."""
+    note says the grouping only when it differs from reading left to right.
+    Two booleans take every comparison, false < true as NumPy orders them:
+    occupied at frame 0 > occupied at frame 2 is loaded at 0 and empty at 2."""
     members = _occupancy()
     c = members["counts"].values.astype(np.float64)
     o, judged = members["occupied"].values, members["occupied"].valid
@@ -173,6 +175,15 @@ def test_operators_keep_their_precedence_and_repeat_within_one_variable() -> Non
         {"name": "either", "terms": [at("counts", "0"), {"op": ">", "number": 1}, {"op": "and", **at("counts", "1")},
                                      {"op": "<", "number": 2}, {"op": "or", **at("occupied", "2")}]},
         {"name": "dark", "terms": [at("counts", "1"), {"op": "where not", **at("occupied", "1")}]},
+        {"name": "emptied", "terms": [at("occupied", "0"), {"op": ">", **at("occupied", "2")}],
+         "statistic": "sum", "over": ["Site"]},
+        {"name": "filled", "terms": [at("occupied", "0"), {"op": "<", **at("occupied", "2")}]},
+        {"name": "no_gain", "terms": [at("occupied", "0"), {"op": ">=", **at("occupied", "2")}]},
+        {"name": "no_loss", "terms": [at("occupied", "0"), {"op": "<=", **at("occupied", "2")}]},
+        {"name": "full1", "terms": [at("occupied", "1"), {"op": ">=", "boolean": "true"}]},
+        {"name": "empty1", "terms": [at("occupied", "1"), {"op": "<", "boolean": "true"}]},
+        {"name": "lost_bright", "terms": [at("occupied", "0"), {"op": ">", **at("occupied", "2")},
+                                          {"op": "and", **at("counts", "0")}, {"op": ">", "number": 30}]},
     )
     results = _evaluated(rows, members)
     answers = {row["name"]: answer for row, answer in zip(rows, typed_variables(
@@ -183,6 +194,7 @@ def test_operators_keep_their_precedence_and_repeat_within_one_variable() -> Non
         "kept_both": "reads counts where (occupied[frame 0] and occupied[frame 2])",
         "scaled": "reads counts[frame 0] + (counts[frame 1] × 2)",
         "either": "reads ((counts[frame 0] > 1) and (counts[frame 1] < 2)) or occupied[frame 2]",
+        "lost_bright": "reads (occupied[frame 0] > occupied[frame 2]) and (counts[frame 0] > 30)",
     }
     # A number takes the unit of the other side of + − and comparisons, and
     # is a plain factor beside × ÷.
@@ -210,6 +222,17 @@ def test_operators_keep_their_precedence_and_repeat_within_one_variable() -> Non
     np.testing.assert_array_equal(results["either"].values[:, 0], ((c[:, 0] > 1) & (c[:, 1] < 2)) | o[:, 2])
     np.testing.assert_array_equal(results["dark"].valid[:, 0],
                                   members["counts"].valid[:, 1] & judged[:, 1] & ~o[:, 1])
+    # Booleans in order: false < true.
+    emptied = results["emptied"]
+    assert emptied.schema == lost.schema, "> on booleans counts what and not counts"
+    np.testing.assert_array_equal(emptied.values, lost.values)
+    for name, expected in (("filled", ~o[:, 0] & o[:, 2]), ("no_gain", o[:, 0] | ~o[:, 2]),
+                           ("no_loss", ~o[:, 0] | o[:, 2]), ("full1", o[:, 1]), ("empty1", ~o[:, 1])):
+        assert describe_schema(results[name].schema) == "repeat 5 × Site 6 · bool · unit 1", name
+        np.testing.assert_array_equal(results[name].values[:, 0], expected, err_msg=name)
+    np.testing.assert_array_equal(results["filled"].valid[:, 0], joint)
+    np.testing.assert_array_equal(results["full1"].valid[:, 0], judged[:, 1])
+    np.testing.assert_array_equal(results["lost_bright"].values[:, 0], (o[:, 0] & ~o[:, 2]) & (c[:, 0] > 30))
 
 
 def test_a_pick_takes_labels_of_any_axis_in_any_domain() -> None:
@@ -470,7 +493,9 @@ def test_problems_are_said_by_variable_and_stage_without_and_with_data() -> None
         "x · term 2: a term reads one thing: an input or a variable, a number, or true or false")
     assert no_data({"name": "x", "terms": [counts, {"op": ">"}]}) == "x · term 2: choose what it reads"
     assert no_data({"name": "x", "terms": [counts, {"op": "+", "boolean": "true"}]}) == (
-        "x · term 2: true and false follow = or ≠ only")
+        "x · term 2: true and false follow a comparison only")
+    assert no_data({"name": "x", "terms": [counts, {"op": "and", "boolean": "true"}]}) == (
+        "x · term 2: true and false follow a comparison only")
     assert no_data({"name": "x", "terms": [{"of": "counts", "labels": ["1"]}]}) == (
         "x · term 1: choose the axis of these labels")
     assert no_data({"name": "x", "terms": [{"number": 2}, {"op": "*", "number": 3}]}) == (
@@ -537,21 +562,21 @@ def test_problems_are_said_by_variable_and_stage_without_and_with_data() -> None
     assert typed({"name": "x", "terms": [counts, {"op": "+", "of": "smae"}]}) == ("x", "term 2", (
         "no input or variable named 'smae'; inputs: counts, occupied; variables: x"))
     assert typed({"name": "counts", "terms": [occupied]}) == ("counts", "name", "counts is an input's name; choose another")
-    assert typed({"name": "x", "terms": [counts, {"op": "==", **occupied}]}) == ("x", "term 2", (
-        "booleans do not mix with numbers; compare booleans with = or ≠, or count them with a statistic"))
-    assert typed({"name": "x", "terms": [occupied, {"op": ">", **occupied}]}) == ("x", "term 2",
-                                                                                  "booleans compare only with = and ≠")
+    mix = "booleans do not mix with numbers; compare booleans with booleans, or count them with a statistic"
+    assert typed({"name": "x", "terms": [counts, {"op": "==", **occupied}]}) == ("x", "term 2", mix)
+    assert typed({"name": "x", "terms": [occupied, {"op": ">", "number": 0}]}) == ("x", "term 2", mix)
+    assert typed({"name": "x", "terms": [counts, {"op": "<=", "boolean": "true"}]}) == ("x", "term 2", mix)
     assert typed({"name": "x", "terms": [occupied, {"op": "and", **counts}]}) == ("x", "term 2",
                                                                                   "and needs booleans; counts is a number")
     assert typed({"name": "x", "terms": [at("occupied", "0"), {"op": "+", **at("occupied", "2")}]}) == (
         "x", "term 2", "+ needs numbers; occupied[frame 0] is a boolean; count booleans with a statistic, or "
-                       "compare them with = or ≠")
+                       "compare them")
     # Where precedence groups the formula otherwise than its lines read, an
     # operator's problem says how it reads: where binds last.
     assert typed({"name": "same", "publish": False, "terms": [at("occupied", "0")]},
                  {"name": "kept", "terms": [counts, {"op": "where", "of": "same"}, {"op": "+", "number": 1}]}) == (
-        "kept", "term 3", "+ needs numbers; same is a boolean; count booleans with a statistic, or compare them "
-                          "with = or ≠; this formula reads counts where (same + 1)")
+        "kept", "term 3", "+ needs numbers; same is a boolean; count booleans with a statistic, or compare them; "
+                          "this formula reads counts where (same + 1)")
     assert typed({"name": "x", "terms": [counts, {"op": "where", **counts}]}) == ("x", "term 2",
                                                                                   "where needs a boolean mask; counts is a number")
     assert typed({"name": "x", "terms": [at("counts", "1"), {"op": "where", **occupied}]}) == ("x", "term 2", (
@@ -1001,8 +1026,15 @@ def test_the_editor_builds_the_users_example_by_clicks() -> None:
         assert line["labels"].view().window().isVisible(), "the pick asks for its label at once"
         s.row_at(line["labels"], 6)
         assert drafts[-1][0]["terms"][1] == {"op": "==", "of": "occupied", "at": "frame", "labels": ("2",)}
-        assert [line["strip"].button(op).isEnabled() for op in ("==", "!=", ">", "<", ">=", "<=")] == [
-            True, True, False, False, False, False], "booleans compare only with = and ≠"
+        assert all(line["strip"].button(op).isEnabled() for op in ("==", "!=", ">", "<", ">=", "<=")), (
+            "two booleans take every comparison")
+        assert s.texts(line["operand"]) == ["Inputs", "    occupied", "Constants", "    true", "    false"], (
+            "a boolean is compared with booleans only")
+        s.click(line["strip"].button(">"))
+        assert drafts[-1][0]["terms"][1]["op"] == ">" and line["error"].isHidden()
+        assert same.preview.text() == (
+            "→ repeat 1 × Site 6 · bool · unit 1 · internal · read by nothing, so not evaluated")
+        s.click(line["strip"].button("=="))
         assert same.preview.text() == (
             "→ repeat 1 × Site 6 · bool · unit 1 · internal · read by nothing, so not evaluated")
 

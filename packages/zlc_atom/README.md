@@ -343,7 +343,7 @@ of a finite run. Its draft is `variables`, one row per variable: a `name`,
 and nothing publishes), `terms` -- the formula, one row per line -- and an
 optional `statistic` over named axes. A term reads `of` (a member of the bound
 bundle or any other variable), a `number`, or `boolean` true/false (only
-after `==`/`!=`), and may pick on `of` by name: `at` is one of its axes, in
+after a comparison), and may pick on `of` by name: `at` is one of its axes, in
 any domain, and `labels` its exact labels as the catalog lists them -- or
 `at` is a domain with two or more axes (`Point`, `Cell`, `Repeat`) and
 `labels` its rows, written `"detuning 2 · power 1"`; `"first"` and `"last"`
@@ -368,8 +368,10 @@ and the published `{"name": "kept", "terms": [{"of": "counts"}, {"op":
 [{"of": "occupied", "at": "frame", "labels": ["0"]}], "statistic": "sum",
 "over": ["Site"]}` counts the atoms loaded in each shot. On booleans `sum`
 is the number true, `mean` the fraction true and `count` the valid samples,
-as in a plot; booleans do not mix with numbers. An operand whose axes are a
-subset of the other's repeats along the rest, so a per-shot level
+as in a plot; booleans do not mix with numbers, and two booleans take every
+comparison, ordered `false < true` as NumPy orders them: occupied at frame 0
+`>` occupied at frame 11 is loaded at 0 and empty at 11. An operand whose
+axes are a subset of the other's repeats along the rest, so a per-shot level
 normalises every site. Only the published variables and what they read are
 evaluated; a helper nothing published reads never blocks Start. The editor
 types each variable against the source's own schemas -- the evaluation's

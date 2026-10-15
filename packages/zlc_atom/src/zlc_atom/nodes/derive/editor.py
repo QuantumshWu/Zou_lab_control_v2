@@ -749,14 +749,9 @@ class _VariableCard(FluentFrame):
         schema_of = context["schema_of"]
         kind = ui["kind"]
         if kind is not None:
-            strip = ui["strip"]
-            strip.set_current(term["op"] or None)
-            if kind == "comparison":
-                # Booleans compare only with = and ≠; one the draft holds
-                # stays marked, and the line's problem says why.
-                boolean_left = info["left"] is not None and _boolean(info["left"])
-                for op in (">", "<", ">=", "<="):
-                    strip.button(op).setEnabled(not boolean_left or op == term["op"])
+            # Every comparison takes two booleans (false < true); the
+            # operand list offers a boolean only booleans to compare with.
+            ui["strip"].set_current(term["op"] or None)
         operand = ui["operand"]
         _fill(operand, self._operands(kind, term, info), _operand_key(term))
         _set_tip(operand, term["of"])
