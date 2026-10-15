@@ -104,7 +104,14 @@ apparatus; no tool can infer unknown hardware settings from a filename.
 
 Calibration owns its capture and Pulse sequence. Configure its actual camera,
 sequencer, Pulse and readout fields through lab_catalog(api_name='calibration'),
-then Start it once. During scientific site review, lab_state reports
+then Start it once. To calibrate again with other detection settings, set
+`frame_source` to 'saved' and `saved_frames_path` to the `figures` folder of a
+run that had `save_frames` on: it reads the crop, exposure and Pulse facts saved
+there, uses no camera, sequencer or Pulse, claims no device, and does not stop a
+running acquisition. The Pulse, samples, exposure, API-field, save_frames and
+photoelectrons fields (each `enabled_when` New frames) and the camera/sequencer
+device keys stay in the draft unused; leave them, do not clear or delete them.
+During scientific site review, lab_state reports
 requires_review and the operator request ID. Use lab_review_points with that
 node's exact generation/request_id to inspect the original site coordinates and
 checks; supply the complete excluded_ids list to confirm (empty keeps all).
