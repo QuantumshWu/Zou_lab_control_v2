@@ -44,7 +44,7 @@ from zlc_ui.fluent import (
 from zlc_ui.fluent.column_set import section_header
 
 from zlc_atom.authoring import AuthoringField, AuthoringSchema
-from zlc_atom.nodes._framework.frames import FIRST, FRAME_AXIS_NAME, LAST
+from zlc_atom.nodes._framework.frames import FIRST, LAST
 
 from .expression import (
     CATEGORIES, DOMAINS, NO_PUBLISHED, OPERATORS, STATISTICS, TERM_DEFAULTS, VARIABLE_COLUMNS, axis_groups,
@@ -771,8 +771,10 @@ class _VariableCard(FluentFrame):
         at = ui["pending"] or term["at"]
         schema = schema_of(term["of"]) if term["of"] else None
         groups = axis_groups(schema) if schema is not None else ()
-        # Before the source publishes, the frame axis its draft declares is
-        # the one pick offered, with the labels this operand keeps of it.
+        # Before the source publishes, the readout-event axis its draft
+        # declares -- by the name it gives it -- is the one pick offered,
+        # with the labels this operand keeps of it.
+        frame_axis = context["frame_axis"]
         frames = context["frames_of"](term["of"]) if term["of"] and schema is None else None
         picks = bool(term["of"]) and (bool(groups) or bool(frames) or bool(at))
         _visible(ui["at"], picks, hold=not number)
@@ -794,7 +796,7 @@ class _VariableCard(FluentFrame):
                 items.extend(_item(f"    {axis.name}", axis.name) for axis in free)
             if frames:
                 items.extend((_header(DOMAINS[1], _COLOURS[DOMAINS[1]]),
-                              _item(f"    {FRAME_AXIS_NAME}", FRAME_AXIS_NAME)))
+                              _item(f"    {frame_axis}", frame_axis)))
             if at and not any(data == at and enabled for _t, data, _b, _c, enabled in items):
                 items.append(_item(at, at))
             _fill(ui["axis"], items, at)
@@ -802,7 +804,7 @@ class _VariableCard(FluentFrame):
             if schema is not None:
                 keys, alternates = pick_values(schema, at), _alternates(schema, at)
             else:
-                keys, alternates = (frames if frames and at == FRAME_AXIS_NAME else None), ()
+                keys, alternates = (frames if frames and at == frame_axis else None), ()
             offered = _label_items(at, keys, alternates)
             shown = () if ui["pending"] is not None else tuple(term["labels"])
             known = {*(keys or ()), FIRST, LAST}
@@ -928,10 +930,13 @@ class DeriveEditor(QtWidgets.QWidget):
         self._members: tuple[str, ...] = ()
         #: Each member's typing schema, None until it publishes.
         self._inputs: dict[str, object] = {}
-        #: The frame labels the source's draft says every member carries
-        #: (``source_frames``); None while nothing says, and for one frame,
-        #: which may as well be no frame axis: there is no pick to offer.
+        #: The readout-event labels the source's draft says every member
+        #: carries (``source_frames``) and that axis' name, as the source
+        #: names it (``source_frame_axis``); None while nothing says, and
+        #: for one frame, which may as well be no axis: there is no pick to
+        #: offer.
         self._frames: tuple[str, ...] | None = None
+        self._frame_axis: str | None = None
         #: The axes no pick may name (``changing_axes``), over every member.
         self._changing: dict[object, tuple[str, ...]] = {}
         self._node = ""
@@ -1156,6 +1161,7 @@ class DeriveEditor(QtWidgets.QWidget):
         self._inputs = {str(name): schema for name, schema, _snapshot in bundle}
         frames = projection.get("source_frames")
         self._frames = None if frames is None or len(frames) < 2 else tuple(frames)
+        self._frame_axis = None if self._frames is None else projection.get("source_frame_axis")
         self._changing = {}
         for _name, schema, snapshot in bundle:
             if schema is not None and snapshot is not None:
@@ -1190,7 +1196,7 @@ class DeriveEditor(QtWidgets.QWidget):
         # Untyped, each name's frames as the source's draft says them.
         drafted = {}
         if not typed and self._frames is not None:
-            for row, frames in zip(rows, frames_kept(rows, FRAME_AXIS_NAME, self._frames, members)):
+            for row, frames in zip(rows, frames_kept(rows, self._frame_axis, self._frames, members)):
                 drafted.setdefault(row["name"], frames)
 
         def frames_of(name):
@@ -1223,7 +1229,8 @@ class DeriveEditor(QtWidgets.QWidget):
                 failure = self._failure
                 card.show_row(row, answer, {
                     "members": members, "variables": variables, "names": (*members, *variables),
-                    "schema_of": schema_of, "frames_of": frames_of, "typed": typed, "node": self._node,
+                    "schema_of": schema_of, "frames_of": frames_of, "frame_axis": self._frame_axis,
+                    "typed": typed, "node": self._node,
                     "changing": self._changing,
                     "failure": failure[1:] if failure is not None and failure[0] == row["name"] else None,
                 })

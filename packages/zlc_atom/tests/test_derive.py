@@ -773,8 +773,10 @@ def test_the_frames_a_draft_says_are_the_frames_typing_keeps() -> None:
             if frames is None:
                 assert answer["error"] is not None or answer["waits_for"] is not None, row["name"]
             if row["publish"]:
-                told[row["name"]] = LOGIC_NODE.describe_output_frames(draft, row["name"], ("0", "1", "2"))
-                assert told[row["name"]] == (None if frames is None else frames or ("0",)), row["name"]
+                answer = LOGIC_NODE.describe_output_frames(draft, row["name"], (FRAME_AXIS_NAME, ("0", "1", "2")))
+                assert answer == (None if frames is None else (FRAME_AXIS_NAME, frames) if frames
+                                  else (None, ("0",))), row["name"]
+                told[row["name"]] = None if answer is None else answer[1]
     assert told == {
         "kept": ("0", "1", "2"), "whole": ("0", "1", "2"), "one": ("0",), "two": ("0", "2"),
         "every": ("0", "1", "2"), "ends": ("0", "2"), "final": ("0",), "zero": ("0",), "rise": ("1", "2"), "pair": ("0", "1"), "steady": ("0", "1", "2"),
@@ -789,12 +791,14 @@ def test_the_frames_a_draft_says_are_the_frames_typing_keeps() -> None:
     # First and Last are tokens of the draft, never labels fixed when it was
     # written: the frames passed on follow the source's frame count.
     ends = {"variables": [published("ends", at("counts", "frame", "first", "last"))]}
-    assert [LOGIC_NODE.describe_output_frames(ends, "ends", tuple(map(str, range(count)))) for count in (3, 4, 2)] == [
-        ("0", "2"), ("0", "3"), ("0", "1")]
+    assert [LOGIC_NODE.describe_output_frames(ends, "ends", (FRAME_AXIS_NAME, tuple(map(str, range(count)))))[1]
+            for count in (3, 4, 2)] == [("0", "2"), ("0", "3"), ("0", "1")]
     draft = {"variables": [same, published("kept", {"of": "counts"}, {"op": "where", "of": "same"})]}
     assert LOGIC_NODE.describe_output_frames(draft, "kept", None) is None, "an upstream that cannot say"
-    assert LOGIC_NODE.describe_output_frames(draft, "same", ("0", "1", "2")) is None, "an internal variable"
-    assert LOGIC_NODE.describe_output_frames({"variables": [{"name": "kept", "code": "x"}]}, "kept", ("0",)) is None
+    assert LOGIC_NODE.describe_output_frames(draft, "same", (FRAME_AXIS_NAME, ("0", "1", "2"))) is None, (
+        "an internal variable")
+    assert LOGIC_NODE.describe_output_frames({"variables": [{"name": "kept", "code": "x"}]}, "kept",
+                                             (FRAME_AXIS_NAME, ("0",))) is None
 
     # What the members' names decide.  frames_kept is told them as typing
     # is: a member's name is read before a variable's, a variable named like
@@ -826,11 +830,31 @@ def test_the_frames_a_draft_says_are_the_frames_typing_keeps() -> None:
               published("summed", {"of": "counts"}, statistic="sum", over=["frame"]),
               published("sites", {"of": "counts"}, statistic="mean", over=["Site"]),
               published("kept", {"of": "occupied"}, {"op": "where", "of": "occupied"})]
-    told = {row["name"]: LOGIC_NODE.describe_output_frames({"variables": single}, row["name"], ("0",))
+    told = {row["name"]: LOGIC_NODE.describe_output_frames({"variables": single}, row["name"], (FRAME_AXIS_NAME, ("0",)))
             for row in _rows(*single)}
-    assert told == {"whole": ("0",), "picked": None, "summed": None, "sites": ("0",), "kept": ("0",)}
+    assert told == {"whole": (None, ("0",)), "picked": None, "summed": None, "sites": (None, ("0",)),
+                    "kept": (None, ("0",))}
     for row, answer in zip(_rows(*single), typed_variables(_rows(*single), reduced)):
         assert (answer["error"] is None) == (told[row["name"]] is not None), row["name"]
+
+    # Over Frame Survival the readout-event axis is "pair": the source says
+    # its name with its labels, and a pick or statistic naming it is told
+    # as typing types it.
+    pair = AxisSpec(AxisId("survival.pair"), "pair", READOUT_EVENT, 3, (0, 1, 2),
+                    coordinate_labels=("0→1", "0→2", "1→2"))
+    survival = replace(occupancy["occupied"], point_domain=DomainSpec((3,), (pair,), ((0, 1, 2),)))
+    over_pairs = [published("ends", at("survival", "pair", "first", "last")),
+                  published("one", at("survival", "pair", "0→2")),
+                  published("rate", {"of": "survival"}, statistic="mean", over=["pair"]),
+                  published("sites", at("survival", "Site", "1", "2"))]
+    rows = _rows(*over_pairs)
+    told = {row["name"]: LOGIC_NODE.describe_output_frames({"variables": over_pairs}, row["name"],
+                                                           ("pair", pair.labels())) for row in rows}
+    assert told == {"ends": ("pair", ("0→1", "1→2")), "one": (None, ("0",)), "rate": (None, ("0",)),
+                    "sites": ("pair", ("0→1", "0→2", "1→2"))}
+    for row, answer in zip(rows, typed_variables(rows, {"survival": survival})):
+        axes = [axis for axis in answer["schema"].point_domain.axes if axis.role == READOUT_EVENT]
+        assert told[row["name"]] == (("pair", axes[0].labels()) if axes else (None, ("0",))), row["name"]
 
 
 def _editor_session(rows=(), bundle=None):
@@ -1039,16 +1063,16 @@ def test_the_editor_builds_the_users_example_by_clicks() -> None:
 
 
 def test_the_editor_offers_the_frame_pick_before_data_only_where_the_frames_are_known() -> None:
-    """Before the source publishes, an operand offers the frame axis the
-    source's draft says every member carries, with the labels that operand
-    keeps: a member's are the source's, a variable's are told by
-    ``frames_kept`` with the members' names, as typing reads them -- a
-    variable reading a name nothing has keeps none, one reading a member
-    shadowed by a variable's name keeps the member's.  One frame is no pick
-    (it may as well be no frame axis); nothing is offered while the source
-    cannot say."""
+    """Before the source publishes, an operand offers the readout-event
+    axis the source's draft says every member carries, by the name the
+    source gives it, with the labels that operand keeps: a member's are the
+    source's, a variable's are told by ``frames_kept`` with the members'
+    names, as typing reads them -- a variable reading a name nothing has
+    keeps none, one reading a member shadowed by a variable's name keeps
+    the member's.  One frame is no pick (it may as well be no frame axis);
+    nothing is offered while the source cannot say."""
     s = _editor_session()
-    frame = ["All", "Point", "    frame"]
+    frame, pair = ["All", "Point", "    frame"], ["All", "Point", "    pair"]
     rows = [
         {"name": "kept", "terms": [{"of": "counts"}]},
         {"name": "v", "terms": [{"of": "kept"}]},
@@ -1059,16 +1083,18 @@ def test_the_editor_offers_the_frame_pick_before_data_only_where_the_frames_are_
         {"name": "u", "terms": [{"of": "shadow"}]},
     ]
 
-    def offered(source_frames):
+    def offered(source_frames, axis="frame"):
         s.editor.update_projection({
             "form_values": {"variables": rows}, "node_id": "derive", "error": "",
-            "input_bundle": (("counts", None, None), ("occupied", None, None)), "source_frames": source_frames})
+            "input_bundle": (("counts", None, None), ("occupied", None, None)), "source_frames": source_frames,
+            "source_frame_axis": axis})
         s.settle()
         return [s.texts(card.head["axis"]) if card.head["axis"].isVisibleTo(s.editor) else None
                 for card in s.editor._cards]
 
     try:
         assert offered(("0", "1", "2")) == [frame, frame, None, None, frame, frame, frame]
+        assert offered(("0→1", "0→2", "1→2"), "pair") == [pair, pair, None, None, pair, pair, pair]
         assert offered(("0",)) == [None] * 7
         assert offered(None) == [None] * 7
     finally:

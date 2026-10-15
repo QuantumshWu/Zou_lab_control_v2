@@ -202,7 +202,8 @@ stop Start, and a run fails only when none of its selected pairs is in the sourc
 The operator keeps parked and absent pairs on purpose: never delete one to make
 Start work. Camera draft changes update Occupancy, Derive and Frame Survival
 editors before new data arrives -- Derive passes on the frames each published
-variable keeps, one frame when it picks or reduces the frame axis away -- and
+variable keeps, one frame when it picks or reduces the frame axis away; over
+Frame Survival that axis is `pair`, and Derive is told so -- and
 runtime data still follows the actual acquired source schema. A node whose draft
 cannot say (a formula being edited) answers with the frames it last published.
 A Derive reads its source's whole bundle, so its source frames are known only

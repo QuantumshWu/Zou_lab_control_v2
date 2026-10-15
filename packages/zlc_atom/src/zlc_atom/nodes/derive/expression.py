@@ -1229,10 +1229,11 @@ def typed_variables(rows: Sequence[Mapping[str, object]],
     return tuple(answers)
 
 
-def frames_kept(rows: Sequence[Mapping[str, object]], axis: str, frames: tuple[str, ...],
+def frames_kept(rows: Sequence[Mapping[str, object]], axis: str | None, frames: tuple[str, ...],
                 members: Sequence[str] | None) -> tuple[tuple[str, ...] | None, ...]:
-    """Every variable's labels of the axis named ``axis`` when each input
-    member carries that axis with labels ``frames`` -- ``()`` when the
+    """Every variable's labels of the axis named ``axis`` -- the name the
+    source gives its readout-event axis, None when it has none -- when each
+    input member carries that axis with labels ``frames`` -- ``()`` when the
     members carry no such axis -- which is what a source's draft says before
     any data exists: one per variable, in card order, ``()`` when the value
     carries no such axis, None when it cannot be told.
@@ -1240,10 +1241,10 @@ def frames_kept(rows: Sequence[Mapping[str, object]], axis: str, frames: tuple[s
     ``members`` are the input members' names, read as typing reads them:
     a name is a member's before it is a variable's, a variable named like a
     member has a name problem, a name that is neither is refused.  None when
-    the names are not known (``describe_output_frames`` is told only the
-    frames): a name no variable has is then read as a member's, so a name
-    nothing has, or a variable named like a member, is typing's alone to
-    refuse once the members publish.
+    the names are not known (``describe_output_frames`` is told the
+    source's axis, not its members): a name no variable has is then read
+    as a member's, so a name nothing has, or a variable named like a
+    member, is typing's alone to refuse once the members publish.
 
     These are typing's rules on that one axis, over the same precedence
     tree: a member carries ``frames``, a variable its own answer; a pick on

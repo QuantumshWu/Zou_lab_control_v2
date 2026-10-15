@@ -10,7 +10,6 @@ from zlc_atom.nodes._framework.descriptor import (
     LogicNodeDescriptor,
     NodeKind,
 )
-from zlc_atom.nodes._framework.frames import FRAME_AXIS_NAME
 from zlc_runtime import DatasetOutputDeclaration, split_signal_key
 
 from .expression import (
@@ -73,28 +72,25 @@ def _draft_outputs(
 
 
 def _describe_output_frames(values: Mapping[str, object], output_name: str,
-                            source_frames: tuple[str, ...] | None) -> tuple[str, ...] | None:
-    """A published variable's frame labels before any data: typing's own
-    rules on the frame axis (:func:`frames_kept`), every member carrying
-    the source's frames; one frame when the variable keeps no frame axis;
-    None when the source or the draft cannot say.
+                            source: tuple[str | None, tuple[str, ...]] | None,
+                            ) -> tuple[str | None, tuple[str, ...]] | None:
+    """A published variable's readout-event axis before any data: typing's
+    own rules on the axis the source names (:func:`frames_kept`), every
+    member carrying the source's labels -- the camera's ``frame``, Frame
+    Survival's ``pair``, whatever it is called; no axis, one frame, when
+    the variable keeps none; None when the source or the draft cannot say.
 
-    The console answers one set of frames for the whole bundle, and only
-    when every member carries the same.  A single label is one frame or no
-    frame axis at all -- the answer does not say which -- so the members
-    are read as carrying none: a pick or statistic on the frame axis cannot
-    be told, and every other formula keeps one frame.
+    The console answers one axis for the whole bundle, and only when every
+    member carries the same.  A single label is one frame or no axis at
+    all, so the members are read as carrying none: a pick or statistic on
+    that axis cannot be told, and every other formula keeps one frame.
 
-    Only labels are told, so two things are taken as given.  The frames are
-    those of the axis named :data:`FRAME_AXIS_NAME`, as the camera, the
-    Calibration task and Occupancy publish it; a readout-event axis named
-    otherwise -- Frame Survival's ``pair`` -- is not recognised when a pick
-    or statistic names it.  And a name no variable has is read as a
-    member's, so a name nothing has, or a variable named like a member, is
-    refused by typing once the members publish and by Start, not here.
+    A name no variable has is read as a member's, so a name nothing has, or
+    a variable named like a member, is refused by typing once the members
+    publish and by Start, not here.
     """
 
-    if source_frames is None:
+    if source is None:
         return None
     try:
         rows = _ROWS.draft_values({"variables": values.get("variables", ())})["variables"]
@@ -102,10 +98,11 @@ def _describe_output_frames(values: Mapping[str, object], output_name: str,
         return None
     if output_name not in published(rows):
         return None
-    carried = tuple(source_frames) if len(source_frames) > 1 else ()
-    kept = frames_kept(rows, FRAME_AXIS_NAME, carried, None)
+    name, labels = source
+    carried = tuple(labels) if len(labels) > 1 else ()
+    kept = frames_kept(rows, name, carried, None)
     frames = next(kept[position] for position, row in enumerate(rows) if row["name"] == output_name)
-    return None if frames is None else frames or ("0",)
+    return None if frames is None else (name, frames) if frames else (None, ("0",))
 
 
 def _admit_source(values: Mapping[str, object], publication: object) -> tuple[str, ...]:

@@ -8648,7 +8648,7 @@ class ConsolePresenter:
             )
         acquisition_options = self._acquisition_options(binding.node_id)
         frames = self._source_frames_for(binding, draft=subject)
-        source_frames = None if frames is None else len(frames)
+        source_frames = None if frames is None else len(frames[1])
 
         def answer() -> LogicDraftFinalization:
             return finalize_logic_draft(
@@ -8708,7 +8708,7 @@ class ConsolePresenter:
             artifact_specs,
             base_dir=artifact_base_dir,
         )
-        source_frames = self._source_frames_for(binding)
+        frame_axis, source_frames = self._source_frames_for(binding) or (None, None)
         state, status = self._logic_state(binding, finalization)
         resource_fields = {
             spec.field_name for spec in binding.descriptor.workspace_resources
@@ -8818,9 +8818,11 @@ class ConsolePresenter:
                 for spec in artifact_specs
                 if spec.frame_claims
             },
-            # Labels of the frames one cycle of the source carries, from 0;
-            # None while nothing says.
+            # Labels of the frames one cycle of the source carries, from 0,
+            # and the name of the axis that carries them (None for one frame
+            # no axis carries); None while nothing says.
             "source_frames": source_frames,
+            "source_frame_axis": frame_axis,
             "artifact_results": self._artifact_results(binding),
             # Beside Start, in both places an operator can press it.  One
             # preference, projected twice; neither widget keeps a default --
@@ -10337,8 +10339,10 @@ class ConsolePresenter:
         *,
         draft: LogicDraft | None = None,
         _visited=frozenset(),
-    ) -> tuple[str, ...] | None:
-        """The labels of the frames one cycle of this node's source carries.
+    ) -> tuple[str | None, tuple[str, ...]] | None:
+        """``(name, labels)`` of the readout-event axis -- the frames one
+        cycle of this node's source carries -- by the name the source gives
+        it (None for one frame no axis carries).
 
         Each signal is asked of its PRODUCER first: its explicit pure
         metadata callback can preserve or describe upstream draft frames,
@@ -10347,7 +10351,7 @@ class ConsolePresenter:
         so what a producer already published still answers while its draft
         is being edited.  A node reading a whole bundle (``select_bundle``)
         reads every member, not only the one its source names: the answer is
-        the members' frames when every member carries the same, None when
+        the members' axis when every member carries the same, None when
         they differ -- one answer cannot say which member carries which.
         None while there is no source or nothing says yet.
         ``draft`` names the source: the node's draft's when omitted.
@@ -10379,17 +10383,18 @@ class ConsolePresenter:
         )
         answers = set()
         for signal in signals:
-            frames = None if describe is None else describe(
+            told = None if describe is None else describe(
                 producer.draft.values, split_signal_key(signal)[1], upstream
             )
-            answers.add(self._plane_frames(signal) if frames is None else frames)
+            answers.add(self._plane_frames(signal) if told is None else told)
         return answers.pop() if len(answers) == 1 else None
 
-    def _plane_frames(self, signal: str) -> tuple[str, ...] | None:
-        """One signal's frame labels as the plane holds them: the declared
-        signal, then its latest publication, through the Point axis with
-        the readout-event role.  A signal without one carries one frame;
-        None while the plane has no schema for it."""
+    def _plane_frames(self, signal: str) -> tuple[str | None, tuple[str, ...]] | None:
+        """``(name, labels)`` of one signal's readout-event Point axis as the
+        plane holds it -- the declared signal, then its latest publication
+        -- labelled as every pick reads an axis (``AxisSpec.labels()``).  A
+        signal without one carries one frame, ``(None, ("0",))``; None
+        while the plane has no schema for it."""
 
         from zlc_data import READOUT_EVENT
 
@@ -10403,11 +10408,8 @@ class ConsolePresenter:
             schema = value.canonical_schema or value.snapshot.block.schema
         for axis in schema.point_domain.axes:
             if axis.role == READOUT_EVENT:
-                return tuple(
-                    coordinate if isinstance(coordinate, str) else f"{coordinate:g}"
-                    for coordinate in (axis.coordinate_at(code) for code in range(axis.size))
-                )
-        return ("0",)
+                return axis.name, axis.labels()
+        return None, ("0",)
 
     def _default_artifact_inputs(self, descriptor: object) -> dict[str, Any]:
         """Freeze the latest observed matching artifact into a new row draft.

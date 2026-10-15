@@ -80,9 +80,9 @@ def _editor_factory(parent=None):
     return CalibrationsEditor(parent)
 
 
-def _describe_output_frames(values, output_name, source_frames):
-    """Every Occupancy output preserves its camera's readout-event axis."""
-    return source_frames if any(item.name == output_name for item in OCCUPANCY_OUTPUTS) else None
+def _describe_output_frames(values, output_name, source):
+    """Every Occupancy output preserves its camera's readout-event axis, name and labels."""
+    return source if any(item.name == output_name for item in OCCUPANCY_OUTPUTS) else None
 
 
 LOGIC_NODE = LogicNodeDescriptor(

@@ -41,9 +41,10 @@ FIRST = "first"
 LAST = "last"
 REST = "rest"
 FRAME_NAMES = (FIRST, LAST, REST)
-#: The name of a cycle's frame axis -- the READOUT_EVENT Point axis the
-#: camera and the Calibration task publish, and Occupancy keeps -- and so
-#: what a Derive pick or statistic writes to name it, before data as after.
+#: The name the camera and the Calibration task give a cycle's frame axis,
+#: the READOUT_EVENT Point axis Occupancy keeps.  A consumer reads the name
+#: its source tells it (``describe_output_frames``), never this one: Frame
+#: Survival's readout-event axis is ``pair``.
 FRAME_AXIS_NAME = "frame"
 
 FrameToken = int | str

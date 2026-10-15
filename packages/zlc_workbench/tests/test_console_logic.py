@@ -1885,7 +1885,9 @@ def test_a_frame_survival_after_derive_is_edited_before_anything_starts(presente
     through Derive.  Derive's own editor offers the frame pick before data.
     A variable picking one frame passes one frame, and Frame Survival says
     why there is no pair.  Then the whole chain runs, Frame Survival too;
-    afterwards, while Derive's draft cannot say, what it published answers."""
+    afterwards, while Derive's draft cannot say, what it published answers.
+    A Derive over Frame Survival is told the pair axis by its name, and
+    passes on what each of its variables keeps of it."""
 
     from PyQt5 import QtCore, QtTest
     from zlc_ui.qt import ensure_qt_app
@@ -1972,6 +1974,8 @@ def test_a_frame_survival_after_derive_is_edited_before_anything_starts(presente
             {"path": str(calibration), "frames": ("rest",)},)}})
         presenter.view.logic_draft_changed.emit(camera_id, {"values": {"frames_per_cycle": 3}})
         presenter.view.logic_draft_changed.emit(derive_id, {"values": {"variables": (same, alive)}})
+        presenter.view.logic_draft_changed.emit(survival_id, {"values": {
+            "selection": "all", "pairs": (), "custom_pairs": ()}})
         session.load_pulse(PULSE_NAME)
         assert presenter.start_logic(camera_id)
         session.fire(shots=1)
@@ -1987,8 +1991,23 @@ def test_a_frame_survival_after_derive_is_edited_before_anything_starts(presente
         editing = {"name": "alive", "terms": (*alive["terms"], {"op": "+"})}
         presenter.view.logic_draft_changed.emit(derive_id, {"values": {"variables": (same, editing)}})
         binding = presenter.logic[derive_id]
-        assert binding.descriptor.describe_output_frames(binding.draft.values, "alive", ("0", "1", "2", "3")) is None
+        assert binding.descriptor.describe_output_frames(
+            binding.draft.values, "alive", ("frame", ("0", "1", "2", "3"))) is None
         assert editors[survival_id]["source_frames"] == ("0", "1", "2"), "what Derive published"
+
+        # Frame Survival's readout-event axis is "pair": a Derive over it is
+        # told that name with the pairs' labels, and what it passes on
+        # follows each variable's pick or statistic on it.
+        ends = {"name": "ends", "terms": ({"of": "survival", "at": "pair", "labels": ("first", "last")},)}
+        over_pairs = presenter.add_logic(
+            "derive", source_signal=stable_signal_key(survival_id, "survival"), values={"variables": (ends,)})
+        projection = presenter.logic_editor_projection(over_pairs)
+        assert (projection["source_frame_axis"], projection["source_frames"]) == ("pair", ("0→1", "0→2", "1→2"))
+        downstream = presenter.add_logic("frame_survival", source_signal=stable_signal_key(over_pairs, "ends"))
+        assert editors[downstream]["source_frames"] == ("0→1", "1→2")
+        rate = {"name": "ends", "terms": ({"of": "survival"},), "statistic": "mean", "over": ("pair",)}
+        presenter.view.logic_draft_changed.emit(over_pairs, {"values": {"variables": (rate,)}})
+        assert editors[downstream]["source_frames"] == ("0",), "the pair axis reduced away"
     finally:
         for widget in (derive_editor, form):
             widget.close()

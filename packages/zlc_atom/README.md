@@ -377,8 +377,10 @@ rules, no data -- and shows the result (`→ repeat 1 × Site 35 · float32 ·
 unit 1`) or the problem under the line it is about; Start refuses a
 published variable that does not type. Before anything publishes, the frames
 each published variable keeps are told from the source's draft frames by the
-same rules on the frame axis alone (`describe_output_frames`), so a Frame
-Survival downstream is edited at once, and the editor offers the frame pick.
+same rules on the readout-event axis alone (`describe_output_frames`), which
+the source names with its labels -- the camera's `frame`, Frame Survival's
+`pair` -- so a Frame Survival downstream is edited at once, and the editor
+offers the frame pick.
 The source's frames are an answer only when every member of the bundle
 carries the same ones -- a Derive reading a Derive whose variables keep
 different frames waits for data -- and one frame offers no pick. Statistics
