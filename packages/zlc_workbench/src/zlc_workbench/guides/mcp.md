@@ -79,6 +79,14 @@ not display-name guesses. API, Scan and Config fields have different meanings.
 Pulse `run_repeats=0` is infinite; explicitly choose finite repeats for a finite
 manual capture. Seamless Scan owns its own repeat/shot counts.
 
+Things the operator keeps but does not use are parked, not errors; leave them.
+An empty bracket (start one past end) saves, validates and runs looping nothing.
+A binding with source default or api may keep a `config_key`: the Config name
+kept for switching back, never applied. A value-file row left all blank is
+dropped on save. A Scan mark only makes a field scannable: the scan table drives
+the fields it names (`state.scan.fields`) and every other Scan field plays its
+own value, as it does when no table exists or the pulse is loaded by name.
+
 Use native authoring actions and validation. Preview/valid does not mean loaded
 or fired. Fire follows the saved Config policy in the sequencer owner; unsaved
 editor changes to a Config file are not active Config values. Inspect pending,
