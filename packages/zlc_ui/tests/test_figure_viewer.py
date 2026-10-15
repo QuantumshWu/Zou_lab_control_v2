@@ -347,6 +347,8 @@ app.processEvents()
 assert editor.page_choice.current() == 'data'
 assert editor.data_group.isVisible() and not editor.axes_group.isVisible()
 assert editor.data_group.width() == card_width
+# The hint under Table shows is a sentence, whoever words it.
+assert editor.blank_help_label.text() == 'Blank removes the value.'
 assert editor.value_model.rowCount() == 100_000
 assert editor.value_model.columnCount() == 1_000
 assert editor.value_table.verticalScrollBar().maximum() > 0
@@ -704,12 +706,17 @@ for page, table, card in (('dataset', editor.axis_value_table, editor.axes_group
     editor.page_choice.button(page).click(); settle()
     assert page_bar.maximum() == 0 and not page_bar.isVisible(), page
     assert table.verticalScrollBar().maximum() > 0
-    assert box(card, viewport)[3] <= viewport.height(), (page, box(card, viewport), viewport.height())
-    # Every row the room holds is a row of values: under the card, less
-    # than one more -- no room kept for a horizontal bar the axis's one
-    # stretched column never shows.
-    spare = viewport.height() - box(card, viewport)[3]
-    assert spare < table.verticalHeader().sectionSize(0), (page, spare)
+    # The table that scrolls takes the whole room, its last row in part:
+    # its card ends on the page's foot, one section gap over the action
+    # bar, on either page -- switching pages moves no card's foot.
+    assert box(card, viewport)[3] == viewport.height(), (page, box(card, viewport), viewport.height())
+    assert box(editor.discard_button, view)[1] - box(card, view)[3] == section_gap(), page
+    # Its vertical bar stands beside the rows it scrolls, under the column
+    # names, not in their row.
+    rows_bar = table.verticalScrollBar()
+    assert rows_bar.isVisible()
+    assert box(rows_bar, table)[1] >= box(table.horizontalHeader(), table)[3], page
+    assert box(rows_bar, table)[3] <= box(table.viewport(), table)[3], page
 assert editor.axis_value_table.horizontalScrollBar().maximum() == 0
 # A value is never shown in part: the table scrolls by whole columns, and
 # the column the viewport's right edge cuts shows nothing.

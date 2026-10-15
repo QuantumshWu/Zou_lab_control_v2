@@ -687,10 +687,12 @@ class _DataEditorView(QtWidgets.QWidget):
 
         Sized to the room the viewport leaves under the cards above it and
         its card's foot, a table is whole when its rows fit -- its card
-        ends under its last row -- and otherwise a viewport of exactly that
-        many rows that scrolls itself, its column names and horizontal bar
-        on screen with it, and the page has nothing left to scroll.  Below
-        the fewest rows a table still shows, the page scrolls the rest.
+        ends under its last row -- and otherwise it scrolls itself and takes
+        the whole room, its last row in part: its column names and
+        horizontal bar stay on screen with it, its card ends on the page's
+        foot -- one section gap over the action bar on either page -- and
+        the page has nothing left to scroll.  Below the fewest rows a table
+        still shows, the page scrolls the rest.
         """
 
         # The line over the commands comes and goes: settle the editor's
@@ -720,6 +722,14 @@ class _DataEditorView(QtWidgets.QWidget):
         if self._table_rows.get(table) != fit:
             self._table_rows[table] = fit
             table.set_content_rows_limit(fit, viewport_rows=fit)
+        # Whatever the page has to spare goes to a card whose table scrolls,
+        # and under a card whose table is whole.
+        scrolls = int(table.model().rowCount() > fit)
+        root = page.layout()
+        index, spare = root.indexOf(card), root.count() - 1
+        if (root.stretch(index), root.stretch(spare)) != (scrolls, 1 - scrolls):
+            root.setStretch(index, scrolls)
+            root.setStretch(spare, 1 - scrolls)
 
     def is_dirty(self) -> bool:
         return bool(getattr(self, "_dirty", False))
@@ -986,7 +996,8 @@ class _DataEditorView(QtWidgets.QWidget):
             with signals_blocked(self.sigma_switch):
                 self.sigma_switch.setChecked(bool(table.get("sigma_enabled", False)))
             self.value_model.set_projection(table)
-            self.blank_help_label.setText(str(table.get("blank_help", "")))
+            # A hint is a sentence, whoever words it.
+            self.blank_help_label.setText(sentence(str(table.get("blank_help", ""))))
             self._show_message(data.get("message", ""))
             self._dirty = bool(data.get("dirty", False))
             modified = bool(data.get("modified", False))
@@ -1057,7 +1068,9 @@ class FigureViewerView(QtWidgets.QWidget):
             path_caption="Open a saved figure archive (.npz)",
             file_filter="Saved figure archives (*.npz)",
             path_base_dir=str(path_base_dir),
-            initial_status="Open a saved figure archive (.npz).",
+            # A status line is a fragment; the next step is the board's
+            # hint beside it.
+            initial_status="no figure open",
             graph_tabs=("Flow",),
             parent=self,
         )
