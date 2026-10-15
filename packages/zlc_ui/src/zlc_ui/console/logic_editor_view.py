@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-from PyQt5 import QtCore, QtGui, QtWidgets
+from PyQt5 import QtCore, QtGui, QtWidgets, sip
 
 from zlc_ui.fluent import (
     GREY,
@@ -35,6 +35,7 @@ from zlc_ui.fluent import (
     section_gap,
     setting_label_width,
     status_dot_gap,
+    window_pad,
 )
 from zlc_ui.form import FluentParameterForm, FormSpec, required_label
 from zlc_ui.form.qt_form import _form_label_width
@@ -42,7 +43,8 @@ from zlc_ui.status import name_words
 from .logic_row_view import (
     STATE_COLOURS,
     STATUS_DOT,
-    fit_start_button,
+    START_LABELS,
+    fit_button_words,
     mount_logic_page,
     start_label,
 )
@@ -85,35 +87,44 @@ class LogicEditorView(QtWidgets.QWidget):
         self._artifact_result_readouts: dict[str, FluentReadoutEdit] = {}
         self._contributions: dict[object, QtWidgets.QWidget] = {}
 
+        # THREE BANDS: the header, the rows, the action bar.  Only the rows
+        # scroll.  The node's name and the status line that says why Start is
+        # off stay above them, and Start, Stop and Remove stay below them, on
+        # a page taller than its tab -- in the body, the action bar of a scan
+        # with two axes and three API values stood below the fold, and the
+        # Stop for a running scan was a scroll away on its own page.
         outer = QtWidgets.QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
-        scroll = FluentScrollArea()
+        pad = window_pad()
+        self._scroll = FluentScrollArea()
+        #: Whether the page has been shown yet: a newly opened page starts
+        #: at its first row (:meth:`showEvent`).
+        self._opened = False
         body = QtWidgets.QWidget()
         body.setStyleSheet("background: transparent;")
         # ONE RHYTHM.  Selectors, both forms, a contribution's rows and the
         # results are one run of rows, a form gap apart whichever widget
         # holds them; a section gap sits after the header, before a
         # contribution that opens with a section title and before the action
-        # bar.  The body spacing is the row gap and these spacers add the
-        # rest of a section gap, each sized by _space_sections from what is
-        # shown -- a block spacing of its own had put 9 between rows that
-        # stand 5 apart everywhere else, and 19 above the action bar.
+        # bar.  The body spacing is the row gap and each contribution's
+        # spacer adds the rest of a section gap, sized by _space_sections
+        # from what is shown -- a block spacing of its own had put 9 between
+        # rows that stand 5 apart everywhere else.
         self._body_layout = QtWidgets.QVBoxLayout(body)
         self._body_layout.setSpacing(row_gap())
-        self._lead_gap = QtWidgets.QSpacerItem(0, 0, QtWidgets.QSizePolicy.Minimum, QtWidgets.QSizePolicy.Fixed)
-        self._action_gap = QtWidgets.QSpacerItem(0, 0, QtWidgets.QSizePolicy.Minimum, QtWidgets.QSizePolicy.Fixed)
         #: The spacer above each contribution, by its factory.
         self._contribution_gaps: dict[object, QtWidgets.QSpacerItem] = {}
 
         # What this is on one line, how it stands on the next: the kind sat
         # a third of the way across and a long draft error wrapped into a
         # block beside it.  The status line is a dot and words, the way the
-        # console's status strip says things.
+        # console's status strip says things.  A section gap under it, on
+        # the body's left and right edges.
         header = QtWidgets.QWidget()
         header.setStyleSheet("background: transparent;")
         header_layout = QtWidgets.QVBoxLayout(header)
-        header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.setContentsMargins(pad, pad, pad, section_gap())
         # Two lines a row gap apart, the title and its kind a row gap apart:
         # the page's one rhythm, not private 4s and 8s.
         header_layout.setSpacing(row_gap())
@@ -152,8 +163,7 @@ class LogicEditorView(QtWidgets.QWidget):
         status_row.addLayout(dot_column)
         status_row.addWidget(self.status_label, 1)
         header_layout.addLayout(status_row)
-        self._body_layout.addWidget(header)
-        self._body_layout.addItem(self._lead_gap)
+        outer.addWidget(header)
 
         # The source and device choices are rows of the form, in its label
         # column -- not a separately boxed card with its own label style.
@@ -194,19 +204,29 @@ class LogicEditorView(QtWidgets.QWidget):
         self._artifact_result_rows: dict[str, FluentSettingRow] = {}
         self._body_layout.addWidget(self._artifact_result_frame)
 
+        self._body_layout.addStretch(1)
+        mount_logic_page(self._scroll, body, top=False, bottom=not show_actions)
+        outer.addWidget(self._scroll, 1)
+
         # The node row's two fixed slots, in its order -- Start then Stop, as
         # On Pulse then Stop Pulse -- and with its words: Start reads Restart
         # while the node is active and Starting… while its start waits.  Both
         # are always there, so nothing on this row moves when a run begins.
         # Remove keeps to the far side, away from the buttons pressed most.
-        actions = QtWidgets.QHBoxLayout()
+        # The bar is the page's foot, on the body's left and right edges and
+        # a section gap under the last row the scroll shows, so the ghost
+        # Remove reads as a command and not as one more red sentence.
+        footer = QtWidgets.QWidget()
+        footer.setStyleSheet("background: transparent;")
+        actions = QtWidgets.QHBoxLayout(footer)
+        actions.setContentsMargins(pad, section_gap(), pad, pad)
         actions.setSpacing(row_gap())
         self.remove_button = FluentButton("Remove", role="destructive")
         self.remove_button.clicked.connect(self.remove_requested.emit)
         actions.addWidget(self.remove_button)
         actions.addStretch(1)
         self.start_button = FluentButton("Start", role="primary")
-        fit_start_button(self.start_button)
+        fit_button_words(self.start_button, START_LABELS)
         self.start_button.clicked.connect(self.start_requested.emit)
         self.stop_button = FluentButton("Stop", role="destructive")
         self.stop_button.clicked.connect(self.stop_requested.emit)
@@ -223,18 +243,34 @@ class LogicEditorView(QtWidgets.QWidget):
         add_row_switch(actions, self.preview_switch, lead=False)
         actions.addWidget(self.start_button)
         actions.addWidget(self.stop_button)
-        # A section gap clear of the last section, so the ghost Remove reads
-        # as a command on the action row and not as one more red sentence.
-        self._body_layout.addItem(self._action_gap)
-        self._body_layout.addLayout(actions)
-        self._show_actions = bool(show_actions)
-        for button in (self.remove_button, self.start_button, self.stop_button, self.preview_switch):
-            button.setVisible(bool(show_actions))
-        self._body_layout.addStretch(1)
-        mount_logic_page(scroll, body)
-        outer.addWidget(scroll)
+        outer.addWidget(footer)
+        # A panel publisher's page has nothing to start or remove: no bar,
+        # and the body carries the page's bottom pad itself.
+        footer.setVisible(bool(show_actions))
 
         self.update_projection(projection)
+
+    def showEvent(self, event) -> None:  # noqa: N802 - Qt API name
+        """A newly opened page starts at its first row.
+
+        Whatever moved its bar before the operator first saw it -- a focus
+        handed on as a row was retired, a wheel turned over the window while
+        it opened -- the page opens where it begins; after that the bar
+        stays where the operator leaves it, across tab switches.
+        """
+
+        super().showEvent(event)
+        if self._opened:
+            return
+        self._opened = True
+        self._scroll.verticalScrollBar().setValue(0)
+        # Once more after the first layout pass, which is when the rows the
+        # first projections built get their heights.
+        QtCore.QTimer.singleShot(0, self._start_at_top)
+
+    def _start_at_top(self) -> None:
+        if not sip.isdeleted(self):
+            self._scroll.verticalScrollBar().setValue(0)
 
     def update_projection(self, projection: Mapping[str, object]) -> None:
         incoming = dict(projection)
@@ -322,7 +358,7 @@ class LogicEditorView(QtWidgets.QWidget):
             self._space_sections()
 
         offered = bool(incoming["preview_offered"])
-        self.preview_switch.setVisible(offered and bool(self._show_actions))
+        self.preview_switch.setVisible(offered)
         blocked = self.preview_switch.blockSignals(True)
         try:
             self.preview_switch.setChecked(bool(incoming["auto_preview"]))
@@ -476,10 +512,10 @@ class LogicEditorView(QtWidgets.QWidget):
         """Size the spacers so each shown boundary gets one gap.
 
         The body already puts a form gap between any two shown blocks; a
-        spacer adds the rest of a section gap where a section starts: after
-        the header (once, before whatever is shown first), before a
-        contribution that opens with a section title when rows come before
-        it, and before the action bar.  A hidden block takes no gap at all.
+        spacer adds the rest of a section gap before a contribution that
+        opens with a section title when rows come before it.  A hidden block
+        takes no gap at all.  The header above the rows and the action bar
+        below them carry their own section gaps.
         """
 
         extra = section_gap() - row_gap()
@@ -494,14 +530,6 @@ class LogicEditorView(QtWidgets.QWidget):
                 QtWidgets.QSizePolicy.Minimum, QtWidgets.QSizePolicy.Fixed,
             )
             rows_above = rows_above or not widget.isHidden()
-        shown = rows_above or not self._artifact_result_frame.isHidden()
-        self._lead_gap.changeSize(
-            0, extra if shown else 0,
-            QtWidgets.QSizePolicy.Minimum, QtWidgets.QSizePolicy.Fixed,
-        )
-        self._action_gap.changeSize(
-            0, extra, QtWidgets.QSizePolicy.Minimum, QtWidgets.QSizePolicy.Fixed
-        )
         self._body_layout.invalidate()
 
     def _project_commands(self) -> None:

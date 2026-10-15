@@ -109,6 +109,14 @@ def _row_columns() -> tuple[FluentColumnSet, FluentColumnSet]:
     return FluentColumnSet(_ROW_COLUMNS), FluentColumnSet(_RANGE_COLUMNS)
 
 
+def _spoken_list(words) -> str:
+    """``words`` as a sentence lists them: "power", "power and angle",
+    "power, angle and focus"."""
+
+    words = [str(word) for word in words]
+    return words[0] if len(words) == 1 else f"{', '.join(words[:-1])} and {words[-1]}"
+
+
 def _sweep_values(row: QtWidgets.QWidget) -> tuple[float, ...]:
     """Space the authored coordinates in the row's selected unit."""
     values = np.linspace(row.start_spin.value(), row.stop_spin.value(), int(row.points_spin.value()))
@@ -476,6 +484,15 @@ class _AxisRow(QtWidgets.QWidget):
         show_note(self.error_label, "")
         self.edited.emit()
 
+    def range_problem(self) -> str:
+        """What a box of the Range bank cannot hold, while the row plays
+        its range: the row's own problem, said under it and nowhere else."""
+
+        if self.input_stack.currentIndex() != 0:
+            return ""
+        return next((str(error) for spin in (self.start_spin, self.stop_spin, self.points_spin)
+                     if (error := spin.property("numericError"))), "")
+
     def _range_normalized(self) -> None:
         if (not self.isEnabled() or self.start_spin.isReadOnly()
                 or self.stop_spin.isReadOnly()):
@@ -694,12 +711,10 @@ class ScanPlanEditor(QtWidgets.QWidget):
                             sources={port: (self._device_labels.get(group, group),)},
                             metadata={}, labels={port: port_leaf(port)}, current=port,
                         )
+                # Each row shows the bank it plays, Range or Values, and
+                # the segmented choice marks that one: the host freezes the
+                # editor, so both read as they run.
                 self._refresh_summary()
-                for row in self._rows:
-                    if row.input_stack.currentIndex() == 1:
-                        row.input_stack.setCurrentIndex(0)
-                        show_note(row.custom_label, "Range off")
-                        row.custom_label.setToolTip("Range (inactive in Values mode)")
             self.add_button.hide()
             self.add_manual_button.hide()
             self._show_values(False)
@@ -844,7 +859,7 @@ class ScanPlanEditor(QtWidgets.QWidget):
         request = object()
         row._unit_request = request
         row._unit_host.setEnabled(False)
-        show_note(row.custom_label, "Converting unit…")
+        show_note(row.custom_label, "converting unit…")
         owner_ref, row_ref = weakref(self), weakref(row)
         explicit = parse_scan_values(entry["value_text"]) if entry["value_text"].strip() else ()
 
@@ -960,7 +975,9 @@ class ScanPlanEditor(QtWidgets.QWidget):
                     kind="int" if code else "float",
                     label=column.label,
                     default=values[name],
-                    required=True,
+                    # An override, never owed: a row left alone runs what
+                    # the pulse carries, so its name takes no ``*``.
+                    required=False,
                     unit="" if code else unit,
                     description=name,
                     minimum=int(column.limit_lo) if code else column.limit_lo,
@@ -1226,22 +1243,32 @@ class ScanPlanEditor(QtWidgets.QWidget):
         self._emit_plan()
 
     def _current_plan(self) -> ScanPlan:
-        for row in self._rows:
-            if row.input_stack.currentIndex() == 0:
-                for spin in (row.start_spin, row.stop_spin, row.points_spin):
-                    if error := spin.property("numericError"):
-                        raise ValueError(str(error))
+        """The plan the rows' boxes hold.  A Range box that cannot show its
+        number is its row's problem, said under that row
+        (:meth:`_say_row_problems`), and no draft is written while one is."""
+
         return ScanPlan.from_tree({"axes": [row.input_entry() for row in self._rows]})
+
+    def _say_row_problems(self) -> bool:
+        """Write each row's unreadable box under that row; whether there was one.
+
+        Said once, where it arises: the plan's own line under all the axes
+        repeated it, hid the summary, and did not say which axis it meant.
+        """
+
+        unreadable = False
+        for row in self._rows:
+            if problem := row.range_problem():
+                show_problem(row.error_label, problem)
+                unreadable = True
+        return unreadable
 
     def _emit_plan(self, *, normalized: bool = False) -> None:
         if self._loading:
             return
-        for row in self._rows:
-            if row.input_stack.currentIndex() == 0:
-                for spin in (row.start_spin, row.stop_spin, row.points_spin):
-                    if error := spin.property("numericError"):
-                        self._say(problem=str(error))
-                        return
+        if self._say_row_problems():
+            # The draft keeps the plan it holds until every box can be read.
+            return
         self._align_columns()
         ordered = sorted(self._rows, key=lambda row: host_advanced_port(
             MANUAL_PARAM_FAMILY if row.manual else str(row.port_combo.currentData())
@@ -1273,6 +1300,7 @@ class ScanPlanEditor(QtWidgets.QWidget):
                 "every point plays the pulse and captures one measurement."
             ))
             return
+        self._say_row_problems()
         try:
             plan = self._current_plan()
         except (ValueError, TypeError) as error:
@@ -1287,15 +1315,18 @@ class ScanPlanEditor(QtWidgets.QWidget):
             axis for axis in plan.axes
             if axis.port.startswith(DEVICE_PARAM_FAMILY)
         )
+        # The run stops once per setting of the hand's axes, not once per
+        # point: every point under one setting is played without a stop.
         stops = 1
         for axis in manual:
             stops *= len(axis.values)
+        knobs = [axis.port[len(MANUAL_PARAM_FAMILY):] for axis in manual]
         by_hand = (
             ""
             if not manual
             else (
-                f" {stops} of those points {'is' if stops == 1 else 'are'} reached by "
-                "hand: the run stops at each one and waits for you to set it."
+                f" The run stops {'once' if stops == 1 else counted(stops, 'time')} for you to set "
+                f"{_spoken_list(knobs)} by hand."
             )
         )
         by_call = 1

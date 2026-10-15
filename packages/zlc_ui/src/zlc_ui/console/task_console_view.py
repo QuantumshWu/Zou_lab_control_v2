@@ -35,9 +35,14 @@ from zlc_ui.fluent import (
 from zlc_ui.status import name_words
 
 from .board_view import ConsoleBoardView
-from .logic_row_view import STATUS_DOT, LogicRowView, mount_logic_page
+from .logic_row_view import STATUS_DOT, LogicRowView, fit_button_words, mount_logic_page
 from .panel_card_view import PanelCardView
 from .status_strip import StatusStrip
+
+#: What the header's Add command says, by the family of the choice beside
+#: it: a Plot adds a panel to the Monitor, a measurement, processor or task
+#: adds a node to the Logic list.
+_ADD_WORDS = {"plot": "Add panel", "logic": "Add node"}
 
 
 def plot_choice_text(label: str) -> str:
@@ -122,8 +127,12 @@ class TaskConsoleView(QtWidgets.QWidget):
         # Keep the full kind label and its arrow in the
         # same fixed slot on every screen scale.
         self.kind_combo.setFixedWidth(scaled_px(170, minimum=130))
-        self.add_panel_button = FluentButton("Add panel")
-        self.add_panel_button.setEnabled(False)
+        # The command names what it adds, a panel or a node, from the family
+        # of the choice beside it; its slot fits either, so the commands
+        # after it never move.
+        self.add_button = FluentButton(_ADD_WORDS["plot"])
+        fit_button_words(self.add_button, tuple(_ADD_WORDS.values()))
+        self.add_button.setEnabled(False)
 
         # Rendered as a push button rather than a toggle, so the button carries
         # the command and the label carries the state.  It emits the state it
@@ -151,7 +160,7 @@ class TaskConsoleView(QtWidgets.QWidget):
         header.addLayout(identity)
         header.addWidget(self.summary_label, 1, QtCore.Qt.AlignVCenter)
         header.addWidget(self.kind_combo, 0, QtCore.Qt.AlignVCenter)
-        header.addWidget(self.add_panel_button, 0, QtCore.Qt.AlignVCenter)
+        header.addWidget(self.add_button, 0, QtCore.Qt.AlignVCenter)
         # The setting is a group of its own between the commands, so its
         # label does not run into Pause.
         add_row_switch(header, self.selectors_switch)
@@ -218,7 +227,7 @@ class TaskConsoleView(QtWidgets.QWidget):
         # as the Monitor's note does for a panel.
         self.logic_hint = muted_note_label(
             "No logic nodes yet. Choose a measurement, processor or task in the "
-            "header and click Add panel; it starts stopped. Open its Edit page to "
+            "header and click Add node; it starts stopped. Open its Edit page to "
             "set parameters, then press Start."
         )
         self.logic_hint.setWordWrap(True)
@@ -230,7 +239,7 @@ class TaskConsoleView(QtWidgets.QWidget):
         self.tabs.add_permanent_tab(logic_page, "Logic")
         outer.addWidget(self.tabs, 1)
 
-        self.add_panel_button.clicked.connect(self._add_current_selection)
+        self.add_button.clicked.connect(self._add_current_selection)
         self.kind_combo.currentIndexChanged[int].connect(
             lambda _index: self._update_add_button()
         )
@@ -301,12 +310,10 @@ class TaskConsoleView(QtWidgets.QWidget):
 
     def _update_add_button(self) -> None:
         selected = self.kind_combo.currentData()
-        blocked_logic = bool(
-            self._task_takeover
-            and selected is not None
-            and selected[0] == "logic"
-        )
-        self.add_panel_button.setEnabled(
+        family = "plot" if selected is None else selected[0]
+        self.add_button.setText(_ADD_WORDS[family])
+        blocked_logic = self._task_takeover and family == "logic"
+        self.add_button.setEnabled(
             self.kind_combo.count() > 0 and not blocked_logic
         )
 

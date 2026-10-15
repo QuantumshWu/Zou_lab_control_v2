@@ -932,7 +932,7 @@ logic_index = next(
     if view._view.kind_combo.itemData(index) == ('logic', 'camera_measurement')
 )
 view._view.kind_combo.setCurrentIndex(logic_index)
-QtTest.QTest.mouseClick(view._view.add_panel_button, QtCore.Qt.LeftButton)
+QtTest.QTest.mouseClick(view._view.add_button, QtCore.Qt.LeftButton)
 application.processEvents()
 assert 'camera_measurement' in presenter.logic
 assert presenter.logic['camera_measurement'].host is None
@@ -942,7 +942,7 @@ image_index = next(
     if view._view.kind_combo.itemData(index) == ('plot', 'image')
 )
 view._view.kind_combo.setCurrentIndex(image_index)
-QtTest.QTest.mouseClick(view._view.add_panel_button, QtCore.Qt.LeftButton)
+QtTest.QTest.mouseClick(view._view.add_button, QtCore.Qt.LeftButton)
 application.processEvents()
 panel = next(iter(presenter.panels.values()))
 assert panel.state.interval_ms == 100, (
@@ -979,7 +979,7 @@ facet_index = next(
     if view._view.kind_combo.itemData(index) == ('plot', 'facet_grid')
 )
 view._view.kind_combo.setCurrentIndex(facet_index)
-QtTest.QTest.mouseClick(view._view.add_panel_button, QtCore.Qt.LeftButton)
+QtTest.QTest.mouseClick(view._view.add_button, QtCore.Qt.LeftButton)
 application.processEvents()
 site_grid = tuple(presenter.panels.values())[-1]
 assert site_grid.state.kind == 'facet_grid'
@@ -1028,7 +1028,7 @@ task_index = next(
     if view._view.kind_combo.itemData(index) == ('logic', 'calibration')
 )
 view._view.kind_combo.setCurrentIndex(task_index)
-QtTest.QTest.mouseClick(view._view.add_panel_button, QtCore.Qt.LeftButton)
+QtTest.QTest.mouseClick(view._view.add_button, QtCore.Qt.LeftButton)
 application.processEvents()
 editor = view._logic_editors['calibration']
 editor.form.widget_for('pulse_template').setText('imaging_template.json')
@@ -1040,7 +1040,7 @@ application.processEvents()
 assert presenter._active_task_id == 'calibration'
 assert view._view.status_strip.action_button.isVisible()
 assert view._view.kind_combo.isEnabled()
-assert not view._view.add_panel_button.isEnabled()
+assert not view._view.add_button.isEnabled()
 task_row = view._rows['calibration']
 assert not task_row.start_button.isEnabled()
 assert task_row.start_button.text() == editor.start_button.text() == 'Restart'
@@ -1072,7 +1072,7 @@ QtTest.QTest.mouseClick(
 until(lambda: presenter._active_task_id is None)
 assert not view._view.status_strip.action_button.isVisible()
 assert view._view.kind_combo.isEnabled()
-assert view._view.add_panel_button.isEnabled()
+assert view._view.add_button.isEnabled()
 assert view._rows['calibration'].start_button.isEnabled()
 assert view._rows['calibration'].start_button.text() == 'Start'
 assert not view._rows['calibration'].stop_button.isEnabled()

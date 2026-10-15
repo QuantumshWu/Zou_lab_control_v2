@@ -971,19 +971,27 @@ assert editor.artifact_form.widget_for('calibration_path').mapTo(editor, QtCore.
 # one run of rows a form gap apart, whichever widget holds them; a section
 # gap follows the header and precedes the action bar; every control starts
 # on one column; and the content sits a window pad inside the page on both
-# sides, the scrollbar's gutter held although no bar shows.
-from zlc_ui.fluent import FluentSettingRow, window_pad
+# sides, the scrollbar's gutter held although no bar shows.  The header and
+# the action bar stand outside the scrolling rows, on the same edges.
+from zlc_ui.fluent import FluentScrollArea, FluentSettingRow, section_gap, window_pad
 from zlc_ui.fluent import row_gap
 top_of = lambda widget: widget.mapTo(editor, QtCore.QPoint()).y()
+left_of = lambda widget: widget.mapTo(editor, QtCore.QPoint()).x()
 rows = sorted((row for row in editor.findChildren(FluentSettingRow) if row.isVisible()), key=top_of)
 assert len(rows) == 5, [row.layout().itemAt(0).widget().text() for row in rows]
 gaps = [top_of(below) - top_of(above) - above.height() for above, below in zip(rows, rows[1:])]
 assert gaps == [row_gap()] * 4, gaps
-assert top_of(rows[0]) - top_of(editor.status_label) - editor.status_label.height() == window_pad()
-assert top_of(editor.remove_button) - top_of(rows[-1]) - rows[-1].height() == window_pad()
+assert top_of(rows[0]) - top_of(editor.status_label) - editor.status_label.height() == section_gap()
 assert len({row.layout().itemAt(1).widget().mapTo(editor, QtCore.QPoint()).x() for row in rows}) == 1
 left = rows[0].mapTo(editor, QtCore.QPoint()).x()
 assert (left, editor.width() - left - rows[0].width()) == (window_pad(), window_pad())
+scroll = editor.findChild(FluentScrollArea)
+viewport_bottom = scroll.viewport().mapTo(editor, QtCore.QPoint(0, scroll.viewport().height())).y()
+assert top_of(editor.remove_button) - viewport_bottom == section_gap()
+assert editor.height() - top_of(editor.remove_button) - editor.remove_button.height() == window_pad()
+assert left_of(editor.title_label) == left_of(editor.remove_button) == window_pad()
+assert editor.width() - left_of(editor.stop_button) - editor.stop_button.width() == window_pad()
+assert not scroll.isAncestorOf(editor.status_label) and not scroll.isAncestorOf(editor.start_button)
 publisher = handle._panel_publisher_rows['panel-1']
 assert tuple(view._logic_rows) == (handle._rows['camera-1'], publisher)
 assert not publisher.publishes_label.isHidden()
@@ -1029,7 +1037,10 @@ handle.panel_publisher_draft_changed.connect(
 handle.open_panel_publisher_editor('panel-1', publisher_projection)
 publisher_editor = handle._panel_publisher_editors['panel-1']
 assert publisher_editor.source_combo is None
-assert publisher_editor.start_button.isHidden() and publisher_editor.stop_button.isHidden()
+# Nothing to start or remove on a publisher's page: no action bar at all.
+assert not any(button.isVisibleTo(publisher_editor) for button in (
+    publisher_editor.start_button, publisher_editor.stop_button, publisher_editor.remove_button,
+))
 publisher_editor.form.widget_for('roi_max').click()
 assert publisher_patches == [('panel-1', {'values': {'roi_max': False}})]
 assert view.tabs.indexOf(editor) >= 0
@@ -1679,9 +1690,12 @@ row = scan_readout._rows[0]
 assert row.start_spin.value() == 1 and row.stop_spin.value() == 3
 assert scan_readout._rows[1].start_spin.valueUnit() == 'MHz'
 assert scan_readout._rows[2].stop_spin.value() == 6
-assert scan_readout._rows[2].input_stack.currentIndex() == 0
+# A Values axis reads as it plays: its list on screen, the choice on Values,
+# and no note about a Range bank the run does not use.
+assert scan_readout._rows[2].input_stack.currentIndex() == 1
+assert scan_readout._rows[2].values_edit.text() == '10, 20'
 assert scan_readout._rows[2].mode_choice.button('values').property('current') is True
-assert scan_readout._rows[2].custom_label.text() == 'Range off'
+assert scan_readout._rows[2].custom_label.isHidden()
 assert 'not in this pulse' not in scan_readout._rows[1].port_combo.currentText()
 plan['axes'][0]['values'] = [4, 5, 6]
 handle.set_panel_producer_projection('panel-1', dict(linked_scan, form_values={'plan': json.dumps(plan)}))
@@ -1947,7 +1961,7 @@ for widget in (
     view.name_label,
     view.summary_label,
     view.kind_combo,
-    view.add_panel_button,
+    view.add_button,
     view.selectors_switch,
     view.pause_switch,
     view.save_screenshot_button,
@@ -2056,9 +2070,18 @@ assert view.kind_combo.itemText(2) == 'Measurement: camera_measurement'
 assert view.kind_combo.itemText(3) == 'Processor: occupancy'
 assert view.kind_combo.itemText(4) == 'Task: calibration'
 assert view.kind_combo.currentData() == ('plot', 'image')
-QtTest.QTest.mouseClick(view.add_panel_button, QtCore.Qt.LeftButton)
+# The command names what it adds, from the family chosen beside it, in one
+# slot: the commands after it stand still when the words change.
+assert view.add_button.text() == 'Add panel'
+add_slot = lambda: (view.add_button.geometry(), view.selectors_switch.geometry())
+plot_slot = add_slot()
+QtTest.QTest.mouseClick(view.add_button, QtCore.Qt.LeftButton)
 view.kind_combo.setCurrentIndex(2)
-QtTest.QTest.mouseClick(view.add_panel_button, QtCore.Qt.LeftButton)
+app.processEvents()
+assert view.add_button.text() == 'Add node'
+assert add_slot() == plot_slot, (add_slot(), plot_slot)
+assert 'click Add node' in view.logic_hint.text()
+QtTest.QTest.mouseClick(view.add_button, QtCore.Qt.LeftButton)
 QtTest.QTest.mouseClick(view.pause_switch, QtCore.Qt.LeftButton)
 QtTest.QTest.mouseClick(view.save_screenshot_button, QtCore.Qt.LeftButton)
 QtTest.QTest.mouseClick(view.save_layout_button, QtCore.Qt.LeftButton)
@@ -2092,7 +2115,7 @@ app.processEvents()
 assert view.status_strip.action_button is not None
 assert view.status_strip.action_button.isVisible()
 assert view.kind_combo.isEnabled()
-assert not view.add_panel_button.isEnabled()
+assert not view.add_button.isEnabled()
 assert view.save_layout_button.isEnabled()
 assert not view.load_layout_button.isEnabled()
 assert not view.clear_board_button.isEnabled()
@@ -2110,7 +2133,7 @@ assert task_row.stop_button.isVisible() and task_row.stop_button.isEnabled()
 assert slots(task_row) == before_takeover, (slots(task_row), before_takeover)
 assert camera_row.stop_button.isVisible() and not camera_row.stop_button.isEnabled()
 before = list(events)
-QtTest.QTest.mouseClick(view.add_panel_button, QtCore.Qt.LeftButton)
+QtTest.QTest.mouseClick(view.add_button, QtCore.Qt.LeftButton)
 QtTest.QTest.mouseClick(camera_row.start_button, QtCore.Qt.LeftButton)
 QtTest.QTest.mouseClick(camera_row.stop_button, QtCore.Qt.LeftButton)
 assert events == before
@@ -2118,8 +2141,8 @@ QtTest.QTest.mouseClick(task_row.stop_button, QtCore.Qt.LeftButton)
 assert events[-1] == ('stop', 'calibration')
 view.kind_combo.setCurrentIndex(0)
 assert view.kind_combo.currentData()[0] == 'plot'
-assert view.add_panel_button.isEnabled()
-QtTest.QTest.mouseClick(view.add_panel_button, QtCore.Qt.LeftButton)
+assert view.add_button.isEnabled()
+QtTest.QTest.mouseClick(view.add_button, QtCore.Qt.LeftButton)
 assert events[-1] == ('panel', 'curve')
 QtTest.QTest.mouseClick(view.status_strip.action_button, QtCore.Qt.LeftButton)
 assert events[-1] == ('stop-task',)
@@ -2127,7 +2150,7 @@ assert events[-1] == ('stop-task',)
 handle.set_task_takeover('')
 assert not view.status_strip.action_button.isVisible()
 assert view.kind_combo.isEnabled()
-assert view.add_panel_button.isEnabled()
+assert view.add_button.isEnabled()
 assert preview.settings_button.isEnabled()
 assert camera_row.start_button.isEnabled()
 assert camera_row.stop_button.isEnabled()
@@ -2602,6 +2625,64 @@ assert not switch.isEnabled(), 'a Task owns the console: nothing here re-aims St
 
 editor.update_projection(dict(projection, preview_offered=False))
 assert not switch.isVisible(), 'no switch where the node opens nothing'
+"""
+    )
+
+
+def test_a_tall_logic_edit_page_keeps_its_header_and_action_bar_and_opens_at_its_top(run_qt) -> None:
+    """Only the rows scroll.  On a page taller than its tab the node's name,
+    the status line that says why Start is off, and Start, Stop and Remove
+    stay on screen; and a newly opened page starts at its first row, even
+    when something moved its bar while it opened."""
+
+    run_qt(
+        """
+from PyQt5 import QtCore, QtGui
+from zlc_ui.qt import ensure_qt_app
+from zlc_ui.fluent import FluentScrollArea
+from zlc_ui.form import FormFieldProps, FormSpec
+from zlc_ui.console import LogicEditorView
+
+app = ensure_qt_app(['test'])
+fields = tuple(FormFieldProps(key=f'value_{index}', kind='int', label=f'Value {index}', default=index)
+               for index in range(30))
+projection = {
+    'api_name': 'seamless_scan', 'kind': 'measurement',
+    'form_spec': FormSpec(fields), 'form_values': {field.key: field.default for field in fields},
+    'artifact_form_spec': FormSpec(()), 'artifact_values': {}, 'artifact_results': (),
+    'auto_preview': False, 'preview_offered': True,
+    'can_start': False, 'can_stop': True, 'running': True,
+    'issues': ('Signal must be selected',),
+}
+editor = LogicEditorView('scan-1', projection)
+editor.resize(700, 360)
+scroll = editor.findChild(FluentScrollArea)
+bar = scroll.verticalScrollBar()
+editor.show()
+# A wheel turned over the window while the page opened.
+viewport = scroll.viewport()
+centre = QtCore.QPointF(viewport.width() / 2, viewport.height() / 2)
+app.sendEvent(viewport, QtGui.QWheelEvent(
+    centre, QtCore.QPointF(viewport.mapToGlobal(centre.toPoint())), QtCore.QPoint(), QtCore.QPoint(0, -120),
+    QtCore.Qt.NoButton, QtCore.Qt.NoModifier, QtCore.Qt.NoScrollPhase, False,
+))
+assert bar.maximum() > 0 and bar.value() > 0, (bar.maximum(), bar.value())
+app.processEvents()
+assert bar.value() == 0, 'a newly opened page starts at its first row'
+inside = lambda widget: QtCore.QRect(QtCore.QPoint(), editor.size()).contains(
+    QtCore.QRect(widget.mapTo(editor, QtCore.QPoint()), widget.size()))
+# Scrolled to the end, the header and the action bar are still there.
+bar.setValue(bar.maximum())
+app.processEvents()
+for widget in (editor.title_label, editor.status_label, editor.remove_button,
+               editor.preview_switch, editor.start_button, editor.stop_button):
+    assert widget.isVisible() and inside(widget), widget
+assert editor.status_label.text() == 'Draft: Signal must be selected'
+assert editor.start_button.text() == 'Restart' and editor.stop_button.isEnabled()
+# After that the bar is the operator's: a tab switch keeps it.
+editor.hide(); editor.show(); app.processEvents()
+assert bar.value() == bar.maximum() > 0
+editor.close()
 """
     )
 

@@ -751,7 +751,7 @@ def perform_action(bench, action, beat, output):
         hide_settings(bench)
         choose(view.kind_combo, ("logic", action["api"]), bench.app)
         before = set(bench.presenter.logic)
-        click(view.add_panel_button, bench.app)
+        click(view.add_button, bench.app)
         if not beat.run_until(lambda: set(bench.presenter.logic) != before, 3):
             raise AssertionError("Add Logic did not create a node")
         created = set(bench.presenter.logic) - before
@@ -886,7 +886,7 @@ def perform_action(bench, action, beat, output):
         hide_settings(bench)
         choose(view.kind_combo, ("plot", action["plot"]), bench.app)
         before = set(bench.presenter.panels)
-        click(view.add_panel_button, bench.app)
+        click(view.add_button, bench.app)
         beat.run_until(lambda: set(bench.presenter.panels) != before, 2.0)
         new = set(bench.presenter.panels)-before
         if len(new) != 1: raise AssertionError("Add Panel did not add exactly one card")

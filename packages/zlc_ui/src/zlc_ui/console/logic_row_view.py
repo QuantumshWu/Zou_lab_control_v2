@@ -59,7 +59,13 @@ STATE_COLOURS = {
 }
 
 
-def mount_logic_page(scroll: FluentScrollArea, body: QtWidgets.QWidget) -> None:
+def mount_logic_page(
+    scroll: FluentScrollArea,
+    body: QtWidgets.QWidget,
+    *,
+    top: bool = True,
+    bottom: bool = True,
+) -> None:
     """Put ``body`` -- a Logic page: the list, or one node's Edit -- in ``scroll``.
 
     Every page has ONE content edge on each side, a window pad inside the tab
@@ -68,11 +74,17 @@ def mount_logic_page(scroll: FluentScrollArea, body: QtWidgets.QWidget) -> None:
     shows (a width-bounded mount), and the right margin is the pad less that
     gutter: the content ends at the same x with or without a bar, instead of
     every stretching control jumping left the moment a page outgrew its tab.
+
+    ``top`` and ``bottom`` say whether the body's own edge is the page's: an
+    Edit page pins its header above the scroll and its action bar below it,
+    and those carry the pads there instead.
     """
 
     pad = window_pad()
     gutter = scroll.verticalScrollBar().sizeHint().width()
-    body.layout().setContentsMargins(pad, pad, max(0, pad - gutter), pad)
+    body.layout().setContentsMargins(
+        pad, pad if top else 0, max(0, pad - gutter), pad if bottom else 0,
+    )
     scroll.set_width_bounded_widget(body)
 
 
@@ -89,17 +101,18 @@ def start_label(*, pending: bool, active: bool) -> str:
     return "Restart" if active else "Start"
 
 
-def fit_start_button(button: FluentButton) -> None:
-    """Size ``button`` for the widest of :data:`START_LABELS`.
+def fit_button_words(button: FluentButton, words: tuple[str, ...]) -> None:
+    """Size ``button`` for the widest of the ``words`` it can say.
 
     Measured through the button itself, so its padding and font count; the
-    slot then keeps one width whatever it says, and Stop beside it never
-    moves.
+    slot then keeps one width whatever it says, and what stands beside it
+    never moves -- Stop beside a Start that reads Restart, the header's
+    commands beside an Add that names a panel or a node.
     """
 
     shown = button.text()
     widths = []
-    for label in START_LABELS:
+    for label in words:
         button.setText(label)
         widths.append(button.sizeHint().width())
     button.setText(shown)
@@ -165,7 +178,7 @@ class LogicRowView(FluentFrame):
         )
         self.preview_switch.toggled.connect(self.auto_preview_changed.emit)
         self.start_button = FluentButton("Start")
-        fit_start_button(self.start_button)
+        fit_button_words(self.start_button, START_LABELS)
         self.start_button.setEnabled(False)
         self.start_button.clicked.connect(self.start_requested.emit)
         self.stop_button = FluentButton("Stop", role="destructive")
@@ -285,7 +298,7 @@ __all__ = [
     "STATE_COLOURS",
     "STATUS_DOT",
     "LogicRowView",
-    "fit_start_button",
+    "fit_button_words",
     "mount_logic_page",
     "start_label",
 ]

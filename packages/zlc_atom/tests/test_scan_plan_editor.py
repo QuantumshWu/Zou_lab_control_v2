@@ -208,6 +208,9 @@ def test_host_only_scan_plans_need_no_dummy_board_axis() -> None:
 
 
 def test_the_summary_says_how_many_stops_the_operator_is_signing_up_for() -> None:
+    """The run stops once per setting of the hand's axes -- not once per
+    point -- and the summary names the knobs the operator sets."""
+
     editor = _editor()
     try:
         editor._add_axis()
@@ -216,7 +219,57 @@ def test_the_summary_says_how_many_stops_the_operator_is_signing_up_for() -> Non
         row.name_edit.setText("power")
         row.points_spin.setValue(3)
         editor._refresh_summary()
-        assert "3 of those points are reached by hand" in editor.summary.text()
+        text = editor.summary.text()
+        assert "15 points" in text, text
+        assert text.endswith(" The run stops 3 times for you to set power by hand."), text
+        editor._add_manual_axis()
+        second = editor._rows[1]
+        assert second.manual
+        second.name_edit.setText("angle")
+        second.points_spin.setValue(1)
+        editor._refresh_summary()
+        assert editor.summary.text().endswith(
+            " The run stops 3 times for you to set power and angle by hand."
+        ), editor.summary.text()
+        row.points_spin.setValue(1)
+        editor._refresh_summary()
+        assert editor.summary.text().endswith(
+            " The run stops once for you to set power and angle by hand."
+        ), editor.summary.text()
+    finally:
+        editor.deleteLater()
+
+
+def test_an_unreadable_box_is_said_once_under_its_row() -> None:
+    """A Range box that cannot show its number is its row's problem: it
+    stands under that row, and the plan's line under all the axes neither
+    repeats it nor gives up the summary for it."""
+
+    editor = _editor()
+    try:
+        editor._add_axis()
+        row = editor._rows[0]
+        summary = editor.summary.text()
+        assert summary and editor.problem.isHidden()
+        drafts: list[dict] = []
+        editor.draft_changed.connect(drafts.append)
+        row.start_spin.setProperty("numericError", "the number does not fit the box")
+        row.start_spin.valueNormalized.emit()
+        assert row.error_label.text() == "the number does not fit the box."
+        assert not row.error_label.isHidden()
+        # Any other edit, and any projection, say it under the row again --
+        # never in the plan's line -- and the draft keeps the plan it holds.
+        row.points_spin.setValue(7)
+        assert row.error_label.text() == "the number does not fit the box."
+        assert editor.problem.isHidden() and editor.problem.text() == ""
+        assert not drafts, drafts
+        editor._refresh_summary()
+        assert editor.problem.isHidden() and not editor.summary.isHidden()
+        assert editor.summary.text().startswith("1 axis, 7 = 7 points"), editor.summary.text()
+        assert row.error_label.text() == "the number does not fit the box."
+        # The row in Values mode plays no Range box: nothing to say.
+        row.mode_choice.button("values").click()
+        assert row.error_label.isHidden()
     finally:
         editor.deleteLater()
 
@@ -501,10 +554,12 @@ def test_api_values_are_reconciled_under_the_operators_wheel() -> None:
     assert editor.label_width_floor() >= setting_label_width(form.shown_labels())
     editor.set_label_width(240)
     label = form._rows["duration:p0"].layout().itemAt(0).widget()
-    assert (label.text(), label.toolTip()) == ("MOT.duration *", "")
+    # An API value is an override the run may leave alone, not a value the
+    # draft owes: its name carries no required marker.
+    assert (label.text(), label.toolTip()) == ("MOT.duration", "")
     # One wider than the column is elided in the middle, whole in its tooltip.
     editor.set_label_width(setting_label_width(("MOT.d",)))
-    assert "…" in label.text() and label.toolTip() == "MOT.duration *"
+    assert "…" in label.text() and label.toolTip() == "MOT.duration"
     # The editor's one number edge reaches the API values' boxes -- and is
     # the same before a pulse with API values is chosen, so the editor's
     # other numbers do not move when they come.
@@ -672,6 +727,8 @@ def test_device_port_unit_conversion_runs_off_the_qt_thread_and_never_overwrites
         restored.mode_choice.button("values").click()
         gate.clear()
         restored.unit_picker.unit_picked.emit("mVpp")
+        # A row's state under it is a lowercase fragment, as "custom values" is.
+        assert restored.custom_label.text() == "converting unit…"
         from PyQt5 import QtTest
         QtTest.QTest.keyClick(restored.values_edit, QtCore.Qt.Key_A, QtCore.Qt.ControlModifier)
         QtTest.QTest.keyClicks(restored.values_edit, "-19, -17")
