@@ -3455,15 +3455,12 @@ QAbstractItemView::item {{
     padding: {scaled_px(3, minimum=2)}px {scaled_px(6, minimum=4)}px;
     border: {FIELD_BORDER_PX}px solid transparent;
     border-radius: {_radius()}px;
-    color: {TEXT};
 }}
 QAbstractItemView::item:hover {{
     background-color: {ACCENT_TINT};
-    color: {TEXT};
 }}
 QAbstractItemView::item:selected {{
     background-color: {SELECTED};
-    color: {TEXT};
 }}
 QAbstractItemView::item:selected:hover {{
     background-color: {SELECTED_HOVER};
@@ -3481,6 +3478,61 @@ QAbstractItemView::corner {{
 #: The item role that marks a combo's blank choice -- the row meaning
 #: "nothing chosen yet" (see :meth:`FluentComboBox.add_blank_item`).
 _BLANK_CHOICE_ROLE = QtCore.Qt.UserRole + 2
+#: The item role that holds a checkable combo's tick (see
+#: :meth:`FluentComboBox.set_checkable`).
+_CHECKED_ROLE = QtCore.Qt.UserRole + 3
+_CHECK_ICONS: dict[tuple[float, float, bool], QtGui.QIcon] = {}
+
+
+def _check_icon(checked: bool) -> QtGui.QIcon:
+    """A checkable combo row's box: :class:`FluentCheckBox`'s own indicator.
+
+    A solid rounded fill whose edge is that fill -- NEUTRAL_FILL unticked,
+    ACCENT with a white tick ticked -- drawn as the row's decoration, so the
+    view lays it out and indents the row's text after it.  The row under
+    the pointer (the view's current row) takes the Selected pixmap, one
+    shade deeper, as the check box's indicator does under the pointer.
+    """
+
+    app = QtWidgets.QApplication.instance()
+    ratio = float(app.devicePixelRatio()) if app is not None else 1.0
+    key = (_FLUENT_SCALE, ratio, bool(checked))
+    icon = _CHECK_ICONS.get(key)
+    if icon is not None:
+        return icon
+    side = scaled_even_px(16)
+    icon = QtGui.QIcon()
+    for mode, deeper in ((QtGui.QIcon.Normal, False), (QtGui.QIcon.Selected, True)):
+        pixmap = QtGui.QPixmap(int(round(side * ratio)), int(round(side * ratio)))
+        pixmap.setDevicePixelRatio(ratio)
+        pixmap.fill(QtCore.Qt.transparent)
+        painter = QtGui.QPainter(pixmap)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing)
+        if checked:
+            fill = QtGui.QColor(ACCENT_HOVER if deeper else ACCENT)
+        else:
+            fill = _mixed(NEUTRAL_FILL, ACCENT, 0.4) if deeper else QtGui.QColor(NEUTRAL_FILL)
+        painter.setPen(QtCore.Qt.NoPen)
+        painter.setBrush(fill)
+        radius = float(_radius())
+        painter.drawRoundedRect(QtCore.QRectF(0, 0, side, side), radius, radius)
+        if checked:
+            # The tick of FluentCheckBox.paintEvent, in the same proportions.
+            points = ((0.26, 0.52), (0.43, 0.68), (0.75, 0.34))
+            dx = side / 2.0 - (0.26 + 0.75) / 2.0 * side
+            dy = side / 2.0 - (0.34 + 0.68) / 2.0 * side
+            pen = QtGui.QPen(QtGui.QColor(SURFACE))
+            pen.setWidthF(max(1.5, side / 8.0))
+            pen.setCapStyle(QtCore.Qt.RoundCap)
+            pen.setJoinStyle(QtCore.Qt.RoundJoin)
+            painter.setPen(pen)
+            painter.drawPolyline(QtGui.QPolygonF([
+                QtCore.QPointF(dx + x * side, dy + y * side) for x, y in points
+            ]))
+        painter.end()
+        icon.addPixmap(pixmap, mode)
+    _CHECK_ICONS[key] = icon
+    return icon
 
 
 class FluentComboBox(QtWidgets.QAbstractButton):
@@ -3489,11 +3541,23 @@ class FluentComboBox(QtWidgets.QAbstractButton):
     The collapsed control owns a plain item model.  Its list/tree popup is a
     real :class:`FluentPopup` created only on first use, so Qt cannot silently
     materialize a private QListView while an ancestor stylesheet is polished.
+
+    In CHECKABLE mode (:meth:`set_checkable`) it picks several of its rows:
+    each keyed row carries FluentCheckBox's box.  A click on a row's box
+    ticks or clears it and the list stays open; a click on its words makes
+    it the only ticked row and closes the list -- the one-value pick stays
+    one click.  Space ticks the current row, Enter means "only this one",
+    Escape or a click outside closes.  :attr:`checked_edited` carries the
+    ticked keys once, when the list closes having changed them.  The
+    collapsed box reads the ticked keys in list order, runs of three or
+    more as ``first–last``; with none ticked, its placeholder in MUTED_INK.
     """
 
     activated = QtCore.pyqtSignal(int)
     currentIndexChanged = QtCore.pyqtSignal(int)
     currentTextChanged = QtCore.pyqtSignal(str)
+    #: The ticked keys, in list order, when a checkable list closes changed.
+    checked_edited = QtCore.pyqtSignal(object)
     _line_edit = None
 
     def __init__(self, parent=None):
@@ -3504,6 +3568,13 @@ class FluentComboBox(QtWidgets.QAbstractButton):
             QtWidgets.QSizePolicy.Preferred,
             QtWidgets.QSizePolicy.Fixed,
         )
+        self._checkable = False
+        self._placeholder = ""
+        self._headers_select = False
+        #: The ticked keys when the open list opened; None while it is shut.
+        self._checked_at_open: tuple | None = None
+        #: The row whose box a press landed on, until its release; -1 none.
+        self._box_press = -1
         self._current_index = -1
         self._minimum_contents_length = 0
         self._model = QtGui.QStandardItemModel(self)
@@ -3579,8 +3650,11 @@ class FluentComboBox(QtWidgets.QAbstractButton):
         item = QtGui.QStandardItem(str(text))
         item.setData(userData, QtCore.Qt.UserRole)
         item.setEditable(False)
+        if self._checkable and userData is not None:
+            item.setData(False, _CHECKED_ROLE)
+            item.setData(_check_icon(False), QtCore.Qt.DecorationRole)
         self._model.appendRow(item)
-        if self._current_index < 0:
+        if self._current_index < 0 and not self._checkable:
             self.setCurrentIndex(0)
 
     def addItems(self, texts) -> None:  # noqa: N802 - Qt API name
@@ -3605,7 +3679,171 @@ class FluentComboBox(QtWidgets.QAbstractButton):
 
         return self.currentData(_BLANK_CHOICE_ROLE) is True
 
+    def set_checkable(self, checkable: bool, *, placeholder: str = "", headers_select: bool = False) -> None:
+        """Pick several keyed rows instead of one (see the class).
+
+        A row keyed None is a header: it carries no box and ends a run of
+        the collapsed text.  With ``headers_select`` a header is a choice of
+        its own -- clicking it ticks exactly the rows under it, up to the
+        next header, and closes the list.  ``placeholder`` is what the
+        collapsed box says while nothing is ticked.
+        """
+
+        self._checkable = bool(checkable)
+        self._placeholder = str(placeholder)
+        self._headers_select = self._checkable and bool(headers_select)
+        for row in range(self.count()):
+            item = self._model.item(row)
+            keyed = self._checkable and item.data(QtCore.Qt.UserRole) is not None
+            item.setData(bool(item.data(_CHECKED_ROLE)) if keyed else None, _CHECKED_ROLE)
+            item.setData(_check_icon(bool(item.data(_CHECKED_ROLE))) if keyed else None, QtCore.Qt.DecorationRole)
+        if self._popup_view is not None:
+            self._configure_checkable_view(self._popup_view)
+        self._checked_changed()
+
+    def checked_data(self) -> tuple:
+        """The keys of the ticked rows, in list order."""
+
+        return tuple(
+            self.itemData(row) for row in range(self.count()) if self.itemData(row, _CHECKED_ROLE)
+        )
+
+    def set_checked_data(self, values) -> None:
+        """Tick exactly the rows keyed ``values``, without emitting.  Ignored
+        while the list is open: what the operator is ticking stands."""
+
+        if self._popup is not None and self._popup.isVisible():
+            return
+        values = tuple(values)
+        self._tick_rows(
+            row for row in range(self.count())
+            if self.itemData(row) is not None and self.itemData(row) in values
+        )
+
+    def _tick_rows(self, rows) -> None:
+        """Tick exactly ``rows``; every other keyed row is cleared."""
+
+        ticked = set(rows)
+        for row in range(self.count()):
+            item = self._model.item(row)
+            if item.data(QtCore.Qt.UserRole) is None:
+                continue
+            checked = row in ticked
+            if bool(item.data(_CHECKED_ROLE)) != checked:
+                item.setData(checked, _CHECKED_ROLE)
+                item.setData(_check_icon(checked), QtCore.Qt.DecorationRole)
+        self._checked_changed()
+
+    def _toggle_row(self, row: int) -> None:
+        item = self._model.item(int(row))
+        if item is None or item.data(QtCore.Qt.UserRole) is None or not item.isEnabled():
+            return
+        self._tick_rows(
+            other for other in range(self.count())
+            if (other == row) != bool(self.itemData(other, _CHECKED_ROLE))
+        )
+
+    def _header_rows(self, row: int) -> tuple[int, ...]:
+        """The enabled keyed rows under the header at ``row``, up to the next one."""
+
+        rows = []
+        for other in range(int(row) + 1, self.count()):
+            item = self._model.item(other)
+            if item.data(QtCore.Qt.UserRole) is None:
+                break
+            if item.isEnabled():
+                rows.append(other)
+        return tuple(rows)
+
+    def _checked_text(self) -> str:
+        """The ticked keys in list order, a run of three or more consecutive
+        rows (unbroken by a header) written ``first–last``."""
+
+        parts: list[str] = []
+        run: list[str] = []
+
+        def close_run() -> None:
+            parts.extend((f"{run[0]}–{run[-1]}",) if len(run) >= 3 else run)
+            run.clear()
+
+        for row in range(self.count()):
+            if self.itemData(row) is not None and self.itemData(row, _CHECKED_ROLE):
+                run.append(str(self.itemData(row)))
+            else:
+                close_run()
+        close_run()
+        return ", ".join(parts)
+
+    def _checked_changed(self) -> None:
+        if not self._checkable:
+            return
+        ticked = ", ".join(str(value) for value in self.checked_data())
+        if self.toolTip() != ticked:
+            self.setToolTip(ticked)
+        self._invalidate_content_width()
+        self.update()
+
+    def _configure_checkable_view(self, view: QtWidgets.QAbstractItemView) -> None:
+        """Boxes as the rows' decoration; the current row follows the
+        pointer and wears the hover wash, never the chosen fill."""
+
+        side = scaled_even_px(16)
+        view.setIconSize(QtCore.QSize(side, side) if self._checkable else QtCore.QSize())
+        view.setMouseTracking(self._checkable)
+        view.viewport().installEventFilter(self)
+        view.setStyleSheet(_combo_popup_stylesheet() + (
+            f"QAbstractItemView::item:selected, QAbstractItemView::item:selected:hover "
+            f"{{ background-color: {ACCENT_TINT}; }}" if self._checkable else ""
+        ))
+
+    def _box_hit(self, view: QtWidgets.QAbstractItemView, index: QtCore.QModelIndex, pos: QtCore.QPoint) -> bool:
+        """Whether ``pos`` is on the row's box: anything before its words."""
+
+        option = view.viewOptions()
+        option.rect = view.visualRect(index)
+        option.features |= (
+            QtWidgets.QStyleOptionViewItem.HasDecoration | QtWidgets.QStyleOptionViewItem.HasDisplay
+        )
+        option.decorationSize = view.iconSize()
+        option.icon = index.data(QtCore.Qt.DecorationRole)
+        option.text = str(index.data(QtCore.Qt.DisplayRole) or "")
+        words = view.style().subElementRect(QtWidgets.QStyle.SE_ItemViewItemText, option, view)
+        return int(pos.x()) < words.left()
+
+    def _checkable_mouse(self, view: QtWidgets.QAbstractItemView, event) -> bool:
+        """A press and release on a row's box tick it, the list open; any
+        other click goes on to the view (``clicked``: only this one)."""
+
+        kind = event.type()
+        index = view.indexAt(event.pos())
+        if kind == QtCore.QEvent.MouseMove:
+            if index.isValid() and index.flags() & QtCore.Qt.ItemIsEnabled and index != view.currentIndex():
+                view.setCurrentIndex(index)
+            return False
+        if event.button() != QtCore.Qt.LeftButton:
+            return False
+        on_box = (
+            index.isValid()
+            and index.data(QtCore.Qt.UserRole) is not None
+            and bool(index.flags() & QtCore.Qt.ItemIsEnabled)
+            and self._box_hit(view, index, event.pos())
+        )
+        if kind in (QtCore.QEvent.MouseButtonPress, QtCore.QEvent.MouseButtonDblClick):
+            self._box_press = index.row() if on_box else -1
+            return on_box
+        pressed, self._box_press = self._box_press, -1
+        if pressed < 0:
+            return False
+        if on_box and index.row() == pressed:
+            self._toggle_row(pressed)
+        return True
+
     def clear(self) -> None:
+        if self._checkable:
+            # A refill closes an open list without emitting: what was
+            # ticked belonged to rows that are gone.
+            self._checked_at_open = None
+            self.hidePopup()
         previous = self._current_index
         if self.count():
             self._model.removeRows(0, self.count())
@@ -3721,12 +3959,25 @@ class FluentComboBox(QtWidgets.QAbstractButton):
 
         view.clicked.connect(self._commit_flat_index)
         view.activated.connect(self._commit_flat_index)
+        if self._checkable:
+            self._configure_checkable_view(view)
 
     def _commit_flat_index(self, index: QtCore.QModelIndex) -> None:
         if not index.isValid() or not (
             index.flags() & QtCore.Qt.ItemIsEnabled
             and index.flags() & QtCore.Qt.ItemIsSelectable
         ):
+            return
+        if self._checkable:
+            # The words of a row: only this one; of a header: its rows.
+            if index.data(QtCore.Qt.UserRole) is not None:
+                self._tick_rows((index.row(),))
+            elif self._headers_select:
+                self._tick_rows(self._header_rows(index.row()))
+            else:
+                return
+            self.hidePopup()
+            QtCore.QTimer.singleShot(0, self._restore_collapsed_focus)
             return
         self.setCurrentIndex(index.row())
         self.hidePopup()
@@ -3782,6 +4033,25 @@ class FluentComboBox(QtWidgets.QAbstractButton):
             elif event.type() == QtCore.QEvent.KeyPress and event.key() in (QtCore.Qt.Key_Up, QtCore.Qt.Key_Down, QtCore.Qt.Key_F4):
                 self.keyPressEvent(event)
                 return True
+        if self._checkable and self._popup_view is not None:
+            view = self._popup_view
+            if watched is view.viewport() and event.type() in (
+                QtCore.QEvent.MouseMove, QtCore.QEvent.MouseButtonPress,
+                QtCore.QEvent.MouseButtonRelease, QtCore.QEvent.MouseButtonDblClick,
+            ):
+                return self._checkable_mouse(view, event)
+            if watched is view and event.type() == QtCore.QEvent.KeyPress:
+                if event.key() == QtCore.Qt.Key_Space:
+                    if view.currentIndex().isValid():
+                        self._toggle_row(view.currentIndex().row())
+                    return True
+                if event.key() in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
+                    self._commit_flat_index(view.currentIndex())
+                    return True
+            if watched is self._popup and event.type() == QtCore.QEvent.Hide:
+                opened, self._checked_at_open = self._checked_at_open, None
+                if opened is not None and self.checked_data() != opened:
+                    self.checked_edited.emit(self.checked_data())
         if (
             watched is self._popup_view
             and event.type() == QtCore.QEvent.KeyPress
@@ -3918,6 +4188,13 @@ class FluentComboBox(QtWidgets.QAbstractButton):
         )
 
     def _collapsed_text_candidates(self) -> tuple[str, ...]:
+        if self._checkable:
+            # What the box may say: its placeholder, what is ticked, or any
+            # one key alone.
+            return (
+                self._placeholder, self._checked_text(),
+                *(str(self.itemData(row)) for row in range(self.count()) if self.itemData(row) is not None),
+            )
         return tuple(self.itemText(index) for index in range(self.count()))
 
     def _collapsed_content_width(self) -> int:
@@ -3948,10 +4225,11 @@ class FluentComboBox(QtWidgets.QAbstractButton):
         )
         content_width = max(self._collapsed_content_width(), minimum_text)
         left, right, drop_width = self._collapsed_text_chrome()
-        return QtCore.QSize(
-            content_width + left + right + drop_width,
-            max(self.minimumHeight(), metrics.height() + scaled_px(4)),
-        )
+        width = content_width + left + right + drop_width
+        if self._checkable:
+            # Many ticked keys elide; the whole list is in the tooltip.
+            width = min(width, scaled_px(200))
+        return QtCore.QSize(width, max(self.minimumHeight(), metrics.height() + scaled_px(4)))
 
     def minimumSizeHint(self):  # noqa: N802 - Qt API name
         return self.sizeHint()
@@ -3987,8 +4265,10 @@ class FluentComboBox(QtWidgets.QAbstractButton):
 
         if self._line_edit is None:
             text_rect = self._collapsed_text_rect()
-            # The blank choice reads as an empty field's placeholder does.
-            ink = DISABLED_INK if not enabled else MUTED_INK if self.current_is_blank() else TEXT
+            # The blank choice reads as an empty field's placeholder does,
+            # and so does a checkable box with nothing ticked.
+            blank = not self.checked_data() if self._checkable else self.current_is_blank()
+            ink = DISABLED_INK if not enabled else MUTED_INK if blank else TEXT
             painter.setPen(QtGui.QColor(ink))
             painter.setFont(self._collapsed_font())
             text = painter.fontMetrics().elidedText(
@@ -4026,6 +4306,9 @@ class FluentComboBox(QtWidgets.QAbstractButton):
         self._sync_popup_selection()
         self._resize_popup_to_contents()
         self._place_popup()
+        if self._checkable:
+            self._checked_at_open = self.checked_data()
+            popup.installEventFilter(self)
         popup.show()
         popup.raise_()
         view.setFocus(QtCore.Qt.PopupFocusReason)
@@ -4167,14 +4450,20 @@ class FluentComboBox(QtWidgets.QAbstractButton):
         view.ensurePolished()
         column = self.modelColumn()
         rows = self._visible_popup_row_count()
-        row_height = int(view.sizeHintForRow(0)) if rows > 0 else 0
-        if rows > 0 and row_height <= 0:
-            row_height = view.fontMetrics().height() + scaled_px(8)
+        # A list's rows each as tall as it is: a header without a box is
+        # shorter than a row with one, and a list as tall as its first row
+        # times the count cut its last row off.  A tree's revealed rows are
+        # not its model's top rows, and are all one height.
+        if isinstance(view, QtWidgets.QListView):
+            heights = [int(view.sizeHintForRow(row)) for row in range(rows)]
+        else:
+            heights = [int(view.sizeHintForRow(0))] * rows
+        fallback = view.fontMetrics().height() + scaled_px(8)
         # The view's frame is its border with the stylesheet padding folded
         # in, on every side; above the view the popup keeps one gap.
         side = int(view.frameWidth())
         content_width = max(0, int(view.sizeHintForColumn(column)))
-        content_height = popup_gap() + 2 * side + rows * row_height
+        content_height = popup_gap() + 2 * side + sum(height if height > 0 else fallback for height in heights)
         below, _available = self._popup_space_below()
         bar = fluent_scrollbar_thickness()
         needs_vertical = self._popup_row_total() > rows or content_height > below
@@ -4223,16 +4512,28 @@ class FluentComboBox(QtWidgets.QAbstractButton):
 
     def _display_text(self) -> str:
         """The text painted in the COLLAPSED combo (the seam a tree combo overrides to show a
-        fuller source-qualified name).  Default: the current item's own text."""
-        return self.currentText()
+        fuller source-qualified name).  Default: the current item's own text, without the
+        indent a grouped list gives the rows under a header; checkable: what is ticked."""
+        if self._checkable:
+            return self._checked_text() or self._placeholder
+        return self.currentText().lstrip()
 
     def _sync_popup_selection(self) -> None:
-        """Project the collapsed flat selection into the materialized view."""
+        """Project the collapsed flat selection into the materialized view.
+
+        A checkable list opens on its first ticked row, else its first row
+        to pick."""
 
         view = self._popup_view
         if view is None:
             return
-        index = self._model.index(self._current_index, 0)
+        row = self._current_index
+        if self._checkable:
+            row = next(
+                (other for other in range(self.count()) if self.itemData(other, _CHECKED_ROLE)),
+                self._selectable_row(0, 1),
+            )
+        index = self._model.index(row, 0)
         if not index.isValid():
             view.clearSelection()
             view.setCurrentIndex(QtCore.QModelIndex())
@@ -4272,6 +4573,11 @@ class FluentComboBox(QtWidgets.QAbstractButton):
             return
         if key == QtCore.Qt.Key_Escape and self._popup is not None:
             self.hidePopup()
+            event.accept()
+            return
+        if self._checkable and key in (QtCore.Qt.Key_Up, QtCore.Qt.Key_Down, QtCore.Qt.Key_Home, QtCore.Qt.Key_End):
+            # Several rows are picked in the list, never by stepping the box.
+            self.showPopup()
             event.accept()
             return
         if key in (
