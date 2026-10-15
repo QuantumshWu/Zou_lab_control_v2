@@ -9365,6 +9365,7 @@ class FluentSelectionGrid(QtWidgets.QTableView):
                 background: transparent;
                 border: none;
                 outline: none;
+                selection-background-color: transparent;
                 font: {fluent_font_size()}pt "{FONT}";
             }}
             QHeaderView {{ background: transparent; }}

@@ -98,6 +98,11 @@ def test_a_chosen_grid_card_is_the_selected_fill_and_nothing_round_it(app, host)
     middle = chosen.center().x()
     assert colour(chosen.left() + 6, chosen.center().y()) == SELECTED.upper()
     assert colour(middle, chosen.top() + inset) == SELECTED.upper(), "no outline on the chosen card"
+    # Nor round it: the gutter outside a chosen card is the ground an empty
+    # card's gutter is -- the view's own selection highlight showed there as
+    # a ring in the platform's highlight blue.
+    assert colour(middle, chosen.top() + inset - 1) == colour(empty.center().x(), empty.top() + inset - 1)
+    assert colour(chosen.left(), chosen.center().y()) == colour(empty.left(), empty.center().y())
     assert colour(empty.left() + 6, empty.center().y()) == BG.upper(), "an empty card is a neutral fill"
     assert colour(empty.center().x(), empty.top() + inset) == BG.upper(), "and has no edge"
     assert colour(derived.left() + 6, derived.center().y()) == ACCENT_TINT.upper()
