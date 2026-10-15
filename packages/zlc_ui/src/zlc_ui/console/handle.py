@@ -94,6 +94,8 @@ class TaskConsoleHandle(QtCore.QObject):
     logic_start_requested = QtCore.pyqtSignal(str)
     logic_auto_preview_changed = QtCore.pyqtSignal(str, bool)
     logic_stop_requested = QtCore.pyqtSignal(str)
+    #: Put the configuration the running node uses back into its draft.
+    logic_revert_requested = QtCore.pyqtSignal(str)
     logic_edit_requested = QtCore.pyqtSignal(str)
     logic_remove_requested = QtCore.pyqtSignal(str)
     logic_draft_changed = QtCore.pyqtSignal(str, object)
@@ -421,6 +423,7 @@ class TaskConsoleHandle(QtCore.QObject):
                 confirm_text="Continue",
                 cancel_text="Stop",
                 kind="info",
+                cancel_role="destructive",
             )
         )
 
@@ -633,12 +636,21 @@ class TaskConsoleHandle(QtCore.QObject):
         if row is not None:
             retire_widget(row)
         self._show_logic_rows()
+        self._show_console_state()
 
     def set_logic_name(self, node_id: str, name: str) -> None:
         self._rows[str(node_id)].set_name(name)
 
     def set_logic_state(self, node_id: str, state: str, status_text: str = "") -> None:
         self._rows[str(node_id)].set_state(state, status_text)
+        self._show_console_state()
+
+    def _show_console_state(self) -> None:
+        # The worst of the nodes': a failure anywhere, else a run anywhere.
+        words = {row.state_word for row in self._rows.values()}
+        self._view.set_console_state(
+            "error" if "error" in words else "running" if "running" in words else "idle"
+        )
 
     def set_logic_commands(
         self, node_id: str, *, can_start: bool, can_stop: bool, pending: bool = False
@@ -768,6 +780,9 @@ class TaskConsoleHandle(QtCore.QObject):
             )
             editor.stop_requested.connect(
                 lambda _=None, nid=key: self.logic_stop_requested.emit(nid)
+            )
+            editor.revert_requested.connect(
+                lambda _=None, nid=key: self.logic_revert_requested.emit(nid)
             )
             editor.remove_requested.connect(
                 lambda _=None, nid=key: self.logic_remove_requested.emit(nid)

@@ -41,6 +41,7 @@ panel_publisher_draft_changed = pyqtSignal(str, object)
 logic_start_requested = pyqtSignal(str)
 logic_auto_preview_changed = pyqtSignal(str, bool)
 logic_stop_requested = pyqtSignal(str)
+logic_revert_requested = pyqtSignal(str)       # put the running configuration back in the draft
 logic_edit_requested = pyqtSignal(str)
 logic_remove_requested = pyqtSignal(str)
 logic_draft_changed = pyqtSignal(str, object)
@@ -156,7 +157,12 @@ card's strip (`strip_rect()`) -- its body is its plot's -- and the whole of
 an empty card, whose blank body shows the open hand; where the board puts
 a carried card does not depend on where it is held.  Setting is as tall as every other button and the header `×` is
 square at that height: the quiet one-glyph remover (red only under the
-pointer), whose first click arms it as the white-on-red confirm.  On a card
+pointer).  Removing a panel from the header `×` takes two clicks
+(`FluentButton(confirm_twice=...)`): the first arms the white-on-red
+confirm, a second within the system double-click interval removes, and left
+alone it returns to rest.  The Remove in its Setting frame removes the same
+panel and takes two clicks the same way.  Setting
+is held down (the active face) while its frame is open.  On a card
 wider than what its viewport shows, the two ride the viewport's right edge
 (`keep_commands_within(right)`), as far in from it as from the card's own
 end, so a panel is edited or removed without scrolling sideways; scrolled
@@ -262,7 +268,7 @@ remove_requested = pyqtSignal()
 auto_preview_changed = pyqtSignal(bool)
 
 set_name(text: str) -> None
-set_state(state: str, status_text: str = "") -> None  # idle|running|error
+set_state(state: str, status_text: str = "") -> None  # idle|draft|running|error
 set_commands(*, can_start: bool, can_stop: bool, pending: bool = False) -> None
 set_preview_offered(offered: bool) -> None
 set_auto_preview(enabled: bool) -> None
@@ -282,17 +288,48 @@ at the width of its widest word, so nothing beside it moves; Stop follows
 command is disabled except the owning Task's own Stop (`owns_task`), which
 raises the same `stop_requested` as the status strip's "Stop task".
 
+A state is drawn as its status word (`STATE_WORDS`): a draft as `idle`, a
+run as `running`, a failure as `error`, the dot and the status line from the
+one `STATUS_CUES` table, on the row and on the node's Edit page alike.
+Removing a node takes two clicks, from the row's `×` and from the Remove on
+its Edit page alike: the first arms the white-on-red confirm, and
+`remove_requested` comes with the second.  Disabled (a Task taking the
+console over) or hidden, an armed remover returns to rest.
+
 A node's Edit page is three bands and only the middle one scrolls: the
 header (the Name, then `(api_name · kind)` in grey, and the status line)
-above, the rows, and the action bar (Remove | Plot, Start, Stop) as the
-page's foot, on the rows' left and right edges.  A newly opened page starts
-at its first row; after that its bar is the operator's, across tab switches.
-The first row is the Name, in the page's one label column; its box's tooltip
-is the node's internal ID.  It commits (`name_committed`) on Return or when
-the focus leaves the box, once, and only when it says something new; a
-refused name is one sentence under the line, in the control column, until
-the next commit.  It stays editable while a Task holds the console.  The tab
-reads `Edit · <name>` and is retitled when the node is renamed.
+above, the rows, and the action bar (Remove | Revert, Plot, Start, Stop) as
+the page's foot, on the rows' left and right edges.  A newly opened page
+starts at its first row; after that its bar is the operator's, across tab
+switches.  The first row is the Name, in the page's one label column; its
+box's tooltip is the node's internal ID.  It commits (`name_committed`) on
+Return or when the focus leaves the box, once, and only when it says
+something new; a refused name is one sentence under the line, in the control
+column, until the next commit.  It stays editable while a Task holds the
+console.  The tab reads `Edit · <name>` and is retitled when the node is
+renamed.  A rename is not an edit: it is not part of the draft, so it never
+marks a running node `· edited` and Revert leaves it alone.
+
+A running node's page stays editable, and the edits are the next run's.  The
+projection's `edited` says the draft differs from the configuration the
+current run (running, following or queued) was started with.  While it holds,
+Revert -- a standard command in its own fixed slot left of the Plot group,
+always shown -- is enabled and raises `revert_requested`
+(`logic_revert_requested` on the handle), which makes that whole configuration
+the draft again -- replacing it, so a device or artifact input only the edit
+named goes too -- without restarting; Restart wears the dirty star and the
+primary role (`set_dirty`, the On Pulse rule) with the tooltip "Restart to run
+the edited configuration".  A Restart of an unedited run is a standard
+command; Start, with nothing running, is the page's primary.  The presenter
+also ends the row's and the header's status with `· edited`, and a Restart
+it refused while the run goes on adds `; Restart refused: <why>` there until
+the next edit.  Only Restart or Revert ends an edit: a following processor
+whose source restarts, or a Measurement a Task restarts to acquire from,
+rebuilds the configuration it was started with, so the cue stays, and while it
+follows its status names that configuration's source even when the edit has
+issues -- those are the next run's.  A queued Restart's configuration is the
+one the node runs only until the Restart is discarded (Stop, another node
+taking its device); then it is the old run's again.
 
 ## `StatusStrip` (internal)
 
@@ -323,12 +360,20 @@ set_logic_kinds(kinds) -> None
 set_cards(cards: tuple[PanelCardView, ...]) -> None
 set_logic_rows(rows: tuple[LogicRowView, ...]) -> None
 set_paused(paused: bool) -> None
+set_console_state(word: str) -> None  # idle|running|error
 set_selectors(enabled: bool) -> None
 set_task_takeover(active: bool) -> None
 show_status(text: str, severity: str) -> None
 set_summary(text: str) -> None
 set_editor_tab_title(editor, title: str) -> None
 ```
+
+Pause is a toggle command: `set_paused(True)` turns its label to Resume and
+holds it down (the active face) until the presenter says the console runs
+again; the click only asks.  Its slot fits both words, so the flip moves
+nothing beside it.  The header dot is the console's state, which
+the handle keeps as the worst of its logic nodes': `error` while one has
+failed, `running` while one runs, `idle` otherwise.
 
 The header names the window (`task`) as a label; it is not an input.  Its
 one chooser lists `Plot: <kind>` and `<Layer>: <api_name>` entries -- a node

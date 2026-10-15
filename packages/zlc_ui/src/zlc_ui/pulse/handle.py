@@ -370,8 +370,8 @@ class PulseEditorHandle(QtCore.QObject):
     def set_scan_page(self, record: Any) -> None:
         self._view.scan_view.set_page(record)
 
-    def set_scan_progress_text(self, text: str) -> None:
-        self._view.scan_view.set_progress_text(text)
+    def set_scan_progress_text(self, text: str, word: str) -> None:
+        self._view.scan_view.set_progress_text(text, word)
 
     # ----------------------------------------------------------- the preview
 
@@ -389,8 +389,10 @@ class PulseEditorHandle(QtCore.QObject):
     def set_preview_size_names(self, names: tuple[str, ...]) -> None:
         self._view.preview_view.set_size_names(names)
 
-    def set_preview_status(self, text: str) -> None:
-        self._view.preview_view.set_status(text)
+    def set_preview_status(self, text: str, word: str) -> None:
+        """The preview's status line, in the ink of status ``word``."""
+
+        self._view.preview_view.set_status(text, word)
 
     def show_preview_placeholder(self, text: str) -> None:
         self._view.preview_view.show_placeholder(text)
@@ -427,8 +429,10 @@ class PulseEditorHandle(QtCore.QObject):
     def set_target_width_rules(self, digital: Any, dac: Any) -> None:
         self._view.target_view.set_width_rules(digital, dac)
 
-    def set_target_feedback(self, text: str) -> None:
-        self._view.target_view.set_feedback(text)
+    def set_target_feedback(self, text: str, word: str) -> None:
+        """The Target page's line, in the ink of status ``word``."""
+
+        self._view.target_view.set_feedback(text, word)
 
 
 __all__ = ["PulseEditorHandle"]

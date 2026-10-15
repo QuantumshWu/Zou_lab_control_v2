@@ -307,7 +307,8 @@ class LoadedLayout:
     panels: tuple[PanelState, ...]
     panel_ids: tuple[str, ...]
     #: One sentence per connection or fate the document had and this board
-    #: cannot carry, for the status strip: nothing is dropped silently.
+    #: cannot carry, and per kept row whose device or source no longer fits,
+    #: for the status strip: nothing is dropped or kept silently.
     notes: tuple[str, ...]
 
 
@@ -322,9 +323,14 @@ def resolve_layout(
     """Resolve every entry onto fresh panel identities, touching no device.
 
     A named device or signal which is absent on today's apparatus remains an
-    unresolved stopped draft, as a reusable layout requires.  A name which can
-    be resolved and contradicts its declared capability/contract is an invalid
-    document and rejects the whole candidate.
+    unresolved stopped draft, as a reusable layout requires.  So does a row
+    that names a device which no longer provides what it needs, or reads a
+    signal declared as another contract: the board keeps rows the operator
+    is not using today, and the apparatus or an upstream row may have
+    changed under one.  Its device and source are kept as written, said in
+    ``notes``, and the row's own finalization refuses its Start until they
+    are chosen again.  Only a document that cannot name today's nodes or
+    frames is refused whole.
 
     ``panel_ids`` are the identities the console minted for this load, in
     saved order.  Every ``@logic/<saved panel id>/<output>`` in the document
@@ -339,6 +345,7 @@ def resolve_layout(
     fresh = tuple(str(panel_id).strip() for panel_id in panel_ids)
     if len(fresh) != len(document.panels):
         raise LayoutError("a load mints one fresh panel_id per saved panel")
+    notes: list[str] = []
     bindings: list[LogicBinding] = []
     installed = getattr(installation, "devices", {})
     installed_keys = set(installed) if isinstance(installed, Mapping) else set()
@@ -356,20 +363,20 @@ def resolve_layout(
             options = device_key_options(descriptor, installation=installation, values=values)
         except Exception as error:
             raise LayoutError(f"{entry.name}: {error}") from error
-        required = tuple(
-            requirement.argument_name
-            for requirement in descriptor.device_requirements
-        )
         selected: dict[str, str] = {}
-        for name in required:
+        for requirement in descriptor.device_requirements:
+            name = requirement.argument_name
             available = options.get(name, ())
             key = entry.device_keys.get(name, available[0] if available else "")
             if not isinstance(key, str):
                 raise LayoutError(f"{entry.name}: device input {name!r} must be text")
+            # Only a device input the row's values use is asked; ``options``
+            # holds exactly those.
             if name in options and key in installed_keys and key not in available:
-                raise LayoutError(
-                    f"{entry.name}: {key!r} is incompatible with device input "
-                    f"{name!r}"
+                notes.append(
+                    f"logic {entry.name} names {key!r} as its {name}, which does "
+                    f"not provide {requirement.capability_token}; the row is kept "
+                    "and cannot start until another device is chosen"
                 )
             selected[name] = key
         artifact_specs = artifact_input_specs(descriptor)
@@ -433,9 +440,10 @@ def resolve_layout(
                 for spec in input_specs
                 if spec.contract_id is not None
             )
-            raise LayoutError(
-                f"{binding.name}: {signal_text(source, names)!r} publishes {actual!r}, expected "
-                f"{', '.join(expected) if expected else 'a compatible Dataset'}"
+            notes.append(
+                f"logic {binding.name} reads {signal_text(source, names)}, which publishes "
+                f"{actual}, not {', '.join(expected) if expected else 'a compatible Dataset'}; "
+                "the row is kept and cannot start until another source is chosen"
             )
 
     for index, state in enumerate(document.panels):
@@ -445,7 +453,6 @@ def resolve_layout(
             raise LayoutError(f"panel {index + 1}: {error}") from error
 
     renamed = dict(zip(document.panel_ids, fresh, strict=True))
-    notes: list[str] = []
     panels: list[PanelState] = []
     for state in document.panels:
         who = f"panel {signal_text(state.title, names)!r}"
@@ -514,15 +521,19 @@ def _sequence(value: object, where: str) -> Sequence[object]:
 
 
 def _current_authoring_values(fields, saved: Mapping[str, Any]) -> dict[str, Any]:
-    """Read only today's declared leaves, including columns of authored rows."""
+    """Read only today's declared leaves, including columns of authored rows.
+
+    Rows come back as the draft holds them, a tuple: a field its switch has
+    turned off is kept as read, not projected.
+    """
     values = {}
     for field in fields:
         if field.name not in saved:
             continue
         value = saved[field.name]
         if str(field.value_type) == "rows" and isinstance(value, (list, tuple)):
-            value = [_current_authoring_values(field.columns, row) if isinstance(row, Mapping)
-                     else row for row in value]
+            value = tuple(_current_authoring_values(field.columns, row) if isinstance(row, Mapping)
+                          else row for row in value)
         values[field.name] = value
     return values
 

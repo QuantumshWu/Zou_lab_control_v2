@@ -245,7 +245,12 @@ unavailable type rather than a broken bench. Logic leaves follow the same
 pattern with a `logic_node.py` exporting `LOGIC_NODE`.
 Factories must return declared capability instances; startup failures are
 reported per leaf in `Installation.failures`, while independent leaves remain
-usable and close in reverse order.
+usable and close in reverse order. A device whose type this machine cannot
+build -- its device folder did not import, or no folder declares the type any
+more -- is one of those failures; its reason is that folder's import error,
+never a sibling's, and a type no folder declares has none. It does not stop
+the others. Simulation settings with no virtual device to read
+them are left unread rather than refused.
 
 ## Execution layers
 
@@ -269,9 +274,17 @@ The runtime has one direction of responsibility:
 
 For a manually controlled experiment, the product notebook calls
 `ExperimentSession.load_pulse` and `ExperimentSession.fire` around a pure
-camera measurement; those methods own compile/load and sequencer execution. For
+camera measurement; those methods own compile/load and sequencer execution.
+`load_pulse` plays every API and Scan field at its authored value, as On Pulse
+does without a scan table: a Scan mark only makes a field scannable. For
 an automated experiment, hosted Calibration owns that whole sequence and
-returns a saved calibration artifact. Calibration discovers its site count and
+returns a saved calibration artifact. With Frames set to Saved frames it
+instead calibrates again the samples a run kept with Save every sample, taking
+the crop, exposure and pulse facts from the run record saved beside them; that
+replay is offline work, so it uses no camera, sequencer or Pulse, claims no
+device and can run while another node holds the camera. The Pulse, Samples,
+exposure and API-field settings stay in its draft greyed and unchecked, and
+New frames finds them as they were. Calibration discovers its site count and
 centers from acquired images and accepts no Target, Science Context, authored
 grid rows, columns, or site count. Feedback later combines that ordinary
 Calibration with its selected Science Context and directly maps positive Target
@@ -308,8 +321,11 @@ positive numbers for the middle frames between them, `rest`; one calibration
 alone reads every frame), and selects `default`, `box`, `psf`, or `uniform_psf`
 readout.  Which calibration reads which frame is resolved against the frames
 that arrive, so `first`, `last` and `rest` follow a cycle that gains or loses a
-frame, a middle number the shorter cycle no longer has is reported absent (it
-never becomes the last frame), and any collision is refused by name.
+frame, a middle number the shorter cycle no longer has is kept and noted absent
+(it reads nothing, never becomes the last frame and stops no run), and any
+collision or unread frame is refused by name.  A calibration claiming no frame
+is parked: kept in the run record, never read and never checked against the
+calibrations that are; only a list in which none reads is refused.
 It publishes three same-publication Dataset siblings: per-site numeric
 `counts` in the source frame's effective unit; per-site boolean `occupied`,
 whose component validity is the sole truth for whether each site was readable;
@@ -358,8 +374,17 @@ or Selected, marked on a start × end matrix with ordinary table selection
 (drag a rectangle, Ctrl to add or remove, a row or column header for every pair
 from or to that frame). Grid edits retain the rule with sparse pair overrides:
 excluding `0` to `last` from From first still selects newly added middle frames.
+Selected keeps a list of its own (`custom_pairs`) while a rule or None is
+picked, so picking it again brings the list back; a pair marked under None
+joins it. A pair the list keeps unselected is parked: kept as written, never
+checked (it may repeat a selected pair or stand unfinished), never published,
+and recorded with the run (`parked_pairs`). A list the grid cannot read is
+named in red and the grid is locked rather than written over.
 Endpoint text `0`/`last` follows the first/last identity; middle indices never
-become a new endpoint when the count shrinks. The editor follows declared source
+become a new endpoint when the count shrinks: a selected pair whose middle frame
+the source does not carry is kept, named in an amber note and in the run record
+(`absent_pairs`), and left out of the published pairs -- the run fails only when
+none of its selected pairs is in the source. The editor follows declared source
 draft frames immediately, while published data uses the actual acquired schema.
 The `slm_feedback` Task takes one ordinary camera/readout Calibration and one
 strict Science Context. Calibration has no SLM or Science Context input.

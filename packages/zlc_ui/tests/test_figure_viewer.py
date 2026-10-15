@@ -437,16 +437,23 @@ assert intents[-1] == (
      'cells': ((1, 0, '0.5'),)},
 )
 
+app.processEvents()
+editing_row = (editor.axis_combo.geometry(), editor.apply_axis_button.geometry())
+assert editor.apply_axis_button.text() == 'Apply axis'
 QtTest.QTest.mouseClick(editor.add_axis_button, QtCore.Qt.LeftButton)
+app.processEvents()
+# Apply axis reads Create axis now, in the same slot: nothing beside it moves.
+assert editor.apply_axis_button.text() == 'Create axis'
+assert (editor.axis_combo.geometry(), editor.apply_axis_button.geometry()) == editing_row
 # Add is a mode of the same control group, entered without a presenter
 # round trip: nothing of the selected axis may still be clickable, and the
 # New axis form must be writable even when nothing was selected before.
 assert not editor.remove_axis_button.isEnabled()
 assert not editor.axis_value_table.isEnabled()
 assert editor.axis_name_edit.isEnabled() and editor.apply_axis_button.isEnabled()
-before_delete = len(intents)
+before_remove = len(intents)
 QtTest.QTest.mouseClick(editor.remove_axis_button, QtCore.Qt.LeftButton)
-assert len(intents) == before_delete, 'Delete fired while adding an axis'
+assert len(intents) == before_remove, 'Remove fired while adding an axis'
 editor.axis_name_edit.setText('shot')
 editor.axis_size_spin.setValue(2)
 sent = len(intents)

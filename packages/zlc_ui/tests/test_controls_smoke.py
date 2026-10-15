@@ -37,6 +37,17 @@ for button in (
     view.reset_button, view.stop_button, view.confirm_button,
 ):
     assert isinstance(button, FluentButton), type(button)
+# Exclude selected and Reset take something away (red, one click); Restore
+# selected gives back; Stop is red; Continue is the surface's one primary.
+assert [button.role() for button in (
+    view.exclude_selected_button, view.restore_selected_button,
+    view.reset_button, view.stop_button, view.confirm_button,
+)] == ['destructive', 'standard', 'destructive', 'destructive', 'primary']
+view.select_points(('site-b',))
+view.exclude_selected_button.click()
+assert view.excluded_ids == ('site-b',)
+view.reset_button.click()
+assert view.excluded_ids == ()
 view.select_points(('site-b',))
 view.exclude_selected_button.click()
 assert view.excluded_ids == ('site-b',)

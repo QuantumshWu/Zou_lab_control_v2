@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from zlc_atom.authoring import AuthoringChoice, AuthoringField, AuthoringSchema
 from zlc_atom.nodes._framework.descriptor import (
     DatasetInputSpec,
@@ -11,8 +13,8 @@ from zlc_atom.nodes._framework.descriptor import (
 from zlc_atom.nodes._framework.frames import frame_identity
 
 from .processor import (
-    SURVIVAL_OUTPUTS, FrameSurvivalProcessor, _checked_pairs, _checked_overrides,
-    _rule_pairs, _selected_pairs, pair_label,
+    PAIR_RULES, SURVIVAL_OUTPUTS, FrameSurvivalProcessor, _checked_overrides, _checked_pairs, _rule_pairs,
+    _selected_pairs, pair_label,
 )
 
 #: What the operator picks: a question that follows the frames the source
@@ -30,33 +32,73 @@ _SELECTIONS = (
     AuthoringChoice("none", "None"),
     AuthoringChoice("custom", "Selected"),
 )
-#: The choices that name their pairs rather than follow a rule.
-_EXPLICIT = ("none", "custom")
+#: A rule's exception: selected adds the pair to the rule, unselected leaves
+#: it out.  Every row is in use, so every row is checked.
+_OVERRIDE_COLUMNS = (
+    AuthoringField("start", "text", "Start frame", "0", required=True),
+    AuthoringField("end", "text", "End frame", "last", required=True),
+    AuthoringField("selected", "bool", "Selected", True),
+)
+#: A row of Selected's own list: a selected row is published and checked;
+#: one kept unselected is parked -- kept as written, its ends filled in or
+#: not, and never checked, against the rows in use or at all.
+_LIST_COLUMNS = (
+    AuthoringField("start", "text", "Start frame", "0"),
+    AuthoringField("end", "text", "End frame", "last"),
+    AuthoringField("selected", "bool", "Selected", True),
+)
+_OVERRIDES = AuthoringField(
+    "pairs", "rows", "Rule overrides", (), columns=_OVERRIDE_COLUMNS, enabled_when=("selection", PAIR_RULES),
+    description="The rule's exceptions: selected=true adds a pair to it, false leaves one out.")
+_LIST = AuthoringField(
+    "custom_pairs", "rows", "Selected pairs", (), columns=_LIST_COLUMNS, enabled_when=("selection", ("custom",)),
+    description="Selected's own list: selected=true pairs are published; selected=false ones are parked -- "
+                "kept as written, never checked and never published. The list is kept while a rule or None "
+                "is picked, so Selected comes back to it.")
+
+
+def _overrides(rows):
+    """A rule's exceptions as checked ``(start, end, selected)``."""
+
+    return _checked_overrides(tuple((row["start"], row["end"], row["selected"]) for row in rows))
+
+
+def _published(rows):
+    """The pairs Selected's list publishes, checked: its selected rows, and only those."""
+
+    for index, row in enumerate(rows, 1):
+        for column in _LIST_COLUMNS[:2]:
+            if row["selected"] and not row[column.name].strip():
+                raise ValueError(f"{_LIST.label} row {index}: {column.label} must be filled in")
+    selected = tuple((row["start"], row["end"]) for row in rows if row["selected"])
+    return _checked_pairs(selected) if selected else ()
+
+
+def _parked(rows):
+    """The pairs Selected's list keeps unselected, as written."""
+
+    return tuple((row["start"], row["end"]) for row in rows if not row["selected"])
 
 
 def _validate(values):
-    overrides = _checked_overrides(tuple((row["start"], row["end"], row["selected"])
-                                        for row in values["pairs"]))
-    if values["selection"] == "none" or (
-        values["selection"] == "custom" and not any(selected for _start, _end, selected in overrides)
-    ):
+    # Only the list the selection reads is checked: the other one is kept as
+    # it was written (enabled_when), for when its choice is picked again.  Of
+    # Selected's list only the selected rows are: a parked row never stops Start.
+    selection = values["selection"]
+    if selection in PAIR_RULES:
+        _overrides(values["pairs"])
+    elif selection != "custom" or not _published(values["custom_pairs"]):
         raise ValueError("Pick a rule or select at least one pair.")
-    if values["selection"] == "custom":
-        _checked_pairs(tuple((start, end) for start, end, selected in overrides if selected))
-        if any(not selected for _start, _end, selected in overrides):
-            raise ValueError("Selected (custom) lists only the pairs it includes; remove rows marked not selected.")
+
 
 FRAME_SURVIVAL_SCHEMA = AuthoringSchema((
     AuthoringField("selection", "choice", "Published pairs", "all", required=True, choices=_SELECTIONS,
                    description="A named choice follows the frames the source carries: All forward pairs, "
                                "Consecutive (k→k+1), From first (0→k) or To last (k→last); None asks for "
-                               "no pair; Selected lists them. Grid edits override only the changed pairs; first/last follow "
-                               "the cycle."),
-    AuthoringField("pairs", "rows", "Pair selections", (), columns=(
-        AuthoringField("start", "text", "Start frame", "0", required=True),
-        AuthoringField("end", "text", "End frame", "last", required=True),
-        AuthoringField("selected", "bool", "Selected", True),
-    )),
+                               "no pair; Selected publishes its own list. Grid edits override only the changed "
+                               "pairs; first/last follow the cycle."),
+    _OVERRIDES,
+    _LIST,
 ), validator=_validate)
 
 
@@ -66,24 +108,46 @@ def _build(*, source_signal: str, **values: object) -> FrameSurvivalProcessor:
     if not selected_source:
         raise ValueError("source_signal must be non-empty")
     selection = authored["selection"]
-    overrides = tuple((row["start"], row["end"], row["selected"]) for row in authored["pairs"])
-    return FrameSurvivalProcessor(
-        source_signal=selected_source,
-        pairs=selection if selection != "custom" else tuple(
-            (start, end) for start, end, _selected in overrides),
-        pair_overrides=overrides if selection != "custom" else (),
-    )
+    if selection != "custom":
+        return FrameSurvivalProcessor(source_signal=selected_source, pairs=selection,
+                                      pair_overrides=_overrides(authored["pairs"]))
+    listed = authored["custom_pairs"]
+    return FrameSurvivalProcessor(source_signal=selected_source, pairs=_published(listed),
+                                  parked_pairs=_parked(listed))
 
 
 def _editor_factory(parent=None):
     from PyQt5 import QtCore, QtWidgets
     from zlc_ui.fluent import (
-        FluentSegmentedButtons, FluentSelectionGrid, error_note_label, muted_note_label, row_gap, show_problem,
+        FONT, ORANGE_DARK, FluentSegmentedButtons, FluentSelectionGrid, error_note_label, fluent_font_size,
+        muted_note_label, row_gap, show_note, show_problem,
     )
     from zlc_ui.fluent.column_set import section_header
-    from .processor import PAIR_RULES
+    from zlc_ui.status import sentence
 
     labels = {choice.value: choice.label for choice in _SELECTIONS}
+    # Each list projected on its own, as the draft projects it under its own choice.
+    lists = {field.name: AuthoringSchema((replace(field, enabled_when=None),)) for field in (_OVERRIDES, _LIST)}
+
+    def read(field, value):
+        """One list as the grid reads it: its rows as the draft projects them
+        and the pairs it uses, checked -- or why the grid cannot read it.  A
+        list holds anything it was given while its choice is not picked (it
+        is kept unchecked), or when the lab API wrote it."""
+
+        try:
+            rows = lists[field.name].project_values({field.name: value})[field.name]
+            return rows, (_overrides(rows) if field is _OVERRIDES else _published(rows)), ""
+        except (TypeError, ValueError) as error:
+            return None, None, f"{field.label} cannot be marked on the grid: {error}"
+
+    def named(row):
+        """The pair a parked row names, or None: a parked row is never checked."""
+
+        try:
+            return _checked_pairs(((row["start"], row["end"]),))[0]
+        except ValueError:
+            return None
 
     class SurvivalForm(QtWidgets.QWidget):
         """Mark pairs on a start x end grid, or pick a named selection.
@@ -99,17 +163,28 @@ def _editor_factory(parent=None):
         empty card -- so what the rule decided and what was decided by hand
         are told apart at a glance.  The strip is the selection's closed
         set and always marks the one picked: a rule, None (no pair), or
-        Selected (the marked list, empty while it is begun).  Selected,
-        picked under a rule, keeps the rule's pairs as the list; picked
-        under None it begins an empty one.  A pair marked under None begins
-        a Selected list with it.
+        Selected (the marked list, empty while it is begun).  Selected has a
+        list of its own, kept while a rule or None is picked: picked again,
+        it comes back.  With no list to come back to, Selected picked under
+        a rule keeps the rule's pairs as the list; picked under None it
+        begins an empty one.  A pair marked under None joins the list and
+        picks Selected.
+
+        In Selected's list a pair unmarked leaves the list and one marked is
+        added, or selected in place when the list keeps it parked; every
+        other row -- parked, or selected but not in this source -- stays as
+        written.  A pair kept but not published this time is said, never
+        refused or dropped: one whose middle frame the source does not carry
+        is named in an amber note, one the list keeps unselected in a muted
+        one.  A list the grid cannot read (written through the lab API) is
+        said in red and the grid is locked, so no gesture writes over it.
 
         "Pairs" heads the section in the editor's label column, so the strip
         and the grid's first card start on the form's field edge.
         """
 
         draft_changed = QtCore.pyqtSignal(object)
-        managed_fields = ("selection", "pairs")
+        managed_fields = ("selection", "pairs", "custom_pairs")
 
         def __init__(self, parent=None):
             super().__init__(parent)
@@ -126,11 +201,25 @@ def _editor_factory(parent=None):
             self.table = FluentSelectionGrid(self)
             self.table.selection_edited.connect(self._marked)
             layout.addWidget(self.table, 0, QtCore.Qt.AlignLeft)
+            self.error = error_note_label()
+            layout.addWidget(self.error)
+            # The error line's shape in the amber of a note: said, not refused.
             self.note = error_note_label()
+            self.note.setStyleSheet(
+                f'color: {ORANGE_DARK}; background: transparent; border: none; font: {fluent_font_size()}pt "{FONT}";')
             layout.addWidget(self.note)
+            self.parked = muted_note_label("")
+            self.parked.setWordWrap(True)
+            self.parked.setVisible(False)
+            layout.addWidget(self.parked)
             self._frames = None
             self._selection = "all"
             self._overrides = ()
+            self._rows = ()
+            self._row_pairs = ()
+            self._listed = ()
+            self._keeps_list = False
+            self._problem = ""
             self._wanted = ()
 
         @property
@@ -153,35 +242,57 @@ def _editor_factory(parent=None):
         def _preset(self, choice):
             if choice == self._selection:
                 return
-            pairs = ()
-            if choice == "custom" and self._frames is not None:
-                # What is selected now becomes the list: a rule's pairs, or
-                # none at all after None.
+            # A choice on the strip starts afresh: a rule's exceptions go.
+            # Selected's list stays, for Selected to come back to.
+            change = {"selection": choice, "pairs": ()}
+            if choice == "custom" and not self._keeps_list and self._frames is not None:
+                # No list to come back to: what is selected now becomes it --
+                # a rule's pairs, or none at all after None.
                 count = len(self._frames)
-                pairs = tuple({"start": str(frame_identity(start, count)), "end": str(frame_identity(end, count)),
-                               "selected": True} for start, end in self._wanted)
-            self.draft_changed.emit({"values": {"selection": choice, "pairs": pairs}})
+                change["custom_pairs"] = tuple(
+                    {"start": str(frame_identity(start, count)), "end": str(frame_identity(end, count)),
+                     "selected": True} for start, end in self._wanted)
+            self.draft_changed.emit({"values": change})
 
         def _marked(self, cells):
-            if self._frames is None:
+            if self._frames is None or self._problem:
                 return
             count = len(self._frames)
-            previous = set(self._wanted)
             current = {(row, column + 1) for row, column in cells}
-            edits = {(start, end): selected for start, end, selected in self._overrides}
-            baseline = set() if self._selection in _EXPLICIT else set(_rule_pairs(self._selection, count))
-            for pair in previous ^ current:
-                identity = tuple(frame_identity(index, count) for index in pair)
-                if (pair in current) == (pair in baseline):
-                    edits.pop(identity, None)
-                else:
-                    edits[identity] = pair in current
-            self.draft_changed.emit({"values": {
-                # A pair marked under None begins a Selected list.
-                "selection": "custom" if self._selection == "none" else self._selection,
-                "pairs": tuple({"start": str(start), "end": str(end), "selected": selected}
-                               for (start, end), selected in edits.items()),
-            }})
+
+            def identity(pair):
+                return tuple(frame_identity(index, count) for index in pair)
+
+            if self._selection in PAIR_RULES:
+                # The edits are the rule's exceptions.
+                edits = {(start, end): selected for start, end, selected in self._overrides}
+                baseline = set(_rule_pairs(self._selection, count))
+                for pair in set(self._wanted) ^ current:
+                    if (pair in current) == (pair in baseline):
+                        edits.pop(identity(pair), None)
+                    else:
+                        edits[identity(pair)] = pair in current
+                self.draft_changed.emit({"values": {"selection": self._selection, "pairs": tuple(
+                    {"start": str(start), "end": str(end), "selected": selected}
+                    for (start, end), selected in edits.items())}})
+                return
+            # The edits are Selected's list.  Under None none of it is shown,
+            # so nothing of it is unmarked: a marked pair joins it.
+            previous = set(self._listed)
+            if self._selection == "none":
+                current |= previous
+            removed = {identity(pair) for pair in previous - current}
+            added = [identity(pair) for pair in sorted(current - previous)]
+            rows = []
+            for row, pair in zip(self._rows, self._row_pairs):
+                if row["selected"] and pair in removed:
+                    continue
+                if not row["selected"] and pair in added:
+                    added.remove(pair)
+                    row = {**row, "selected": True}
+                rows.append(row)
+            rows.extend({"start": str(start), "end": str(end), "selected": True} for start, end in added)
+            self.draft_changed.emit({"values": {"selection": "custom", "custom_pairs": tuple(rows)}})
 
         def update_projection(self, projection):
             values = projection["form_values"]
@@ -199,30 +310,43 @@ def _editor_factory(parent=None):
                 )
             selection = values["selection"]
             self._selection = selection
-            self._overrides = _checked_overrides(tuple(
-                (row["start"], row["end"], row.get("selected", True)) for row in values["pairs"]
-                if row["start"] not in (None, "") and row["end"] not in (None, "")))
+            rule = selection in PAIR_RULES
+            _rows, self._overrides, overrides_problem = read(_OVERRIDES, values["pairs"])
+            self._rows, published, list_problem = read(_LIST, values["custom_pairs"])
+            # A list the grid cannot read is still a list to come back to.
+            self._keeps_list = self._rows is None or bool(self._rows)
+            # Gestures write a rule's exceptions, or Selected's list -- under
+            # None too: one the grid cannot read is said, never written over.
+            self._problem = overrides_problem if rule else list_problem
+            show_problem(self.error, self._problem)
             self.presets.set_current(selection)
-            self.table.setEnabled(frames is not None)
-            if frames is None:
+            self.table.setEnabled(frames is not None and not self._problem)
+            if frames is None or self._problem:
                 self.table.set_cell_states({})
+                self.table.set_selected(())
                 self._wanted = ()
-                self.summary.setText("Waiting for the source frames")
-                show_problem(self.note, "")
+                self.summary.setText("Waiting for the source frames" if frames is None
+                                     else self.presets.button(selection).text())
+                show_note(self.note, "")
+                show_note(self.parked, "")
                 return
             count = len(frames)
-            listed = () if selection == "none" else tuple(
-                (start, end) for start, end, selected in self._overrides if selected)
-            wanted, absent = _selected_pairs(
-                selection if selection not in _EXPLICIT else listed,
-                self._overrides if selection not in _EXPLICIT else (), count)
+            # Under a rule Selected's list is not the grid's, and may be unread.
+            rows = self._rows or ()
+            selected = iter(published or ())
+            self._row_pairs = tuple(next(selected) if row["selected"] else named(row) for row in rows)
+            self._listed, listed_absent = _selected_pairs(
+                tuple(pair for row, pair in zip(rows, self._row_pairs) if row["selected"]), (), count)
+            wanted, absent = (
+                _selected_pairs(selection, self._overrides, count) if rule
+                else (self._listed, listed_absent) if selection == "custom" else ((), ()))
             self._wanted = wanted
             # What the rule selects by itself is derived; what is selected
             # beyond it was marked by hand and stays a chosen card.  Either
             # way the pair is in the table's selection, so the gestures
             # (and the draft they edit) are the table's own.
-            rule = set() if selection in _EXPLICIT else set(_rule_pairs(selection, count))
-            derived = tuple(pair for pair in wanted if pair in rule)
+            baseline = set(_rule_pairs(selection, count)) if rule else set()
+            derived = tuple(pair for pair in wanted if pair in baseline)
             self.table.set_cell_states(
                 {(start, end - 1): "derived" for start, end in derived},
                 {(start, end - 1): f"{pair_label(frames[start], frames[end])} follows {labels[selection]}; "
@@ -234,8 +358,15 @@ def _editor_factory(parent=None):
             # Named with the strip's own word for its current segment.
             self.summary.setText(
                 f"{self.presets.button(selection).text()} · {len(wanted)} of {count * (count - 1) // 2} pairs")
-            show_problem(self.note, "" if not absent else "not in this source: " + ", ".join(
-                pair_label(start, end) for start, end, _selected in absent))
+            # A parked row naming a pair the list publishes is not said: the
+            # selected row wins.
+            shown = set(published or ())
+            parked = tuple(row for row, pair in zip(rows, self._row_pairs)
+                           if not row["selected"] and pair not in shown) if selection == "custom" else ()
+            show_note(self.note, "" if not absent else sentence("kept, not in this source: " + ", ".join(
+                pair_label(start, end) for start, end, _selected in absent)))
+            show_note(self.parked, "" if not parked else sentence("kept, not selected: " + ", ".join(
+                pair_label(row["start"] or "(no start)", row["end"] or "(no end)") for row in parked)))
 
         def set_mutation_enabled(self, enabled):
             self.setEnabled(enabled)
@@ -254,9 +385,13 @@ LOGIC_NODE = LogicNodeDescriptor(
         "Mean over repeats gives conditional survival. Choose the pairs with selection: "
         "all, consecutive (k->k+1), from_first (0->k) and to_last (k->last) follow the "
         "frames the source carries; none asks for no pair (Start waits for a rule or a pair). "
-        "Pair rows override the rule with selected=true/false; "
-        "custom lists only included pairs. Endpoints use text '0'/'last'; numbered "
-        "middle frames keep their index when the cycle changes. "
+        "Under a rule, pairs rows override it with selected=true/false; custom publishes "
+        "its own custom_pairs list, whose selected=false rows are parked: kept as written, "
+        "never checked and never published. That list is kept while a rule or none is "
+        "picked. Endpoints use text "
+        "'0'/'last'; numbered middle frames keep their index when the cycle changes, and "
+        "a selected pair whose middle frame the source lacks is kept and left out of the "
+        "run, which fails only when no selected pair is left. "
         "Feed survival to Seamless Scan and use a site Facet with native Exponential "
         "fitting for per-site lifetimes."
     ),

@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 
 from zlc_atom.devices.camera.contract import CameraFrameRecord
-from zlc_atom.nodes import FrameClaim
+from zlc_atom.nodes import FrameClaim, ResolvedArtifact
 from zlc_atom.nodes.calibration import (
     CALIBRATION_ARTIFACT_CODEC,
     FrameContract,
@@ -94,7 +94,8 @@ def test_each_frame_reads_with_the_calibration_that_claims_it() -> None:
 def test_last_and_rest_follow_the_frame_count_and_numbers_keep_their_place() -> None:
     """The same claims read a cycle that gained a frame the way they were
     meant: the last frame stays the strict one.  A number the cycle does not
-    carry, a frame read twice or by nobody, refuses the run by name."""
+    carry reads nothing and stops nothing; a frame read twice or by nobody
+    refuses the run by name."""
 
     shared, strict = _calibration(1.0), _calibration(1e6)
     processor = OccupancyProcessor((
@@ -114,11 +115,10 @@ def test_last_and_rest_follow_the_frame_count_and_numbers_keep_their_place() -> 
         CalibrationReading(shared, ("rest",), Path("load.json")),
         CalibrationReading(strict, (3,), Path("late.json")),
     ))
-    with pytest.raises(ValueError, match=r"late names middle frame 3, but the source carries 2 frames \(0-1\)"):
-        beyond.process(_cycle(10.0, 10.0))
+    # Middle frame 3 is not in two frames: late reads nothing, the rest is load's.
+    assert beyond.process(_cycle(10.0, 10.0)).occupied.tolist() == [[[True], [True]]]
     # In four frames 3 is the last frame, not a middle one: still absent.
-    with pytest.raises(ValueError, match=r"late names middle frame 3"):
-        beyond.process(_cycle(10.0, 10.0, 10.0, 10.0))
+    assert beyond.process(_cycle(10.0, 10.0, 10.0, 10.0)).occupied.tolist() == [[[True]] * 4]
     assert beyond.process(_cycle(10.0, 10.0, 10.0, 10.0, 10.0)).occupied.tolist() == [
         [[True], [True], [True], [False], [True]]
     ]
@@ -126,8 +126,9 @@ def test_last_and_rest_follow_the_frame_count_and_numbers_keep_their_place() -> 
         CalibrationReading(strict, ("last",), Path("readout.json")),
         CalibrationReading(shared, (0, 2), Path("load.json")),
     ))
-    # In three frames 2 is the last: load's middle 2 is absent, not a second reader.
-    with pytest.raises(ValueError, match=r"load names middle frame 2"):
+    # In three frames 2 is the last: load's middle 2 is absent, not a second
+    # reader -- and frame 1, which nobody names, refuses the run.
+    with pytest.raises(ValueError, match="frame 1 has no calibration"):
         twice.process(_cycle(10.0, 10.0, 10.0))
     with pytest.raises(ValueError, match="frame 1 has no calibration"):
         twice.process(_cycle(10.0, 10.0, 10.0, 10.0))
@@ -172,11 +173,32 @@ def test_calibrations_must_fit_together() -> None:
             CalibrationReading(_calibration(1.0), ("rest",), Path("a.json")),
             CalibrationReading(_calibration(1.0), ("rest",), Path("b.json")),
         ))
-    with pytest.raises(ValueError, match="b reads no frame"):
-        OccupancyProcessor((
+    # A calibration kept but not read is checked against nothing -- other
+    # sites, trained in photoelectrons, a copy of one that reads -- and the
+    # run record keeps it, beside a file never decoded at all.
+    elsewhere = replace(_calibration(1.0, sites=("site-1", "site-2")),
+                        report={"run_record": {"request": {"photoelectrons": True}}})
+    kept = OccupancyProcessor(
+        (
             CalibrationReading(_calibration(1.0), ("rest",), Path("a.json")),
-            CalibrationReading(_calibration(1.0), (), Path("b.json")),
-        ))
+            CalibrationReading(elsewhere, (), Path("b.json")),
+            CalibrationReading(_calibration(1.0), (), Path("a.json")),
+        ),
+        parked=(Path("gone.json"), None),
+    )
+    counted = SignalValue("camera/frames", _cycle(10.0, 10.0), None)
+    kept.evaluate(counted)
+    assert kept.process(_cycle(10.0, 10.0)).occupied.tolist() == [[[True], [True]]]
+    assert kept.describe_run({"frames": counted})["parameters"]["calibrations"] == [
+        {"path": str(Path("a.json").resolve()), "frames": ["rest"], "read_frames": [0, 1]},
+        {"path": str(Path("b.json").resolve()), "frames": [], "read_frames": []},
+        {"path": str(Path("a.json").resolve()), "frames": [], "read_frames": []},
+        {"path": str(Path("gone.json").resolve()), "frames": [], "read_frames": []},
+        {"path": None, "frames": [], "read_frames": []},
+    ]
+    with pytest.raises(ValueError, match="no calibration reads a frame"):
+        OccupancyProcessor((CalibrationReading(_calibration(1.0), (), Path("a.json")),),
+                           parked=(Path("b.json"),))
     with pytest.raises(ValueError, match="a is listed twice"):
         OccupancyProcessor((
             CalibrationReading(_calibration(1.0), ("rest",), Path("a.json")),
@@ -214,10 +236,14 @@ def test_the_logic_node_hands_each_claim_to_the_processor(tmp_path: Path) -> Non
     _calibration(1e6).save(strict_path)
     codec = CALIBRATION_ARTIFACT_CODEC
     assert "calibrations" in OCCUPANCY_NODE.build_argument_names
+    gone = (tmp_path / "gone.json").resolve()
     processor = OCCUPANCY_NODE.instantiate(
         calibrations=(
             FrameClaim(codec.resolve(shared_path), ("rest",)),
             FrameClaim(codec.resolve(strict_path), ("last",)),
+            # Kept, not read: one whose file is gone, one with no file yet.
+            FrameClaim(ResolvedArtifact(gone, codec.contract_id, FileNotFoundError("file not found")), ()),
+            FrameClaim(None, ()),
         ),
         source_signal="camera/frames",
     )
@@ -227,6 +253,8 @@ def test_the_logic_node_hands_each_claim_to_the_processor(tmp_path: Path) -> Non
     assert record["parameters"]["calibrations"] == [
         {"path": str(shared_path.resolve()), "frames": ["rest"], "read_frames": [0]},
         {"path": str(strict_path.resolve()), "frames": ["last"], "read_frames": [1]},
+        {"path": str(gone), "frames": [], "read_frames": []},
+        {"path": None, "frames": [], "read_frames": []},
     ]
     assert processor.process(frames).occupied.tolist() == [[[True], [False]]]
     with pytest.raises(TypeError, match="resolved calibration artifacts"):
@@ -298,25 +326,24 @@ def test_a_calibration_arms_its_camera_with_the_longest_window_and_shows_it() ->
 def _claims_projection(entries, frames):
     """What the console projects for the calibrations editor."""
 
-    from zlc_atom.nodes import check_claims, claim_names, frame_problems, reach_frames
+    from zlc_atom.nodes import absent_notes, claim_names, claim_problems, frame_problems, parked_entries, reach_frames
 
     names = claim_names(entries)
     claimed = tuple(entry["frames"] for entry in entries)
-    problems, reads = (), None
-    try:
-        check_claims(claimed, names)
-    except ValueError as error:
-        problems = (str(error),)
+    problems, notes, reads = claim_problems(claimed, names, what="file"), (), None
     if frames is not None and entries:
         problems = problems or frame_problems(claimed, len(frames), names, what="file")
+        notes = absent_notes(claimed, len(frames), names)
         reach = reach_frames(claimed, len(frames))
         reads = tuple(reach.frames_of(index) for index in range(len(entries)))
     return {
         "artifact_claims": {"calibrations": {
             "label": "Calibrations", "entries": tuple(entries), "base_dir": "C:/data",
             "file_filter": "Calibration artifacts (*.json)",
-            "files": tuple({"path": entry["path"], "summary": "20 ms · 1 sites · default Box"} for entry in entries),
-            "reads": reads, "problems": problems,
+            "files": tuple(
+                {"path": entry["path"], "summary": "20 ms · 1 sites · default Box", "unread": ""}
+                for entry in entries),
+            "reads": reads, "problems": problems, "notes": notes, "unused": parked_entries(claimed),
         }},
         "source_frames": frames,
         "form_values": {"model_kind": "default"},
@@ -355,9 +382,10 @@ def test_the_calibrations_editor_gives_frames_to_files_by_clicking(monkeypatch) 
         app.processEvents()
         return drafts[-1]["artifact_inputs"]["calibrations"]
 
-    def problems():
-        return [label.text() for label in editor.problems.findChildren(QtWidgets.QLabel)
-                if not label.isHidden()] if editor.problems.isVisible() else []
+    def problems(block=None):
+        block = editor.problems if block is None else block
+        return [label.text() for label in block.findChildren(QtWidgets.QLabel)
+                if not label.isHidden()] if block.isVisible() else []
 
     def click(row, column):
         assert grid.model().index(row, column).flags() & QtCore.Qt.ItemIsSelectable, (row, column)
@@ -400,6 +428,11 @@ def test_the_calibrations_editor_gives_frames_to_files_by_clicking(monkeypatch) 
         claims = click(1, 0)
         assert claims == ({"path": load["path"], "frames": ()},
                           {"path": readout["path"], "frames": ("first", "last", "rest")})
+        # The load file, left with no frame, is kept and not read: no problem.
+        project(claims)
+        assert problems() == [] and problems(editor.notes) == []
+        assert editor.summary.text() == "readout reads every frame · 1 file not read"
+        assert "kept · reads no frame" in grid.model().headerData(0, QtCore.Qt.Vertical, QtCore.Qt.ToolTipRole)
         # A middle frame keeps its number while the ends follow the cycle: with
         # five frames the middle is 1-3; back at three frames, 2 is the LAST
         # frame, so the claim on middle frame 2 is absent -- never the last.
@@ -409,10 +442,11 @@ def test_the_calibrations_editor_gives_frames_to_files_by_clicking(monkeypatch) 
             "First · 0", "Last · 4", "Rest", "", "1", "2", "3"]
         assert grid.selected_cells() == ((0, 0), (0, 5), (1, 2))
         project((middle, readout))
-        assert header(5) == "2" and state(0, 5) == "warning"
-        assert problems() == [
-            "load names middle frame 2, but the source carries 3 frames (0-2); "
-            "a numbered middle frame never stands for the first or the last."]
+        # Kept, said in amber, stopping nothing.
+        assert header(5) == "2" and state(0, 5) == "kept"
+        assert problems() == []
+        assert problems(editor.notes) == [
+            "load's middle frame 2 is not in this source (frames 0-2); it is kept for a cycle that has it."]
         assert state(1, 1) == "derived", "the new last frame is read as rest, not as middle 2"
         assert click(0, 5)[0] == {"path": load["path"], "frames": ("first",)}
         # Each row ends, after a gap, with its own remove cell: never a claim.
@@ -442,9 +476,15 @@ def test_the_calibrations_editor_gives_frames_to_files_by_clicking(monkeypatch) 
         project(({"path": load["path"], "frames": (4, "first")},
                  {"path": readout["path"], "frames": ("last",)}))
         assert problems() == [
-            "load names middle frame 4, but the source carries 3 frames (0-2); "
-            "a numbered middle frame never stands for the first or the last.",
             "frame 1 has no file: give it to one, or let one read the rest."]
+        assert problems(editor.notes) == [
+            "load's middle frame 4 is not in this source (frames 0-2); it is kept for a cycle that has it."]
+        # Every collision at once, each in its own block.
+        project(({"path": load["path"], "frames": ("first", "last")},
+                 {"path": readout["path"], "frames": ("first", "last")}))
+        assert problems() == [
+            "'first' is claimed by both load and readout.",
+            "'last' is claimed by both load and readout."]
         blocks = [label for label in editor.problems.findChildren(QtWidgets.QLabel) if not label.isHidden()]
         assert blocks[1].y() - blocks[0].geometry().bottom() - 1 == row_gap() // 2
         # A row is named as every sentence about it names it: by its stem,
@@ -503,9 +543,9 @@ def test_the_files_keep_the_forms_row_pitch_and_problems_stand_under_the_model()
         assert model - cards_end == row_gap(), "the model choice is the next row"
         project(({"path": files[0]["path"], "frames": (4, "first")}, files[1],
                  {"path": files[2]["path"], "frames": ("last",)}))
-        assert editor.problems.isVisible()
+        assert editor.problems.isVisible() and editor.notes.isVisible()
         assert y(editor.model_row) == model, "a problem does not move the model choice"
-        assert y(editor.model_row) < y(editor.problems) < y(editor.hint)
+        assert y(editor.model_row) < y(editor.problems) < y(editor.notes) < y(editor.hint)
     finally:
         editor.close()
         editor.deleteLater()

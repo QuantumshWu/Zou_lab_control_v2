@@ -94,6 +94,17 @@ def test_scan_accepts_the_complete_document_saved_by_the_pulse_editor(
     grouped = set_subpulse_source(replace(grouped, config_enabled=True), "mot", "config", str(fragment_path))
     path.write_text(json.dumps(sequence_to_tree(grouped)), encoding="utf-8")
     fixed = resource.resolve(path).value
+    # A file that holds the scanned field constant: a plan that leaves that
+    # port alone builds, and only one that sweeps it is refused, by name.
+    write_subpulse(fragment_path, replace(extract_subpulse(grouped, "mot"), bindings=()))
+    constant = resource.resolve(path)
+    port = PULSE_PARAM_FAMILY + slotted.scan_bindings[0].field_id
+    assert port not in {item.port for item in hardware_scan_ports_for(constant.value)}
+    build = dict(sequencer=object(), signal_plane=object(), source_signal="camera.frames",
+                 pulse_resource=constant)
+    assert SEAMLESS_NODE.build(plan={"axes": [{"port": "manual:power", "values": [1.0]}]}, **build).plan.shape == (1,)
+    with pytest.raises(ValueError, match=f"offers no scan port named '{port}'"):
+        SEAMLESS_NODE.build(plan={"axes": [{"port": port, "values": [0.0]}]}, **build)
     fragment_path.unlink()
     assert fixed.components[0].source == "default"
     assert fixed.scan_bindings == slotted.scan_bindings
@@ -190,6 +201,10 @@ def test_scan_time_projection_uses_the_played_pulse_without_expanding_repeats() 
     assert huge["total_pulse_seconds"] == pytest.approx(.125 * 2 * 10**18)
     capped = ScanPlan((ScanAxis("api:bracket_count:load_loop", tuple(range(1, 258)), "count"),))
     assert "preview budget" in estimate_scan_time(sequence, capped, **inputs)["reason"]
+    # Emptied, the same bracket's count is no knob: the estimate says why.
+    emptied = replace(sequence, brackets=(PulseBracket("load_loop", "image", "load", 1),))
+    with pytest.raises(ValueError, match="^Bracket 1 is empty, so scanning its repeat count changes nothing"):
+        estimate_scan_time(emptied, plan, **inputs)
 
 
 def test_binding_refuses_unknown_ports_and_out_of_range_values() -> None:
@@ -349,13 +364,52 @@ def test_a_region_lands_on_the_axis_the_picture_drew_when_two_ports_share_a_name
             SelectionRange("scan.bias.2", 12.0, 18.0, domain="point"),
         ),
     )
+    # A parked namesake ahead of them drew no axis: it is neither counted
+    # in the ids nor narrowed.
+    tree = plan.to_tree()
+    tree["axes"].insert(0, {"port": MANUAL_PARAM_FAMILY + "bias", "values": [5.0, 6.0], "enabled": False})
     patched = SEAMLESS_NODE.selection_patch(
-        selection, draft={"plan": json.dumps(plan.to_tree())},
+        selection, draft={"plan": json.dumps(tree)},
         context={"axis_units": {"scan.bias": "1", "scan.bias.2": "code"}},
     )
+    assert plan_input_rows(json.loads(patched["plan"]))[0]["values"] == [5.0, 6.0]
     narrowed = ScanPlan.from_tree(json.loads(patched["plan"]))
     assert narrowed.axes[0].values == (1.25, 1.75)
     assert narrowed.axes[1].values == (12.0, 18.0)
+
+
+def test_a_parked_axis_is_kept_by_the_draft_and_scanned_by_nothing() -> None:
+    """An axis switched off stays in the plan text and the run record, and is
+    not read, bound, played or counted: a port the pulse does not offer and
+    an empty Values list block nothing.  Switched on, it is the plan's again
+    and refused by name."""
+
+    from pathlib import Path
+    from zlc_atom.nodes import ResolvedWorkspaceResource
+    from zlc_atom.nodes.scan import SCAN_PULSE_CONTRACT
+
+    hand = {"port": MANUAL_PARAM_FAMILY + "power", "values": [1.0, 2.0]}
+    gone = {"port": PULSE_PARAM_FAMILY + "duration:gone", "values": [], "mode": "values",
+            "value_text": "", "enabled": False}
+    rows = plan_input_rows({"axes": [hand, gone]})
+    assert rows[1]["enabled"] is False and "enabled" not in rows[0]
+    assert "enabled" not in plan_input_rows({"axes": [{**hand, "enabled": True}]})[0]
+    assert plan_from_authored({"axes": [hand, gone]}).shape == (2,)
+    with pytest.raises(ValueError, match="every scan axis is parked"):
+        plan_from_authored({"axes": [gone]})
+    with pytest.raises(TypeError, match="enabled must be true or false"):
+        plan_input_rows({"axes": [{**hand, "enabled": "no"}]})
+    build = dict(
+        sequencer=object(), signal_plane=object(), source_signal="camera.frames",
+        pulse_resource=ResolvedWorkspaceResource(Path("mot.json"), SCAN_PULSE_CONTRACT, _template_sequence()),
+    )
+    built = SEAMLESS_NODE.build(plan=json.dumps({"axes": [hand, gone]}), **build)
+    assert built.plan.shape == (2,) and built.ports == ()
+    assert built.parked_axes == ({"port": gone["port"], "values": [], "unit": "",
+                                  "mode": "values", "value_text": ""},)
+    with pytest.raises(ValueError, match="offers no scan port named"):
+        SEAMLESS_NODE.build(plan={"axes": [hand, {**gone, "enabled": True, "mode": "range",
+                                                  "values": [1.0]}]}, **build)
 
 
 def test_a_range_drawn_in_a_shown_power_unit_reaches_the_plan_in_its_unit() -> None:
@@ -508,3 +562,31 @@ def test_api_parameters_are_host_walked_ports_unless_a_slot_sweeps_them() -> Non
         API_PARAM_FAMILY + "dac:load:da_bias_y",
         API_PARAM_FAMILY + "dac:load:da_bias_z",
     ]
+
+    # An empty bracket loops nothing: its API repeat count is kept but is no
+    # knob to scan, so a plan naming it is refused, saying why.
+    from zlc_atom.nodes.scan import unscannable_api_ports
+    from zlc_atom.nodes.scan.plan import ScanAxis, ScanPlan, bind_plan
+    from zlc_pulse import PulseBinding, PulseBracket, PulseFieldRef
+
+    first_id = raw.periods[1].period_id
+    waiting = replace(raw, brackets=(PulseBracket("wait", first_id, raw.periods[0].period_id, 2),),
+                      bindings=(*raw.bindings, PulseBinding(
+                          PulseFieldRef("bracket_count", bracket_id="wait"), "count", source="api")))
+    assert "bracket_count:wait" in {binding.field_id for binding in waiting.api_bindings}
+    offered = api_scan_ports_for(waiting)
+    assert [port.port for port in offered] == [port.port for port in ports]
+    walked = ScanPlan((ScanAxis("api:bracket_count:wait", (1.0, 2.0)),))
+    with pytest.raises(ValueError, match="offers no scan port named 'api:bracket_count:wait'"):
+        bind_plan(walked, offered)
+    reason = "Bracket 1 is empty, so scanning its repeat count changes nothing"
+    assert unscannable_api_ports(waiting) == {"api:bracket_count:wait": reason}
+    with pytest.raises(ValueError) as refused:
+        bind_plan(walked, offered, withheld=unscannable_api_ports(waiting))
+    assert str(refused.value) == (
+        f"{reason}; remove axis 'api:bracket_count:wait' or put a period inside the bracket"
+    )
+    # With a period inside, the same count is an ordinary port.
+    looping = replace(waiting, brackets=(PulseBracket("wait", raw.periods[0].period_id, first_id, 2),))
+    assert unscannable_api_ports(looping) == {}
+    assert API_PARAM_FAMILY + "bracket_count:wait" in {port.port for port in api_scan_ports_for(looping)}

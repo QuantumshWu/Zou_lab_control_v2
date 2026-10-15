@@ -232,7 +232,8 @@ these reflection tools and refuses them, also inside `lab_batch`:
   read-only rules as the GUI; switch to Default or edit their source instead.
   `subpulse.*` actions select, group, bind sources, edit, insert and save using
   the existing Subpulse owner. File paths are explicit; an empty source path
-  clears the reference. State distinguishes embedded defaults from the selected
+  clears the reference, and a Config source with no file plays its embedded
+  default. State distinguishes embedded defaults from the selected
   file draft and its save target/dirty state. Use the catalog for arguments,
   including `bracket_count` bindings; editor revision also covers Subpulse
   selection and draft changes. State inspection does not reread source files:

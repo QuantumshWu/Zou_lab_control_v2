@@ -179,7 +179,7 @@ class _ConsoleView:
         "panel_edit_requested", "panel_plot_error",
         "panel_publisher_edit_requested", "panel_publisher_draft_changed",
         "logic_start_requested", "logic_auto_preview_changed",
-        "logic_stop_requested",
+        "logic_stop_requested", "logic_revert_requested",
         "logic_edit_requested", "logic_remove_requested", "logic_draft_changed",
         "logic_name_committed",
         "panel_state_changed", "panel_snapshot_refresh_requested",
@@ -3935,6 +3935,52 @@ def test_a_board_naming_a_signal_nobody_publishes_keeps_the_blank_panel(
     assert unresolved.signal == "nobody.publishes.this"
     assert unresolved.host is None and unresolved.port is None
     assert any("nobody.publishes.this" in text for _severity, text in presenter.view.status)
+
+
+def test_a_board_row_whose_device_or_source_no_longer_fits_is_kept(presenter) -> None:
+    """A stale row costs that row its Start, not the board its load.
+
+    Boards keep rows the operator is not using today, and the apparatus or
+    an upstream row can change under one: a device key now naming another
+    kind of device, a source now declared as another contract.  The row is
+    kept as written, the load says so, and the row's own check refuses it.
+    """
+
+    row = {"values": {}, "source_signal": "", "device_keys": {},
+           "artifact_inputs": {}, "auto_preview": False}
+    document = {
+        "format": "zlc.console-board",
+        "panels": [],
+        "logic": [
+            {**row, "node_id": "cm", "api_name": "camera_measurement",
+             "device_keys": {"camera": "sequencer"}},
+            {**row, "node_id": "fb", "api_name": "slm_feedback",
+             "values": {"feedback_mode": "ramsey_frequency"},
+             "source_signal": "@logic/cm/frames"},
+        ],
+    }
+
+    assert presenter.apply_layout(document) is True
+    assert tuple(presenter.logic) == ("cm", "fb")
+    assert presenter.logic["cm"].draft.device_keys["camera"] == "sequencer"
+    assert presenter.logic["fb"].draft.source_signal == "@logic/cm/frames"
+    warnings = [text for severity, text in presenter.view.status if severity == "warning"]
+    assert any(
+        "logic cm names 'sequencer' as its camera, which does not provide camera.adapter"
+        in text for text in warnings
+    )
+    assert any(
+        text.startswith("logic fb reads cm/frames, which publishes ")
+        for text in warnings
+    )
+    camera = presenter.control_action("logic.validate", {"node_id": "cm"})
+    assert camera["accepted"] is False
+    assert "'sequencer' does not provide camera.adapter" in camera["error"]
+    presenter.control_action("logic.validate", {"node_id": "fb"})
+    assert any(
+        "'cm/frames' is not declared as" in issue
+        for issue in presenter.logic["fb"].finalization.issues
+    )
 
 
 def test_a_board_panel_whose_saved_table_is_refused_does_not_stop_the_rest(
@@ -8241,7 +8287,8 @@ def test_a_queued_restart_says_what_it_is_waiting_for() -> None:
 
     generation = object()
     binding = LogicBinding("camera_measurement", LOGIC_NODE, LogicDraft(values={}))
-    binding.pending = SimpleNamespace(waiting_for=())
+    # A queued candidate carries the configuration it was built from.
+    binding.pending = SimpleNamespace(waiting_for=(), draft=LogicDraft(values={}))
     stopping = SimpleNamespace(
         running=True, error="", phase="stopping", terminal=False, progress=None, warnings=(),
     )
@@ -8292,7 +8339,9 @@ def test_a_queued_restart_says_what_it_is_waiting_for() -> None:
     console.panels["panel-1"].configuration = None
 
     # The holder is named as the operator calls it.
-    binding.pending = SimpleNamespace(waiting_for=("camera_measurement",))
+    binding.pending = SimpleNamespace(
+        waiting_for=("camera_measurement",), draft=LogicDraft(values={}),
+    )
     assert ConsolePresenter._logic_state(console, binding)[1] == "waiting for Camera A"
 
 
@@ -8358,6 +8407,9 @@ def test_a_run_makes_the_values_a_region_wrote_the_producers_own() -> None:
     console.update_logic_draft = lambda node_id, **kwargs: (
         ConsolePresenter.update_logic_draft(console, node_id, **kwargs)
     )
+    console._commit_logic_draft = lambda binding, draft, **kwargs: (
+        ConsolePresenter._commit_logic_draft(console, binding, draft, **kwargs)
+    )
     # The region's write, the way routing does it: the patch, then the undo.
     assert console.update_logic_draft("scan-owner", values={"plan": routed})
     binding.selection_restore["plan"] = ("panel-1", original)
@@ -8371,6 +8423,7 @@ def test_a_run_makes_the_values_a_region_wrote_the_producers_own() -> None:
         previews=(),
         run_root=None,
         input_summary=None,
+        draft=LogicDraft(values={"plan": routed}),
     )
     assert ConsolePresenter._activate_candidate(console, binding, candidate) is True
     assert started and binding.selection_restore == {}
@@ -8422,6 +8475,9 @@ def test_a_region_on_a_scan_curve_reaches_the_scan_as_its_next_sweep() -> None:
             routed.append((name, patch)),
             ConsolePresenter.update_logic_draft(console, name, **patch),
         )[1],
+        _commit_logic_draft=lambda binding, draft, **kwargs: (
+            ConsolePresenter._commit_logic_draft(console, binding, draft, **kwargs)
+        ),
     )
     publication = SimpleNamespace(run_record={})
 

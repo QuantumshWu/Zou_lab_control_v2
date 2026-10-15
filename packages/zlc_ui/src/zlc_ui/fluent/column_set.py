@@ -49,8 +49,7 @@ from collections.abc import Sequence
 from PyQt5 import QtCore, QtWidgets, sip
 
 from ..status import sentence
-from .fluent import FluentLabel, FluentSectionLabel, fluent_font_size, row_gap
-from .style import FONT, RED_DARK
+from .fluent import FluentLabel, FluentSectionLabel, row_gap, set_status_ink
 
 #: What decides a column's width; see the module docstring.
 COLUMN_KINDS = ("fit", "stretch", "slots", "glyph")
@@ -90,15 +89,13 @@ def section_header(
 
 
 def error_note_label(text: str = "") -> QtWidgets.QLabel:
-    """The one error line: RED_DARK ink, word-wrapped, hidden while it says
-    nothing.  It stands under what it concerns (see
+    """The one error line: the ``error`` status ink, word-wrapped, hidden
+    while it says nothing.  It stands under what it concerns (see
     :meth:`FluentColumnSet.follow`), never in the width left beside it, and
     says it as a sentence (:func:`show_problem`)."""
 
     label = FluentLabel(text)
-    label.setStyleSheet(
-        f'color: {RED_DARK}; background: transparent; border: none; font: {fluent_font_size()}pt "{FONT}";'
-    )
+    set_status_ink(label, "error")
     label.setWordWrap(True)
     label.setVisible(bool(text))
     return label

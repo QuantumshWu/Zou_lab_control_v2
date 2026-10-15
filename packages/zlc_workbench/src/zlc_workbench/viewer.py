@@ -77,7 +77,7 @@ _MANUAL_DTYPES = tuple(
 )
 # The manual editor works on one dense logical tensor.  Repeat and Point are
 # flattened only at the Dataset boundary; keeping them expanded here makes
-# every axis obey the same Add/Edit/Delete and Rows/Columns/Scope rules.
+# every axis obey the same Add/Edit/Remove and Rows/Columns/Scope rules.
 
 
 def _manual_version() -> str:
@@ -178,7 +178,7 @@ def _edited_mapped_domain(axes: tuple[object, ...], source: object) -> object:
     """Keep an existing carrier map until the operator changes its topology.
 
     Editing data, coordinates, names or units does not turn a sparse/serpentine
-    acquisition into a Cartesian product.  Add/Delete, moving an axis between
+    acquisition into a Cartesian product.  Add/Remove, moving an axis between
     domains, or changing an axis length does change the topology and therefore
     intentionally starts a new dense authored map.
     """
@@ -364,6 +364,8 @@ def _draft_from_snapshot(
         "modified": source_path is None,
         "unsaved": False,
         "message": "",
+        #: The status word the message is shown in: idle, warning or error.
+        "message_severity": "idle",
         "producer_serial": int(producer_serial),
         "producer": None,
         "publication": None,
@@ -801,7 +803,7 @@ def _delete_axis(draft: dict[str, object], axis_id: str) -> None:
     visible = _visible_axes(draft)
     draft["selected_axis"] = "" if not visible else str(visible[0].axis_id)
     draft["message"] = (
-        f"Deleted {axis.name}; kept coordinate {axis.coordinate_at(kept_index)!r}"
+        f"Removed {axis.name}; kept coordinate {axis.coordinate_at(kept_index)!r}"
     )
     _normalize_table_axes(draft)
 
@@ -1070,6 +1072,10 @@ def _data_projection(draft: dict[str, object]) -> dict[str, object]:
         "can_save": bool(draft["save_ready"] and not draft["modified"]),
         "save_suggested": str((Path(source_path).parent / suggested) if source_path is not None else suggested),
         "message": str(draft.get("message") or validation_message),
+        "message_severity": (
+            str(draft["message_severity"]) if draft.get("message")
+            else "error" if validation_message else "idle"
+        ),
     }
 
 
@@ -2692,6 +2698,7 @@ class FigureViewerPresenter:
             str(draft["name"])
         ):
             draft["message"] = "Save or discard this data working copy before closing"
+            draft["message_severity"] = "warning"
             self._show_data_draft(draft)
             return False
         closer = getattr(self.view, "close_data_editor", None)
@@ -2788,6 +2795,7 @@ class FigureViewerPresenter:
             draft[key] = value
         self._restore_data_draft(draft)
         draft["message"] = "Applied working copy discarded"
+        draft["message_severity"] = "idle"
 
     def data_editor_intent(self, editor_id: str, intent: Mapping[str, object]) -> None:
         draft = self._data_drafts.get(str(editor_id))
@@ -2799,6 +2807,7 @@ class FigureViewerPresenter:
             command = dict(intent)
             operation = str(command.pop("op"))
             draft["message"] = ""
+            draft["message_severity"] = "idle"
             marks_dirty = True
             if operation == "set_dataset_field":
                 field = str(command["field"])
@@ -2909,6 +2918,7 @@ class FigureViewerPresenter:
             self._project_data_choices(f"manual:{editor_id}")
         except (KeyError, IndexError, TypeError, ValueError, RuntimeError) as error:
             draft["message"] = str(error)
+            draft["message_severity"] = "error"
             self._show_data_draft(draft)
             self.view.set_status(f"cannot edit data: {error}", error=True)
 
@@ -3110,6 +3120,7 @@ class FigureViewerPresenter:
                 if current
                 else f"Saved older preview to {archive.name}; current data is not saved"
             )
+            draft["message_severity"] = "idle" if current else "warning"
             self.view.set_status(
                 f"saved {archive.name} and {image.name}"
             )
@@ -3139,6 +3150,7 @@ class FigureViewerPresenter:
             draft["save_ready"] = ready
             if ready and not bool(draft["modified"]):
                 draft["message"] = "Preview ready"
+                draft["message_severity"] = "idle"
             if bool(getattr(self.view, "has_data_editor", lambda _key: False)(str(draft["editor_id"]))):
                 self.view.update_data_editor(
                     str(draft["editor_id"]), _data_projection(draft)

@@ -20,7 +20,10 @@ at which point it becomes the uniform grid the spins describe.
 Every row is a line of one column set, so the axes read as a table: the
 axis (a port, or a manual axis's name) starts on the editor's field edge,
 with "By hand" in the label column before a manual one; from, to, points,
-the unit, Range|Values and × stand at one x on every row.  What a row's
+the unit, Range|Values, the scan switch and × stand at one x on every row.
+A row switched off is PARKED: greyed, kept in the plan with its port and
+values, and scanned by nothing -- whatever port it names, it blocks
+nothing.  What a row's
 values are ("custom values", a conversion running) and what is wrong with
 them stand under the row, from the axis's text, instead of in a column
 every row reserved for them.  A problem -- a row's, the plan's, the API
@@ -45,6 +48,7 @@ from zlc_ui.fluent import (
     FluentTreeComboBox,
     FluentLineEdit,
     FluentSpinBox,
+    FluentSwitch,
     FluentLabel,
     FluentSectionLabel,
     FluentSegmentedButtons,
@@ -64,13 +68,14 @@ from zlc_ui.fluent.column_set import section_header
 from zlc_ui.form import FluentParameterForm, FormFieldProps, FormSpec, being_edited, decimal_number_width
 from zlc_ui.status import counted
 
-from zlc_data.units import DEFAULT_UNITS
+from zlc_data.units import DEFAULT_UNITS, format_quantity
 from zlc_pulse import api_parameter_columns_for, authored_api_entries
 
 from .plan import (
     MANUAL_PARAM_FAMILY,
     PULSE_PARAM_FAMILY,
     API_PARAM_FAMILY,
+    ambiguous_api_value,
     api_overrides_from_authored,
     api_scan_ports_for,
     api_overrides_to_authored,
@@ -80,6 +85,7 @@ from .plan import (
     host_advanced_port,
     port_group,
     port_leaf,
+    unscannable_api_ports,
     plan_input_rows,
     parse_scan_values,
     DEVICE_PARAM_FAMILY,
@@ -95,9 +101,9 @@ _BY_HAND = "By hand"
 _API_LABEL_ROOM = 180
 #: The columns of every axis row: "By hand" or nothing (the editor's label
 #: column), the axis, its values (the Range bank or the Values list), their
-#: unit, which of the two it plays, and its ×.
+#: unit, which of the two it plays, whether it is scanned, and its ×.
 _ROW_COLUMNS = (("kind", "fit"), ("axis", "stretch"), ("values", "fit"), ("unit", "fit"),
-                ("mode", "fit"), ("remove", "glyph"))
+                ("mode", "fit"), ("enabled", "fit"), ("remove", "glyph"))
 #: The Range bank's own columns, so from, to and points stand at one x.
 _RANGE_COLUMNS = (("from", "fit"), ("start", "fit"), ("to", "fit"), ("stop", "fit"),
                   ("points", "fit"), ("count", "fit"))
@@ -145,7 +151,8 @@ class _AxisRow(QtWidgets.QWidget):
     remove_requested = QtCore.pyqtSignal(object)
     unit_change_requested = QtCore.pyqtSignal(object, object, str)
 
-    def __init__(self, ports, axis: Mapping | None, columns, parent=None, *, device_labels=None) -> None:
+    def __init__(self, ports, axis: Mapping | None, columns, parent=None, *, device_labels=None,
+                 withheld: Mapping[str, str] | None = None) -> None:
         super().__init__(parent)
         # A DEVICE's knobs gather under the device, the way an operator looks
         # for one; the flat list put a laser current beside a pulse parameter
@@ -158,6 +165,9 @@ class _AxisRow(QtWidgets.QWidget):
         self._build_inputs(columns, self.port_combo)
         self._device_labels = dict(device_labels or {})
         self._ports = label_device_scan_ports(ports, self._device_labels)
+        # Ports the pulse has but does not offer, each with why
+        # (:func:`unscannable_api_ports`).
+        self._withheld = dict(withheld or {})
         self._fill_ports(None if axis is None else axis["port"])
         self._apply_port_limits()
         if axis is not None:
@@ -211,6 +221,16 @@ class _AxisRow(QtWidgets.QWidget):
         remove = FluentButton("×", role="destructive")
         remove.setToolTip("Remove this axis")
         self.remove_button = remove
+        #: Whether the plan scans this axis.  Off PARKS it: the row, its port
+        #: and its values stay in the plan, greyed, and nothing binds, plays
+        #: or counts it -- a 1-D cut of a 2-D plan, or an axis for a pulse or
+        #: device that is not here today, kept without being deleted.
+        self.enabled_switch = FluentSwitch("")
+        self.enabled_switch.setChecked(True)
+        self.enabled_switch.setToolTip("Scan this axis; off parks it: kept in the plan, not scanned")
+        self._identity = identity
+        #: "By hand" before a manual axis, greyed with the rest of a parked row.
+        self._kind = kind
         if kind is not None:
             line.place("kind", kind)
         line.place("axis", identity, fill=True)
@@ -223,6 +243,7 @@ class _AxisRow(QtWidgets.QWidget):
         line.place("values", self.input_stack, fill=True)
         line.place("unit", self._unit_host, fill=True)
         line.place("mode", self.mode_choice)
+        line.place("enabled", self.enabled_switch)
         line.place("remove", remove)
         #: What this row's values are -- a list nobody's ends describe, a
         #: conversion still running -- under the row, from the axis's text.
@@ -244,7 +265,31 @@ class _AxisRow(QtWidgets.QWidget):
             spin.valueNormalized.connect(self._range_normalized)
         self.values_edit.editingFinished.connect(self.edited.emit)
         self.mode_choice.activated.connect(self._pick_mode)
+        self.enabled_switch.toggled.connect(self._enabled_toggled)
         self.remove_button.clicked.connect(lambda: self.remove_requested.emit(self))
+
+    @property
+    def scanned(self) -> bool:
+        """Whether the plan scans this axis; False while it is parked."""
+
+        return self.enabled_switch.isChecked()
+
+    def _enabled_toggled(self, _checked: bool) -> None:
+        self._show_parked()
+        self.edited.emit()
+
+    def _show_parked(self) -> None:
+        """A parked row is greyed, all but its switch and its ×, and says no
+        problem: nothing reads its values, and a greyed box puts back the
+        last number it could read, which the row reads as when it is
+        switched on again."""
+
+        for widget in (self._kind, self._identity, self.input_stack, self._unit_host,
+                       self.mode_choice, self.custom_label):
+            if widget is not None:
+                widget.setEnabled(self.scanned)
+        if not self.scanned:
+            show_note(self.error_label, "")
 
     def _pick_mode(self, mode: str) -> None:
         index = int(mode == "values")
@@ -268,6 +313,7 @@ class _AxisRow(QtWidgets.QWidget):
             "values": list(self._custom_values if self._custom_values is not None else _sweep_values(self)),
             "mode": "values" if self.input_stack.currentIndex() == 1 else "range",
             "value_text": self.values_edit.text(),
+            **({} if self.scanned else {"enabled": False}),
         }
 
     def _show_inputs(self, entry: Mapping, *, preserve_edit: bool = False,
@@ -281,6 +327,9 @@ class _AxisRow(QtWidgets.QWidget):
         if not preserve_edit or not being_edited(self.values_edit):
             self.values_edit.setText(entry["value_text"])
         self.input_stack.setCurrentIndex(int(entry["mode"] == "values"))
+        with signals_blocked(self.enabled_switch):
+            self.enabled_switch.setChecked(entry.get("enabled", True))
+        self._show_parked()
         self._refresh_mode()
         return True
 
@@ -321,8 +370,14 @@ class _AxisRow(QtWidgets.QWidget):
             # authored: silently selecting whatever sits first re-points their
             # axis at an unrelated knob and the run would sweep it without a
             # word.  Left as it is, bind_plan refuses by name before anything
-            # arms.
-            labels[chosen] = f"{port_leaf(chosen)} (not in this pulse)"
+            # arms.  An empty bracket's repeat count IS in the pulse, and
+            # saying otherwise sends the operator looking for a deleted
+            # parameter.
+            labels[chosen] = (
+                f"{port_leaf(chosen)} (its bracket is empty)"
+                if chosen in self._withheld
+                else f"{port_leaf(chosen)} (not in this pulse)"
+            )
             sources[chosen] = (branch(chosen),)
         fill_grouped_choice_combo(
             self.port_combo,
@@ -426,7 +481,7 @@ class _AxisRow(QtWidgets.QWidget):
         show_note(self.error_label, "")
         return True
 
-    def reconcile(self, ports, entry: Mapping) -> None:
+    def reconcile(self, ports, entry: Mapping, withheld: Mapping[str, str]) -> None:
         """Bring this row to its authored inputs, touching only what differs.
 
         The row the operator is inside is theirs: its port, range and
@@ -434,8 +489,9 @@ class _AxisRow(QtWidgets.QWidget):
         """
 
         ports = tuple(ports)
-        if ports != self._ports:
+        if ports != self._ports or withheld != self._withheld:
             self._ports = ports
+            self._withheld = dict(withheld)
             self._fill_ports(entry["port"])
             self._apply_port_limits(entry["unit"])
         elif str(self.port_combo.currentData()) != entry["port"]:
@@ -488,7 +544,7 @@ class _AxisRow(QtWidgets.QWidget):
         """What a box of the Range bank cannot hold, while the row plays
         its range: the row's own problem, said under it and nowhere else."""
 
-        if self.input_stack.currentIndex() != 0:
+        if self.input_stack.currentIndex() != 0 or not self.scanned:
             return ""
         return next((str(error) for spin in (self.start_spin, self.stop_spin, self.points_spin)
                      if (error := spin.property("numericError"))), "")
@@ -551,10 +607,10 @@ class _ManualAxisRow(_AxisRow):
         self.name_edit.textChanged.connect(lambda _text: self.edited.emit())
         self._connect_inputs()
 
-    def reconcile(self, ports, entry: Mapping) -> None:
+    def reconcile(self, ports, entry: Mapping, withheld: Mapping[str, str]) -> None:
         """Bring this row to its inputs; a hand's row has no port to follow."""
 
-        del ports
+        del ports, withheld
         name = entry["port"][len(MANUAL_PARAM_FAMILY):]
         if self.name_edit.text().strip() != name and not being_edited(self.name_edit):
             with signals_blocked(self.name_edit):
@@ -584,7 +640,8 @@ class ScanPlanEditor(QtWidgets.QWidget):
         column.setSpacing(row_gap())
         self.add_button = FluentButton("Add axis")
         self.add_manual_button = FluentButton("Add manual axis")
-        _title, header = section_header("Scan plan", actions=(self.add_button, self.add_manual_button))
+        self.plan_title, header = section_header(
+            "Scan plan", actions=(self.add_button, self.add_manual_button))
         column.addLayout(header)
         self.rows_layout = QtWidgets.QVBoxLayout()
         self.rows_layout.setSpacing(row_gap())
@@ -592,6 +649,9 @@ class ScanPlanEditor(QtWidgets.QWidget):
         # Why the plan cannot be read stands under its rows in the one error
         # line; what the plan IS stands there as a muted note (:meth:`_say`).
         self.problem = error_note_label()
+        #: What :attr:`problem` says, as the words the draft's issue has
+        #: (:meth:`shown_problems`), before the full stop is added.
+        self._plan_problem = ""
         column.addWidget(self.problem)
         self.summary = muted_note_label("")
         self.summary.setWordWrap(True)
@@ -620,6 +680,21 @@ class ScanPlanEditor(QtWidgets.QWidget):
             lambda key: self._value_changed(key, normalized=True)
         )
         column.addWidget(self.values_form)
+        #: The values the draft keeps but this run does not apply, one muted
+        #: line each with its ×: a name this pulse does not declare, or one a
+        #: board axis sweeps.  Kept, never deleted behind the operator's back
+        #: -- they come back into play when the pulse or the axis does.
+        self.parked_values = QtWidgets.QWidget(self)
+        parked_layout = QtWidgets.QVBoxLayout(self.parked_values)
+        parked_layout.setContentsMargins(0, 0, 0, 0)
+        parked_layout.setSpacing(row_gap() // 2)
+        self.parked_values.hide()
+        self._parked_shown: dict[str, str] = {}
+        #: The kept values the run cannot take, each with the sentence the
+        #: draft refuses it with: a label two of the pulse's fields answer
+        #: to.  Said on the value's own line, in red, and nowhere else.
+        self._value_problems: dict[str, str] = {}
+        column.addWidget(self.parked_values)
         self.values_error = error_note_label()
         column.addWidget(self.values_error)
         self.values_note = muted_note_label("")
@@ -627,6 +702,7 @@ class ScanPlanEditor(QtWidgets.QWidget):
         column.addWidget(self.values_note)
 
         self._ports: tuple = ()
+        self._withheld: dict[str, str] = {}
         self._device_labels: dict[str, str] = {}
         self._rows: list[_AxisRow] = []
         self._loading = False
@@ -690,6 +766,20 @@ class ScanPlanEditor(QtWidgets.QWidget):
         """The editor's number edge: the API values end where its other number boxes do."""
 
         self.values_form.set_number_edge(int(edge))
+
+    def shown_problems(self) -> dict[str, str]:
+        """The draft's problems this editor states in red where they arise,
+        each with its section: the plan's under the axes, a kept API value's
+        on its line.  The page header counts them rather than saying one
+        again above."""
+
+        shown: dict[str, str] = {}
+        if self._plan_problem and self.problem.isVisibleTo(self):
+            shown[self._plan_problem] = self.plan_title.text()
+        if self.parked_values.isVisibleTo(self):
+            for problem in self._value_problems.values():
+                shown.setdefault(problem, self.values_title.text())
+        return shown
 
     def update_projection(self, projection: Mapping[str, object]) -> None:
         if projection.get("read_only_fields"):
@@ -782,7 +872,7 @@ class ScanPlanEditor(QtWidgets.QWidget):
                 self._start_port_read()
                 return
             self._apply_projection(template_ports, sequence, plan_text, values_text)
-            show_problem(self.problem, "device range reads require the console's device worker")
+            self._show_plan_problem("device range reads require the console's device worker")
             return
         self._port_read_request = None
         self._apply_projection(template_ports, sequence, plan_text, values_text)
@@ -812,7 +902,7 @@ class ScanPlanEditor(QtWidgets.QWidget):
                 return
             if error is not None:
                 owner._refresh_summary()
-                show_problem(owner.problem, f"cannot read device ranges: {error}")
+                owner._show_plan_problem(f"cannot read device ranges: {error}")
                 return
             owner._port_read_request = None
             owner._device_scan_ports = (key, tuple(ports))
@@ -834,9 +924,11 @@ class ScanPlanEditor(QtWidgets.QWidget):
         """Adopt plain port metadata only on the widget's owner thread."""
         ports = label_device_scan_ports(ports, self._device_labels)
 
-        ports_changed = tuple(ports) != self._ports
+        withheld = {} if sequence is None else unscannable_api_ports(sequence)
+        ports_changed = tuple(ports) != self._ports or withheld != self._withheld
         if ports_changed:
             self._ports = tuple(ports)
+            self._withheld = withheld
         if ports_changed or plan_text != self._plan_text:
             self._plan_text = plan_text
             self._reconcile_rows(plan_text)
@@ -878,7 +970,7 @@ class ScanPlanEditor(QtWidgets.QWidget):
                     or current._unit_request is not request):
                 return
             current._unit_request = None
-            current._unit_host.setEnabled(True)
+            current._unit_host.setEnabled(current.scanned)
             if current.input_entry() != entry or owner._tunable_devices.get(key) is not device:
                 current._refresh_mode()
                 return
@@ -902,19 +994,21 @@ class ScanPlanEditor(QtWidgets.QWidget):
     # ---------------------------------------------------------- API values
 
     def _scanned_parameters(self) -> set[str]:
+        """The pulse slots a scanned (not parked) board axis of the plan sweeps."""
+
         return {
             entry["port"][len(PULSE_PARAM_FAMILY):]
             for row in self._rows
-            if (entry := row.input_entry())["port"].startswith(PULSE_PARAM_FAMILY)
+            if row.scanned and (entry := row.input_entry())["port"].startswith(PULSE_PARAM_FAMILY)
         }
 
     def _walked_parameters(self) -> set[str]:
-        """The API parameters an ``api:`` axis of the plan walks."""
+        """The API parameters a scanned (not parked) ``api:`` axis of the plan walks."""
 
         return {
             entry["port"][len(API_PARAM_FAMILY):]
             for row in self._rows
-            if (entry := row.input_entry())["port"].startswith(API_PARAM_FAMILY)
+            if row.scanned and (entry := row.input_entry())["port"].startswith(API_PARAM_FAMILY)
         }
 
     def _reconcile_values(self, sequence: object) -> None:
@@ -922,7 +1016,13 @@ class ScanPlanEditor(QtWidgets.QWidget):
 
         A parameter an ``api:`` axis walks keeps its row, locked: the plan
         says what it plays, point by point, and the box says so until the
-        axis is taken out of the plan.
+        axis is taken out of the plan -- holding the value the draft keeps
+        for it, which comes back into play then.  A value the run does not
+        apply and no row can show -- a name this pulse does not declare, one
+        a board axis sweeps -- is a parked line under the rows.  A label two
+        of the pulse's fields answer to is no parked value: the run refuses
+        it, and its line says why, in red.  With no pulse there is nothing
+        to say any value is not in: the lines wait for one.
         """
 
         parameters = tuple(getattr(sequence, "api_bindings", ()) or ())
@@ -983,7 +1083,10 @@ class ScanPlanEditor(QtWidgets.QWidget):
                     minimum=int(column.limit_lo) if code else column.limit_lo,
                     maximum=int(column.limit_hi) if code else column.limit_hi,
                     unavailable_reason=(
-                        "swept by the scan plan; take its axis out of the "
+                        "swept by the scan plan; the value shown is kept for "
+                        "when its axis is taken out of the plan"
+                        if name in walked and name in overrides
+                        else "swept by the scan plan; take its axis out of the "
                         "plan to set a value for the run"
                         if name in walked
                         else ""
@@ -1002,7 +1105,20 @@ class ScanPlanEditor(QtWidgets.QWidget):
         finally:
             self._loading = False
         self._values_broken = bool(broken)
-        shown = bool(self.values_form.keys) or bool(broken)
+        undecided = bool(broken) or sequence is None
+        labelled = self._fields_labelled()
+        self._value_problems = {} if undecided else {
+            name: ambiguous_api_value(name, labelled[name])
+            for name in overrides
+            if name not in self._authored and len(labelled.get(name, ())) > 1
+        }
+        parked = {} if undecided else {
+            name: self._value_problems.get(name) or self._parked_text(name, value)
+            for name, value in overrides.items()
+            if name not in self.values_form.keys
+        }
+        self._show_parked(parked)
+        shown = bool(self.values_form.keys) or bool(broken) or bool(parked)
         self._show_values(shown)
         # A pulse that cannot be read says so in the error line; the muted
         # note is for what the rows set.
@@ -1011,6 +1127,55 @@ class ScanPlanEditor(QtWidgets.QWidget):
         if broken:
             return
         self._refresh_values_note()
+
+    def _parked_text(self, name: str, value: float) -> str:
+        """One kept value the run does not apply, said as what it is."""
+
+        number = format_quantity(value, "1")
+        if name not in self._authored:
+            return f"not in this pulse: {name} = {number} (kept, not applied)"
+        unit = self._authored[name][1]
+        shown = number if unit in ("value", "count") else f"{number} {unit}"
+        return (
+            f"swept by the scan plan: {self._api_labels.get(name, name)} = {shown} "
+            "(kept for when its axis is taken out of the plan)"
+        )
+
+    def _show_parked(self, parked: Mapping[str, str]) -> None:
+        """Put the parked values' lines under the rows, each with its ×."""
+
+        if dict(parked) == self._parked_shown:
+            return
+        self._parked_shown = dict(parked)
+        layout = self.parked_values.layout()
+        while layout.count():
+            retire_widget(layout.takeAt(0).widget())
+        for name, text in parked.items():
+            line = QtWidgets.QWidget(self.parked_values)
+            row = QtWidgets.QHBoxLayout(line)
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(row_gap())
+            if name in self._value_problems:
+                label = error_note_label()
+                show_problem(label, text)
+            else:
+                label = muted_note_label(text)
+                label.setWordWrap(True)
+            remove = FluentButton("×", role="destructive")
+            remove.setToolTip("Remove this kept value from the draft")
+            remove.clicked.connect(lambda _checked=False, key=name: self._remove_kept_value(key))
+            row.addWidget(label, 1)
+            row.addWidget(remove)
+            layout.addWidget(line)
+
+    def _remove_kept_value(self, name: str) -> None:
+        current = self._current_overrides()
+        if current.pop(name, None) is None:
+            return
+        self._values_text = api_overrides_to_authored(current)
+        self._port_read_projection = None
+        self.draft_changed.emit({"values": {"api_values": self._values_text}})
+        self._reconcile_values(self._sequence)
 
     def _show_values(self, shown: bool) -> None:
         """Show or hide the API values section, with the section gap above its title."""
@@ -1022,47 +1187,65 @@ class ScanPlanEditor(QtWidgets.QWidget):
         self.layout().invalidate()
         self.values_title.setVisible(shown)
         self.values_form.setVisible(shown)
+        self.parked_values.setVisible(shown and bool(self._parked_shown))
 
     def _rescope_values(self) -> None:
         """The projected text, re-read against THIS pulse.
 
         An API value is a difference written against one pulse: a name it
-        declares, at a value other than the one it carries.  Change the
-        pulse and the text may name parameters the new pulse does not
-        declare -- and the run's build refuses those by name, while the
-        form has no row to show them in, so the operator could neither see
-        the stale line nor remove it.  The draft is this editor's
-        projection, so the editor re-scopes it here: names the pulse does
-        not declare and values equal to its own are dropped, and the text
-        is written back only when that changes it, so one round trip
-        settles it.  Only the TEXT is re-read, never the boxes -- a box may
-        be mid-word, and the boxes speak through ``_value_changed``.  A
-        pulse that could not be read, or one that is not there, decides
-        nothing; nor does an editor its host has frozen.
+        declares, at a value other than the one it carries.  A value equal
+        to the pulse's own is no override, and is dropped; a label is
+        written as the field id it names.  Everything else is KEPT: a name
+        the pulse does not declare (another pulse's, or a field its Subpulse
+        file no longer offers) and one the plan sweeps are parked lines the
+        operator can see and remove, and they come back into play when the
+        pulse or the axis does -- the build applies only what the pulse
+        declares and names the rest in the run record.  The text is written
+        back only when that changes it, so one round trip settles it.  Only
+        the TEXT is re-read, never the boxes -- a box may be mid-word, and
+        the boxes speak through ``_value_changed``.  A pulse that could not
+        be read, or one that is not there, decides nothing; nor does an
+        editor its host has frozen.
         """
 
         if self._sequence is None or self._values_broken or not self.isEnabled():
             return
-        current = self._current_overrides()
-        walked = self._walked_parameters()
+        try:
+            written = api_overrides_from_authored(self._values_text)
+        except ValueError:
+            return
         kept = {
             name: value
-            for name, value in current.items()
-            if name in self.values_form.keys
-            and name not in walked
-            and value != self._authored[name][0]
+            for name, value in self._current_overrides().items()
+            if name not in self._authored or value != self._authored[name][0]
         }
-        if kept == current:
+        if kept == written:
             return
         self._values_text = api_overrides_to_authored(kept)
         self.draft_changed.emit({"values": {"api_values": self._values_text}})
-        self._refresh_values_note()
+        self._reconcile_values(self._sequence)
 
     def _current_overrides(self) -> dict[str, float]:
+        """The written values, a parameter's label read as its field id."""
+
         try:
-            return api_overrides_from_authored(self._values_text)
+            written = api_overrides_from_authored(self._values_text)
         except ValueError:
             return {}
+        named = self._fields_labelled()
+        return {
+            named[name][0] if name not in self._authored and len(named.get(name, ())) == 1 else name: value
+            for name, value in written.items()
+        }
+
+    def _fields_labelled(self) -> dict[str, list[str]]:
+        """Each label this pulse's API parameters show, with the field ids
+        that answer to it, in the pulse's order."""
+
+        named: dict[str, list[str]] = {}
+        for field_id, label in self._api_labels.items():
+            named.setdefault(label, []).append(field_id)
+        return named
 
     def _value_changed(self, _key: str, *, normalized: bool = False) -> None:
         """A value moved: the draft says so now.
@@ -1078,20 +1261,22 @@ class ScanPlanEditor(QtWidgets.QWidget):
         self._emit_values(normalized=normalized)
 
     def _overrides(self) -> dict[str, float]:
-        """Only what this run sets differently.
+        """Only what this run sets differently, and every value kept.
 
         A box left at the value the pulse carries is not an override: the
         pulse's own number is already the workspace's current one, and
         freezing a copy of it here would quietly outrank the next
-        recalibration.
+        recalibration.  A value no free box holds -- one the plan sweeps, or
+        a name this pulse does not declare -- is carried over as written.
         """
 
-        overrides: dict[str, float] = {}
         walked = self._walked_parameters()
-        for name in self.values_form.keys:
-            if name in walked:
-                # The plan says what this one plays, point by point.
-                continue
+        editable = tuple(name for name in self.values_form.keys if name not in walked)
+        overrides = {
+            name: value for name, value in self._current_overrides().items()
+            if name not in editable
+        }
+        for name in editable:
             try:
                 value = self.values_form.read_value(name)
             except ValueError:
@@ -1120,12 +1305,13 @@ class ScanPlanEditor(QtWidgets.QWidget):
 
         parts = []
         walked = self._walked_parameters()
-        free = sum(1 for name in self.values_form.keys if name not in walked)
+        free = tuple(name for name in self.values_form.keys if name not in walked)
         if free:
-            set_here = len(self._overrides())
+            overrides = self._overrides()
+            set_here = sum(1 for name in free if name in overrides)
             parts.append(
-                f"{set_here} of {free} set for this run"
-                + ("; the rest run what the pulse carries." if set_here < free else ".")
+                f"{set_here} of {len(free)} set for this run"
+                + ("; the rest run what the pulse carries." if set_here < len(free) else ".")
             )
         swept = (self._scanned_parameters() | walked) & set(self._authored)
         if swept:
@@ -1174,7 +1360,7 @@ class ScanPlanEditor(QtWidgets.QWidget):
                 manual = axis["port"].startswith(MANUAL_PARAM_FAMILY)
                 row = self._rows[position] if position < len(self._rows) else None
                 if row is not None and row.manual == manual:
-                    row.reconcile(self._ports, axis)
+                    row.reconcile(self._ports, axis, self._withheld)
                     kept.append(row)
                     continue
                 if row is not None:
@@ -1191,7 +1377,7 @@ class ScanPlanEditor(QtWidgets.QWidget):
 
     def _build_row(self, axis: Mapping | None) -> _AxisRow:
         row = _AxisRow(self._ports, axis, (self._columns, self._range_columns), self,
-                       device_labels=self._device_labels)
+                       device_labels=self._device_labels, withheld=self._withheld)
         row.edited.connect(self._emit_plan)
         row.normalized.connect(lambda: self._emit_plan(normalized=True))
         row.unit_change_requested.connect(self._convert_axis_unit)
@@ -1290,8 +1476,15 @@ class ScanPlanEditor(QtWidgets.QWidget):
     def _say(self, *, summary: str = "", problem: str = "") -> None:
         """Under the rows: what the plan is, or why it cannot be read."""
 
-        show_problem(self.problem, problem)
+        self._show_plan_problem(problem)
         show_note(self.summary, summary)
+
+    def _show_plan_problem(self, problem: str) -> None:
+        """The one line under the axes that says what is wrong, and the
+        words it says it in, for :meth:`shown_problems`."""
+
+        self._plan_problem = problem
+        show_problem(self.problem, problem)
 
     def _refresh_summary(self) -> None:
         if not self._rows:
@@ -1340,9 +1533,16 @@ class ScanPlanEditor(QtWidgets.QWidget):
                 "applied and read back between fires."
             )
         )
+        parked = sum(1 for row in self._rows if not row.scanned)
+        kept = (
+            ""
+            if not parked
+            else f" {counted(parked, 'parked axis', 'parked axes')} {'is' if parked == 1 else 'are'} "
+            "kept and not scanned."
+        )
         self._say(summary=(
             f"{counted(len(plan.axes), 'axis', 'axes')}, {shape} = "
             f"{counted(plan.point_count, 'point')}, "
             "outermost first; each point resolves the template, plays it, and "
-            f"captures one measurement.{by_hand}{by_device}"
+            f"captures one measurement.{by_hand}{by_device}{kept}"
         ))

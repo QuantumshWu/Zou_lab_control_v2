@@ -13,8 +13,7 @@ from zlc_ui.fluent import (
     retire_widget,
     detach_widget,
     ElidedLabel,
-    GREEN,
-    MUTED_INK,
+    MUTED_LABEL_STYLE,
     FluentButton,
     FluentComboBox,
     FluentFrame,
@@ -24,6 +23,7 @@ from zlc_ui.fluent import (
     FluentSwitch,
     add_row_switch,
     card_pad,
+    fit_button_words,
     FluentTabWidget,
     fluent_widget_stylesheet,
     muted_note_label,
@@ -35,7 +35,7 @@ from zlc_ui.fluent import (
 from zlc_ui.status import name_words
 
 from .board_view import ConsoleBoardView
-from .logic_row_view import STATUS_DOT, LogicRowView, fit_button_words, mount_logic_page
+from .logic_row_view import STATUS_DOT, LogicRowView, mount_logic_page
 from .panel_card_view import PanelCardView
 from .status_strip import StatusStrip
 
@@ -110,15 +110,15 @@ class TaskConsoleView(QtWidgets.QWidget):
         header.setContentsMargins(side, scaled_px(6), side, scaled_px(6))
         header.setSpacing(row_gap())
 
+        # The console's state: the worst of its logic nodes' (set_console_state).
         self.status_dot = FluentStatusDot(size=STATUS_DOT)
-        self.status_dot.set_color(GREEN)
         # The window's identity, as a word: nothing reads a name typed here,
         # so an edit box in its place was an input that changed nothing.  At
         # its own width, so the summary follows the word instead of a blank
         # column a hundred pixels wide.
         self.name_label = FluentLabel("task")
         self.summary_label = ElidedLabel("")
-        self.summary_label.setStyleSheet(f"color: {MUTED_INK}; background: transparent; border: none;")
+        self.summary_label.setStyleSheet(MUTED_LABEL_STYLE)
 
         self.kind_combo = FluentComboBox()
         self._task_takeover = False
@@ -134,10 +134,13 @@ class TaskConsoleView(QtWidgets.QWidget):
         fit_button_words(self.add_button, tuple(_ADD_WORDS.values()))
         self.add_button.setEnabled(False)
 
-        # Rendered as a push button rather than a toggle, so the button carries
-        # the command and the label carries the state.  It emits the state it
-        # is asking FOR, which is what makes the command reversible.
-        self.pause_switch = FluentButton("Pause")
+        # A toggle command: its label names the next press, and it wears the
+        # active face while the console is paused -- both projected by the
+        # presenter (set_paused), never set by the click.  It emits the state
+        # it is asking FOR, which is what makes the command reversible.
+        self.pause_button = FluentButton("Pause")
+        # Its slot fits both words, so Resume moves nothing beside it.
+        fit_button_words(self.pause_button, ("Pause", "Resume"))
         self._paused = False
         # An on/off setting is a switch, even in a row of commands: a
         # checkable button there read as one more command.
@@ -165,7 +168,7 @@ class TaskConsoleView(QtWidgets.QWidget):
         # label does not run into Pause.
         add_row_switch(header, self.selectors_switch)
         for widget in (
-            self.pause_switch,
+            self.pause_button,
             self.save_screenshot_button,
             self.save_layout_button,
             self.load_layout_button,
@@ -244,7 +247,7 @@ class TaskConsoleView(QtWidgets.QWidget):
         self.kind_combo.currentIndexChanged[int].connect(
             lambda _index: self._update_add_button()
         )
-        self.pause_switch.clicked.connect(
+        self.pause_button.clicked.connect(
             lambda _checked=False: self.pause_toggled.emit(not self._paused)
         )
         self.selectors_switch.toggled.connect(self.selectors_toggled.emit)
@@ -336,7 +339,14 @@ class TaskConsoleView(QtWidgets.QWidget):
         """Show the state, so the button can ask for the other one."""
 
         self._paused = bool(paused)
-        self.pause_switch.setText("Resume" if self._paused else "Pause")
+        self.pause_button.setText("Resume" if self._paused else "Pause")
+        self.pause_button.set_active(self._paused)
+
+    def set_console_state(self, word: str) -> None:
+        """The header dot: ``running`` while a node runs, ``error`` while
+        one has failed, ``idle`` otherwise (``STATUS_CUES``)."""
+
+        self.status_dot.set_state(word)
 
     def set_selectors(self, enabled: bool) -> None:
         """Show whether selections derive, without asking for it again.

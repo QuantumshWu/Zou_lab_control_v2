@@ -269,26 +269,17 @@ def test_pulse_tree_uses_only_brackets_and_run_repeats() -> None:
     assert not hasattr(authored, "repeat") and not hasattr(authored, "bracket")
     assert sequence_from_tree(tree) == authored
 
+    # An empty bracket is a placeholder waiting for periods: it saves and
+    # reopens as written, and compiles to no loop, so the board never sees it
+    # and it takes none of the board's loops.
     for start, end, gap in (("p0", None, 0), ("p1", "p0", 1), (None, "p2", 3)):
-        empty = replace(authored, brackets=(PulseBracket("loop", start, end, 3),))
-        assert empty.bracket_bounds == ((gap, gap),)
-        raw = {**tree, "brackets": [
-            {"bracket_id": "loop", "start_period_id": start, "end_period_id": end, "count": 3},
-        ]}
-        messages = []
-        for operation in (
-            empty.require_nonempty_brackets,
-            lambda: compile_sequence(empty, StreamerParams(max_rows=8, bank_size=2), 50e6),
-            lambda: sequence_to_tree(empty),
-            lambda: sequence_from_tree(raw),
-        ):
-            try:
-                operation()
-            except ValueError as error:
-                messages.append(str(error))
-            else:
-                raise AssertionError("empty authoring bracket escaped the execution/save boundary")
-        assert len(set(messages)) == 1 and "Bracket loop is empty" in messages[0]
+        empty = replace(authored, brackets=(PulseBracket("wait", start, end, 3),))
+        assert empty.bracket_bounds == ((gap, gap),) and empty.loops == ()
+        assert sequence_from_tree(sequence_to_tree(empty)) == empty
+        assert compile_sequence(empty, StreamerParams(max_rows=8, bank_size=2), 50e6).loops == ()
+    beside = replace(authored, brackets=(*authored.brackets, PulseBracket("wait", "p1", "p0", 2)))
+    one_loop = StreamerParams(max_rows=8, bank_size=2, max_loops=1, loop_depth=1)
+    assert compile_sequence(beside, one_loop, 50e6).loops == ((0, 2, 3),)
     with np.testing.assert_raises_regex(ValueError, "end precedes"):
         replace(authored, brackets=(PulseBracket("loop", "p2", "p0", 3),))
 
@@ -564,8 +555,14 @@ def test_scan_and_value_source_share_one_physical_field_declaration() -> None:
         assert sequence_from_tree(sequence_to_tree(combined)) == combined
         with np.testing.assert_raises_regex(ValueError, "one binding"):
             replace(base, bindings=(binding, replace(binding, scan=False)))
-    with np.testing.assert_raises(ValueError):
-        PulseBinding(duration, "ns", source="api", config_key="shared")
+    # A non-Config binding may keep its Config name; nothing applies it.
+    kept = replace(base, config_enabled=True, bindings=(
+        PulseBinding(duration, "ns", source="api", config_key="shared"),
+        PulseBinding(PulseFieldRef("duration", "p1"), "ns", config_key="shared"),
+    ))
+    assert kept.config_bindings == ()
+    assert apply_config_values(kept, {"shared": (0.08, "us")})[0].periods == kept.periods
+    assert sequence_from_tree(sequence_to_tree(kept)) == kept
     with np.testing.assert_raises(ValueError):
         PulseBinding(PulseFieldRef("delay", port="d0"), "ns", scan=True)
     for old_member in ("slots", "api_parameters", "config_parameters"):
@@ -835,7 +832,7 @@ def test_component_and_non_executable_subpulse_files_roundtrip(tmp_path) -> None
     from zlc_pulse import (
         extract_subpulse, group_component, insert_subpulse, read_pulse_document,
         read_subpulse, subpulse_from_tree, subpulse_to_tree, write_subpulse,
-        apply_api_values, resolve_subpulse_sources, set_subpulse_source,
+        apply_api_values, resolve_subpulse_sources, set_subpulse_source, stale_subpulse_bindings,
     )
 
     authored = group_component(
@@ -869,6 +866,10 @@ def test_component_and_non_executable_subpulse_files_roundtrip(tmp_path) -> None
     write_subpulse(path, api_fragment)
     defaults = insert_subpulse(insert_subpulse(None, api_fragment), api_fragment)
     first, second = defaults.components
+    unchosen = resolve_subpulse_sources(replace(
+        set_subpulse_source(defaults, first.component_id, "config", ""), config_enabled=True))
+    assert unchosen.periods == defaults.periods
+    assert (unchosen.components[0].source, unchosen.components[0].config_path) == ("default", "")
     referenced = set_subpulse_source(defaults, first.component_id, "config", path.name)
     assert resolve_subpulse_sources(referenced, base_directory=tmp_path) is referenced
     assert referenced.periods == defaults.periods
@@ -899,9 +900,16 @@ def test_component_and_non_executable_subpulse_files_roundtrip(tmp_path) -> None
     expanded = resolve_subpulse_sources(active)
     assert expanded.components[0].period_ids[:2] == first.period_ids
     assert expanded.periods == resolve_subpulse_sources(active).periods
+    assert stale_subpulse_bindings(active, expanded) == ()
+    # A file that holds an API field constant plays it; only a run that sets
+    # that field is refused, by name.
     write_subpulse(path, replace(changed, bindings=()))
-    with np.testing.assert_raises_regex(ValueError, "Scan/API field"):
-        resolve_subpulse_sources(active)
+    constant = resolve_subpulse_sources(active)
+    assert api_field in {binding.field_id for binding in stale_subpulse_bindings(active, constant)}
+    assert api_field not in {binding.field_id for binding in constant.api_bindings}
+    assert constant.period_by_id[first.period_ids[0]].duration == 80
+    with np.testing.assert_raises_regex(ValueError, "unknown or ambiguous api field"):
+        apply_api_values(active, {api_field: (100, "ns")})
     write_subpulse(path, replace(changed, time_step_ns=10))
     with np.testing.assert_raises_regex(ValueError, "time step"):
         resolve_subpulse_sources(active)

@@ -423,7 +423,6 @@ def compile_sequence(
 
     if not isinstance(sequence, PulseSequence):
         raise TypeError("sequence must be PulseSequence")
-    sequence.require_nonempty_brackets()
     if sequence.api_bindings:
         declared = tuple(
             parameter.field_id for parameter in sequence.api_bindings
@@ -457,12 +456,13 @@ def compile_sequence(
             f"sequence has {len(sequence.periods)} periods but the streamer geometry "
             f"holds {params.max_rows} rows"
         )
-    if len(sequence.brackets) > params.max_loops:
+    # An empty bracket loops nothing and is not a loop the board holds.
+    loops = sequence.loops
+    if len(loops) > params.max_loops:
         raise ValueError(
-            f"sequence has {len(sequence.brackets)} brackets but the streamer geometry "
+            f"sequence loops {len(loops)} brackets but the streamer geometry "
             f"holds {params.max_loops} loops"
         )
-    loops = sequence.loops
     depth = loop_nesting_depth(loops)
     if depth > params.loop_depth:
         raise ValueError(

@@ -16,6 +16,7 @@ from __future__ import annotations
 from collections import deque
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from concurrent.futures import CancelledError, Future, TimeoutError as _AnswerTimeout
+from copy import deepcopy
 from dataclasses import dataclass, field, fields, is_dataclass, replace
 from enum import Enum
 import logging
@@ -139,8 +140,13 @@ FRAME_CLAIMS_RULE = (
     "middle frames between them, and 'rest' (every frame no other entry names); each frame "
     "is read by exactly one entry; at most one entry takes each of 'first', 'last', 'rest' "
     "and each middle number; one file per entry. One entry with ['rest'] reads every frame. "
+    "An entry with frames [] is kept but reads nothing: it is parked (listed in 'unused'), "
+    "its file is not checked against the others and may be missing; keep it, do not delete "
+    "it to make the draft start. At least one entry must read a frame. "
     "Claims are kept as written when the frame count changes; one the new count "
-    "cannot honour is reported, never dropped. A middle index cannot become the new last frame."
+    "cannot honour is reported, never dropped. A middle index cannot become the new last "
+    "frame: a middle number the source does not carry is listed in 'notes', reads nothing "
+    "and does not stop a run. A frame no entry reads does."
 )
 _PANEL_UPDATE_FIELDS = (
     "signal", "kind", "cell_kind", "size", "interval_ms", "title",
@@ -277,6 +283,79 @@ def _artifact_draft_value(value: object) -> object:
         return value
 
 
+def _same_draft_value(previous: object, proposed: object) -> bool:
+    """Whether two draft values are one authored value.
+
+    Compared as the form shows them and of one type: an editor echoing its
+    projection back (rows as tuples, a number list as its text) and an
+    operator typing the same value again are no change.
+    """
+
+    from .authoring_form import display_value
+
+    previous, proposed = display_value(previous), display_value(proposed)
+    return type(previous) is type(proposed) and previous == proposed
+
+
+def _unknown_fields_refusal(
+    subject: str, descriptor: Any, values: Mapping[str, Any]
+) -> str:
+    """The refusal of value names the node's schema does not declare, or "".
+
+    Such a name is no setting of the node: kept, it would ride along in
+    every later draft, Start and comparison with the running configuration,
+    and no edit could take it out again.  Adding a row and changing its
+    draft refuse it with this one sentence.
+    """
+
+    fields = descriptor.authoring_schema.field_names
+    unknown = sorted(str(name) for name in values if name not in fields)
+    if not unknown:
+        return ""
+    return (
+        f"{subject} has no field "
+        f"{', '.join(repr(name) for name in unknown)}; "
+        f"its fields are {', '.join(fields)}"
+    )
+
+
+def _same_draft(draft: LogicDraft, other: LogicDraft) -> bool:
+    """Whether two drafts would Start the same run: every part, by value."""
+
+    return (
+        draft.source_signal == other.source_signal
+        and draft.device_keys == other.device_keys
+        and draft.artifact_inputs == other.artifact_inputs
+        and draft.values.keys() == other.values.keys()
+        and all(
+            _same_draft_value(value, other.values[name])
+            for name, value in draft.values.items()
+        )
+    )
+
+
+def _running_configuration(binding: LogicBinding) -> LogicDraft | None:
+    """The draft the current run -- running, queued or following -- was
+    started with; None while the node has no current run.
+
+    A queued Restart's configuration is its candidate's own copy, so
+    whichever way the candidate is discarded, the old run's record is what
+    remains.
+    """
+
+    if binding.pending is not None:
+        return binding.pending.draft
+    active = binding.following or (binding.host is not None and binding.host.running)
+    return binding.started_draft if active else None
+
+
+def _edited_since_start(binding: LogicBinding) -> bool:
+    """Whether the draft differs from the configuration the node runs."""
+
+    running = _running_configuration(binding)
+    return running is not None and not _same_draft(binding.draft, running)
+
+
 def _shown_resource_path(value: object, directory: Path) -> str:
     """A workspace resource's path as its field shows it.
 
@@ -306,28 +385,34 @@ def _claims_projection(
     source_frames: tuple[str, ...] | None,
     base_dir: str,
 ) -> dict[str, Any]:
-    """One frame-claims input for its editor and for lab_catalog(node_id); all plain."""
+    """One frame-claims input for its editor and for lab_catalog(node_id); all plain.
 
-    from zlc_atom.nodes import check_claims, claim_names, frame_claim_entries, frame_problems, reach_frames
+    ``problems`` refuse Start; ``notes`` do not (a middle number this source
+    does not carry, kept for a cycle that has it); ``unused`` are the rows
+    reading no frame, kept and not read -- none of them is an error.
+    """
+
+    from zlc_atom.nodes import (
+        absent_notes, claim_names, claim_problems, frame_claim_entries, frame_problems,
+        parked_entries, reach_frames,
+    )
 
     try:
         entries = frame_claim_entries(raw)
     except ValueError as error:
         return {"label": spec.label, "entries": (), "base_dir": base_dir,
                 "file_filter": str(spec.codec.file_filter), "files": (),
-                "reads": None, "problems": (str(error),)}
+                "reads": None, "problems": (str(error),), "notes": (), "unused": ()}
     names = claim_names(entries)
     frames = tuple(entry["frames"] for entry in entries)
     claims = finalization.artifacts.get(spec.name)
     reads = None
-    problems: tuple[str, ...] = ()
-    try:
-        check_claims(frames, names)
-    except ValueError as error:
-        problems = (str(error),)
+    notes: tuple[str, ...] = ()
+    problems = claim_problems(frames, names, what="file")
     if entries and source_frames is not None:
         if not problems:
             problems = frame_problems(frames, len(source_frames), names, what="file")
+        notes = absent_notes(frames, len(source_frames), names)
         reach = reach_frames(frames, len(source_frames))
         reads = tuple(reach.frames_of(entry) for entry in range(len(entries)))
     describe = spec.codec.describe
@@ -336,21 +421,27 @@ def _claims_projection(
         if claims is not None and len(claims) == len(entries)
         else (None,) * len(entries)
     )
+
+    def file(item: Any) -> dict[str, str]:
+        unread = isinstance(item.value, Exception)
+        return {
+            "path": str(item.path),
+            "summary": "" if unread or describe is None else str(describe(item.value)),
+            # Why the file was not read; "" when it was.
+            "unread": str(item.value) if unread else "",
+        }
+
     return {
         "label": spec.label,
         "entries": entries,
         "base_dir": base_dir,
         "file_filter": str(spec.codec.file_filter),
-        # What each row's file is, None where it did not resolve.
-        "files": tuple(
-            None if item is None else {
-                "path": str(item.path),
-                "summary": "" if describe is None else str(describe(item.value)),
-            }
-            for item in resolved
-        ),
+        # What each row's file is; None for a row with no file.
+        "files": tuple(None if item is None else file(item) for item in resolved),
         "reads": reads,
         "problems": problems,
+        "notes": notes,
+        "unused": parked_entries(frames),
     }
 
 
@@ -994,6 +1085,7 @@ class ConsolePresenter:
             self.view.logic_start_requested.connect(self._guarded(self.start_logic))
             self.view.logic_auto_preview_changed.connect(self._guarded(self.set_logic_auto_preview))
             self.view.logic_stop_requested.connect(self._guarded(self.stop_logic))
+            self.view.logic_revert_requested.connect(self._guarded(self.revert_logic_draft))
             self.view.logic_edit_requested.connect(self._guarded(self.edit_logic))
             self.view.logic_remove_requested.connect(self._guarded(self.remove_logic))
             self.view.logic_name_committed.connect(self._guarded(self.rename_logic))
@@ -7374,7 +7466,13 @@ class ConsolePresenter:
                 "api_name": binding.descriptor.api_name,
                 "kind": binding.descriptor.kind.value,
                 "draft_revision": binding.draft_revision,
-                **({"draft": _control_plain(binding.draft)} if details else {}),
+                **({
+                    "draft": _control_plain(binding.draft),
+                    # What the current run was started with -- what
+                    # logic.revert puts back; null with no current run.
+                    "running_draft": _control_plain(_running_configuration(binding)),
+                } if details else {}),
+                "edited_since_start": _edited_since_start(binding),
                 "status": phase,
                 "generation": None if host is None or host.generation is None else host.generation.value,
                 "observation": _control_plain(observed),
@@ -7725,6 +7823,10 @@ class ConsolePresenter:
                 if set(params) != {"node_id"}:
                     raise ValueError("logic.start accepts only node_id")
                 accepted = self.start_logic(node_id)
+            elif action == "logic.revert":
+                if set(params) != {"node_id"}:
+                    raise ValueError("logic.revert accepts only node_id")
+                accepted = self.revert_logic_draft(node_id)
             elif action == "logic.stop":
                 accepted = self.stop_logic(**params)
             elif action == "logic.remove":
@@ -8369,7 +8471,7 @@ class ConsolePresenter:
             )
             if selected_name != selected_id
             else ""
-        )
+        ) or _unknown_fields_refusal(descriptor.api_name, descriptor, dict(values or {}))
         if problem:
             self._report(problem, severity="error")
             return ""
@@ -8479,29 +8581,31 @@ class ConsolePresenter:
         *,
         force: bool = False,
         source_options: tuple[str, ...] | None = None,
+        draft: LogicDraft | None = None,
     ) -> LogicDraftFinalization:
         """Cache one owner finalization until its raw or external facts change.
 
         ``source_options`` is the caller's own compatible-source set for this
         row, when it built one this turn.  ``force`` is a file boundary: the
         draft's files are read again rather than kept from the last answer.
+        ``draft`` answers for another configuration of this node than its
+        draft -- the one its run was started with, which a follow restart
+        rebuilds -- and that answer is never cached: the cache is the draft's.
         """
 
+        subject = binding.draft if draft is None else draft
         if source_options is None:
             source_options = self._source_options(
-                binding.descriptor, binding.node_id
+                binding.descriptor, binding.node_id, values=subject.values
             )
         acquisition_options = self._acquisition_options(binding.node_id)
-        frames = self._source_frames_for(binding)
+        frames = self._source_frames_for(binding, draft=subject)
         source_frames = None if frames is None else len(frames)
-        key = (
-            *self._logic_finalization_key(binding, source_options, acquisition_options),
-            source_frames,
-        )
-        if force or binding.finalization is None or binding.finalization_key != key:
-            binding.finalization = finalize_logic_draft(
+
+        def answer() -> LogicDraftFinalization:
+            return finalize_logic_draft(
                 binding.descriptor,
-                binding.draft,
+                subject,
                 installation=self.session.installation,
                 signal_plane=self.session.signal_plane,
                 workspace=self.session.workspace,
@@ -8511,6 +8615,15 @@ class ConsolePresenter:
                 source_frames=source_frames,
                 node_names=self.logic_names(),
             )
+
+        if draft is not None:
+            return answer()
+        key = (
+            *self._logic_finalization_key(binding, source_options, acquisition_options),
+            source_frames,
+        )
+        if force or binding.finalization is None or binding.finalization_key != key:
+            binding.finalization = answer()
             binding.finalization_key = key
         return binding.finalization
 
@@ -8697,6 +8810,9 @@ class ConsolePresenter:
             "pending": binding.pending is not None,
             "can_start": can_start,
             "can_stop": can_stop,
+            # The draft differs from the configuration the current run was
+            # started with: Revert puts that back, Restart runs the draft.
+            "edited": _edited_since_start(binding),
             "issues": finalization.issues,
             "error": status if state == "error" else "",
             "state": state,
@@ -8751,18 +8867,17 @@ class ConsolePresenter:
         if binding is None:
             return False
         if values is not None:
-            from .authoring_form import display_value
-
+            refusal = _unknown_fields_refusal(binding.name, binding.descriptor, values)
+            if refusal:
+                self._report(refusal, severity="error")
+                return False
             # An editor may echo its initial projection (rows as tuples,
             # numeric normalization, or an unchanged source choice). Only
             # actual authoring changes advance the shared draft revision.
-            changed = {}
-            for name, value in values.items():
-                previous = display_value(binding.draft.values.get(name, _UNCHANGED))
-                proposed = display_value(value)
-                if type(previous) is not type(proposed) or previous != proposed:
-                    changed[name] = value
-            values = changed
+            values = {
+                name: value for name, value in values.items()
+                if not _same_draft_value(binding.draft.values.get(name, _UNCHANGED), value)
+            }
         if source_signal is not _UNCHANGED and str(source_signal) == binding.draft.source_signal:
             source_signal = _UNCHANGED
         if device_keys is not None:
@@ -8779,21 +8894,46 @@ class ConsolePresenter:
             }
         if not values and source_signal is _UNCHANGED and not device_keys and not artifact_inputs:
             return True
+        draft = binding.draft
+        self._commit_logic_draft(
+            binding,
+            LogicDraft(
+                values={**draft.values, **(values or {})},
+                source_signal=(
+                    draft.source_signal if source_signal is _UNCHANGED
+                    else str(source_signal)
+                ),
+                device_keys={**draft.device_keys, **(device_keys or {})},
+                artifact_inputs={**draft.artifact_inputs, **(artifact_inputs or {})},
+            ),
+            normalized=normalized,
+        )
+        return True
+
+    def _commit_logic_draft(
+        self,
+        binding: LogicBinding,
+        draft: LogicDraft,
+        *,
+        normalized: bool = False,
+    ) -> None:
+        """Make ``draft`` the node's draft: the one tail every draft change
+        runs, whether an edit patched the draft or Revert replaced it whole.
+
+        A field whose value changes is no longer a panel selection's to
+        undo -- unless the change is ``normalized``, the editor's passive
+        display normalization, which is no change of mind.
+        """
+
         outputs_before = tuple(output.name for output in self._logic_outputs(binding))
-        if values is not None:
-            for name, value in values.items():
-                if (not normalized and name in binding.selection_restore
-                        and value != binding.draft.values[name]):
+        if not normalized:
+            for name in tuple(binding.selection_restore):
+                if not _same_draft_value(
+                    binding.draft.values.get(name, _UNCHANGED),
+                    draft.values.get(name, _UNCHANGED),
+                ):
                     binding.selection_restore.pop(name)
-            binding.draft.values.update(dict(values))
-        if source_signal is not _UNCHANGED:
-            binding.draft.source_signal = str(source_signal)
-        if device_keys is not None:
-            binding.draft.device_keys.update(
-                {str(name): str(key) for name, key in device_keys.items()}
-            )
-        if artifact_inputs is not None:
-            binding.draft.artifact_inputs.update(artifact_inputs)
+        binding.draft = draft
         binding.draft_error = ""
         binding.draft_revision += 1
         # The last finalization stays as the source of files it already
@@ -8813,7 +8953,6 @@ class ConsolePresenter:
                     self.refresh_logic_editor(other_id)
         else:
             self._refresh_consumer_editors(binding.node_id)
-        return True
 
     def _logic_draft_changed(self, node_id: str, patch: Mapping[str, Any]) -> None:
         source = patch["source_signal"] if "source_signal" in patch else _UNCHANGED
@@ -8826,13 +8965,62 @@ class ConsolePresenter:
             artifact_inputs=patch.get("artifact_inputs"),
         )
 
-    def start_logic(self, node_id: str, *, _acquisition: bool = False) -> bool:
+    def revert_logic_draft(self, node_id: str) -> bool:
+        """Make the configuration the node runs its draft again, whole.
+
+        The draft is replaced, not patched: a value, device or artifact row
+        the edit added goes with the rest.  It takes the same tail as every
+        draft change, so the editor and every consumer re-project once.
+        Nothing restarts and nothing is asked: the run already uses this
+        configuration.  Accepted only when the draft is that configuration
+        afterwards.
+        """
+
+        if self._task_command_blocked("changing a logic draft"):
+            return False
+        binding = self.logic.get(str(node_id))
+        if binding is None:
+            return False
+        running = _running_configuration(binding)
+        if running is None or _same_draft(binding.draft, running):
+            self._report(
+                f"{binding.name} has no running configuration to revert to"
+                if running is None else
+                f"{binding.name} already runs its draft; there is nothing to revert",
+                severity="warning",
+            )
+            return False
+        self._commit_logic_draft(binding, deepcopy(running))
+        if _same_draft(binding.draft, running):
+            return True
+        self._report(
+            f"{binding.name}: the draft still differs from the configuration "
+            "it runs after Revert",
+            severity="error",
+        )
+        return False
+
+    def start_logic(
+        self,
+        node_id: str,
+        *,
+        _acquisition: bool = False,
+        _draft: LogicDraft | None = None,
+    ) -> bool:
+        """Start the node -- a Restart when it already runs -- from its draft.
+
+        ``_draft`` is another configuration of this node to start from
+        instead: a follow restart passes the one its run was started with,
+        so an edit nobody restarted stays an edit.
+        """
+
         if not (_acquisition and node_id in self._task_acquisition_nodes()) and self._task_command_blocked("starting another logic node"):
             return False
         binding = self.logic.get(str(node_id))
         if binding is None:
             return False
-        finalization = self._finalize_logic_binding(binding, force=True)
+        draft = binding.draft if _draft is None else _draft
+        finalization = self._finalize_logic_binding(binding, force=True, draft=_draft)
         if not finalization.can_start:
             error = finalization.issues[0]
             binding.draft_error = error
@@ -8844,8 +9032,18 @@ class ConsolePresenter:
             # A processor is a standing follower, not a one-shot run: with
             # no source signal yet there is nothing to bind to, so the Start
             # is accepted as an intent and the poll beat completes it the
-            # moment the source publishes.
+            # moment the source publishes.  It is still a Restart: a queued
+            # one is replaced and the current run ends, as for any Restart,
+            # so the configuration recorded here is the one the node runs.
+            self._discard_pending(binding)
+            host = binding.host
+            if host is not None and host.running:
+                host.cancel(
+                    "the operator restarted it to follow "
+                    f"{self._signal_text(finalization.source_signal)}"
+                )
             binding.following = True
+            binding.started_draft = deepcopy(draft)
             binding.draft_error = ""
             self._refresh_console_projection()
             self.refresh_logic_editor(binding.node_id)
@@ -8899,6 +9097,12 @@ class ConsolePresenter:
             self.refresh_logic_editor(binding.node_id)
             return False
 
+        # The Start is accepted: whether it runs now or queues behind the old
+        # run, the candidate carries the configuration it was built from.
+        # It is the node's record only once installed (_activate_candidate):
+        # a refused Start returned above, and a queued one discarded later
+        # takes its copy with it -- either way the old run's stays.
+        candidate.draft = deepcopy(draft)
         blockers = set(candidate.reservation.waiting_for)
         if blockers:
             binding.pending = candidate
@@ -8957,8 +9161,13 @@ class ConsolePresenter:
                 or host.observation.phase not in ("done", "cancelled", "failed")
             ):
                 continue
-            finalization = binding.finalization
-            signal = str(getattr(finalization, "source_signal", "") or "")
+            # The follow restarts the configuration its run was started
+            # with, never an edit nobody restarted: that stays an edit
+            # ("· edited", Restart*, Revert) until the operator decides.
+            # A following node has one: a standing follow records it, and
+            # a run is installed with its candidate's.
+            running = _running_configuration(binding)
+            signal = running.source_signal.strip()
             if not signal:
                 continue
             plane = self.session.signal_plane
@@ -8979,7 +9188,7 @@ class ConsolePresenter:
                 # to be followed -- the follower's own start may be what
                 # causes the first one.
                 continue
-            if not self.start_logic(binding.node_id, _acquisition=True):
+            if not self.start_logic(binding.node_id, _acquisition=True, _draft=running):
                 # Source admission failures belong to the new host and wait
                 # under the same generation rule. A rejected authoring/build
                 # never installed a host and requires an operator correction.
@@ -9231,17 +9440,28 @@ class ConsolePresenter:
             )
             return answer.issues
 
+        # A following node shows the follow unless the draft's issues are
+        # the follow's own.  An edit's issues are the next run's: the follow
+        # goes on with -- and names the source of -- the configuration it
+        # was started with.
+        following = binding.following and (
+            not draft_issues() or _edited_since_start(binding)
+        )
+        refused = ""
+        followed = (
+            _running_configuration(binding).source_signal.strip()
+            if following else ""
+        )
         host = binding.host
         if host is None:
             issues = draft_issues()
             error = binding.draft_error
             state = "error" if error else "draft" if issues else "idle"
             status = error or (f"Draft: {issues[0]}" if issues else "not started")
-            if binding.following and not error and not issues:
-                signal = getattr(binding.finalization, "source_signal", "")
+            if following and not error:
                 state = "running"
                 status = (
-                    f"following {self._signal_text(signal)} (waiting for the signal)"
+                    f"following {self._signal_text(followed)} (waiting for the signal)"
                 )
         else:
             observed = host.observation
@@ -9253,18 +9473,25 @@ class ConsolePresenter:
                     status = f"failed; restarts with the source's next run: {observed.error}"
             elif observed.running:
                 state, status = "running", self._observation_status(observed)
+                if binding.draft_error:
+                    # A refused Restart leaves the run going; the refusal is
+                    # said where the operator pressed it, not only in the log.
+                    refused = binding.draft_error
             elif binding.draft_error:
                 state, status = "error", binding.draft_error
             else:
                 issues = draft_issues()
-                if issues:
-                    state, status = "draft", f"Draft: {issues[0]}"
-                elif binding.following:
-                    signal = getattr(
-                        binding.finalization, "source_signal", ""
-                    )
+                if following:
+                    # The run ended; the follow waits for its source to run
+                    # again, or -- restarted onto a source that never
+                    # published -- for that source's first signal.
                     state = "running"
-                    status = f"following {self._signal_text(signal)} (source stopped)"
+                    published = self.session.signal_plane.latest_publication(followed)
+                    status = f"following {self._signal_text(followed)} " + (
+                        "(waiting for the signal)" if published is None else "(source stopped)"
+                    )
+                elif issues:
+                    state, status = "draft", f"Draft: {issues[0]}"
                 else:
                     state, status = "idle", self._observation_status(observed)
             warnings = tuple(getattr(observed, "warnings", ()))
@@ -9297,6 +9524,12 @@ class ConsolePresenter:
                             f"restart queued: {names} still to read the last "
                             f"run ({age:.0f} s)"
                         )
+        if state == "running" and _edited_since_start(binding):
+            # The run goes on with the configuration it started with; the
+            # draft on the page is for the next one.
+            status = f"{status} · edited"
+        if refused:
+            status = f"{status}; Restart refused: {refused}"
         return state, str(status)
 
     def _show_logic(
@@ -9359,6 +9592,9 @@ class ConsolePresenter:
             can_stop,
             pending,
             binding.auto_preview,
+            # Not always in the status (an error says only the error), and
+            # the Edit page's Revert and Restart follow it.
+            _edited_since_start(binding),
         )
         if shown == binding.shown:
             return
@@ -9383,17 +9619,22 @@ class ConsolePresenter:
         consumer_node_id: str,
         *,
         descriptions: Sequence[Any] | None = None,
+        values: Mapping[str, Any] | None = None,
     ) -> tuple[str, ...]:
         """Stable keys whose declared Dataset contract matches this input.
 
         ``descriptions`` lets a caller that already read the plane hand that
         read in.  Three of these questions are asked side by side about one
         unchanged plane, and each used to take the lock and rebuild the
-        whole description list again.
+        whole description list again.  ``values`` are the authored values
+        the consumer's Dataset inputs are read from: its draft's when
+        omitted, the running configuration's for a follow restart.
         """
 
-        consumer = self.logic.get(consumer_node_id)
-        specs = dataset_inputs(descriptor, None if consumer is None else consumer.draft.values)
+        if values is None:
+            consumer = self.logic.get(consumer_node_id)
+            values = None if consumer is None else consumer.draft.values
+        specs = dataset_inputs(descriptor, values)
         if not specs:
             return ()
 
@@ -9675,6 +9916,9 @@ class ConsolePresenter:
         candidate.reservation = None
         binding.node = candidate.node
         binding.host = candidate.host
+        # The installed run's configuration becomes the node's record: what
+        # Revert puts back and a follow restart rebuilds from here on.
+        binding.started_draft = candidate.draft
         binding.preview_specs = candidate.previews
         binding.lease = lease
         binding.pending = None
@@ -9918,29 +10162,36 @@ class ConsolePresenter:
                 parent_host = parent.host
                 if parent_host is None or parent_host.generation != context.generation or not parent_host.running:
                     raise RuntimeError("the acquisition caller's run is no longer active")
+                # The caller's run is read as it was started: an edit to the
+                # caller nobody restarted is the next run's, not this one's.
+                running = _running_configuration(parent) or parent.draft
                 descriptor = parent.descriptor
                 field = descriptor.acquisition_input
                 if completion != descriptor.acquisition_completion or not field:
                     raise ValueError("acquisition must match this run's declared selection and completion")
                 if self._active_task() is not None and (
-                    not descriptor.authoring_schema.is_enabled(field, parent.draft.values)
-                    or str(parent.draft.values.get(field) or "") != node_id
+                    not descriptor.authoring_schema.is_enabled(field, running.values)
+                    or str(running.values.get(field) or "") != node_id
                 ):
                     raise ValueError("the Task did not select this acquisition")
                 if node_id not in self._acquisition_options(str(context.instance_id)):
                     raise ValueError(
                         f"{self.logic_name(node_id)!r} is not an available acquisition Measurement"
                     )
-                if completion == "terminal" and parent.draft.source_signal and not any(
+                if completion == "terminal" and running.source_signal and not any(
                     parts is not None and parts[0] == node_id
-                    for signal in self._signal_input_chain(parent.draft.source_signal)
+                    for signal in self._signal_input_chain(running.source_signal)
                     for parts in (split_signal_key(signal),)
                 ):
                     raise ValueError(
-                        f"{self._signal_text(parent.draft.source_signal)!r} does not derive from "
+                        f"{self._signal_text(running.source_signal)!r} does not derive from "
                         f"the selected acquisition {self.logic_name(node_id)!r}"
                     )
-                if not self.start_logic(node_id, _acquisition=True):
+                # A restart the operator did not press runs the acquisition's
+                # current configuration when it has one -- an unrestarted
+                # edit stays an edit -- and its draft when it is not running.
+                child = _running_configuration(self.logic[node_id])
+                if not self.start_logic(node_id, _acquisition=True, _draft=child):
                     raise RuntimeError(
                         self.logic[node_id].draft_error
                         or f"could not restart {self.logic_name(node_id)}"
@@ -10039,7 +10290,13 @@ class ConsolePresenter:
             self._artifact_completion_order += 1
             binding.artifact_completion_order = self._artifact_completion_order
 
-    def _source_frames_for(self, binding: LogicBinding, *, _visited=frozenset()) -> tuple[str, ...] | None:
+    def _source_frames_for(
+        self,
+        binding: LogicBinding,
+        *,
+        draft: LogicDraft | None = None,
+        _visited=frozenset(),
+    ) -> tuple[str, ...] | None:
         """The labels of the frames one cycle of this node's source carries.
 
         Asked of the source's PRODUCER first: its explicit pure metadata
@@ -10048,6 +10305,7 @@ class ConsolePresenter:
         the declared signal, then its latest publication -- through the Point
         axis with the readout-event role.  A source without one carries one
         frame; None while there is no source or nothing says yet.
+        ``draft`` names the source: the node's draft's when omitted.
         """
 
         from zlc_data import READOUT_EVENT
@@ -10055,7 +10313,7 @@ class ConsolePresenter:
         if binding.node_id in _visited:
             return None
         visited = _visited | {binding.node_id}
-        source = str(binding.draft.source_signal).strip()
+        source = str((binding.draft if draft is None else draft).source_signal).strip()
         if not source:
             return None
         parts = split_signal_key(source)

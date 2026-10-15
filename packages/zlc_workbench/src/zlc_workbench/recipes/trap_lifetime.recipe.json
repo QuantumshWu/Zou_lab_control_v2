@@ -23,7 +23,7 @@
     "calibrations": {
       "path": ["logic", 1, "artifact_inputs", "calibrations"],
       "required": true,
-      "description": "Occupancy's Calibration rows, each an existing Calibration JSON (relative to workspace/data, or absolute) and the frames it reads: [{\"path\":\"calibration.json\",\"frames\":[\"rest\"]}] reads every frame with one file; give frames trained at another exposure their own row, e.g. [{\"path\":\"load.json\",\"frames\":[\"first\"]},{\"path\":\"readout.json\",\"frames\":[\"rest\"]}]. Frames are numbers from 0, 'first' (frame 0), 'last' and 'rest'; each frame is read by exactly one row. They must match the camera/readout; this recipe does not recalibrate."
+      "description": "Occupancy's Calibration rows, each an existing Calibration JSON (relative to workspace/data, or absolute) and the frames it reads: [{\"path\":\"calibration.json\",\"frames\":[\"rest\"]}] reads every frame with one file; give frames trained at another exposure their own row, e.g. [{\"path\":\"load.json\",\"frames\":[\"first\"]},{\"path\":\"readout.json\",\"frames\":[\"rest\"]}]. Frames are numbers from 0, 'first' (frame 0), 'last' and 'rest'; each frame is read by exactly one row. They must match the camera/readout; this recipe does not recalibrate. A row with frames [] is kept but not read: its file need not exist or match, so leave such rows in place."
     },
     "scan_plan": {
       "path": ["logic", 3, "values", "plan"],
@@ -56,11 +56,11 @@
       "description": "All camera trigger frames in one Pulse cycle, including frames not selected for survival."
     },
     "start_frame": {
-      "path": ["logic", 2, "values", "pairs", 0, "start"],
+      "path": ["logic", 2, "values", "custom_pairs", 0, "start"],
       "description": "Earlier frame identity as text: '0' is first; positive numbers name middle frames. Conditions on occupied sites."
     },
     "end_frame": {
-      "path": ["logic", 2, "values", "pairs", 0, "end"],
+      "path": ["logic", 2, "values", "custom_pairs", 0, "end"],
       "description": "Later frame identity as text: 'last' follows the cycle's last frame; positive numbers name middle frames. Must follow start_frame."
     },
     "fit_fixed": {

@@ -206,7 +206,6 @@ def sequence_to_tree(sequence: PulseSequence) -> dict[str, Any]:
 
     if not isinstance(sequence, PulseSequence):
         raise TypeError("sequence must be PulseSequence")
-    sequence.require_nonempty_brackets()
     target = sequence.target
     tree = {
         "format": PULSE_TREE_FORMAT,
@@ -459,7 +458,6 @@ def sequence_from_tree(tree: Mapping[str, Any]) -> PulseSequence:
             )
         ),
     )
-    sequence.require_nonempty_brackets()
     return sequence
 
 

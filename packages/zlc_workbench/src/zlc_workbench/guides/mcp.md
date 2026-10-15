@@ -35,6 +35,10 @@ nodes. `lab_devices(action='load', path=...)` loads the requested apparatus JSON
 `lab_initialize()` submits Init. Wait for `lab_state.session_open=true` using
 `lab_wait_for`, then inspect `device_operation_pending`, `device_failures` and
 device identities. Init alone does not prepare optical traps.
+A device whose type this machine cannot build appears in `device_failures`
+with the reason; the others open normally. The operator may keep such a card
+(and simulation settings no virtual device reads) on purpose: do not delete
+them from the apparatus to make Init look clean.
 
 For SLM work, open the chosen device with `lab_device_action(action='open',
 device_id=...)`, inspect `lab_editor_catalog` and load the specified Science
@@ -67,7 +71,9 @@ without it they return the confirmation text without opening a GUI dialog.
 ## acquisition
 
 Camera Measurement publishes complete cycles with all authored frames, pixel
-coordinates, units and validity. It does not own the experiment Pulse. Collect
+coordinates, units and validity. It does not own the experiment Pulse. A blank
+exposure or ROI field keeps the camera's current value for that field alone:
+set only the ROI fields you mean to change. Collect
 all triggers in each Pulse cycle even when interested in just one frame. For
 manual finite capture, prepare the Pulse first; Camera Start → that generation
 ready → Fire belongs in one already-decided batch, not separate model decisions.
@@ -89,6 +95,15 @@ Config, Subpulse and preview/validation actions. Use stable IDs returned there,
 not display-name guesses. API, Scan and Config fields have different meanings.
 Pulse `run_repeats=0` is infinite; explicitly choose finite repeats for a finite
 manual capture. Seamless Scan owns its own repeat/shot counts.
+
+Things the operator keeps but does not use are parked, not errors; leave them.
+An empty bracket (start one past end) saves, validates and runs looping nothing;
+its API repeat count is no Scan port until a period is put inside it.
+A binding with source default or api may keep a `config_key`: the Config name
+kept for switching back, never applied. A value-file row left all blank is
+dropped on save. A Scan mark only makes a field scannable: the scan table drives
+the fields it names (`state.scan.fields`) and every other Scan field plays its
+own value, as it does when no table exists or the pulse is loaded by name.
 
 Use native authoring actions and validation. Preview/valid does not mean loaded
 or fired. Fire follows the saved Config policy in the sequencer owner; unsaved
@@ -115,7 +130,14 @@ apparatus; no tool can infer unknown hardware settings from a filename.
 
 Calibration owns its capture and Pulse sequence. Configure its actual camera,
 sequencer, Pulse and readout fields through lab_catalog(api_name='calibration'),
-then Start it once. During scientific site review, lab_state reports
+then Start it once. To calibrate again with other detection settings, set
+`frame_source` to 'saved' and `saved_frames_path` to the `figures` folder of a
+run that had `save_frames` on: it reads the crop, exposure and Pulse facts saved
+there, uses no camera, sequencer or Pulse, claims no device, and does not stop a
+running acquisition. The Pulse, samples, exposure, API-field, save_frames and
+photoelectrons fields (each `enabled_when` New frames) and the camera/sequencer
+device keys stay in the draft unused; leave them, do not clear or delete them.
+During scientific site review, lab_state reports
 requires_review and the operator request ID. Use lab_review_points with that
 node's exact generation/request_id to inspect the original site coordinates and
 checks; supply the complete excluded_ids list to confirm (empty keeps all).
@@ -138,27 +160,46 @@ stored as `first`), `last`, positive numbers for middle frames between them, and
 frame; frames taken at another exposure get their own row, e.g.
 `lab_action('logic.update', {'node_id': OCC, 'artifact_inputs': {'calibrations':
 [{'path': LOAD, 'frames': ['first']}, {'path': READOUT, 'frames': ['rest']}]}})`.
-Each frame is read by exactly one row; a collision, a frame nobody reads or a
-number the source does not carry is reported by name, never resolved silently,
-and the rows are never rewritten when the frame count changes. A middle index
-that no longer exists stays in the draft; it cannot become the new last frame.
-Clicking the last column authors `last`, not its temporary numeric index.
+Each frame is read by exactly one row; a collision or a frame nobody reads is
+reported by name, never resolved silently, and the rows are never rewritten
+when the frame count changes. A middle index the source does not carry stays in
+the draft, reads nothing and is listed in `notes`: it does not stop a run, and
+it cannot become the new last frame. Clicking the last column authors `last`,
+not its temporary numeric index. A row with `"frames": []` is parked: kept in
+the draft, the layout and the run record, reading nothing, and its file is not
+checked against the other rows (it may even be missing). The operator keeps
+such rows on purpose -- never delete one, or give it frames, to make Start
+work; only a list in which no row reads a frame is refused.
 `lab_catalog(node_id=OCC).node.artifact_claims.calibrations` returns the rows,
-the frames each actually reads (`reads`) and any `problems`. Frame Survival consumes occupied, not counts.
+the frames each actually reads (`reads`), the parked rows (`unused`), what each
+file is or why it was not read (`files[i].summary`, `files[i].unread`), the
+`notes`, and the `problems` that refuse Start. Frame Survival consumes occupied, not counts.
 It publishes the later occupancy verdict with validity equal to earlier occupied
 AND both frames judgeable. Mean over trials is therefore conditional survival;
 the site axis remains available for per-site analysis. Its `selection` field
 chooses the published forward pairs: `all`, `consecutive` (k→k+1), `from_first`
 (0→k) and `to_last` (k→last) are resolved against the frames the source carries,
 so they survive a Pulse that adds or removes a photograph. Grid edits retain that
-rule and store only exceptions, e.g. `{"selection":"from_first","pairs":[
-{"start":"0","end":"last","selected":false}]}` selects every first-to-middle
-pair, including newly added middle frames, but excludes first-to-last. `custom`
-starts with no pairs and explicitly selects rows, e.g. `{"selection":"custom",
-"pairs":[{"start":"0","end":"last","selected":true}]}`. Endpoints are text:
-`0` is first, `last` is last, and positive indices name middle frames. Camera
-draft changes update Occupancy and Frame Survival editors before new data arrives;
-runtime data still follows the actual acquired source schema.
+rule and store only its exceptions in `pairs`, e.g. `{"selection":"from_first",
+"pairs":[{"start":"0","end":"last","selected":false}]}` selects every
+first-to-middle pair, including newly added middle frames, but excludes
+first-to-last. `none` asks for no pair. `custom` publishes its own list,
+`custom_pairs`, e.g. `{"selection":"custom","custom_pairs":[{"start":"0",
+"end":"last","selected":true}]}`. A `custom_pairs` row with `"selected":false` is
+parked: kept as written in the draft, the layout and the run record
+(`parked_pairs`), never checked, never published and never in the way of Start --
+it may repeat a selected pair or have an empty end. Only the selected rows are
+checked (filled-in ends, start before end, no pair twice). The list stays in the
+draft while a rule or `none` is selected, so selecting `custom` again brings it
+back. Endpoints are text: `0` (or `first`) is first and only ever starts a pair,
+`last` is last, and positive indices name middle frames. A selected pair
+whose middle frame the source does not carry stays in the draft, is left out of
+this source's pairs and is named in the run record (`absent_pairs`); it does not
+stop Start, and a run fails only when none of its selected pairs is in the source.
+The operator keeps parked and absent pairs on purpose: never delete one to make
+Start work. Camera draft changes update Occupancy and Frame Survival editors
+before new data arrives; runtime data still follows the actual acquired source
+schema.
 
 Derive is within-shot algebra on one producer's bundle; averages over shots,
 per-site probabilities and fits belong in a plot panel. Read the exact member,
@@ -192,6 +233,22 @@ Seamless Scan consumes a signal, a Pulse and a native ScanPlan. Its acquisition
 input names the existing acquisition node; the Scan handles its ready/Fire flow.
 Plan axes may be Pulse slots, device fields or manual coordinates. Query the
 bound node's catalog for actual scan ports/units; names must not be guessed.
+
+An axis the operator keeps but does not want scanned now -- a 1-D cut of a 2-D
+plan, a port for a Pulse or device that is not loaded today -- is parked with
+`"enabled": false`: it stays in the plan and the run record (`parked_axes`) and
+is never bound, played or counted. Park such an axis instead of deleting it.
+A scanned axis on a port the Pulse does not offer, or on a device not installed,
+is a draft issue (`logic.validate`, lab_state issues) and Start waits; switch
+that axis off or fix it. At least one axis must stay enabled.
+
+`api_values` lines the operator wrote are theirs: do not delete one because the
+current Pulse does not declare it or the plan sweeps it. Such a line is kept and
+applied to nothing (the run record lists it as `unapplied_api_values`) or is
+overridden point by point, and comes back into play when the Pulse or the axis
+does. Only a line equal to the Pulse's own value is dropped by the editor.
+A line named by a label two of the Pulse's fields share is a draft issue: rewrite
+it with the field id it means.
 
 `repeats` means complete table sweeps; `shots_per_point` means repetitions at each
 point before advancing. Their product changes total statistics, but their order
@@ -293,6 +350,10 @@ If the metadata exceeds limit, it is paged as JSON text with next_offset/total_b
 continue only as needed, or request one named metadata section.
 Use the native Figure Viewer to reopen; a custom np.savez array file is not a
 Figure archive. `layout.save` preserves reusable node and panel authoring.
+`layout.load` keeps a row whose device or source no longer fits today's board
+(a warning report names it) and that row's `logic.validate` says what to choose;
+the board may hold rows the operator is not using today. Fix only the rows the
+task runs; do not delete the others.
 
 ## recipes
 
@@ -462,7 +523,27 @@ same generation/receipt; do not replay a partially completed batch.
 stops the current run and queues the replacement. The reply reads
 `status='queued'` and still carries the old `generation` (`pending.generation`
 is null); once `logic[].pending` is null, read the new `generation` from
-`lab_state(node_id=...)` before waiting on it.
+`lab_state(node_id=...)` before waiting on it. A processor restarted onto a
+source that has not published has nothing to queue: its run stops, a queued
+Restart is dropped, and it follows the new source (`pending` null,
+`running_draft` names that source).
+
+`logic.update` on a running, following or queued node edits only its draft for
+the next Start; the run keeps the configuration it was started with, and
+`logic[].edited_since_start` is true while the draft differs from it.
+`lab_state(node_id=..., details=true)` shows both: `draft` and
+`running_draft`, the configuration the current run uses (null with no current
+run). `logic.revert` (`node_id`) makes `running_draft` the draft again --
+values, source, devices and artifact rows, replacing the draft rather than
+merging into it -- without restarting; it is refused when the node has no
+current run or its draft already matches, and accepted only when the draft is
+`running_draft` afterwards. A following processor whose source restarts runs
+`running_draft` again, never the unrestarted edit; only `logic.start` runs
+the edit. A queued Restart that is discarded before it runs (Stop, another
+node taking its device) leaves the old run's configuration as
+`running_draft`. `logic.add` and `logic.update` refuse value names the node's
+schema does not declare and name the valid fields
+(`lab_catalog(api_name).fields`).
 
 Draft issues name a field the way its Edit page does, not by its draft key.
 "X must be selected", where X is `lab_catalog(node_id).node.source_label`,

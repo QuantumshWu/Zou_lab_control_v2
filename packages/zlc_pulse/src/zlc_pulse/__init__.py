@@ -58,6 +58,7 @@ from .binding import (
     authored_api_entries,
     authored_api_values,
     api_bindings_in_period_order,
+    bracket_label,
     field_label,
     normalize_binding_values,
     config_parameter_key,
@@ -66,6 +67,7 @@ from .binding import (
     pulse_field_value,
     resolve_api_parameters,
     resolve_subpulse_sources,
+    stale_subpulse_bindings,
 )
 from .wire import load_streamer_config
 from .manifest import pulse_target_from_xdc
@@ -83,6 +85,7 @@ from .scan import (
     scan_columns_for,
     scan_rows_from_wire,
     scan_rows_to_wire,
+    scan_table_for,
     scan_table_template,
     validate_scan_table,
 )
@@ -111,6 +114,7 @@ __all__ = [
     "replace_component",
     "set_subpulse_source",
     "resolve_subpulse_sources",
+    "stale_subpulse_bindings",
     "remove_component",
     "PERIOD_KIND_PERIOD",
     "PERIOD_KIND_SPACER",
@@ -158,6 +162,7 @@ __all__ = [
     "authored_api_entries",
     "authored_api_values",
     "api_bindings_in_period_order",
+    "bracket_label",
     "field_label",
     "normalize_binding_values",
     "config_parameter_key",
@@ -168,6 +173,7 @@ __all__ = [
     "api_parameter_columns_for",
     "prepare_scan_application",
     "scan_columns_for",
+    "scan_table_for",
     "scan_table_template",
     "validate_scan_table",
     "scan_rows_to_wire",

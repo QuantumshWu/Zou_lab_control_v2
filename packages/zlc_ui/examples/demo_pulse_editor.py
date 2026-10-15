@@ -213,6 +213,7 @@ def populate(editor) -> None:
         selected="offline",
         endpoint="127.0.0.1:18861",
         status="Offline (edit only)",
+        status_word="idle",
     ))
     scan = editor
     scan.set_scan_page(ScanPageRecord(

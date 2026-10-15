@@ -1,7 +1,7 @@
 """Pure operator chrome for one console logic row.
 
 Also what the row shares with its node's Edit page and with the Logic list
-around it -- the status look, the Start words, the gaps and the page edges --
+around it -- the status words, the Start words, the gaps and the page edges --
 so the list and every Edit page are built from one set of numbers.
 """
 
@@ -11,12 +11,7 @@ from PyQt5 import QtCore, QtWidgets
 
 from zlc_ui.fluent import (
     CARD_PAD,
-    GREEN,
-    GREY,
-    MUTED_INK,
-    RED,
-    RED_DARK,
-    TEXT,
+    MUTED_LABEL_STYLE,
     ElidedLabel,
     FluentButton,
     FluentFrame,
@@ -25,7 +20,9 @@ from zlc_ui.fluent import (
     FluentStatusDot,
     FluentSwitch,
     add_row_switch,
+    fit_button_words,
     scaled_px,
+    set_status_ink,
     setting_label_width,
     status_dot_gap,
     window_pad,
@@ -45,17 +42,18 @@ START_LABELS = ("Start", "Restart", "Starting…")
 #: and the same node's dot on its Edit page are one mark.
 STATUS_DOT = 12
 
-#: How each node state looks, as (dot, ink).  ONE table for the row and the
-#: node's Edit page: a draft that was grey on its row and orange on its page
-#: was one status drawn two ways.  A draft is drawn as calmly as a stopped
-#: node: what keeps it from starting is something still to fill in, not a
-#: fault, and amber is what reads as "something is wrong".  A run wears the
-#: plain ink of something under way, and only a failure is red.
-STATE_COLOURS = {
-    "idle": (GREY, MUTED_INK),
-    "draft": (GREY, MUTED_INK),
-    "running": (GREEN, TEXT),
-    "error": (RED, RED_DARK),
+#: Each node state as the status word it is drawn with (``STATUS_CUES``).
+#: ONE table for the row and the node's Edit page: a draft that was grey on
+#: its row and orange on its page was one status drawn two ways.  A draft is
+#: drawn as calmly as a stopped node: what keeps it from starting is
+#: something still to fill in, not a fault, and amber is what reads as
+#: "something is wrong".  A run wears the plain ink of something under way,
+#: and only a failure is red.
+STATE_WORDS = {
+    "idle": "idle",
+    "draft": "idle",
+    "running": "running",
+    "error": "error",
 }
 
 
@@ -101,24 +99,6 @@ def start_label(*, pending: bool, active: bool) -> str:
     return "Restart" if active else "Start"
 
 
-def fit_button_words(button: FluentButton, words: tuple[str, ...]) -> None:
-    """Size ``button`` for the widest of the ``words`` it can say.
-
-    Measured through the button itself, so its padding and font count; the
-    slot then keeps one width whatever it says, and what stands beside it
-    never moves -- Stop beside a Start that reads Restart, the header's
-    commands beside an Add that names a panel or a node.
-    """
-
-    shown = button.text()
-    widths = []
-    for label in words:
-        button.setText(label)
-        widths.append(button.sizeHint().width())
-    button.setText(shown)
-    button.setMinimumWidth(max(widths))
-
-
 class LogicRowView(FluentFrame):
     """A lifecycle-free row that emits only operator intent.
 
@@ -140,7 +120,9 @@ class LogicRowView(FluentFrame):
         super().__init__(parent)
         self.kind = str(kind)
         self._status_text = "idle"
-        self._status_colour = ""
+        #: The status word the row shows now; the console's own dot is the
+        #: worst of its rows'.
+        self.state_word = "idle"
         self._can_start = False
         self._can_stop = False
         self._pending = False
@@ -157,13 +139,13 @@ class LogicRowView(FluentFrame):
 
         top = QtWidgets.QHBoxLayout()
         top.setSpacing(row_gap())
-        self.dot = FluentStatusDot(size=STATUS_DOT, color=GREY)
+        self.dot = FluentStatusDot(size=STATUS_DOT)
         self.name_label = ElidedLabel(str(title))
         # Name and kind are fixed columns: every row's kind and status start
         # at the same x, instead of floating with the length of the name.
         self.name_label.setFixedWidth(scaled_px(200, minimum=150))
         self.kind_label = FluentLabel(f"({self.kind})")
-        self.kind_label.setStyleSheet(f"color: {MUTED_INK}; background: transparent; border: none;")
+        self.kind_label.setStyleSheet(MUTED_LABEL_STYLE)
         self.kind_label.setFixedWidth(setting_label_width(_KINDS))
         self.status_label = ElidedLabel("idle")
         self.status_label.setMinimumWidth(0)
@@ -185,12 +167,14 @@ class LogicRowView(FluentFrame):
         self.stop_button.clicked.connect(self.stop_requested.emit)
         self.edit_button = FluentButton("Edit")
         self.edit_button.clicked.connect(self.edit_requested.emit)
-        # On the row, where it is looked for: a per-row delete is the quiet
-        # ghost x that turns red under the pointer, as on every other list.
-        self.remove_button = FluentButton("×", role="destructive")
+        # On the row, where it is looked for: the quiet ghost x that turns
+        # red under the pointer, as on every other list.  Removing a node
+        # takes two clicks: the first arms the white-on-red confirm.
+        self.remove_button = FluentButton(
+            "×", role="destructive", confirm_twice="remove this node"
+        )
         self.remove_button.setFixedWidth(self.remove_button.minimumHeight())
-        self.remove_button.setToolTip("Remove this node")
-        self.remove_button.clicked.connect(self.remove_requested.emit)
+        self.remove_button.confirmed.connect(self.remove_requested.emit)
         top.addWidget(self.dot)
         # A dot's words stand a status gap after it, as on the node's Edit
         # page and in the status strip: one status look wherever it is.
@@ -244,21 +228,13 @@ class LogicRowView(FluentFrame):
 
     def set_state(self, state: str, status_text: str = "") -> None:
         state = str(state)
-        if state not in STATE_COLOURS:
-            raise ValueError(f"state must be one of {tuple(STATE_COLOURS)}")
+        if state not in STATE_WORDS:
+            raise ValueError(f"state must be one of {tuple(STATE_WORDS)}")
         self._status_text = str(status_text or state)
-        dot, colour = STATE_COLOURS[state]
-        self.dot.set_color(dot)
+        self.state_word = STATE_WORDS[state]
+        self.dot.set_state(self.state_word)
         self.status_label.setText(self._status_text)
-        # Written only when it CHANGES.  A status tick arrives ten times a
-        # second, so almost every write said what the last one said -- and a
-        # stylesheet write re-parses the sheet, repolishes the widget and
-        # schedules a repaint regardless.
-        if colour != self._status_colour:
-            self._status_colour = colour
-            self.status_label.setStyleSheet(
-                f"color: {colour}; background: transparent; border: none;"
-            )
+        set_status_ink(self.status_label, self.state_word)
 
     def set_commands(self, *, can_start: bool, can_stop: bool, pending: bool = False) -> None:
         """Project presenter-owned command admission onto this row.
@@ -300,10 +276,9 @@ class LogicRowView(FluentFrame):
 
 __all__ = [
     "START_LABELS",
-    "STATE_COLOURS",
+    "STATE_WORDS",
     "STATUS_DOT",
     "LogicRowView",
-    "fit_button_words",
     "mount_logic_page",
     "start_label",
 ]

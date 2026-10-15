@@ -1686,7 +1686,7 @@ def test_control_apply_sends_the_authored_unit_and_keeps_canonical_provenance(wo
     flow._queue_device_tune("rf", "power", 135.0, "mVpp")
     assert calls == [("power", 135.0, "mVpp")], model["status"]
     assert len(refreshes) == 2, "Apply must consume its command readback, not refresh every field"
-    assert model["status"]["power"] == ("Applied", "ready")
+    assert model["status"]["power"] == ("Applied", "idle")
     assert model["desired"]["power"][0] == pytest.approx(135.125)
     assert model["desired"]["power"][1] == "mVpp"
     assert model["tunables"][0].metadata.unit == "mVpp"
@@ -2452,6 +2452,13 @@ async def client():
                 await edit("subpulse.save", {"path":"pulses/load.subpulse.json"})
                 await edit("save", {"path":"pulses/mcp_checked.json"})
                 assert "fields" not in (await call("lab_catalog"))["logic"][0]
+                # A value name the schema lacks never makes a row: kept, it
+                # could neither Start nor be updated away.
+                unknown = await call("lab_action", {"action":"logic.add", "arguments":{
+                    "api_name":"camera_measurement", "values":{"exposure":0.01}}})
+                assert not unknown["accepted"] and unknown["node_id"] is None, unknown
+                assert "no field 'exposure'" in unknown["error"], unknown
+                assert "exposure_seconds" in unknown["error"], unknown
                 added = await call("lab_action", {"action":"logic.add", "arguments":{
                     "api_name":"camera_measurement", "values":{"repeat":0}, "device_keys":{"camera":"camera"}}})
                 node = added["node_id"]
@@ -2500,6 +2507,23 @@ async def client():
                 assert not blocked["completed"] and blocked["stopped_at"] == 0
                 assert not blocked["results"][0]["result"]["reached"]
                 assert (await call("lab_state", {"node_id":node}))["console"]["logic"][0]["observation"]["running"]
+                # A running node's draft is the next run's.  A value name its
+                # schema lacks is refused with the names it has; details show
+                # what the run uses beside the draft, and Revert restores it.
+                unknown = await call("lab_action", {"action":"logic.update",
+                    "arguments":{"node_id":node, "values":{"exposure":0.01}}})
+                assert not unknown["accepted"] and "no field 'exposure'" in unknown["error"], unknown
+                assert "exposure_seconds" in unknown["error"], unknown
+                edited = await call("lab_action", {"action":"logic.update",
+                    "arguments":{"node_id":node, "values":{"repeat":3}}})
+                assert edited["accepted"], edited
+                detailed = (await call("lab_state", {"node_id":node, "details":True}))["console"]["logic"][0]
+                assert detailed["edited_since_start"], detailed
+                assert detailed["draft"]["values"]["repeat"] == 3, detailed["draft"]
+                assert detailed["running_draft"]["values"]["repeat"] == 0, detailed["running_draft"]
+                reverted = await call("lab_action", {"action":"logic.revert", "arguments":{"node_id":node}})
+                assert reverted["accepted"] and not reverted["state"]["logic"][0]["edited_since_start"], reverted
+                assert reverted["state"]["logic"][0]["generation"] == generation, "Revert restarted the run"
                 fired = await call('lab_pulse', {'action':'fire', 'device_id':'sequencer'})
                 assert fired['accepted'], fired
                 settled_pulse = await call('lab_batch', {'calls':[

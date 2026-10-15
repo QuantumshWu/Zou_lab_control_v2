@@ -405,7 +405,12 @@ def config_parameter_key(value: object) -> str:
 
 @dataclass(frozen=True)
 class PulseBinding:
-    """One field's independent scan capability and default/API/Config source."""
+    """One field's independent scan capability and default/API/Config source.
+
+    ``config_key`` is read only while the source is Config.  A Default or
+    API binding may keep the name it had -- switched to Default to edit the
+    default, it switches back to the same name -- and nothing applies it.
+    """
 
     field_ref: PulseFieldRef
     unit: str
@@ -431,8 +436,6 @@ class PulseBinding:
         key = _text(self.config_key, "Config key", empty=True)
         if key:
             config_parameter_key(key)
-        if self.source != BINDING_CONFIG and key:
-            raise ValueError("only Config bindings may name a Config key")
         object.__setattr__(self, "unit", unit)
 
     @property
@@ -631,6 +634,16 @@ class PulseComponent:
             if len({pair[0] for pair in mapping}) != len(mapping):
                 raise ValueError(f"{name} source ids must be unique")
             object.__setattr__(self, name, mapping)
+
+    @property
+    def from_file(self) -> bool:
+        """Whether this instance plays a Subpulse file: Config, with a file chosen.
+
+        A Config instance with no file yet plays its embedded default, the
+        way a Config field with no Config name plays its own value.
+        """
+
+        return self.source == BINDING_CONFIG and bool(self.config_path)
 
 
 @dataclass(frozen=True, init=False)
@@ -863,9 +876,9 @@ class PulseSequence:
 
         One period is one row, so a bracket over the period gaps
         ``start..end`` loops rows ``start..end-1``.  An EMPTY bracket loops
-        nothing and is not in the table; whether it may stand at all is
-        ``require_nonempty_brackets``'s question, asked before any compile,
-        save or export.
+        nothing and is not in the table: it is a placeholder the editor
+        keeps, saves and reopens until periods are put inside it, and the
+        board never sees it.
         """
 
         return tuple(
@@ -890,14 +903,6 @@ class PulseSequence:
             for period in self.periods
         )
         return float(frame_ticks(durations, self.loops))
-
-    def require_nonempty_brackets(self) -> None:
-        for bracket, (start, end) in zip(self.brackets, self._bracket_bounds, strict=True):
-            if start == end:
-                raise ValueError(
-                    f"Bracket {bracket.bracket_id} is empty. Put a period inside it or "
-                    "remove the bracket before running or saving."
-                )
 
     @property
     def scan_bindings(self) -> tuple[PulseBinding, ...]:

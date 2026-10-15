@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from zlc_ui.form import FormChoice
+from zlc_ui.status import STATUS_SEVERITIES, STATUS_STATES
 
 
 #: What a field may hold, in the words the widget layer understands.
@@ -228,12 +229,19 @@ class ConnectionChoiceVM:
 
 @dataclass(frozen=True)
 class ConnectionVM:
-    """One complete connection control state supplied by its presenter."""
+    """One complete connection control state supplied by its presenter.
+
+    ``status_word`` is the connection's state in the status vocabulary
+    (:data:`zlc_ui.status.STATUS_STATES`): ``running`` attached and read,
+    ``idle`` attached to nothing, ``warning`` attached but not described,
+    ``error`` a connect or disconnect that failed -- the ink ``status`` is
+    written in."""
 
     choices: tuple[ConnectionChoiceVM, ...]
     selected: str
     endpoint: str
     status: str
+    status_word: str
     locked: bool = False
 
     def __post_init__(self) -> None:
@@ -252,6 +260,10 @@ class ConnectionVM:
             )
         if not isinstance(self.endpoint, str) or not isinstance(self.status, str):
             raise TypeError("connection endpoint and status must be strings")
+        if self.status_word not in STATUS_STATES:
+            raise ValueError(
+                f"connection status_word must be one of {STATUS_STATES}, not {self.status_word!r}"
+            )
         if not isinstance(self.locked, bool):
             raise TypeError("connection locked must be bool")
 
@@ -309,6 +321,10 @@ class BindingRecord:
     source: str = "default"
     group_id: str = ""
     group_label: str = ""
+    #: Why the mark plays nothing today, said after it in muted ink: "not in
+    #: file" for a Scan/API mark inside a Subpulse whose file holds that
+    #: field constant.
+    note: str = ""
 
 
 @dataclass(frozen=True)
@@ -323,6 +339,9 @@ class ConfigPageRecord:
     active_path: str = ""
     busy: bool = False
     binding_groups: tuple[tuple[str, str, str], ...] = ()
+    #: Fields in ``bindings`` whose source is Default or API but which kept
+    #: their Config name: listed muted, the name kept to switch back to.
+    parked: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -340,7 +359,16 @@ class ScanPageRecord:
     repeats: int = 1
     busy: bool = False
     progress_text: str = ""
+    #: ``progress_text``'s status word (``STATUS_SEVERITIES``): ``task`` for
+    #: what the page is doing or just did, ``error`` for why it could not.
+    progress_word: str = "task"
     progress_polling: bool = False
+
+    def __post_init__(self) -> None:
+        if self.progress_word not in STATUS_SEVERITIES:
+            raise ValueError(
+                f"scan progress_word must be one of {STATUS_SEVERITIES}, not {self.progress_word!r}"
+            )
 
 
 @dataclass(frozen=True)
