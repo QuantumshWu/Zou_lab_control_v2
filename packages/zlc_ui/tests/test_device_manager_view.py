@@ -287,7 +287,7 @@ control.set_projection(spec, {
         'gain': {
             'current': 2, 'desired': 2, 'editable': True,
             'live_apply': False, 'live_enabled': True, 'apply_enabled': True,
-            'status': 'Ready', 'severity': 'ready', 'reason': '',
+            'status': 'Ready', 'severity': 'idle', 'reason': '',
         },
     },
 })
@@ -319,7 +319,7 @@ control.set_projection(spec, {
         'gain': {
             'current': 2, 'desired': 6, 'editable': True,
             'live_apply': True, 'live_enabled': True, 'apply_enabled': True,
-            'status': 'Ready', 'severity': 'ready', 'reason': '',
+            'status': 'Ready', 'severity': 'idle', 'reason': '',
         },
     },
 })
@@ -527,7 +527,7 @@ spec = FormSpec((
 def state(current, limits):
     return {'current': current, 'desired': current, 'editable': True,
             'live_apply': False, 'live_enabled': True, 'apply_enabled': False,
-            'status': '', 'severity': 'ready', 'reason': '', 'device_limits': limits}
+            'status': '', 'severity': 'idle', 'reason': '', 'device_limits': limits}
 initial = {
     'fields': {'power': state(-3.0, (-120.0, 30.0)), 'output': state(False, None),
                'frequency': state(1000.0, (1e-6, 160e6))},

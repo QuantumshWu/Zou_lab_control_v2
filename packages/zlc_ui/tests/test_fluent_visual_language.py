@@ -192,10 +192,10 @@ def test_a_selected_run_of_table_rows_is_one_rounded_block(app, host) -> None:
 
 
 def test_a_stepper_is_chevrons_and_a_tint_inside_the_frame(app, host) -> None:
-    from PyQt5 import QtWidgets
+    from PyQt5 import QtCore, QtTest, QtWidgets
     from zlc_ui.fluent import FluentDoubleSpinBox
     from zlc_ui.fluent import fluent as F
-    from zlc_ui.fluent.style import ACCENT, ACCENT_TINT, PLACEHOLDER, SURFACE
+    from zlc_ui.fluent.style import ACCENT, ACCENT_TINT, PLACEHOLDER, SELECTED, SURFACE
 
     box = FluentDoubleSpinBox(host)
     box.setRange(0.0001, 100.0)
@@ -212,6 +212,12 @@ def test_a_stepper_is_chevrons_and_a_tint_inside_the_frame(app, host) -> None:
     assert edge in (PLACEHOLDER.upper(), ACCENT.upper()), edge
     assert _at(box, box.width() - 1, up.center().y()) == edge, "and leaves the frame's edge whole"
     assert _at(box, up.center().x(), 0) == edge
+    # Held down, the cell is the SELECTED tile every press is.
+    QtTest.QTest.mousePress(box, QtCore.Qt.LeftButton, QtCore.Qt.NoModifier, up.center().toPoint())
+    app.processEvents()
+    assert _at(box, up.right() - 1, up.center().y()) == SELECTED.upper()
+    QtTest.QTest.mouseRelease(box, QtCore.Qt.LeftButton, QtCore.Qt.NoModifier, up.center().toPoint())
+    box.setValue(1)
     # Down from 1 with a floor of 0.0001 cannot move: its chevron is dimmed.
     enabled = box.stepEnabled()
     assert enabled & QtWidgets.QAbstractSpinBox.StepUpEnabled
@@ -348,6 +354,44 @@ def test_the_current_segment_and_an_active_cycle_are_the_selected_fill(app, host
     assert _at(other, 4, other.height() / 2.0) == ACCENT_TINT.upper(), "hover is the light wash"
     assert _at(cycle, 3, cycle.height() / 2.0) == SELECTED.upper()
     assert _at(cycle, cycle.width() / 2.0, 0) == PLACEHOLDER.upper(), "its edge is the field's own"
+
+    # A toggle command that is ON is held down: the same SELECTED fill, a
+    # step deeper under the pointer, over a tinted card's white face too.
+    from PyQt5 import QtCore, QtWidgets
+    from zlc_ui.fluent import FluentButton, FluentPopup, FluentSettingsPopupAnchor
+    from zlc_ui.fluent.style import BUTTON_TINT, DIVIDER, SELECTED_HOVER
+
+    toggle = FluentButton("Collapse", host)
+    toggle.move(0, 110)
+    toggle.set_active(True)
+    _shown(app, host, toggle)
+
+    def face(button):
+        app.processEvents()
+        return _at(button, 4, button.height() / 2.0)
+
+    assert toggle.is_active() and face(toggle) == SELECTED.upper()
+    _under_pointer(toggle)
+    assert face(toggle) == SELECTED_HOVER.upper()
+    toggle.setAttribute(QtCore.Qt.WA_UnderMouse, False)
+    QtWidgets.QApplication.sendEvent(toggle, QtCore.QEvent(QtCore.QEvent.Leave))
+    toggle.set_on_tint(True)
+    assert face(toggle) == SELECTED.upper(), "an engaged toggle outranks the on-tint face"
+    toggle.set_on_tint(False)
+    toggle.set_active(False)
+    assert face(toggle) == BUTTON_TINT.upper()
+    toggle.set_active(True)
+    toggle.setEnabled(False)
+    assert face(toggle) == DIVIDER.upper(), "disabled hides the state, as a disabled segment does"
+    # The button a frame opens from is ON while its frame is open.
+    opener = FluentButton("Setting", host)
+    opener.move(0, 150)
+    _shown(app, host, opener)
+    popup = FluentPopup(host)
+    FluentSettingsPopupAnchor(popup, opener).toggle(QtWidgets.QLabel("frame", popup))
+    assert opener.is_active() and face(opener) == SELECTED.upper()
+    popup.hide()
+    assert not opener.is_active() and face(opener) == BUTTON_TINT.upper()
 
 
 def test_a_selected_card_keeps_its_own_edge_and_chips_have_none(app, host) -> None:
@@ -536,6 +580,88 @@ def test_a_button_disabled_or_hidden_with_the_focus_hands_it_to_nobody(app, host
         assert QtWidgets.QApplication.focusWidget() is None
 
 
+def test_only_a_button_told_to_confirm_twice_arms_and_its_second_click_confirms(app, host) -> None:
+    """Removing a logic node or a plot panel takes two clicks, and nothing
+    else does.  The first click arms the white-on-red confirm, label and
+    width unchanged; a second within the double-click interval confirms;
+    left alone, disabled or hidden it is back at rest; a double-click is
+    two clicks."""
+
+    from PyQt5 import QtCore, QtGui, QtTest, QtWidgets
+    from zlc_ui.fluent import FluentButton, arm_interval_ms
+    from zlc_ui.fluent.style import RED_DARK, RED_TINT, SURFACE
+
+    side = FluentButton("x").minimumHeight()
+    glyph = FluentButton("×", host, role="destructive", confirm_twice="remove this node")
+    glyph.setFixedSize(side, side)
+    labelled = FluentButton("Remove", host, role="destructive", confirm_twice="remove this node")
+    labelled.move(60, 0)
+    plain = FluentButton("×", host, role="destructive")
+    plain.setFixedSize(side, side)
+    plain.move(180, 0)
+    _shown(app, host, glyph, labelled, plain)
+    confirmed, clicked = [], []
+    for button in (glyph, labelled):
+        button.confirmed.connect(lambda button=button: confirmed.append(button))
+    plain.clicked.connect(lambda: clicked.append(plain))
+
+    def face(button):
+        app.processEvents()
+        return _at(button, 3, button.height() / 2.0)
+
+    def click(button):
+        QtTest.QTest.mouseClick(button, QtCore.Qt.LeftButton)
+
+    # At rest: the ghost x and the labelled red face, each saying it takes two.
+    assert face(glyph) == SURFACE.upper(), "a glyph remover at rest is a ghost"
+    assert face(labelled) == RED_TINT.upper()
+    assert glyph.toolTip() == labelled.toolTip() == "Click twice to remove this node"
+    width = labelled.width()
+    for button in (glyph, labelled):
+        click(button)
+        assert confirmed == [] and button.is_armed()
+        assert button.role() == "destructive_primary" and face(button) == RED_DARK.upper()
+        assert button.toolTip() == "Click again to remove this node"
+        assert labelled.width() == width, "arming moves nothing"
+        click(button)
+        assert confirmed == [button], confirmed
+        assert button.role() == "destructive" and not button.is_armed()
+        assert button.toolTip() == "Click twice to remove this node"
+        confirmed.clear()
+    assert face(glyph) == SURFACE.upper() and face(labelled) == RED_TINT.upper()
+
+    # Left alone past the interval, disabled, or hidden: back at rest, and
+    # the next click arms again rather than removing.
+    click(glyph)
+    QtTest.QTest.qWait(arm_interval_ms() + 50)
+    assert not glyph.is_armed() and glyph.role() == "destructive"
+    click(glyph)
+    glyph.setEnabled(False)
+    assert not glyph.is_armed()
+    glyph.setEnabled(True)
+    click(glyph)
+    glyph.hide()
+    assert not glyph.is_armed()
+    glyph.show()
+    click(glyph)
+    assert confirmed == [] and glyph.is_armed()
+    glyph.disarm()
+
+    # A double-click -- press, release, double-click, release -- removes.
+    centre = QtCore.QPointF(glyph.rect().center())
+    for kind, held in ((QtCore.QEvent.MouseButtonPress, QtCore.Qt.LeftButton),
+                       (QtCore.QEvent.MouseButtonRelease, QtCore.Qt.NoButton),
+                       (QtCore.QEvent.MouseButtonDblClick, QtCore.Qt.LeftButton),
+                       (QtCore.QEvent.MouseButtonRelease, QtCore.Qt.NoButton)):
+        QtWidgets.QApplication.sendEvent(glyph, QtGui.QMouseEvent(
+            kind, centre, QtCore.Qt.LeftButton, held, QtCore.Qt.NoModifier))
+    assert confirmed == [glyph], confirmed
+
+    # Not told to confirm twice: one click acts, and it never arms.
+    click(plain)
+    assert clicked == [plain] and not plain.is_armed() and plain.role() == "destructive"
+
+
 def _ink_rows(widget, test, left: float = 0.0, right: float | None = None) -> list[int]:
     """The device rows of ``widget``'s own grab, between logical ``left``
     and ``right``, that hold a pixel ``test`` accepts."""
@@ -582,6 +708,13 @@ def test_the_step_chip_is_centred_on_the_frame(app, host) -> None:
     assert washed and abs((washed[0] - top) - (bottom - 1 - washed[-1])) <= 1, (washed, top, bottom)
     inked = _ink_rows(box, lambda c: c.lightness() < 150, chip.x(), chip.x() + chip.width())
     assert abs((inked[0] - washed[0]) - (washed[-1] - inked[-1])) <= 1, "the text is centred in the pill"
+    # Held down, the pill is the SELECTED fill every press is.
+    from zlc_ui.fluent.style import SELECTED
+    chip.setDown(True)
+    app.processEvents()
+    held = _ink_rows(box, lambda c: c.name().upper() == SELECTED.upper(), chip.x(), chip.x() + chip.width())
+    assert held == washed, (held, washed)
+    chip.setDown(False)
 
 
 def _badge_box(frame, button, colours) -> tuple[list[int], list[int]]:

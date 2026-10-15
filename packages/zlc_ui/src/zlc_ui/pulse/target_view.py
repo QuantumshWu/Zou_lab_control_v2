@@ -190,8 +190,10 @@ class PulseTargetView(QtWidgets.QWidget):
         width.setFixedSize(px(82, minimum=70), row_height())
         clock_endpoint = FluentLineEdit(record.clock_endpoint or "")
         clock_endpoint.setFixedHeight(row_height())
-        remove_button = FluentButton("Remove", role="destructive")
-        remove_button.setFixedSize(px(86, minimum=74), row_height())
+        # The row remover every list has: the ghost x, red under the pointer.
+        remove_button = FluentButton("×", role="destructive")
+        remove_button.setFixedSize(row_height(), row_height())
+        remove_button.setToolTip("Remove this port row")
         remove_button.clicked.connect(lambda _checked=False, key=record.key: self._remove_key(key))
         if record.kind == "dac":
             width.valueChanged.connect(lambda value, field=endpoints: self._resize_dac_endpoints(field, int(value)))

@@ -56,6 +56,7 @@ from zlc_ui.fluent import (
     fluent_scrollbar_thickness,
     muted_note_label,
     muted_summary_label,
+    set_status_ink,
     setting_label_width,
     signals_blocked,
     window_pad,
@@ -441,9 +442,10 @@ class _DataEditorView(QtWidgets.QWidget):
         self.axis_combo = FluentComboBox()
         self.axis_combo.setMinimumContentsLength(13)
         self.apply_axis_button = FluentButton("Apply axis")
-        self.remove_axis_button = FluentButton("Delete", role="destructive")
+        # One verb for every remover: Remove, red, one click.
+        self.remove_axis_button = FluentButton("Remove", role="destructive")
         self.remove_axis_button.setToolTip(
-            "Delete selected axis and keep its current Scope slice"
+            "Remove the selected axis and keep its current Scope slice"
         )
         self.axis_choice_row = self._labelled_row(
             "Editing",
@@ -529,6 +531,7 @@ class _DataEditorView(QtWidgets.QWidget):
             )
         )
         self.sigma_switch = FluentSwitch("Store sigma")
+        self.sigma_switch.setToolTip("Off removes the stored sigma values")
         component_controls = QtWidgets.QWidget(data_group)
         component_controls.setStyleSheet("background: transparent;")
         component_layout = QtWidgets.QHBoxLayout(component_controls)
@@ -742,13 +745,14 @@ class _DataEditorView(QtWidgets.QWidget):
         self._emit("set_dataset_field", field=str(field), value=value)
 
     def _show_local_rejection(self, message: str) -> None:
-        self._show_message(message)
+        self._show_message(message, "error")
 
-    def _show_message(self, message: object) -> None:
+    def _show_message(self, message: object, severity: str) -> None:
         # One sentence, whoever words it: this editor's own refusals and
-        # what its presenter says alike.
+        # what its presenter says alike, in the ink of its status word.
         text = sentence(str(message))
         self.message_label.setText(text)
+        set_status_ink(self.message_label, severity)
         self.message_label.setVisible(bool(text))
         # A line over the commands is room the page no longer has.
         self._table_fit.start()
@@ -998,7 +1002,7 @@ class _DataEditorView(QtWidgets.QWidget):
             self.value_model.set_projection(table)
             # A hint is a sentence, whoever words it.
             self.blank_help_label.setText(sentence(str(table.get("blank_help", ""))))
-            self._show_message(data.get("message", ""))
+            self._show_message(data.get("message", ""), data.get("message_severity", "idle"))
             self._dirty = bool(data.get("dirty", False))
             modified = bool(data.get("modified", False))
             self.apply_button.set_dirty(modified)

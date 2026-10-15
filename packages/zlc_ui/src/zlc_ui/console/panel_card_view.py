@@ -31,19 +31,15 @@ from zlc_ui.fluent import (
     FluentSettingsPopupAnchor,
     FluentStatusDot,
     fluent_text_width,
-    GREY,
     MUTED_INK,
-    RED_DARK,
     RADIUS,
-    RED,
     card_pad,
     control_height,
     row_gap,
     scaled_px,
     section_gap,
-    show_fluent_popup_for_anchor,
-    FONT,
-    fluent_font_size,)
+    set_status_ink,
+    show_fluent_popup_for_anchor,)
 from zlc_ui.form.form import FormChoice, FormFieldProps, FormSpec
 from zlc_ui.form.qt_form import FluentParameterForm, _form_label_width, being_edited
 
@@ -440,18 +436,13 @@ class PanelCardView(FluentGroupBox):
         self.settings_button.setFixedHeight(control)
         self.settings_button.clicked.connect(self._open_settings)
         # A remover at rest is the quiet ghost every one-glyph × is -- red
-        # only under the pointer -- and the armed second click is the one
-        # white-on-red confirm.
-        self.close_button = FluentButton("×", role="destructive")
-        self.close_button.setFixedSize(control, control)
-        self.close_button.setToolTip(
-            "Click once to arm; click again to remove this panel"
+        # only under the pointer.  Removing a panel takes two clicks: the
+        # first arms the white-on-red confirm, the second removes.
+        self.close_button = FluentButton(
+            "×", role="destructive", confirm_twice="remove this panel"
         )
-        self._remove_armed = False
-        self._remove_timer = QtCore.QTimer(self)
-        self._remove_timer.setSingleShot(True)
-        self._remove_timer.timeout.connect(self._disarm_header_remove)
-        self.close_button.clicked.connect(self._header_remove_clicked)
+        self.close_button.setFixedSize(control, control)
+        self.close_button.confirmed.connect(self.remove_requested.emit)
 
         # The presenter marks the card a board-wide error line is about.  The
         # card body reserves no status row, so the dot rides the title strip
@@ -1133,7 +1124,7 @@ class PanelCardView(FluentGroupBox):
         value, error = (local, True) if local else self._presented_status
         self._status_text = value
         self._status_error = error
-        self.status_dot.set_color(RED if error else GREY)
+        self.status_dot.set_state("error" if error else "idle")
         self.status_dot.setToolTip(value)
         self.status_dot.setVisible(bool(value))
         self._project_settings_status()
@@ -1151,11 +1142,7 @@ class PanelCardView(FluentGroupBox):
         if label is None:
             return
         label.setText(self._status_text)
-        label.setStyleSheet(
-            f'QLabel {{ color: {RED_DARK if self._status_error else MUTED_INK}; '
-            f'font: {fluent_font_size()}pt "{FONT}"; background: transparent; '
-            f"border: none; }}"
-        )
+        set_status_ink(label, "error" if self._status_error else "idle")
         label.setVisible(bool(self._status_text))
         self._sync_settings_body_size()
 
@@ -1524,8 +1511,11 @@ class PanelCardView(FluentGroupBox):
             # not be removed at all and its Edit signal could not be raised.
             self.edit_button = FluentButton("Edit", body)
             self.edit_button.clicked.connect(self._request_edit)
-            self.remove_button = FluentButton("Remove", body, role="destructive")
-            self.remove_button.clicked.connect(self._request_remove)
+            # The same panel as the header ×, so the same two clicks.
+            self.remove_button = FluentButton(
+                "Remove", body, role="destructive", confirm_twice="remove this panel"
+            )
+            self.remove_button.confirmed.connect(self._request_remove)
             buttons.addWidget(self.edit_button)
             buttons.addStretch(1)
             buttons.addWidget(self.remove_button)
@@ -1593,26 +1583,6 @@ class PanelCardView(FluentGroupBox):
     def _request_remove(self) -> None:
         self.retire_settings_popup()
         self.remove_requested.emit()
-
-    def _header_remove_clicked(self) -> None:
-        if self._remove_armed:
-            self._remove_timer.stop()
-            self._disarm_header_remove()
-            self.remove_requested.emit()
-            return
-        self._remove_armed = True
-        self.close_button.set_role("destructive_primary")
-        self.close_button.setToolTip("Click again to remove this panel")
-        application = QtWidgets.QApplication.instance()
-        interval = 400 if application is None else application.doubleClickInterval()
-        self._remove_timer.start(max(250, int(interval)))
-
-    def _disarm_header_remove(self) -> None:
-        self._remove_armed = False
-        self.close_button.set_role("destructive")
-        self.close_button.setToolTip(
-            "Click once to arm; click again to remove this panel"
-        )
 
     def _setting_changed(self, key: str) -> None:
         """A Panel row edited: its value, as one patch."""

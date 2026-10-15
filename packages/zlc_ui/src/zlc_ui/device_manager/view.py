@@ -11,19 +11,8 @@ from zlc_ui.fluent import (
     row_gap,
     section_gap,
     status_dot_gap,
-    ACCENT,
-    ACCENT_TINT,
     CARD_PAD,
-    DISABLED_INK,
     FIELD_BORDER_PX,
-    GREEN,
-    GREY,
-    MUTED_INK,
-    ORANGE,
-    RADIUS,
-    RED,
-    SELECTED,
-    TEXT,
     ElidedLabel,
     FluentLabel,
     FluentButton,
@@ -44,6 +33,7 @@ from zlc_ui.fluent import (
     popup_gap,
     retire_widget,
     scaled_px,
+    set_status_ink,
     setting_label_width,
     signals_blocked,
     window_pad,
@@ -119,19 +109,21 @@ def _ruled_list() -> QtWidgets.QVBoxLayout:
     return items
 
 
-class _Disclosure(QtWidgets.QAbstractButton):
+class _Disclosure(FluentButton):
     """Shows or hides a device's parameters: a quiet chevron, not a command.
 
     As Fluent's expander has it: at the trailing end of the header, pointing
     where the body will go -- down while it is hidden, up while it shows.  A
     square as tall as the row's controls, the chevron the combos and spin
-    boxes paint, centred on it; a text glyph sat its ink a pixel low.  Under
-    the pointer it takes the one hover wash every control shares, in body
-    ink: a command's tinted face would make it a command again.
+    boxes paint, centred on it; a text glyph sat its ink a pixel low.  It
+    is a quiet button: no face at rest, the one hover wash and press every
+    quiet thing shares, in body ink -- a command's tinted face would make it
+    a command again.  A toggle, too: a card rests unfolded, so a folded
+    card's disclosure wears the active face until it is unfolded.
     """
 
     def __init__(self, parent=None) -> None:
-        super().__init__(parent)
+        super().__init__("", parent, role="quiet")
         side = control_height()
         self.setFixedSize(side, side)
         self.setCursor(QtCore.Qt.PointingHandCursor)
@@ -139,31 +131,19 @@ class _Disclosure(QtWidgets.QAbstractButton):
 
     def set_expanded(self, expanded: bool) -> None:
         self._expanded = bool(expanded)
+        self.set_active(not self._expanded)
         self.setToolTip("Hide parameters" if self._expanded else "Show parameters")
-        self.update()
-
-    def enterEvent(self, event) -> None:  # noqa: N802 - Qt naming
-        super().enterEvent(event)
-        self.update()
-
-    def leaveEvent(self, event) -> None:  # noqa: N802 - Qt naming
-        super().leaveEvent(event)
         self.update()
 
     def paintEvent(self, event) -> None:  # noqa: N802 - Qt naming
         del event
-        painter = QtGui.QPainter(self)
-        painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
-        hovered = self.underMouse() and self.isEnabled()
-        if self.isDown() or hovered:
-            radius = float(scaled_px(RADIUS))
-            painter.setPen(QtCore.Qt.NoPen)
-            painter.setBrush(QtGui.QColor(SELECTED if self.isDown() else ACCENT_TINT))
-            painter.drawRoundedRect(QtCore.QRectF(self.rect()), radius, radius)
-        ink = TEXT if hovered else MUTED_INK if self.isEnabled() else DISABLED_INK
+        option = QtWidgets.QStyleOptionButton()
+        self.initStyleOption(option)
+        painter = QtWidgets.QStylePainter(self)
+        painter.drawControl(QtWidgets.QStyle.CE_PushButtonBevel, option)
         paint_chevron(
             painter, self, QtCore.QRectF(self.rect()).center(),
-            up=self._expanded, colour=QtGui.QColor(ink),
+            up=self._expanded, colour=QtGui.QColor(self.glyph_ink()),
         )
         painter.end()
 
@@ -571,8 +551,7 @@ class DeviceControlView(QtWidgets.QWidget):
         # a control.  A plain label, not an eliding one: a fence the operator
         # cannot read whole tells them nothing, so the text asks for its
         # full width and the column (and the snug window) grow to it.
-        limits = FluentLabel("")
-        limits.setStyleSheet(f"color: {MUTED_INK}; background: transparent; border: none;")
+        limits = muted_note_label("")
         limits.setToolTip(
             "The instrument's own range for this field; the editable window "
             "is the tighter of it and the bench policy"
@@ -732,7 +711,6 @@ class DeviceControlView(QtWidgets.QWidget):
         with signals_blocked(self.risk_switch):
             self.risk_switch.setChecked(bool(projection.get("risk_accepted", False)))
         self.risk_switch.setEnabled(bool(projection.get("risk_enabled", False)))
-        colours = {"ready": GREEN, "task": ACCENT, "warning": ORANGE, "error": RED}
         units = {declared.key: declared.unit for declared in spec.fields}
         for key in spec.keys:
             field = fields[key]
@@ -765,7 +743,9 @@ class DeviceControlView(QtWidgets.QWidget):
             if not bool(field.get("editable", False)) or not live.isChecked():
                 self._live_timers[key].stop()
             status.setText(str(field.get("status", "")))
-            dot.set_color(colours[str(field.get("severity", "ready"))])
+            severity = str(field.get("severity", "idle"))
+            dot.set_state(severity)
+            set_status_ink(status, severity)
             reason = str(field.get("reason", ""))
             for widget in (editor, live, apply, status):
                 widget.setToolTip(reason)
@@ -946,7 +926,7 @@ class DeviceManagerView(QtWidgets.QWidget):
         self.status_strip = StatusStrip()
         self.status_strip.set_inset(False, right=gutter)
         self.status_dot = FluentStatusDot(size=12)
-        self.status_dot.set_color(GREY)
+        self.status_dot.set_state("idle")
         self.document_name = ElidedLabel(
             "untitled", align=QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter
         )
@@ -1342,7 +1322,7 @@ class DeviceManagerView(QtWidgets.QWidget):
         self._lifecycle_commits = not (active and not changed)
         self._show_lifecycle_role()
         pending = bool(active and changed)
-        self.status_dot.set_color(ORANGE if pending else GREEN if active else GREY)
+        self.status_dot.set_state("warning" if pending else "running" if active else "idle")
         self.status_dot.setToolTip(
             "Configuration differs from the active installation"
             if pending

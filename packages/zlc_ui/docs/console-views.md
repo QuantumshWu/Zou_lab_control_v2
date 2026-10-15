@@ -149,7 +149,11 @@ card's strip (`strip_rect()`) -- its body is its plot's -- and the whole of
 an empty card, whose blank body shows the open hand; where the board puts
 a carried card does not depend on where it is held.  Setting is as tall as every other button and the header `×` is
 square at that height: the quiet one-glyph remover (red only under the
-pointer), whose first click arms it as the white-on-red confirm.  On a card
+pointer).  Removing a panel takes two clicks, from the header `×` and from
+the Remove in its Setting frame alike (`FluentButton(confirm_twice=...)`):
+the first arms the white-on-red confirm, a second within the system
+double-click interval removes, and left alone it returns to rest.  Setting
+is held down (the active face) while its frame is open.  On a card
 wider than what its viewport shows, the two ride the viewport's right edge
 (`keep_commands_within(right)`), as far in from it as from the card's own
 end, so a panel is edited or removed without scrolling sideways; scrolled
@@ -254,7 +258,7 @@ edit_requested = pyqtSignal()
 remove_requested = pyqtSignal()
 auto_preview_changed = pyqtSignal(bool)
 
-set_state(state: str, status_text: str = "") -> None  # idle|running|error
+set_state(state: str, status_text: str = "") -> None  # idle|draft|running|error
 set_commands(*, can_start: bool, can_stop: bool, pending: bool = False) -> None
 set_preview_offered(offered: bool) -> None
 set_auto_preview(enabled: bool) -> None
@@ -271,6 +275,14 @@ at the width of its widest word, so nothing beside it moves; Stop follows
 `can_stop`, not the row's state.  While a Task owns the console every
 command is disabled except the owning Task's own Stop (`owns_task`), which
 raises the same `stop_requested` as the status strip's "Stop task".
+
+A state is drawn as its status word (`STATE_WORDS`): a draft as `idle`, a
+run as `running`, a failure as `error`, the dot and the status line from the
+one `STATUS_CUES` table, on the row and on the node's Edit page alike.
+Removing a node takes two clicks, from the row's `×` and from the Remove on
+its Edit page alike: the first arms the white-on-red confirm, and
+`remove_requested` comes with the second.  Disabled (a Task taking the
+console over) or hidden, an armed remover returns to rest.
 
 A node's Edit page is three bands and only the middle one scrolls: the
 header (name, kind, status line) above, the rows, and the action bar
@@ -307,11 +319,18 @@ set_logic_kinds(kinds) -> None
 set_cards(cards: tuple[PanelCardView, ...]) -> None
 set_logic_rows(rows: tuple[LogicRowView, ...]) -> None
 set_paused(paused: bool) -> None
+set_console_state(word: str) -> None  # idle|running|error
 set_selectors(enabled: bool) -> None
 set_task_takeover(active: bool) -> None
 show_status(text: str, severity: str) -> None
 set_summary(text: str) -> None
 ```
+
+Pause is a toggle command: `set_paused(True)` turns its label to Resume and
+holds it down (the active face) until the presenter says the console runs
+again; the click only asks.  The header dot is the console's state, which
+the handle keeps as the worst of its logic nodes': `error` while one has
+failed, `running` while one runs, `idle` otherwise.
 
 The header names the window (`task`) as a label; it is not an input.  Its
 one chooser lists `Plot: <kind>` and `<Layer>: <api_name>` entries -- a node

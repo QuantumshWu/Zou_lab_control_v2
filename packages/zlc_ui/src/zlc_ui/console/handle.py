@@ -419,6 +419,7 @@ class TaskConsoleHandle(QtCore.QObject):
                 confirm_text="Continue",
                 cancel_text="Stop",
                 kind="info",
+                cancel_role="destructive",
             )
         )
 
@@ -630,9 +631,18 @@ class TaskConsoleHandle(QtCore.QObject):
         if row is not None:
             retire_widget(row)
         self._show_logic_rows()
+        self._show_console_state()
 
     def set_logic_state(self, node_id: str, state: str, status_text: str = "") -> None:
         self._rows[str(node_id)].set_state(state, status_text)
+        self._show_console_state()
+
+    def _show_console_state(self) -> None:
+        # The worst of the nodes': a failure anywhere, else a run anywhere.
+        words = {row.state_word for row in self._rows.values()}
+        self._view.set_console_state(
+            "error" if "error" in words else "running" if "running" in words else "idle"
+        )
 
     def set_logic_commands(
         self, node_id: str, *, can_start: bool, can_stop: bool, pending: bool = False

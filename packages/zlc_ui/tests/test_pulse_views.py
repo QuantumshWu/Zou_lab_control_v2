@@ -1525,6 +1525,7 @@ assert open_width == view.left_body.sizeHint().width(), (
 open_timeline = view.timeline_scroll.width()
 # It names what it hides: "Collapse" is the Subpulse's own command.
 assert view.collapse_button.text() == "Hide side panels"
+assert not view.collapse_button.is_active()
 
 view.collapse_button.click()
 for _ in range(40):
@@ -1537,6 +1538,7 @@ assert collapsed_width == view.left_body.sizeHint().width(), (
 )
 assert collapsed_width < open_width, "hiding the side panels freed no width at all"
 assert view.collapse_button.text() == "Show side panels"
+assert view.collapse_button.is_active(), "a toggle is held down while what it did stands"
 assert view.timeline_scroll.width() > open_timeline, (
     "the freed width went nowhere: the periods are no wider than before"
 )
@@ -1546,6 +1548,7 @@ for _ in range(40):
     app.processEvents()
 assert view.left_scroll.width() == open_width, "Show side panels did not give it back"
 assert view.collapse_button.text() == "Hide side panels"
+assert not view.collapse_button.is_active()
 
 view.close()
 app.processEvents()
@@ -2127,6 +2130,8 @@ centers = [button.mapTo(card, button.rect().center()).x() for button in buttons]
 assert len(set(centers)) == 1
 tops = [button.mapTo(card, QtCore.QPoint()).y() for button in buttons]
 assert tops[0] < tops[1] < tops[2]
+# Ungroup takes the Subpulse away: red, and one click.
+assert card.ungroup_button.role() == "destructive"
 card.ungroup_button.click(); app.processEvents()
 assert actions == [("ungroup", "mot")], actions
 actions.clear()
@@ -2653,38 +2658,49 @@ host.close(); view.close()
 
 def test_a_tinted_subpulse_card_gives_its_commands_the_white_face(run_qt) -> None:
     """The selection wash under a plain Subpulse is the light blue of the
-    standard face: there, as on a Config Subpulse's green, the commands
-    wear the white on-tint face, and they go back when the card does."""
+    standard face: there, as on a Config Subpulse's green, Expand and Edit
+    wear the white on-tint face, and they go back when the card does.
+    Ungroup is red on any body, and an expanded Subpulse's Collapse is held
+    down -- the SELECTED face -- on the green too."""
 
     run_qt(r'''
 from PyQt5 import QtGui, QtWidgets
 from zlc_ui.qt import ensure_qt_app
-from zlc_ui.fluent.style import BUTTON_TINT, SURFACE
+from zlc_ui.fluent.style import BUTTON_TINT, RED_TINT, SELECTED, SURFACE
 from zlc_ui.pulse import ComponentVM
 from zlc_ui.pulse.schedule_view import ComponentCard
 app = ensure_qt_app(["pulse-subpulse-faces"])
 host = QtWidgets.QWidget(); host.resize(300, 400)
 card = ComponentCard(ComponentVM("mot", "MOT", ("p1",), "4 us", "1 period"), host)
 host.show(); app.processEvents()
-buttons = (card.expand_button, card.edit_button, card.ungroup_button)
+buttons = (card.expand_button, card.edit_button)
+
+def face(button):
+    app.processEvents()
+    image = button.grab().toImage()
+    ratio = image.devicePixelRatio()
+    return QtGui.QColor(image.pixel(int(3 * ratio), int(button.height() / 2 * ratio))).name().upper()
 
 def faces():
-    app.processEvents()
-    found = set()
-    for button in buttons:
-        image = button.grab().toImage()
-        ratio = image.devicePixelRatio()
-        found.add(QtGui.QColor(image.pixel(int(3 * ratio), int(button.height() / 2 * ratio))).name().upper())
-    return found
+    return {face(button) for button in buttons}
 
 assert faces() == {BUTTON_TINT.upper()}, faces()
+assert face(card.ungroup_button) == RED_TINT.upper()
+assert not card.expand_button.is_active(), "a closed Subpulse's Expand rests"
 card.set_selected(True)
 assert faces() == {SURFACE.upper()}, faces()
+assert face(card.ungroup_button) == RED_TINT.upper(), "Ungroup is red on any body"
 card.set_selected(False)
 assert faces() == {BUTTON_TINT.upper()}, faces()
-card.set_component(ComponentVM("mot", "MOT", ("p1",), "4 us", "1 period",
-                               source="config", config_path="a.json", config_active=True))
+config = ComponentVM("mot", "MOT", ("p1",), "4 us", "1 period",
+                     source="config", config_path="a.json", config_active=True)
+card.set_component(config)
 assert faces() == {SURFACE.upper()}, "a Config Subpulse is tinted whether or not it is selected"
+assert face(card.ungroup_button) == RED_TINT.upper()
+expanded = ComponentCard(config, host, mode="start")
+expanded.show(); app.processEvents()
+assert expanded.expand_button.text() == "Collapse" and expanded.expand_button.is_active()
+assert face(expanded.expand_button) == SELECTED.upper(), "held down, on the green card too"
 host.close()
 ''')
 

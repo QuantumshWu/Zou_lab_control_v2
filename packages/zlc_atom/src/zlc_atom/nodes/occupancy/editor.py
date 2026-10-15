@@ -9,11 +9,12 @@ MIDDLE frames, which keep their number.  "Rest" takes whatever no file
 names.  A frame reached through Rest shows as a dashed card in its file's
 row (on First or Last when it is an end); a frame nobody reads is an empty
 red card in every row, and one two files reach, or a middle number the
-source no longer has between its ends, is a red-edged card with the reason
+source no longer has between its ends, is a red-tinted card with the reason
 below.  Nothing here changes a claim
 because the frame count changed: what was authored stays until the operator
-edits it.  A file is removed by the × that ends its row and replaced by
-clicking its name.  A file row is one line, as tall as every other
+edits it.  A file is replaced by the … and removed by the × that end its
+row -- both on the row, where they are looked for -- and clicking its name
+replaces it too.  A file row is one line, as tall as every other
 control and one row pitch from the next: what the file is (its exposure,
 sites and model) is in the name's tooltip with its path.  The readout
 model -- which model each file is read with, set once -- is a segmented
@@ -42,7 +43,6 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 
 from zlc_ui.fluent import (
     FONT,
-    TEXT,
     FluentButton,
     FluentLabel,
     FluentSegmentedButtons,
@@ -91,7 +91,10 @@ class CalibrationsEditor(QtWidgets.QWidget):
         layout.addLayout(header)
         self.grid = FluentSelectionGrid(
             self, toggle=True,
-            row_actions=(("remove", "×", "Remove this calibration"),),
+            row_actions=(
+                ("replace", "…", "Choose another file", "quiet"),
+                ("remove", "×", "Remove this calibration"),
+            ),
             label_action=("replace", "Click to choose another file"),
         )
         # File names read as a list: they start on the editor's content edge.
@@ -105,7 +108,6 @@ class CalibrationsEditor(QtWidgets.QWidget):
         model_layout.setSpacing(row_gap())
         # A field label like "Frames" above it, not a second hint line.
         self.model_label = FluentLabel("Readout model")
-        self.model_label.setStyleSheet(f"color: {TEXT}; background: transparent; border: none;")
         model_layout.addWidget(self.model_label)
         self.model = FluentSegmentedButtons(
             tuple((choice.value, choice.label) for choice in READOUT_MODEL_CHOICES), self.model_row)

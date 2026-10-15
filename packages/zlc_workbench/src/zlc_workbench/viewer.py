@@ -364,6 +364,8 @@ def _draft_from_snapshot(
         "modified": source_path is None,
         "unsaved": False,
         "message": "",
+        #: The status word the message is shown in: idle, warning or error.
+        "message_severity": "idle",
         "producer_serial": int(producer_serial),
         "producer": None,
         "publication": None,
@@ -1070,6 +1072,10 @@ def _data_projection(draft: dict[str, object]) -> dict[str, object]:
         "can_save": bool(draft["save_ready"] and not draft["modified"]),
         "save_suggested": str((Path(source_path).parent / suggested) if source_path is not None else suggested),
         "message": str(draft.get("message") or validation_message),
+        "message_severity": (
+            str(draft["message_severity"]) if draft.get("message")
+            else "error" if validation_message else "idle"
+        ),
     }
 
 
@@ -2680,6 +2686,7 @@ class FigureViewerPresenter:
             str(draft["name"])
         ):
             draft["message"] = "Save or discard this data working copy before closing"
+            draft["message_severity"] = "warning"
             self._show_data_draft(draft)
             return False
         closer = getattr(self.view, "close_data_editor", None)
@@ -2776,6 +2783,7 @@ class FigureViewerPresenter:
             draft[key] = value
         self._restore_data_draft(draft)
         draft["message"] = "Applied working copy discarded"
+        draft["message_severity"] = "idle"
 
     def data_editor_intent(self, editor_id: str, intent: Mapping[str, object]) -> None:
         draft = self._data_drafts.get(str(editor_id))
@@ -2787,6 +2795,7 @@ class FigureViewerPresenter:
             command = dict(intent)
             operation = str(command.pop("op"))
             draft["message"] = ""
+            draft["message_severity"] = "idle"
             marks_dirty = True
             if operation == "set_dataset_field":
                 field = str(command["field"])
@@ -2897,6 +2906,7 @@ class FigureViewerPresenter:
             self._project_data_choices(f"manual:{editor_id}")
         except (KeyError, IndexError, TypeError, ValueError, RuntimeError) as error:
             draft["message"] = str(error)
+            draft["message_severity"] = "error"
             self._show_data_draft(draft)
             self.view.set_status(f"cannot edit data: {error}", error=True)
 
@@ -3098,6 +3108,7 @@ class FigureViewerPresenter:
                 if current
                 else f"Saved older preview to {archive.name}; current data is not saved"
             )
+            draft["message_severity"] = "idle"
             self.view.set_status(
                 f"saved {archive.name} and {image.name}"
             )
@@ -3127,6 +3138,7 @@ class FigureViewerPresenter:
             draft["save_ready"] = ready
             if ready and not bool(draft["modified"]):
                 draft["message"] = "Preview ready"
+                draft["message_severity"] = "idle"
             if bool(getattr(self.view, "has_data_editor", lambda _key: False)(str(draft["editor_id"]))):
                 self.view.update_data_editor(
                     str(draft["editor_id"]), _data_projection(draft)

@@ -9,6 +9,7 @@ only :mod:`zlc_ui.pulse.models` records.
 from __future__ import annotations
 
 import json
+import weakref
 from dataclasses import replace
 
 from PyQt5 import QtCore, QtGui, QtWidgets
@@ -16,7 +17,7 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 from zlc_ui.form import FormChoice, being_edited
 from zlc_ui.fluent import (
     retire_widget,
-    ACCENT, ACCENT_TINT, BG, DERIVED_INK, DISABLED_INK, FIELD_BORDER_PX, HOVER, MUTED_INK, SELECTION_EDGE, TEXT, CONFIG_GREEN,
+    ACCENT, ACCENT_TINT, BG, DERIVED_INK, FIELD_BORDER_PX, MUTED_INK, SELECTION_EDGE, TEXT, CONFIG_GREEN,
     CONFIG_GREEN_DARK, CONFIG_GREEN_TINT, FluentButton, FluentCheckBox, FluentSegmentedButtons,
     FluentSwitch, FluentComboBox, FluentFrame, FluentGroupBox, fluent_count_box,
     FluentLabel, FluentLineEdit, FluentReadoutEdit, FluentScrollArea, LinkedScrollPanes,
@@ -81,15 +82,18 @@ class _PortToggleIcon(QtGui.QIconEngine):
     it for "on".  Two characters (a disc and a ring) never matched -- the
     small disc read as a dot beside a circle, the large one as a dark blot
     heavier than every word on the page -- so both are drawn: the same
-    ring, the same stroke, in the command's own ink."""
+    ring, the same stroke, in the command's own ink -- its button's
+    :meth:`FluentButton.glyph_ink`, so a ring that takes steps away is the
+    quiet ghost that turns red under the pointer, as every row's x is."""
 
-    def __init__(self, on: bool) -> None:
+    def __init__(self, on: bool, button: FluentButton) -> None:
         super().__init__()
         self._on = bool(on)
+        self._button = weakref.ref(button)
 
     def paint(self, painter, rect, mode, state) -> None:  # noqa: N802 - Qt API name
-        del state
-        ink = QtGui.QColor(DISABLED_INK if mode == QtGui.QIcon.Disabled else HOVER)
+        del mode, state
+        ink = QtGui.QColor(self._button().glyph_ink())
         side = float(min(rect.width(), rect.height()))
         stroke = max(1.0, side / 9.0)
         centre = QtCore.QRectF(rect).center()
@@ -115,12 +119,12 @@ class _PortToggleIcon(QtGui.QIconEngine):
         return QtGui.QPixmap.fromImage(image)
 
     def clone(self):
-        return _PortToggleIcon(self._on)
+        return _PortToggleIcon(self._on, self._button())
 
 
 def _port_toggle_button(on: bool, tooltip: str) -> FluentButton:
     button = FluentButton("")
-    button.setIcon(QtGui.QIcon(_PortToggleIcon(on)))
+    button.setIcon(QtGui.QIcon(_PortToggleIcon(on, button)))
     side = row_height()
     # About half the face, of the face's parity: an odd ring in an even
     # face has no centred place, and stood half a pixel off on every row.
@@ -810,6 +814,9 @@ class ChannelPanel(FluentGroupBox):
             digital = port.kind == "digital"
             # Inapplicable actions keep their column in every port row.
             fill.setEnabled(digital)
+            # On an analog row the ring takes the output's steps away: a
+            # row remover, ghost at rest and red under the pointer.
+            clear.set_role("standard" if digital else "destructive")
             clear.setToolTip(
                 "Turn this output off in every period"
                 if digital
@@ -1134,8 +1141,13 @@ class ComponentCard(FluentGroupBox):
         self.edit_button = FluentButton("Edit")
         self.edit_button.setToolTip("Edit this Subpulse")
         self.edit_button.clicked.connect(lambda: self.action_requested.emit("edit", self.component_id))
-        self.ungroup_button = FluentButton("Ungroup")
-        self.ungroup_button.setToolTip("Keep the default contents as ordinary Pulse items")
+        # Ungroup dissolves the Subpulse: red like every command that takes
+        # something away, and one click.
+        self.ungroup_button = FluentButton("Ungroup", role="destructive")
+        self.ungroup_button.setToolTip(
+            "Dissolve this Subpulse: its periods become ordinary Pulse items "
+            "and its source link is removed"
+        )
         self.ungroup_button.clicked.connect(lambda: self.action_requested.emit("ungroup", self.component_id))
         # One command per port row, from the first: as tall as a row and
         # the rows' spacing apart, so none straddles two rows of the cards
@@ -1212,10 +1224,12 @@ class ComponentCard(FluentGroupBox):
         """The commands' face for the body under them.  On a tinted body --
         the green of a Config Subpulse, the selection wash -- a light-blue
         face lays a second hue on the card (on the wash it read 1.09:1 and
-        nearly vanished): there the commands wear a white face, no edge."""
+        nearly vanished): there the commands wear a white face, no edge.
+        Ungroup keeps its red face on any body, and an expanded Subpulse's
+        Collapse its active face."""
 
         tinted = self._component.config_active or self.is_selected()
-        for button in (self.expand_button, self.edit_button, self.ungroup_button):
+        for button in (self.expand_button, self.edit_button):
             button.set_on_tint(tinted)
 
     def set_selected(self, selected: bool) -> None:
@@ -1252,6 +1266,8 @@ class ComponentCard(FluentGroupBox):
         self.name_label.setText(component.name)
         self.summary_label.setText(component.summary_text if self.mode == "closed" else "")
         self.expand_button.setText("Expand" if self.mode == "closed" else "Collapse")
+        # A toggle: held down while it is expanded, its label the next press.
+        self.expand_button.set_active(self.mode != "closed")
         self._project_source()
 
 
@@ -1926,7 +1942,8 @@ class PulseScheduleView(QtWidgets.QWidget):
         self.save_button = FluentButton("Save Pulse")
         # Asks for the file to read: the ellipsis says more comes first.
         self.load_button = FluentButton("Open…")
-        # Names what it hides: "Collapse" is the Subpulse's own command.
+        # Names what it hides: "Collapse" is the Subpulse's own command.  A
+        # toggle: active while the side panels are hidden.
         self.collapse_button = FluentButton("Hide side panels")
         self.group_button = FluentButton("Group Subpulse")
         # Three compact rows: execute; edit the timeline; save and organize.
@@ -2740,6 +2757,7 @@ class PulseScheduleView(QtWidgets.QWidget):
         self.channel_panel_holder.setVisible(not visible)
         self.left_panel_stub_holder.setVisible(visible)
         self.collapse_button.setText("Show side panels" if visible else "Hide side panels")
+        self.collapse_button.set_active(visible)
         self._settle_left_pane_width()
 
     def _show_left_panels(self) -> None:
@@ -2747,6 +2765,7 @@ class PulseScheduleView(QtWidgets.QWidget):
         self.channel_panel_holder.show()
         self.left_panel_stub_holder.hide()
         self.collapse_button.setText("Hide side panels")
+        self.collapse_button.set_active(False)
         self._settle_left_pane_width()
 
 

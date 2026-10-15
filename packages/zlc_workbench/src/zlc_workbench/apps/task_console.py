@@ -1136,7 +1136,7 @@ class ExperimentGuiFlow:
                     ("Protected", "warning") if not editable else
                     ("Stands outside its bounds", "warning")
                     if _stands_outside(tunable.metadata, current.get(name)) else
-                    ("Ready", "ready")
+                    ("Ready", "idle")
                 ),
             )
             fields[name] = {
@@ -1481,7 +1481,7 @@ class ExperimentGuiFlow:
                 model["settings_epoch"] = int(
                     result["provenance"]["settings_epoch"]
                 )
-                model["status"] = {field: ("Applied", "ready")}
+                model["status"] = {field: ("Applied", "idle")}
                 model["control"].show_status(f"applied {field}", "idle")
             self._project_device_control(key)
             self._drain_device_tune_pending()

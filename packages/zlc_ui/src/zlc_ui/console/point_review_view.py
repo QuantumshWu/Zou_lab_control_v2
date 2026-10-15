@@ -152,7 +152,9 @@ class PointReviewView(FluentFrame):
 
         actions = QtWidgets.QHBoxLayout()
         actions.setSpacing(window_pad(0.5))
-        self.exclude_selected_button = FluentButton("Exclude selected", self)
+        # Takes points out of the fit: red like every command that takes
+        # something away, one click (Restore selected and Reset bring it back).
+        self.exclude_selected_button = FluentButton("Exclude selected", self, role="destructive")
         self.restore_selected_button = FluentButton("Restore selected", self)
         self.reset_button = FluentButton("Reset", self)
         actions.addWidget(self.exclude_selected_button)

@@ -12,9 +12,8 @@ from collections.abc import Mapping
 from PyQt5 import QtCore, QtGui, QtWidgets, sip
 
 from zlc_ui.fluent import (
-    GREY,
     HEADING_CSS_WEIGHT,
-    MUTED_INK,
+    MUTED_LABEL_STYLE,
     TEXT,
     FluentButton,
     FluentComboBox,
@@ -33,6 +32,7 @@ from zlc_ui.fluent import (
     retire_widget,
     row_gap,
     section_gap,
+    set_status_ink,
     setting_label_width,
     status_dot_gap,
     window_pad,
@@ -41,7 +41,7 @@ from zlc_ui.form import FluentParameterForm, FormSpec, required_label
 from zlc_ui.form.qt_form import _form_label_width
 from zlc_ui.status import name_words
 from .logic_row_view import (
-    STATE_COLOURS,
+    STATE_WORDS,
     STATUS_DOT,
     START_LABELS,
     fit_button_words,
@@ -77,7 +77,6 @@ class LogicEditorView(QtWidgets.QWidget):
         #: The projection minus what the status half applies, as last
         #: rebuilt from.  A beat that changes neither rebuilds nothing.
         self._applied_structure: dict[str, object] | None = None
-        self._status_colours: tuple[str, str] = ("", "")
         #: The editor's ONE label column, shared by the selectors, both forms,
         #: the results and every contribution, so their fields start at one x.
         self._label_width = setting_label_width(())
@@ -136,7 +135,7 @@ class LogicEditorView(QtWidgets.QWidget):
             "background: transparent; }"
         )
         self.kind_label = FluentLabel("")
-        self.kind_label.setStyleSheet(f"color: {MUTED_INK}; background: transparent; border: none;")
+        self.kind_label.setStyleSheet(MUTED_LABEL_STYLE)
         title_row.addWidget(self.title_label)
         title_row.addWidget(self.kind_label)
         title_row.addStretch(1)
@@ -145,7 +144,7 @@ class LogicEditorView(QtWidgets.QWidget):
         # The air between a dot and its words is the status strip's, so this
         # dot reads as the node row's and the strip's.
         status_row.setSpacing(status_dot_gap())
-        self.status_dot = FluentStatusDot(size=STATUS_DOT, color=GREY)
+        self.status_dot = FluentStatusDot(size=STATUS_DOT)
         self.status_label = FluentLabel("stopped")
         self.status_label.setWordWrap(True)
         self.status_label.setMinimumWidth(0)
@@ -212,17 +211,20 @@ class LogicEditorView(QtWidgets.QWidget):
         # On Pulse then Stop Pulse -- and with its words: Start reads Restart
         # while the node is active and Starting… while its start waits.  Both
         # are always there, so nothing on this row moves when a run begins.
-        # Remove keeps to the far side, away from the buttons pressed most.
+        # Remove keeps to the far side, away from the buttons pressed most,
+        # and takes two clicks like the row's x: it removes the same node.
         # The bar is the page's foot, on the body's left and right edges and
-        # a section gap under the last row the scroll shows, so the ghost
+        # a section gap under the last row the scroll shows, so the red
         # Remove reads as a command and not as one more red sentence.
         footer = QtWidgets.QWidget()
         footer.setStyleSheet("background: transparent;")
         actions = QtWidgets.QHBoxLayout(footer)
         actions.setContentsMargins(pad, section_gap(), pad, pad)
         actions.setSpacing(row_gap())
-        self.remove_button = FluentButton("Remove", role="destructive")
-        self.remove_button.clicked.connect(self.remove_requested.emit)
+        self.remove_button = FluentButton(
+            "Remove", role="destructive", confirm_twice="remove this node"
+        )
+        self.remove_button.confirmed.connect(self.remove_requested.emit)
         actions.addWidget(self.remove_button)
         actions.addStretch(1)
         self.start_button = FluentButton("Start", role="primary")
@@ -385,15 +387,9 @@ class LogicEditorView(QtWidgets.QWidget):
                 issues, incoming.get("artifact_claims"), self._shown_problems()
             )
         self.status_label.setText(status)
-        # Written when they CHANGE: the sheet is re-parsed and the widget
-        # repolished on every write.
-        colours = STATE_COLOURS[state]
-        if colours != self._status_colours:
-            self._status_colours = colours
-            self.status_dot.set_color(colours[0])
-            self.status_label.setStyleSheet(
-                f"color: {colours[1]}; background: transparent; border: none;"
-            )
+        word = STATE_WORDS[state]
+        self.status_dot.set_state(word)
+        set_status_ink(self.status_label, word)
 
     def set_mutation_enabled(self, enabled: bool, *, owns_task: bool = False) -> None:
         """Disable authored and lifecycle commands while a Task owns the console.

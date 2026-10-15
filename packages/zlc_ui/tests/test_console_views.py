@@ -211,9 +211,13 @@ QtTest.QTest.mouseClick(card.edit_button, QtCore.Qt.LeftButton)
 app.processEvents()
 QtTest.QTest.mouseClick(card.settings_button, QtCore.Qt.LeftButton)
 app.processEvents()
+# Setting's Remove removes the same panel as the header x: two clicks.
+QtTest.QTest.mouseClick(card.remove_button, QtCore.Qt.LeftButton)
+assert events.count(('remove',)) == 1, events
+assert card.remove_button.role() == 'destructive_primary'
 QtTest.QTest.mouseClick(card.remove_button, QtCore.Qt.LeftButton)
 assert ('edit',) in events
-assert ('remove',) in events
+assert events.count(('remove',)) == 2, events
 assert any(event[0] == 'state' and event[1]['title'] == 'Card changed' for event in events)
 assert ('state', {'interval_ms': 800}) in events
 popup.close(); card.close(); card.deleteLater()
@@ -872,9 +876,9 @@ QtTest.QTest.mouseClick(start, QtCore.Qt.LeftButton)
 QtTest.QTest.mouseClick(stop, QtCore.Qt.LeftButton)
 # A draft that cannot start is a state of its own, drawn as the node's Edit
 # page draws it -- a word the row refused would raise out of a Qt slot.
-from zlc_ui.console.logic_row_view import STATE_COLOURS
+from zlc_ui.fluent import STATUS_CUES
 row.set_state('draft', 'Draft: select a compatible source')
-dot, ink = STATE_COLOURS['draft']
+dot, ink = STATUS_CUES['idle']
 assert dot in row.dot.styleSheet() and ink in row.status_label.styleSheet()
 row.set_state('idle', 'stopped')
 row.set_commands(can_start=True, can_stop=False)
@@ -883,6 +887,9 @@ assert start.text() == 'Start' and not stop.isEnabled() and stop.isVisible()
 assert slots() == idle, (slots(), idle)
 QtTest.QTest.mouseClick(start, QtCore.Qt.LeftButton)
 QtTest.QTest.mouseClick(row.edit_button, QtCore.Qt.LeftButton)
+# Removing a node takes two clicks: the first only arms the x.
+QtTest.QTest.mouseClick(row.remove_button, QtCore.Qt.LeftButton)
+assert events == ['start', 'stop', 'start', 'edit'] and row.remove_button.is_armed()
 QtTest.QTest.mouseClick(row.remove_button, QtCore.Qt.LeftButton)
 assert events == ['start', 'stop', 'start', 'edit', 'remove']
 """
@@ -1966,7 +1973,7 @@ for widget in (
     view.kind_combo,
     view.add_button,
     view.selectors_switch,
-    view.pause_switch,
+    view.pause_button,
     view.save_screenshot_button,
     view.save_layout_button,
     view.load_layout_button,
@@ -2085,7 +2092,7 @@ assert view.add_button.text() == 'Add node'
 assert add_slot() == plot_slot, (add_slot(), plot_slot)
 assert 'click Add node' in view.logic_hint.text()
 QtTest.QTest.mouseClick(view.add_button, QtCore.Qt.LeftButton)
-QtTest.QTest.mouseClick(view.pause_switch, QtCore.Qt.LeftButton)
+QtTest.QTest.mouseClick(view.pause_button, QtCore.Qt.LeftButton)
 QtTest.QTest.mouseClick(view.save_screenshot_button, QtCore.Qt.LeftButton)
 QtTest.QTest.mouseClick(view.save_layout_button, QtCore.Qt.LeftButton)
 QtTest.QTest.mouseClick(view.clear_board_button, QtCore.Qt.LeftButton)
@@ -2123,7 +2130,7 @@ assert view.save_layout_button.isEnabled()
 assert not view.load_layout_button.isEnabled()
 assert not view.clear_board_button.isEnabled()
 assert view.selectors_switch.isEnabled()
-assert view.pause_switch.isEnabled()
+assert view.pause_button.isEnabled()
 assert view.save_screenshot_button.isEnabled()
 assert preview.settings_button.isEnabled()
 for row in (task_row, camera_row):
@@ -2181,13 +2188,17 @@ app = ensure_qt_app(['pause'])
 view = TaskConsoleView(); view.show(); app.processEvents()
 asked = []
 view.pause_toggled.connect(asked.append)
-QtTest.QTest.mouseClick(view.pause_switch, QtCore.Qt.LeftButton)
+QtTest.QTest.mouseClick(view.pause_button, QtCore.Qt.LeftButton)
 assert asked == [True], asked
-assert view.pause_switch.text() == 'Pause', 'the label moved before the presenter agreed'
+assert view.pause_button.text() == 'Pause', 'the label moved before the presenter agreed'
+assert not view.pause_button.is_active(), 'nor did its face'
 view.set_paused(True)
-assert view.pause_switch.text() == 'Resume'
-QtTest.QTest.mouseClick(view.pause_switch, QtCore.Qt.LeftButton)
+assert view.pause_button.text() == 'Resume'
+assert view.pause_button.is_active(), 'paused, the toggle is held down'
+QtTest.QTest.mouseClick(view.pause_button, QtCore.Qt.LeftButton)
 assert asked == [True, False], asked
+view.set_paused(False)
+assert view.pause_button.text() == 'Pause' and not view.pause_button.is_active()
 """
     )
 
@@ -2600,10 +2611,18 @@ editor.stop_requested.connect(lambda: stops.append('stop'))
 QtTest.QTest.mouseClick(stop, QtCore.Qt.LeftButton)
 assert stops == ['stop']
 
-# While a Task owns the console only that Task's own Stop stays live.
+# Remove takes two clicks, as the row's x does: the same node.
+removes = []
+editor.remove_requested.connect(lambda: removes.append('remove'))
+QtTest.QTest.mouseClick(editor.remove_button, QtCore.Qt.LeftButton)
+assert removes == [] and editor.remove_button.role() == 'destructive_primary'
+
+# While a Task owns the console only that Task's own Stop stays live, and an
+# armed Remove forgets its first click.
 editor.update_projection(dict(projection, running=True, can_stop=True))
 editor.set_mutation_enabled(False, owns_task=True)
 assert stop.isEnabled() and not start.isEnabled() and not editor.remove_button.isEnabled()
+assert not editor.remove_button.is_armed() and editor.remove_button.role() == 'destructive'
 editor.set_mutation_enabled(False)
 assert not stop.isEnabled()
 editor.set_mutation_enabled(True)
@@ -2611,6 +2630,9 @@ editor.update_projection(projection)
 app.processEvents()
 assert start.text() == 'Start' and not stop.isEnabled()
 assert slots() == idle, (slots(), idle)
+QtTest.QTest.mouseClick(editor.remove_button, QtCore.Qt.LeftButton)
+QtTest.QTest.mouseClick(editor.remove_button, QtCore.Qt.LeftButton)
+assert removes == ['remove'], removes
 
 raised = []
 switch.toggled.connect(raised.append)
