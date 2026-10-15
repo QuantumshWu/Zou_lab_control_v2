@@ -252,14 +252,13 @@ def source_label(spec: Any) -> str:
     """The words a node's source chooser stands under on its Edit page,
     and so the words a draft names it by.
 
-    A bundle input is what code reads its members through (``a.counts``),
-    so its name stands exactly as declared -- Python is case sensitive, and
-    an operator who copies "A" from the label writes a NameError.  Any
-    other input's name reads as words, like every form label beside it.
+    A bundle input is chosen as a whole producer's bundle, so it reads
+    "Signal bundle"; any other input's name reads as words, like every
+    form label beside it.
     """
 
     if spec.select_bundle:
-        return f"Signal bundle {spec.name}"
+        return "Signal bundle"
     return name_words(spec.name)
 
 
@@ -900,7 +899,7 @@ def make_host(
     siblings: tuple[str, ...] = ()
     if has_input and kind == "processor":
         # A node that computes what it was asked to (derive) reads the
-        # outputs its expression names, and says so on the instance; every
+        # members its variables name, and says so on the instance; every
         # other processor reads only the signal it subscribed to.
         declared_by_node = getattr(node, "dataset_input_siblings", None)
         siblings = () if declared_by_node is None else tuple(declared_by_node)

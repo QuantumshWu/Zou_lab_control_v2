@@ -7421,7 +7421,7 @@ class ConsolePresenter:
             # and what the node reads is described plainly instead.
             result["node"] = _control_plain({
                 key: value for key, value in projection.items()
-                if key not in {"input_bundle", "output_bundle", "source_schema", "form_spec",
+                if key not in {"input_bundle", "source_schema", "form_spec",
                                "artifact_form_spec", "workspace_resources", "ui_contributions",
                                "bench_extras", "run_device_read"}
             })
@@ -8410,7 +8410,7 @@ class ConsolePresenter:
             binding.descriptor, binding.node_id, compatible
         )
         source_description = self._signal_projection()[1].get(binding.draft.source_signal)
-        input_bundle = output_bundle = ()
+        input_bundle = ()
         if source_specs and source_specs[0].select_bundle:
             # Immutable metadata/references only: the editor must not ask a
             # plugin or the plane to assemble a run/history on the Qt thread.
@@ -8433,17 +8433,6 @@ class ConsolePresenter:
                     if producer is not None else (signal_output_name(selected_source),)
                 )
                 input_bundle = tuple((name, None, None) for name in names)
-            outputs = self._logic_outputs(binding)
-            if outputs:
-                publication = self.session.signal_plane.latest_publication(
-                    stable_signal_key(binding.node_id, outputs[0].name)
-                )
-                if publication is not None:
-                    output_bundle = tuple(
-                        (signal_output_name(name), value.canonical_schema or value.snapshot.block.schema,
-                         value.snapshot)
-                        for name, value in publication.signals.items()
-                    )
         return {
             "node_id": binding.node_id,
             "api_name": str(binding.descriptor.api_name),
@@ -8498,7 +8487,6 @@ class ConsolePresenter:
             "source_labels": source_labels,
             "source_groups": source_groups,
             "input_bundle": input_bundle,
-            "output_bundle": output_bundle,
             "device_keys": dict(binding.draft.device_keys),
             "device_options": options,
             "device_labels": self.session.device_labels,
@@ -9959,8 +9947,8 @@ class ConsolePresenter:
         # host meant a window that never closed.  Once the operator has been
         # TOLD the close is abnormal, the retired list stops being a gate and
         # the processes go down; their readers then settle whatever is left.
-        # A logic row that never settles after Stop -- a Derive expression
-        # that loops -- is the same case while it drives no device: its lease
+        # A logic row that never settles after Stop -- a processor that never
+        # settles -- is the same case while it drives no device: its lease
         # is bookkeeping only, and letting it go is what lets the session
         # close under a worker nothing can interrupt.  A row still inside a
         # device call keeps the close waiting, and said: the session cannot
