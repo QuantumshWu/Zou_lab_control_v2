@@ -182,6 +182,34 @@ def test_scan_estimate_uses_the_read_worker_without_starting_a_node(session, mon
             assert session.sequencer.applied() is before
 
 
+def test_a_parked_scan_axis_blocks_nothing_and_a_scanned_one_waits_at_the_draft(session) -> None:
+    """An axis the pulse or the bench cannot reach is a draft issue the Edit
+    page says while it is scanned -- Start waits instead of the build
+    refusing -- and nothing at all once it is switched off (parked)."""
+
+    with _console_over(session) as control:
+        node_id = control.add_logic("seamless_scan")
+
+        def issues(*axes) -> tuple[str, ...]:
+            control.update_logic_draft(node_id, values={
+                "pulse_template": PULSE_NAME + ".json", "plan": json.dumps({"axes": list(axes)}),
+            })
+            return tuple(control.logic_editor_projection(node_id)["issues"])
+
+        hand = {"port": "manual:power", "values": [1.0, 2.0]}
+        gone = {"port": "pulse:param:duration:gone", "values": [1.0, 2.0]}
+        absent = {"port": "device:absent:frequency", "values": [1.0]}
+        empty = {"port": "manual:angle", "values": [], "mode": "values", "value_text": ""}
+        assert any("offers no scan port named 'pulse:param:duration:gone'" in issue
+                   and "switch that axis off" in issue for issue in issues(hand, gone))
+        assert any("no installed device 'absent'" in issue for issue in issues(hand, absent))
+        assert any("Values is empty" in issue for issue in issues(hand, empty))
+        parked = issues(hand, *({**axis, "enabled": False} for axis in (gone, absent, empty)))
+        assert not [issue for issue in parked if any(
+            word in issue for word in ("gone", "absent", "Values", "parked"))], parked
+        assert any("every scan axis is parked" in issue for issue in issues({**hand, "enabled": False}))
+
+
 def test_adding_a_node_creates_only_a_stopped_draft_and_opens_edit(bench_presenter) -> None:
     """Add is authoring, so it cannot build or acquire before Start.
 

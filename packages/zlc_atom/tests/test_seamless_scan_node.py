@@ -271,6 +271,7 @@ def _seamless_host(
     *,
     publications_per_fire: int,
     seed: bool = True,
+    parked: tuple[dict, ...] = (),
     **node_kwargs,
 ):
     """The seamless node started over the scripted bench on the virtual board.
@@ -302,7 +303,7 @@ def _seamless_host(
             signal_plane=plane,
             source_signal=bench.signal_name,
             pulse_resource=_pulse_resource(TEMPLATE_NAME, sequence),
-            plan=plan.to_tree(),
+            plan={"axes": [*plan.to_tree()["axes"], *parked]},
             **node_kwargs,
         )
         host = _scan_host(node, plane)
@@ -375,6 +376,8 @@ def test_device_axes_alone_repeat_a_fixed_pulse_and_restore_the_device() -> None
         device_labels={"rf": "Cooling RF"},
         # Kept in the draft for a parameter this pulse does not declare.
         api_values="retired = 5",
+        # Kept in the plan, switched off: neither bound nor played.
+        parked=({"port": "pulse:param:gone", "values": [1.0, 2.0], "unit": "", "enabled": False},),
     )
     assert bench.fired_repeats == [(2, 1)] * 6
     assert bench.loads == 1 and bench.scan_tables == []
@@ -398,6 +401,10 @@ def test_device_axes_alone_repeat_a_fixed_pulse_and_restore_the_device() -> None
         {"port": "device:rf:frequency", "values": [1.0, 1.5, 2.0], "unit": "GHz"},
     ]
     assert record["unapplied_api_values"] == {"retired": 5.0}
+    assert record["scan_shape"] == [3]
+    assert record["parked_axes"] == [
+        {"port": "pulse:param:gone", "values": [1.0, 2.0], "unit": "", "mode": "range", "value_text": ""},
+    ]
     assert claims[0].protected_fields == ("frequency",)
 
 
@@ -1079,6 +1086,7 @@ def _device_run(
     device_field="frequency",
     device_labels=None,
     api_values="",
+    parked=(),
 ):
     """Walk a plan whose outer axis is an installed device knob.
 
@@ -1121,6 +1129,7 @@ def _device_run(
         repeats=repeats,
         shots_per_point=shots,
         api_values=api_values,
+        parked=parked,
     ) as run:
         host = run.host
         deadline = time.monotonic() + 60.0

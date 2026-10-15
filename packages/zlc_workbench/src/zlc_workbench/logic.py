@@ -381,6 +381,10 @@ def finalize_logic_draft(
         values = {}
         authored = False
         issues.append(str(error))
+    # What the draft cannot do with what it was given is a draft issue too,
+    # asked once the draft projects and every resource it names resolved.
+    if descriptor.admit_resources is not None and authored and not resource_issues:
+        issues.extend(descriptor.admit_resources(values, resources, installation))
 
     acquisition_field = descriptor.acquisition_input
     acquisition = str(draft.values.get(acquisition_field) or "") if descriptor.authoring_schema.is_enabled(acquisition_field, raw_values) else ""

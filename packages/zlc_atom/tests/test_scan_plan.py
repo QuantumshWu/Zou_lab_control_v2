@@ -360,13 +360,52 @@ def test_a_region_lands_on_the_axis_the_picture_drew_when_two_ports_share_a_name
             SelectionRange("scan.bias.2", 12.0, 18.0, domain="point"),
         ),
     )
+    # A parked namesake ahead of them drew no axis: it is neither counted
+    # in the ids nor narrowed.
+    tree = plan.to_tree()
+    tree["axes"].insert(0, {"port": MANUAL_PARAM_FAMILY + "bias", "values": [5.0, 6.0], "enabled": False})
     patched = SEAMLESS_NODE.selection_patch(
-        selection, draft={"plan": json.dumps(plan.to_tree())},
+        selection, draft={"plan": json.dumps(tree)},
         context={"axis_units": {"scan.bias": "1", "scan.bias.2": "code"}},
     )
+    assert plan_input_rows(json.loads(patched["plan"]))[0]["values"] == [5.0, 6.0]
     narrowed = ScanPlan.from_tree(json.loads(patched["plan"]))
     assert narrowed.axes[0].values == (1.25, 1.75)
     assert narrowed.axes[1].values == (12.0, 18.0)
+
+
+def test_a_parked_axis_is_kept_by_the_draft_and_scanned_by_nothing() -> None:
+    """An axis switched off stays in the plan text and the run record, and is
+    not read, bound, played or counted: a port the pulse does not offer and
+    an empty Values list block nothing.  Switched on, it is the plan's again
+    and refused by name."""
+
+    from pathlib import Path
+    from zlc_atom.nodes import ResolvedWorkspaceResource
+    from zlc_atom.nodes.scan import SCAN_PULSE_CONTRACT
+
+    hand = {"port": MANUAL_PARAM_FAMILY + "power", "values": [1.0, 2.0]}
+    gone = {"port": PULSE_PARAM_FAMILY + "duration:gone", "values": [], "mode": "values",
+            "value_text": "", "enabled": False}
+    rows = plan_input_rows({"axes": [hand, gone]})
+    assert rows[1]["enabled"] is False and "enabled" not in rows[0]
+    assert "enabled" not in plan_input_rows({"axes": [{**hand, "enabled": True}]})[0]
+    assert plan_from_authored({"axes": [hand, gone]}).shape == (2,)
+    with pytest.raises(ValueError, match="every scan axis is parked"):
+        plan_from_authored({"axes": [gone]})
+    with pytest.raises(TypeError, match="enabled must be true or false"):
+        plan_input_rows({"axes": [{**hand, "enabled": "no"}]})
+    build = dict(
+        sequencer=object(), signal_plane=object(), source_signal="camera.frames",
+        pulse_resource=ResolvedWorkspaceResource(Path("mot.json"), SCAN_PULSE_CONTRACT, _template_sequence()),
+    )
+    built = SEAMLESS_NODE.build(plan=json.dumps({"axes": [hand, gone]}), **build)
+    assert built.plan.shape == (2,) and built.ports == ()
+    assert built.parked_axes == ({"port": gone["port"], "values": [], "unit": "",
+                                  "mode": "values", "value_text": ""},)
+    with pytest.raises(ValueError, match="offers no scan port named"):
+        SEAMLESS_NODE.build(plan={"axes": [hand, {**gone, "enabled": True, "mode": "range",
+                                                  "values": [1.0]}]}, **build)
 
 
 def test_a_range_drawn_in_a_shown_power_unit_reaches_the_plan_in_its_unit() -> None:

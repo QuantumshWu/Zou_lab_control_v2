@@ -451,6 +451,16 @@ class LogicNodeDescriptor:
     admit_source: (
         Callable[[Mapping[str, object], object], tuple[str, ...]] | None
     ) = None
+    #: What one authored draft cannot do with the workspace resources it
+    #: resolved to and the devices installed -- a scan plan's axis on a port
+    #: its pulse does not offer, or on a device that is not installed.
+    #: Called with the projected values, the resolved resources by field
+    #: name and the installation, once the draft projects and every resource
+    #: it names resolved; each answer is one draft issue, so the Edit page
+    #: says it and Start waits, instead of the build refusing at Start.
+    admit_resources: (
+        Callable[[Mapping[str, object], Mapping[str, object], object], tuple[str, ...]] | None
+    ) = None
     #: Optional plugin-owned read-only budget projection over frozen authoring,
     #: resolved devices and workspace resources. Called on the device worker,
     #: never while constructing a node or running an acquisition.
@@ -566,6 +576,8 @@ class LogicNodeDescriptor:
             raise TypeError("resolve_defaults must be callable or None")
         if self.admit_source is not None and not callable(self.admit_source):
             raise TypeError("admit_source must be callable or None")
+        if self.admit_resources is not None and not callable(self.admit_resources):
+            raise TypeError("admit_resources must be callable or None")
         if self.estimate_run is not None and not callable(self.estimate_run):
             raise TypeError("estimate_run must be callable or None")
         if self.describe_output_frames is not None and not callable(self.describe_output_frames):

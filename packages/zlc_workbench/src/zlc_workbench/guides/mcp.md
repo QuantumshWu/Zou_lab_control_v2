@@ -182,6 +182,14 @@ input names the existing acquisition node; the Scan handles its ready/Fire flow.
 Plan axes may be Pulse slots, device fields or manual coordinates. Query the
 bound node's catalog for actual scan ports/units; names must not be guessed.
 
+An axis the operator keeps but does not want scanned now -- a 1-D cut of a 2-D
+plan, a port for a Pulse or device that is not loaded today -- is parked with
+`"enabled": false`: it stays in the plan and the run record (`parked_axes`) and
+is never bound, played or counted. Park such an axis instead of deleting it.
+A scanned axis on a port the Pulse does not offer, or on a device not installed,
+is a draft issue (`logic.validate`, lab_state issues) and Start waits; switch
+that axis off or fix it. At least one axis must stay enabled.
+
 `api_values` lines the operator wrote are theirs: do not delete one because the
 current Pulse does not declare it or the plan sweeps it. Such a line is kept and
 applied to nothing (the run record lists it as `unapplied_api_values`) or is

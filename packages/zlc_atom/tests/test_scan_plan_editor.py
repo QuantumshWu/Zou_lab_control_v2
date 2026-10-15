@@ -67,6 +67,39 @@ def test_a_manual_row_authors_a_name_and_the_values_a_hand_will_set() -> None:
         editor.deleteLater()
 
 
+def test_an_axis_switched_off_is_parked_not_deleted() -> None:
+    """Off keeps the row -- greyed, its port and values written in the plan
+    as ``"enabled": false`` -- and scans nothing; the summary counts it as
+    kept; the last axis switched off is said once, as the plan's problem;
+    and the draft read back keeps the row parked."""
+
+    editor = _editor()
+    drafts: list[dict] = []
+    editor.draft_changed.connect(drafts.append)
+    try:
+        editor._add_manual_axis()
+        editor._add_axis()
+        hand, bias = editor._rows
+        bias.enabled_switch.click()
+        axes = json.loads(drafts[-1]["values"]["plan"])["axes"]
+        assert "enabled" not in axes[0] and axes[1]["enabled"] is False
+        assert axes[1]["port"] == BIAS.port, "the row keeps its port"
+        assert not bias.port_combo.isEnabled() and not bias.input_stack.isEnabled()
+        assert bias.enabled_switch.isEnabled() and bias.remove_button.isEnabled()
+        assert [axis.port for axis in _plan(editor).axes] == ["manual:manual 1"]
+        assert "1 parked axis is kept and not scanned." in editor.summary.text()
+        hand.enabled_switch.click()
+        assert editor.problem.text() == "every scan axis is parked; switch one on to scan it."
+        editor.update_projection({"form_values": {"plan": drafts[-1]["values"]["plan"]}})
+        assert [row.scanned for row in editor._rows] == [False, False]
+        bias = editor._rows[1]
+        bias.enabled_switch.click()
+        assert editor.problem.text() == "" and bias.port_combo.isEnabled()
+        assert [axis.port for axis in _plan(editor).axes] == [BIAS.port]
+    finally:
+        editor.deleteLater()
+
+
 def test_a_fresh_manual_row_is_already_runnable() -> None:
     """An unnamed axis is not a plan, so the button never authors one."""
 

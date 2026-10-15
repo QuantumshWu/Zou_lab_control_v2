@@ -20,7 +20,10 @@ at which point it becomes the uniform grid the spins describe.
 Every row is a line of one column set, so the axes read as a table: the
 axis (a port, or a manual axis's name) starts on the editor's field edge,
 with "By hand" in the label column before a manual one; from, to, points,
-the unit, Range|Values and × stand at one x on every row.  What a row's
+the unit, Range|Values, the scan switch and × stand at one x on every row.
+A row switched off is PARKED: greyed, kept in the plan with its port and
+values, and scanned by nothing -- whatever port it names, it blocks
+nothing.  What a row's
 values are ("custom values", a conversion running) and what is wrong with
 them stand under the row, from the axis's text, instead of in a column
 every row reserved for them.  A problem -- a row's, the plan's, the API
@@ -45,6 +48,7 @@ from zlc_ui.fluent import (
     FluentTreeComboBox,
     FluentLineEdit,
     FluentSpinBox,
+    FluentSwitch,
     FluentLabel,
     FluentSectionLabel,
     FluentSegmentedButtons,
@@ -95,9 +99,9 @@ _BY_HAND = "By hand"
 _API_LABEL_ROOM = 180
 #: The columns of every axis row: "By hand" or nothing (the editor's label
 #: column), the axis, its values (the Range bank or the Values list), their
-#: unit, which of the two it plays, and its ×.
+#: unit, which of the two it plays, whether it is scanned, and its ×.
 _ROW_COLUMNS = (("kind", "fit"), ("axis", "stretch"), ("values", "fit"), ("unit", "fit"),
-                ("mode", "fit"), ("remove", "glyph"))
+                ("mode", "fit"), ("enabled", "fit"), ("remove", "glyph"))
 #: The Range bank's own columns, so from, to and points stand at one x.
 _RANGE_COLUMNS = (("from", "fit"), ("start", "fit"), ("to", "fit"), ("stop", "fit"),
                   ("points", "fit"), ("count", "fit"))
@@ -211,6 +215,14 @@ class _AxisRow(QtWidgets.QWidget):
         remove = FluentButton("×", role="destructive")
         remove.setToolTip("Remove this axis")
         self.remove_button = remove
+        #: Whether the plan scans this axis.  Off PARKS it: the row, its port
+        #: and its values stay in the plan, greyed, and nothing binds, plays
+        #: or counts it -- a 1-D cut of a 2-D plan, or an axis for a pulse or
+        #: device that is not here today, kept without being deleted.
+        self.enabled_switch = FluentSwitch("")
+        self.enabled_switch.setChecked(True)
+        self.enabled_switch.setToolTip("Scan this axis; off parks it: kept in the plan, not scanned")
+        self._identity = identity
         if kind is not None:
             line.place("kind", kind)
         line.place("axis", identity, fill=True)
@@ -223,6 +235,7 @@ class _AxisRow(QtWidgets.QWidget):
         line.place("values", self.input_stack, fill=True)
         line.place("unit", self._unit_host, fill=True)
         line.place("mode", self.mode_choice)
+        line.place("enabled", self.enabled_switch)
         line.place("remove", remove)
         #: What this row's values are -- a list nobody's ends describe, a
         #: conversion still running -- under the row, from the axis's text.
@@ -244,7 +257,24 @@ class _AxisRow(QtWidgets.QWidget):
             spin.valueNormalized.connect(self._range_normalized)
         self.values_edit.editingFinished.connect(self.edited.emit)
         self.mode_choice.activated.connect(self._pick_mode)
+        self.enabled_switch.toggled.connect(self._enabled_toggled)
         self.remove_button.clicked.connect(lambda: self.remove_requested.emit(self))
+
+    @property
+    def scanned(self) -> bool:
+        """Whether the plan scans this axis; False while it is parked."""
+
+        return self.enabled_switch.isChecked()
+
+    def _enabled_toggled(self, _checked: bool) -> None:
+        self._show_parked()
+        self.edited.emit()
+
+    def _show_parked(self) -> None:
+        """A parked row is greyed, all but its switch and its ×."""
+
+        for widget in (self._identity, self.input_stack, self._unit_host, self.mode_choice):
+            widget.setEnabled(self.scanned)
 
     def _pick_mode(self, mode: str) -> None:
         index = int(mode == "values")
@@ -268,6 +298,7 @@ class _AxisRow(QtWidgets.QWidget):
             "values": list(self._custom_values if self._custom_values is not None else _sweep_values(self)),
             "mode": "values" if self.input_stack.currentIndex() == 1 else "range",
             "value_text": self.values_edit.text(),
+            **({} if self.scanned else {"enabled": False}),
         }
 
     def _show_inputs(self, entry: Mapping, *, preserve_edit: bool = False,
@@ -281,6 +312,9 @@ class _AxisRow(QtWidgets.QWidget):
         if not preserve_edit or not being_edited(self.values_edit):
             self.values_edit.setText(entry["value_text"])
         self.input_stack.setCurrentIndex(int(entry["mode"] == "values"))
+        with signals_blocked(self.enabled_switch):
+            self.enabled_switch.setChecked(entry.get("enabled", True))
+        self._show_parked()
         self._refresh_mode()
         return True
 
@@ -488,7 +522,7 @@ class _AxisRow(QtWidgets.QWidget):
         """What a box of the Range bank cannot hold, while the row plays
         its range: the row's own problem, said under it and nowhere else."""
 
-        if self.input_stack.currentIndex() != 0:
+        if self.input_stack.currentIndex() != 0 or not self.scanned:
             return ""
         return next((str(error) for spin in (self.start_spin, self.stop_spin, self.points_spin)
                      if (error := spin.property("numericError"))), "")
@@ -913,19 +947,21 @@ class ScanPlanEditor(QtWidgets.QWidget):
     # ---------------------------------------------------------- API values
 
     def _scanned_parameters(self) -> set[str]:
+        """The pulse slots a scanned (not parked) board axis of the plan sweeps."""
+
         return {
             entry["port"][len(PULSE_PARAM_FAMILY):]
             for row in self._rows
-            if (entry := row.input_entry())["port"].startswith(PULSE_PARAM_FAMILY)
+            if row.scanned and (entry := row.input_entry())["port"].startswith(PULSE_PARAM_FAMILY)
         }
 
     def _walked_parameters(self) -> set[str]:
-        """The API parameters an ``api:`` axis of the plan walks."""
+        """The API parameters a scanned (not parked) ``api:`` axis of the plan walks."""
 
         return {
             entry["port"][len(API_PARAM_FAMILY):]
             for row in self._rows
-            if (entry := row.input_entry())["port"].startswith(API_PARAM_FAMILY)
+            if row.scanned and (entry := row.input_entry())["port"].startswith(API_PARAM_FAMILY)
         }
 
     def _reconcile_values(self, sequence: object) -> None:
@@ -1422,9 +1458,16 @@ class ScanPlanEditor(QtWidgets.QWidget):
                 "applied and read back between fires."
             )
         )
+        parked = sum(1 for row in self._rows if not row.scanned)
+        kept = (
+            ""
+            if not parked
+            else f" {counted(parked, 'parked axis', 'parked axes')} {'is' if parked == 1 else 'are'} "
+            "kept and not scanned."
+        )
         self._say(summary=(
             f"{counted(len(plan.axes), 'axis', 'axes')}, {shape} = "
             f"{counted(plan.point_count, 'point')}, "
             "outermost first; each point resolves the template, plays it, and "
-            f"captures one measurement.{by_hand}{by_device}"
+            f"captures one measurement.{by_hand}{by_device}{kept}"
         ))

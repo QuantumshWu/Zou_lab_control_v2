@@ -422,8 +422,17 @@ class ScanPlan:
 
     @classmethod
     def from_tree(cls, tree: object) -> "ScanPlan":
+        """The axes the plan scans.  A parked row (``"enabled": false``) is
+        kept by the draft and the run record but is no axis: it is not read,
+        bound, played or counted in the shape, and its knob keeps its value."""
+
+        rows = plan_input_rows(tree)
+        if rows and all(not row.get("enabled", True) for row in rows):
+            raise ValueError("every scan axis is parked; switch one on to scan it")
         axes = []
-        for index, entry in enumerate(plan_input_rows(tree), 1):
+        for index, entry in enumerate(rows, 1):
+            if not entry.get("enabled", True):
+                continue
             try:
                 if entry["port"].startswith(MANUAL_PARAM_FAMILY):
                     manual_axis_name(entry["port"])
@@ -593,7 +602,11 @@ def api_overrides_to_authored(overrides: Mapping[str, float]) -> str:
 
 
 def plan_input_rows(payload: object) -> tuple[dict, ...]:
-    """Read the two independent input banks without compiling Values text."""
+    """Read the two independent input banks without compiling Values text.
+
+    A row carries ``"enabled": False`` exactly when it is parked; a row
+    that scans carries no such key, however it was written.
+    """
     if isinstance(payload, ScanPlan):
         payload = payload.to_tree()
     elif isinstance(payload, str):
@@ -607,13 +620,18 @@ def plan_input_rows(payload: object) -> tuple[dict, ...]:
         raise TypeError("scan plan axes must be a list")
     rows = []
     for index, entry in enumerate(entries, 1):
-        allowed = {"port", "values", "unit", "mode", "value_text"}
+        allowed = {"port", "values", "unit", "mode", "value_text", "enabled"}
         if not isinstance(entry, Mapping) or not {"port", "values"} <= set(entry) or set(entry) - allowed:
-            raise ValueError("scan axis fields must be port, values, and optional unit, mode, value_text")
+            raise ValueError("scan axis fields must be port, values, and optional unit, mode, value_text, enabled")
         row = {"port": entry["port"], "values": entry["values"], "unit": entry.get("unit", ""),
                "mode": entry.get("mode", "range"), "value_text": entry.get("value_text", "")}
         if any(not isinstance(row[key], str) for key in ("port", "unit", "mode", "value_text")):
             raise TypeError(f"scan axis {index}: port, unit, mode and value_text must be text")
+        enabled = entry.get("enabled", True)
+        if not isinstance(enabled, bool):
+            raise TypeError(f"scan axis {index} ({row['port']!r}): enabled must be true or false")
+        if not enabled:
+            row["enabled"] = False
         if row["mode"] not in ("range", "values"):
             raise ValueError(f"scan axis {index} ({row['port']!r}): mode must be range or values")
         values = row["values"]
@@ -669,9 +687,11 @@ def _selected_plan(
         str(getattr(item, "axis", "")): item
         for item in getattr(selection, "ranges", ())
     }
-    axis_ids = scan_axis_ids([port_label(row["port"]) for row in rows])
+    # The dataset's axes are the plan's scanned rows; a parked row drew none.
+    scanned = [row for row in rows if row.get("enabled", True)]
+    axis_ids = scan_axis_ids([port_label(row["port"]) for row in scanned])
     changed = False
-    for row, axis_id in zip(rows, axis_ids, strict=True):
+    for row, axis_id in zip(scanned, axis_ids, strict=True):
         chosen = wanted.get(axis_id)
         if chosen is None or len(row["values"]) < 2:
             continue

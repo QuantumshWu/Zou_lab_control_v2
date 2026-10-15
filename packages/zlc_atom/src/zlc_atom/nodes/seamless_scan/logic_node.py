@@ -25,6 +25,9 @@ from zlc_atom.nodes._framework.descriptor import (
     ResolvedWorkspaceResource,
 )
 from zlc_atom.nodes.scan import (
+    API_PARAM_FAMILY,
+    DEVICE_PARAM_FAMILY,
+    PULSE_PARAM_FAMILY,
     PublishedSignalSource,
     SCAN_PLAN_SELECTIONS,
     MANUAL_PARAM_FAMILY,
@@ -42,6 +45,16 @@ from zlc_atom.nodes.scan import (
     plan_from_authored,
     scan_ports_for_devices,
 )
+from zlc_atom.nodes.scan.plan import device_port_parts, plan_input_rows
+
+
+def _validate(values) -> None:
+    """The plan and the API values read as the build reads them, while the
+    draft is still being edited: an empty Values list, an axis on one port
+    twice or every axis parked is said on the Edit page, not at Start."""
+
+    plan_from_authored(values["plan"])
+    api_overrides_from_authored(values.get("api_values"))
 
 
 SEAMLESS_SCAN_SCHEMA = AuthoringSchema(
@@ -67,7 +80,10 @@ SEAMLESS_SCAN_SCHEMA = AuthoringSchema(
                 'Use device Control metadata or the Pulse field/binding catalog for IDs and units. '
                 'Only authored axes are scanned; omitted Pulse scan slots retain their authored value. '
                 'The optional Values input bank uses mode="values" and value_text="500,501,502" '
-                'while values retains the independent Range bank. Manual axes require the human operator.'
+                'while values retains the independent Range bank. Manual axes require the human operator. '
+                'An axis with "enabled": false is parked: kept in the plan and the run record, never '
+                'bound, played or counted in the shape, its knob left as it is, whatever port it names. '
+                'Park an axis the operator wrote instead of deleting it; at least one axis must be enabled.'
             ),
         ),
         AuthoringField(
@@ -111,8 +127,46 @@ SEAMLESS_SCAN_SCHEMA = AuthoringSchema(
             1,
             minimum=1,
         ),
-    )
+    ),
+    validator=_validate,
 )
+
+
+def _admit_resources(values, resources, installation) -> tuple[str, ...]:
+    """Every enabled axis against the knobs this draft can reach, so an axis
+    on a port its pulse does not offer, or on a device not installed, is a
+    draft issue the Edit page says and Start waits on.  A parked axis is not
+    asked: it binds nothing.  A device field's range needs the device read,
+    on its worker, so that one is still checked by the build."""
+
+    from zlc_atom.install import tunable_devices
+
+    plan = plan_from_authored(values["plan"])
+    issues = []
+    resource = resources.get("pulse_template")
+    pulse_axes = tuple(
+        axis for axis in plan.axes if axis.port.startswith((PULSE_PARAM_FAMILY, API_PARAM_FAMILY))
+    )
+    if resource is not None and pulse_axes:
+        try:
+            sequence, _unapplied = apply_api_overrides(
+                resource.value, api_overrides_from_authored(values.get("api_values"))
+            )
+            bind_plan(ScanPlan(pulse_axes), (
+                *hardware_scan_ports_for(sequence), *api_scan_ports_for(sequence),
+            ))
+        except ValueError as error:
+            issues.append(f"{error}; switch that axis off to keep it without scanning it")
+    installed = tunable_devices(installation)
+    for axis in plan.axes:
+        if axis.port.startswith(DEVICE_PARAM_FAMILY):
+            key, _field = device_port_parts(axis.port)
+            if key not in installed:
+                issues.append(
+                    f"device axis {axis.port!r} has no installed device {key!r} behind it; "
+                    "switch that axis off to keep it without scanning it"
+                )
+    return tuple(issues)
 
 
 def _build(
@@ -145,6 +199,9 @@ def _build(
         pulse_resource.value, api_overrides_from_authored(api_values)
     )
     parsed = plan_from_authored(plan)
+    # A parked axis is the draft's, not the run's: named in the run record,
+    # bound and played by nothing.
+    parked = tuple(row for row in plan_input_rows(plan) if not row.get("enabled", True))
     # An operator's axis binds to no port at all: the run stops and asks
     # for it.  A device axis binds to an installed knob the HOST moves
     # between fires, and an API axis to a parameter of the pulse the host
@@ -182,6 +239,7 @@ def _build(
         acquisition_logic=acquisition_logic,
         restart_logic=restart_logic,
         unapplied_api_values=unapplied,
+        parked_axes=parked,
     )
 
 
@@ -248,6 +306,7 @@ LOGIC_NODE = LogicNodeDescriptor(
         DeviceRequirement("sequencer.streamer", "sequencer", ("program",)),
     ),
     build=_build,
+    admit_resources=_admit_resources,
     estimate_run=_estimate_run,
     # A region drawn on this scan's own plot is a statement about
     # what to sweep next, in the axes the picture is drawn in.
