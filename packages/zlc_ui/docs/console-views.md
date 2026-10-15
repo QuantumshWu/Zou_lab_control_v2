@@ -182,8 +182,9 @@ The board's gap -- between cards and from its edges -- is one card pad
 card starts where a white page's content starts; each card's rectangle is
 the card's own.  After `set_cards`, the board owns the only live geometry
 calculation, and one rule set places every card, whatever their sizes:
-every card has a place, a card goes where it is put, the cards in its way
-make room, and everything falls north-west.
+every card has a place, a card let go onto another changes places with it,
+a card let go on empty space goes there, cards that overlap make way, and
+everything falls north-west.
 
 - **Places.**  A drop records where it left every card, for the board's
   column count (how many of the narrowest card fit side by side); nothing
@@ -200,21 +201,28 @@ make room, and everything falls north-west.
   stopped by a card above it slides left no further than that card's left
   edge -- with several above it, the leftmost one's: a card put below
   another stays below it, and does not slide along its bottom and rise into
-  a hole beside it.  No card passes through another or searches the board
-  for a hole.
-- **Carrying.**  Picked up, the card leaves a hole the others fall into
-  under the same gravity, none rising above the line its top stood on; that
-  board stands still while it is carried.  The slot is the place under the
-  pointer, on the line of the carried card's strip, nearest where the card
-  is drawn: a 2x4 held near Setting and an empty 4x4 held by its body land
-  where the same card held at the left of its strip would.  Rows come only
-  from the cards in the slot's column, so a short card's edge never cuts a
-  tall card beside it.
-- **Dropping.**  The card stays where it is put.  A card in its way goes
-  back to where it stood before the drag if that is free, else along its
-  row if the row has room for it and every card it pushes, else straight
-  down its column; then everything falls.  Put back where it was picked up,
-  the card leaves every card where it stood.
+  a hole beside it.  Rising and sliding stop at the first card in the way,
+  so falling passes no card, and no card searches the board for a hole.
+- **Carrying.**  The slot is chosen in the board as it stood when the card
+  was picked up, which stands still while the card is carried; picking a
+  card up does not let the others fall into its hole.  The slot is the
+  place under the pointer, on the line of the carried card's strip,
+  nearest where the card is drawn: a 2x4 held near Setting and an empty
+  4x4 held by its body land where the same card held at the left of its
+  strip would.  Rows come only from the cards in the slot's column, so a
+  short card's edge never cuts a tall card beside it.
+- **Dropping** (`drop`) **swaps, then applies gravity.**  The card let go
+  onto -- the one standing over the slot's top-left corner -- takes the
+  place the carried card stood in, and the carried card takes the slot;
+  let go on empty space, the carried card takes the slot.  Where cards of
+  different sizes then overlap, they settle in priority: the two that
+  swapped first, the one further up and left (in reading order) keeping its
+  place, then every other card in the reading order of where it stands.  A
+  card that overlaps one already settled moves right just clear of it if
+  its row has the room -- on the board, passing no card on the way --
+  otherwise straight down its own column to the first clear place.  Then
+  every card falls north-west until nothing moves.  Put back where it was
+  picked up, the card leaves every card where it stood.
 
 While a card is carried it follows the pointer, the other cards already
 stand where the drop will leave them -- the preview and the drop are one

@@ -436,7 +436,7 @@ def test_a_card_put_below_another_stays_below_it() -> None:
     metrics = BoardMetrics(10)
     above = _board_card(100, 80, 10, 10)
     below = _board_card(100, 80, 10, 240)
-    pack([above, below], metrics, board_w=330, dropped=below)
+    pack([above, below], metrics, board_w=330)
     assert (above.col, above.row) == (10, 10)
     assert (below.col, below.row) == (10, 100), "the free slot at (120, 10) is not its place"
 
@@ -448,7 +448,7 @@ def test_two_placements_survive_each_other() -> None:
     first = _board_card(100, 80, 10, 10)
     under = _board_card(100, 80, 10, 100)
     beside = _board_card(100, 80, 200, 240)
-    pack([first, under, beside], metrics, board_w=330, dropped=beside)
+    pack([first, under, beside], metrics, board_w=330)
     assert (under.col, under.row) == (10, 100), "the earlier placement stands"
     assert (beside.col, beside.row) == (120, 10), "nothing above it, so it rises and stops at `first`"
 

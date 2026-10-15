@@ -154,46 +154,65 @@ class Monitor:
 """
 
 
-def test_a_card_released_over_a_bigger_card_takes_its_place(run_qt) -> None:
-    """Let go over a 4x4, a smaller card goes where it was let go and the
-    4x4 makes way.
+def test_a_card_let_go_onto_another_swaps_with_it(run_qt) -> None:
+    """Let go onto a card, the two change places: that card takes the place
+    the carried one left and the carried one takes the slot -- on a grid of
+    one size, and on mixed sizes either way round, where the card further up
+    and left keeps its place and the other moves just clear of it.
 
-    The slot was chosen on a board re-flowed without the carried card, where
-    the 4x4 had already moved into the carried card's hole, so a release
-    over the 4x4 as the operator saw it put the card back where it came
-    from: nothing happened.
+    The cards in the way used to make room by hand-made cases -- back to
+    where they stood, along the row, into the room left beside them -- so a
+    card let go onto a 4x4 was put back where it came from, and a 4x4 let
+    go onto the 2x4 above it changed nothing.
     """
 
     run_qt(
         _MONITOR
         + """
-# A 2x2 beside a 4x4: they change places.
-board = Monitor(('2x2', '4x4', '2x4'), MID)
-assert board.places() == {'p0': (GAP, GAP), 'p1': (col_after('2x2'), GAP), 'p2': (GAP, row_after('4x4'))}
-board.drag('p0', 'strip_left', (col_after('2x2') + 10, GAP + 10))
-assert board.places() == {
-    'p0': (col_after('4x4'), GAP), 'p1': (GAP, GAP), 'p2': (GAP, row_after('4x4')),
-}, board.places()
-board.close()
+# A 2x2 grid: bottom-left onto bottom-right, then top-left onto bottom-right.
+for carried in ('p2', 'p0'):
+    board = Monitor(('2x2',) * 4, NARROW)
+    before = board.places()
+    assert before == {
+        'p0': (GAP, GAP), 'p1': (col_after('2x2'), GAP),
+        'p2': (GAP, row_after('2x2')), 'p3': (col_after('2x2'), row_after('2x2')),
+    }, before
+    board.drag(carried, 'strip_left', (before['p3'][0] + 10, before['p3'][1] + 10))
+    assert board.places() == {**before, carried: before['p3'], 'p3': before[carried]}, board.places()
+    board.close()
 
-# A 2x4 above a 4x4 on a board one column wide for them: they change places.
-board = Monitor(('2x4', '4x4', '2x2'), NARROW)
-assert board.places() == {
-    'p0': (GAP, GAP), 'p1': (GAP, row_after('2x4')), 'p2': (GAP, row_after('2x4', '4x4')),
-}, board.places()
-board.drag('p0', 'strip_left', (GAP + 10, row_after('2x4') + 10))
-assert board.places() == {
-    'p1': (GAP, GAP), 'p0': (GAP, row_after('4x4')), 'p2': (GAP, row_after('4x4', '2x4')),
-}, board.places()
-board.close()
+# A 2x2 beside a 4x4, a 2x4 under them: either let go onto the other, the
+# 4x4 ends on the left and the 2x2 right of it.
+for carried, onto, hold in (('p0', 'p1', 'strip_left'), ('p1', 'p0', 'strip_right')):
+    board = Monitor(('2x2', '4x4', '2x4'), MID)
+    before = board.places()
+    assert before == {'p0': (GAP, GAP), 'p1': (col_after('2x2'), GAP), 'p2': (GAP, row_after('4x4'))}, before
+    board.drag(carried, hold, (before[onto][0] + 10, before[onto][1] + 10))
+    assert board.places() == {
+        'p1': (GAP, GAP), 'p0': (col_after('4x4'), GAP), 'p2': before['p2'],
+    }, (carried, board.places())
+    board.close()
+
+# A 2x4 above a 4x4 on a board one column wide for them: either let go onto
+# the other, the 4x4 ends on top and the 2x4 under it.
+for carried, onto in (('p0', 'p1'), ('p1', 'p0')):
+    board = Monitor(('2x4', '4x4', '2x2'), NARROW)
+    before = board.places()
+    assert before == {
+        'p0': (GAP, GAP), 'p1': (GAP, row_after('2x4')), 'p2': (GAP, row_after('2x4', '4x4')),
+    }, before
+    board.drag(carried, 'strip_left', (before[onto][0] + 10, before[onto][1] + 10))
+    assert board.places() == {
+        'p1': (GAP, GAP), 'p0': (GAP, row_after('4x4')), 'p2': (GAP, row_after('4x4', '2x4')),
+    }, (carried, board.places())
+    board.close()
 """
     )
 
 
-def test_no_card_is_flung_past_another_and_cards_nobody_carried_stay_close(run_qt) -> None:
-    """A carried card never lands beyond a card that stays put, and the
-    cards it displaces make way where they are -- down their column or
-    along their row -- instead of re-flowing across the board.
+def test_cards_nobody_let_go_onto_stay_where_they_are(run_qt) -> None:
+    """Only the card let go onto and the cards in the way move; a 4x4 beside
+    them stays put.
 
     A card whose place another covered took the first free hole anywhere on
     the board, and every card no drop had placed was list-flowed again on
@@ -204,7 +223,8 @@ def test_no_card_is_flung_past_another_and_cards_nobody_carried_stay_close(run_q
     run_qt(
         _MONITOR
         + """
-# Onto the 2x2 under a 1x2: it takes that column; the 4x4 stays.
+# Onto the 2x2 under a 1x2: the two change places; the 4x4 and the 2x4
+# under it stay.
 board = Monitor(('2x2', '1x2', '4x4', '2x2', '2x4'), WIDE)
 before = board.places()
 assert before == {
@@ -212,27 +232,7 @@ assert before == {
     'p3': (col_after('2x2'), row_after('1x2')), 'p4': (col_after('2x2', '1x2'), row_after('4x4')),
 }, before
 board.drag('p0', 'strip_left', (before['p3'][0] + 10, before['p3'][1] + 10))
-assert board.places() == {
-    'p1': (GAP, GAP), 'p0': (col_after('1x2'), GAP), 'p2': before['p2'],
-    'p3': (col_after('1x2'), row_after('2x2')), 'p4': before['p4'],
-}, board.places()
-board.close()
-
-# A 2x2 put at the top-left: only the cards in its way make way.
-board = Monitor(('4x4', '2x2', '2x2', '2x4', '2x2'), MID)
-before = board.places()
-assert before == {
-    'p0': (GAP, GAP), 'p1': (col_after('4x4'), GAP), 'p2': (col_after('4x4'), row_after('2x2')),
-    'p3': (GAP, row_after('4x4')), 'p4': (col_after('4x4'), row_after('2x2', '2x2')),
-}, before
-board.drag('p4', 'strip_left', (GAP, GAP))
-assert board.places() == {
-    'p4': (GAP, GAP),
-    'p1': (col_after('2x2'), GAP),                     # slides left one step
-    'p0': (GAP, row_after('2x2')),                     # pushed straight down
-    'p2': before['p2'],                                # untouched
-    'p3': (GAP, row_after('2x2', '4x4')),              # pushed straight down
-}, board.places()
+assert board.places() == {**before, 'p0': before['p3'], 'p3': before['p0']}, board.places()
 board.close()
 
 # The 4x4 in the top-right corner is not in the way, so it does not move.
@@ -272,18 +272,19 @@ landed = []
 for hold in ('body', 'strip_left'):
     board = Monitor(('2x2', '1x2', '4x4'), MID)
     assert board.places()['p2'] == (col_after('2x2'), row_after('1x2'))
-    # Drawn over the first column, nine tenths of it.
+    # Drawn over the first column, nine tenths of it: onto the 2x2, which
+    # takes the 4x4's place and moves just clear of it, under the 1x2.
     board.drag('p2', hold, (SIZE['4x4'][0] // 8, GAP))
     landed.append(board.places())
     board.close()
 assert landed[0] == landed[1] == {
-    'p2': (GAP, GAP), 'p0': (GAP, row_after('4x4')), 'p1': (col_after('4x4'), GAP),
+    'p2': (GAP, GAP), 'p1': (col_after('4x4'), GAP), 'p0': (col_after('4x4'), row_after('1x2')),
 }, landed
 """
     )
 
 
-def test_a_card_put_under_another_stays_under_it(run_qt) -> None:
+def test_a_card_let_go_on_empty_space_under_a_tall_card_stays_under_it(run_qt) -> None:
     """Let go under a card, a card stays under it: it does not slide along
     that card's bottom and rise into a hole beside it.
 
@@ -328,17 +329,19 @@ def test_each_drop_leaves_every_card_where_it_showed_it(run_qt) -> None:
         _MONITOR
         + """
 board = Monitor(('2x4', '4x4', '2x2'), WIDE)
-# The 2x4 onto the 2x2's place: the 2x2 rises into the place the 2x4 left.
+# The 2x4 onto the 2x2: the two change places.
 board.drag('p0', 'strip_left', (GAP, row_after('2x4')))
 assert board.places() == {
     'p2': (GAP, GAP), 'p1': (col_after('2x4'), GAP), 'p0': (GAP, row_after('2x2')),
 }, board.places()
-# The 4x4 to the top-left: the two cards in its way move along their rows.
+# The 4x4 onto the 2x2 at the top-left: the two change places, and the 2x4
+# in the 4x4's way moves along its row, just clear of it.
 board.drag('p1', 'strip_left', (GAP, GAP))
 assert board.places() == {
     'p1': (GAP, GAP), 'p2': (col_after('4x4'), GAP), 'p0': (col_after('4x4'), row_after('2x2')),
 }, board.places()
-# The 2x2 under the 4x4: nothing else moves but the 2x4 rising into its place.
+# The 2x2 on the empty space under the 4x4: nothing else moves but the 2x4
+# rising into its place.
 board.drag('p2', 'strip_left', (GAP + 5, row_after('4x4') + 5))
 assert board.places() == {
     'p1': (GAP, GAP), 'p0': (col_after('4x4'), GAP), 'p2': (GAP, row_after('4x4')),
@@ -390,6 +393,7 @@ def test_narrowing_packs_the_arrangement_and_widening_restores_it(run_qt) -> Non
         _MONITOR
         + """
 board = Monitor(('4x4', '2x2', '2x2', '2x4', '2x2'), WIDE)
+# The last 2x2 onto the 4x4: the two change places, and the rest fall.
 board.drag('p4', 'strip_left', (GAP, GAP))
 wide = board.places()
 assert wide == {

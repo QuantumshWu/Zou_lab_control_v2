@@ -9,8 +9,8 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 from zlc_ui.board import (
     BoardMetrics,
     GeomProxy,
+    drop,
     first_free_slot,
-    lift,
     min_board_width,
     pack,
     slot_under,
@@ -22,25 +22,21 @@ from .panel_card_view import PanelCardView
 
 
 class _DragFrame(NamedTuple):
-    """The board a carried card is put back into, settled once per width."""
+    """The board a carried card is let go into, settled once per width."""
 
-    #: Where the carried card stood when it was picked up.
-    place: tuple[int, int]
-    #: Where every other card stood then, by panel id.
-    home: dict[str, tuple[int, int]]
-    #: The other cards fallen north-west into the carried card's hole: the
-    #: board the operator sees, and the one the slot is chosen in.
-    fallen: dict[str, GeomProxy]
-    #: The width all of it was settled at.
+    #: Every card where it stood when the carried card was picked up, by
+    #: panel id: the board the slot is chosen in and every drop starts from.
+    board: dict[str, GeomProxy]
+    #: The width it was settled at.
     board_w: int
 
 
 class ConsoleBoardView(QtWidgets.QWidget):
     """Cards carried by their grip and put down where they are seen.
 
-    One rule set places every card: every card has a place, a card goes
-    where it is put, the cards in its way make room, and everything falls
-    north-west.
+    One rule set places every card: every card has a place, a card let go
+    onto another changes places with it, a card let go on empty space goes
+    there, cards that overlap make way, and everything falls north-west.
 
     A drop records where it left EVERY card, for the board's column count
     (how many of the narrowest card fit side by side), and nothing else
@@ -59,17 +55,18 @@ class ConsoleBoardView(QtWidgets.QWidget):
     card above it stays below it, rather than sliding out from under it to a
     hole beside it, and no card ever passes another.
 
-    A drag shows the drop before it happens.  Picked up, the carried card
-    leaves a hole the others fall north-west into (``lift``) -- a card at or
-    below its top line never rises above that line -- and that frame stands
-    still while the card is carried, so the choice cannot chase its own
-    consequence.  The slot is the place under the pointer, on the line of
-    the carried card's strip, nearest where the card is drawn
-    (``slot_under``): the column is where the hand is and the row the one
-    the card is seen in, whatever part of it is held.  Let go there, the
-    card stays where it is put; a card in its way goes back to where it
-    stood before the drag, else along its row if the row has room, else
-    straight down its column; then everything falls.  Put back where it was
+    A drag shows the drop before it happens.  The slot is chosen in the
+    board as it stood when the card was picked up, which stands still while
+    the card is carried, so the choice cannot chase its own consequence: the
+    place under the pointer, on the line of the carried card's strip,
+    nearest where the card is drawn (``slot_under``) -- the column is where
+    the hand is and the row the one the card is seen in, whatever part of
+    it is held.  Let go there (``drop``), the card swaps with the card it is
+    let go onto -- that card takes the place the carried one left, the
+    carried one takes the slot -- or, let go on empty space, takes the slot;
+    where their new places overlap, the card further up and left keeps its
+    place, the other cards make way for both (right if the row has room,
+    else straight down), and then everything falls.  Put back where it was
     picked up, it leaves every card where it stood.  While it is carried the
     other cards already stand where the drop will leave them -- preview and
     drop are one computation -- and the slot is drawn under it as an
@@ -405,43 +402,29 @@ class ConsoleBoardView(QtWidgets.QWidget):
         self._steer_scroll()
 
     def _frame_drag(self) -> None:
-        """Pick the carried card up: the others fall north-west into its hole.
-        The frame its slot is chosen in, for as long as it is carried at this
-        width."""
+        """The board the carried card is let go into: every card where it
+        stands, for as long as the card is carried at this width."""
 
-        card = self._active_card
         board_w = self._board_width(self._proxy(each) for each in self._cards.values())
-        rest = self._settle(self._order, board_w)
-        lifted = rest.pop(card.panel_id)
-        home = {panel_id: (proxy.col, proxy.row) for panel_id, proxy in rest.items()}
-        lift(tuple(rest.values()), lifted, self._metrics)
-        self._frame = _DragFrame((lifted.col, lifted.row), home, rest, board_w)
+        self._frame = _DragFrame(self._settle(self._order, board_w), board_w)
         self._drop_slot = None
         self._show_drop()
 
     def _dropped_at(self, slot: tuple[int, int]) -> dict[str, GeomProxy]:
-        """Every card at rest once the carried card is let go at ``slot``: it
-        stays where it is put, and a card in its way goes back to where it
-        stood before the drag, or along its row, or down its column.  Let go
-        where it was picked up, it finds every card where it stood."""
+        """Every card at rest once the carried card is let go at ``slot``
+        (``drop``), on copies of the frame."""
 
-        card = self._active_card
         frame = self._frame
         proxies = {
             panel_id: GeomProxy(proxy.width, proxy.height, proxy.col, proxy.row)
-            for panel_id, proxy in frame.fallen.items()
+            for panel_id, proxy in frame.board.items()
         }
-        carried = self._proxy(card)
-        carried.col, carried.row = slot
-        proxies[card.panel_id] = carried
-        home = {proxies[panel_id]: place for panel_id, place in frame.home.items()}
-        home[carried] = frame.place
-        pack(
+        drop(
             tuple(proxies[panel_id] for panel_id in self._order),
+            proxies[self._active_card.panel_id],
+            slot,
             self._metrics,
             frame.board_w,
-            dropped=carried,
-            home=home,
         )
         return proxies
 
@@ -458,12 +441,13 @@ class ConsoleBoardView(QtWidgets.QWidget):
 
         card = self._active_card
         frame = self._frame
+        others = tuple(proxy for panel_id, proxy in frame.board.items() if panel_id != card.panel_id)
         at = self.mapFromGlobal(self._pointer)
         seen = card.pos()
         slot = slot_under(
             (at.x(), card.y() + card.strip_rect().center().y()),
-            self._proxy(card),
-            tuple(frame.fallen.values()),
+            frame.board[card.panel_id],
+            others,
             self._metrics,
             frame.board_w,
             seen=(seen.x(), seen.y()),
@@ -483,7 +467,7 @@ class ConsoleBoardView(QtWidgets.QWidget):
         # Room for one more row while a card is carried: the slot after the
         # last card is somewhere the pointer must be able to reach, and to
         # scroll to on a board taller than its viewport.
-        lowest = max((proxy.row + proxy.height for proxy in frame.fallen.values()), default=0)
+        lowest = max((proxy.row + proxy.height for proxy in others), default=0)
         gap = self._metrics.gap
         self.setMinimumSize(
             min_board_width(tuple(preview.values()), self._metrics),

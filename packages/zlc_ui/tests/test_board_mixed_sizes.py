@@ -9,16 +9,14 @@ stands beside a 2x2.
 
 The rectangles are the presets' frames at the offscreen scale, and the gap
 is the card pad there; they are this file's inputs, not the product's
-constants.
+constants.  Every expected place is derived from them.
 """
 
 from __future__ import annotations
 
 import random
 
-import pytest
-
-from zlc_ui.board import BoardMetrics, GeomProxy, first_free_slot, lift, pack, slot_under
+from zlc_ui.board import BoardMetrics, GeomProxy, drop, first_free_slot, pack, slot_under
 from zlc_ui.board import board_layout
 from zlc_ui.board.board_layout import gravity_slot
 
@@ -44,31 +42,133 @@ def places(cards) -> list[tuple[int, int]]:
     return [(c.col, c.row) for c in cards]
 
 
-def test_a_card_on_a_taken_place_makes_way_straight_down(monkeypatch) -> None:
-    """A card whose place a 4x4 covers goes straight down its own column.
+def col_after(*sizes: str) -> int:
+    """The column a card stands in to the right of these cards, side by side."""
 
-    It used to rise through the 4x4 and then take the first free hole on the
-    whole board, from the row it had risen to: on a wide board, up and to the
-    right, past the 4x4.
-    """
+    return GAP + sum(SIZES[size][0] + GAP for size in sizes)
+
+
+def row_after(*sizes: str) -> int:
+    """The row a card stands in under these cards, stacked."""
+
+    return GAP + sum(SIZES[size][1] + GAP for size in sizes)
+
+
+def _tiled(sizes, board_w):
+    """A board of these cards as Add tiles it."""
+
+    placed = []
+    for size in sizes:
+        c = card(size)
+        c.col, c.row = first_free_slot(c, placed, board_w, METRICS)
+        placed.append(c)
+    return placed
+
+
+def _slot(board, carried, drawn, hold, board_w):
+    """The slot a card carried by ``hold`` and drawn at ``drawn`` is aimed at,
+    on the board as it stood when it was picked up."""
+
+    others = [c for c in board if c is not carried]
+    aim = (drawn[0] + hold[0], drawn[1] + STRIP)
+    return slot_under(aim, carried, others, METRICS, board_w, seen=drawn)
+
+
+def _let_go(board, carried, slot, board_w):
+    """The board once ``carried`` is let go at ``slot`` -- on copies, as a
+    preview is."""
+
+    after = [GeomProxy(c.width, c.height, c.col, c.row) for c in board]
+    drop(after, after[board.index(carried)], slot, METRICS, board_w)
+    return after
+
+
+def test_a_card_let_go_onto_another_swaps_with_it() -> None:
+    """The card let go onto takes the carried card's place and the carried
+    card takes the slot, held by either end of its strip -- on a grid of one
+    size and on mixed sizes, both ways round."""
+
+    w2, w4 = SIZES["2x2"][0], SIZES["4x4"][0]
+    cases = (
+        # A 2x2 grid: bottom-left onto bottom-right, top-left onto bottom-right.
+        (("2x2",) * 4, 1104, 2, 3),
+        (("2x2",) * 4, 1104, 0, 3),
+        # A 2x2 beside a 4x4, a 2x4 under them: either onto the other.
+        (("2x2", "4x4", "2x4"), 1400, 0, 1),
+        (("2x2", "4x4", "2x4"), 1400, 1, 0),
+        # A 2x4 above a 4x4 in one column: either onto the other.
+        (("2x4", "4x4", "2x2"), 1104, 0, 1),
+        (("2x4", "4x4", "2x2"), 1104, 1, 0),
+    )
+    landed = {}
+    for sizes, board_w, carried_at, onto in cases:
+        board = _tiled(sizes, board_w)
+        carried, target = board[carried_at], board[onto]
+        for hold in ((14, STRIP), (carried.width - 110, STRIP)):
+            slot = _slot(board, carried, (target.col + 10, target.row + 10), hold, board_w)
+            assert slot == (target.col, target.row), (sizes, carried_at, hold, slot)
+            landed[sizes, carried_at, hold[0] > 14] = places(_let_go(board, carried, slot, board_w))
+    grid = [(GAP, GAP), (col_after("2x2"), GAP), (GAP, row_after("2x2")), (col_after("2x2"), row_after("2x2"))]
+    for hold in (False, True):
+        assert landed[("2x2",) * 4, 2, hold] == [grid[0], grid[1], grid[3], grid[2]]
+        assert landed[("2x2",) * 4, 0, hold] == [grid[3], grid[1], grid[2], grid[0]]
+        # The 4x4 on the left and the 2x2 right of it, whichever was carried.
+        beside = [(col_after("4x4"), GAP), (GAP, GAP), (GAP, row_after("4x4"))]
+        assert landed[("2x2", "4x4", "2x4"), 0, hold] == beside
+        assert landed[("2x2", "4x4", "2x4"), 1, hold] == beside
+        # The 4x4 on top and the 2x4 under it, whichever was carried.
+        stacked = [(GAP, row_after("4x4")), (GAP, GAP), (GAP, row_after("4x4", "2x4"))]
+        assert landed[("2x4", "4x4", "2x2"), 0, hold] == stacked
+        assert landed[("2x4", "4x4", "2x2"), 1, hold] == stacked
+    assert col_after("4x4") + w2 <= 1400 - GAP < col_after("2x2", "2x2") + w4
+
+
+def test_a_card_let_go_on_empty_space_takes_it_and_one_under_a_tall_card_stays_under_it() -> None:
+    """Let go where no card stands, the card takes the slot and falls; let go
+    under a 4x4 beside the hole under a shorter 2x4, it stays under the 4x4."""
+
+    board = [card("2x4", GAP, GAP), card("4x4", col_after("2x4"), GAP), card("2x2", GAP, row_after("2x4"))]
+    small = board[2]
+    under = (col_after("2x4"), row_after("4x4"))
+    slot = _slot(board, small, (under[0] + 10, under[1] + 10), (14, STRIP), 1900)
+    assert slot == under
+    assert places(_let_go(board, small, slot, 1900)) == [*places(board[:2]), under]
+
+
+def test_putting_a_card_back_changes_nothing() -> None:
+    """Drawn exactly where it stood, a card is aimed back there, and let go
+    there it leaves every card where it was."""
+
+    board = _tiled(("4x4", "2x2", "1x2", "2x4", "2x2", "4x2"), 1400)
+    for carried in board:
+        for hold in ((14, STRIP), (carried.width - 110, STRIP)):
+            seen = (carried.col, carried.row)
+            slot = _slot(board, carried, seen, hold, 1400)
+            assert slot == seen, (places(board), seen, hold, slot)
+            assert places(_let_go(board, carried, slot, 1400)) == places(board)
+
+
+def test_a_card_in_the_way_moves_right_when_its_row_has_room_else_straight_down(monkeypatch) -> None:
+    """A card a settled card overlaps moves right just clear of it if its row
+    has the room, and otherwise straight down its own column.  It never
+    searches the board for a hole."""
 
     def search(*_args, **_kwargs):
-        raise AssertionError("gravity searched the board for a hole")
+        raise AssertionError("packing searched the board for a hole")
 
     monkeypatch.setattr(board_layout, "first_free_slot", search)
-    big = card("4x4", 7, 7)
-    small = card("2x2", 7, 422)
-    assert gravity_slot(small, [big], 1900, METRICS) == (7, 674)
-    assert gravity_slot(small, [big], 1104, METRICS) == (7, 674)
-
-
-def test_pack_never_passes_one_card_through_another() -> None:
-    """A 1x2 let go below the 2x2 rises to the top row; the 4x4 to its right
-    stays where it is, and nothing is left overlapping."""
-
-    first, big, dropped = card("2x2", 7, 7), card("4x4", 1029, 7), card("1x2", 518, 422)
-    pack([first, big, dropped], METRICS, 1900, dropped=dropped)
-    assert places([first, dropped, big]) == [(7, 7), (518, 7), (1029, 7)]
+    for board_w, rest in ((1900, (col_after("4x4"), GAP)), (1104, (GAP, row_after("4x4")))):
+        big, small = card("4x4", GAP, GAP), card("2x2", GAP, row_after("2x4"))
+        pack([big, small], METRICS, board_w)
+        assert places([big, small]) == [(GAP, GAP), rest], board_w
+    # Right only if the way there passes no card.  A 2x4 put over the top of
+    # a 4x2, with a 1x2 beside the 4x2 under the 2x4: the 4x2 would have to
+    # pass the 1x2 to clear the 2x4 rightward, so it goes down, under it.
+    wide = card("2x4", SIZES["4x2"][0] // 2, GAP)
+    tall = card("4x2", GAP, GAP)
+    low = card("1x2", col_after("4x2"), row_after("2x4"))
+    pack([wide, tall, low], METRICS, 1900, first=(wide,))
+    assert places([wide, tall, low]) == [(GAP, GAP), (GAP, row_after("2x4")), (col_after("4x2"), row_after("2x4"))]
 
 
 def test_the_slot_is_the_place_the_card_is_seen_over_wherever_it_is_held() -> None:
@@ -121,72 +221,16 @@ def test_a_card_stopped_by_a_card_above_it_stays_below_it() -> None:
 
     # Under the 4x4, with the hole under the 2x4 beside it: it stays.
     wide, big = card("2x4", 7, 7), card("4x4", 854, 7)
-    assert gravity_slot(card("2x2", 854, 674), [wide, big], 1900, METRICS) == (854, 674)
+    assert gravity_slot(card("2x2", 854, 674), [wide, big], METRICS) == (854, 674)
     # A 1x2 under a 4x4 that starts left of it slides along under it to the
     # 4x4's left edge, and no further: not on under the 1x2 beside it.
     low, big = card("1x2", 7, 7), card("4x4", 518, 7)
-    assert gravity_slot(card("1x2", 1029, 674), [low, big], 1900, METRICS) == (518, 674)
+    assert gravity_slot(card("1x2", 1029, 674), [low, big], METRICS) == (518, 674)
     # Under two cards, the leftmost one bounds it.
     left, right = card("2x2", 518, 7), card("2x2", 1029, 7)
-    assert gravity_slot(card("2x4", 854, 422), [left, right], 1900, METRICS) == (518, 422)
+    assert gravity_slot(card("2x4", 854, 422), [left, right], METRICS) == (518, 422)
     # Nothing above it: it rises, and on the top margin it slides freely.
-    assert gravity_slot(card("2x2", 1365, 900), [wide], 1900, METRICS) == (854, 7)
-
-
-def test_lifting_a_card_opens_its_own_hole_and_not_the_board_above_it() -> None:
-    """The others fall north-west into the lifted card's hole; a card that
-    stood below its top line stops at that line."""
-
-    # A 2x4 under a 2x2, with two 2x2 under it; the right one is clear of
-    # the 2x2 above, so only the lifted card's top line stops it.
-    top_row = [card("2x2", 7, 7), card("2x2", 518, 7)]
-    beside = card("2x2", 7, 422)
-    lifted = card("2x4", 518, 422)
-    under = [card("2x2", 518, 837), card("2x2", 1029, 837)]
-    lift([*top_row, beside, *under], lifted, METRICS)
-    assert places(top_row + [beside]) == [(7, 7), (518, 7), (7, 422)]
-    assert places(under) == [(518, 422), (1029, 422)], "they fill the hole, not the top row"
-    # A card beside the lifted one on the top row slides into its place, and
-    # the card under it slides along with it, still under it.
-    lifted = card("1x2", 7, 7)
-    wide = card("2x4", 518, 7)
-    below = card("2x2", 518, 422)
-    lift([wide, below], lifted, METRICS)
-    assert places([wide, below]) == [(7, 7), (7, 422)]
-
-
-def _lifted(board, carried):
-    """The frame a carried card's slot is chosen in, and where each other card stood."""
-
-    others = [GeomProxy(c.width, c.height, c.col, c.row) for c in board if c is not carried]
-    home = {id(o): (o.col, o.row) for o in others}
-    lift(others, carried, METRICS)
-    return others, home
-
-
-def _drop(board, carried, slot, board_w):
-    """The board once ``carried`` is let go at ``slot`` -- copies, as a preview
-    is -- and where each card stood while it was carried."""
-
-    frame, home = _lifted(board, carried)
-    moved = GeomProxy(carried.width, carried.height, *slot)
-    homes = {o: home[id(o)] for o in frame}
-    homes[moved] = (carried.col, carried.row)
-    after = [moved if c is carried else frame.pop(0) for c in board]
-    carried_over = places(after)
-    pack(after, METRICS, board_w, dropped=moved, home=homes)
-    return after, carried_over
-
-
-def _tiled(sizes, board_w):
-    """A board of these cards as Add tiles it."""
-
-    placed = []
-    for size in sizes:
-        c = card(size)
-        c.col, c.row = first_free_slot(c, placed, board_w, METRICS)
-        placed.append(c)
-    return placed
+    assert gravity_slot(card("2x2", 1365, 900), [wide], METRICS) == (854, 7)
 
 
 def _random_board(rng):
@@ -199,51 +243,6 @@ def _random_board(rng):
 
 def _hold(rng, c):
     return rng.choice(((14, STRIP), (c.width - 110, STRIP), (c.width // 2, c.height // 2)))
-
-
-def test_a_card_let_go_on_its_row_neighbour_swaps_with_it() -> None:
-    """Carried onto the card beside it in a full row, the two trade places:
-    the one in the way takes the room the carried card left in that row --
-    it is not pushed down a row with a hole left beside it.  Holds for a row
-    of one size and for a 4x4 beside a 2x2."""
-
-    for left_size, right_size, board_w in (("2x2", "2x2", 1104), ("2x2", "4x4", 1400), ("4x4", "2x2", 1400)):
-        board = _tiled(("2x2", "2x2", left_size, right_size), board_w)
-        carried, neighbour = board[2], board[3]
-        assert carried.row == neighbour.row, places(board)
-        slot = (neighbour.col + neighbour.width - carried.width if carried.width < neighbour.width else neighbour.col,
-                neighbour.row)
-        after, _over = _drop(board, carried, slot, board_w)
-        assert after[3].row == carried.row, (left_size, right_size, places(after))
-        assert after[3].col < after[2].col, (left_size, right_size, places(after))
-        assert max(c.row + c.height for c in after) == max(c.row + c.height for c in board), places(after)
-
-
-def test_putting_a_card_back_changes_nothing() -> None:
-    """Drawn exactly where it stood, held anywhere, a card is put back there
-    and every other card is where it was -- on random mixed boards, after
-    random earlier drops."""
-
-    rng = random.Random(7)
-    for _board in range(150):
-        board, board_w = _random_board(rng)
-        for _drag in range(rng.randint(0, 2)):
-            carried = rng.choice(board)
-            drawn = (rng.randint(0, board_w - carried.width), rng.randint(0, 1600))
-            hold = _hold(rng, carried)
-            frame, _home = _lifted(board, carried)
-            aim = (drawn[0] + hold[0], drawn[1] + STRIP)
-            slot = slot_under(aim, carried, frame, METRICS, board_w, seen=drawn)
-            board, _carried_over = _drop(board, carried, slot, board_w)
-        before = places(board)
-        for carried in board:
-            hold = _hold(rng, carried)
-            seen = (carried.col, carried.row)
-            frame, _home = _lifted(board, carried)
-            aim = (seen[0] + hold[0], seen[1] + STRIP)
-            slot = slot_under(aim, carried, frame, METRICS, board_w, seen=seen)
-            assert slot == seen, (before, seen, hold, slot)
-            assert places(_drop(board, carried, slot, board_w)[0]) == before
 
 
 def _overlaps(a, b) -> bool:
@@ -283,53 +282,55 @@ def _centre(c, place) -> tuple[int, int]:
     return (place[0] + c.width // 2, place[1] + c.height // 2)
 
 
-@pytest.mark.parametrize("seed", range(4))
-def test_random_mixed_drags_keep_every_rule(seed, monkeypatch) -> None:
+def test_random_mixed_drags_keep_every_rule(monkeypatch) -> None:
     """Random mixed boards, widths and drags -- onto a card, anywhere, held by
     either end of the strip or by the body:
 
+    - a card drawn where it stands is aimed there, and let go there changes
+      nothing;
     - no two cards overlap;
     - the board a drop leaves is the board that packing its places gives
       again: what was previewed is what stays;
     - every card is at north-west rest among the others;
-    - no card the operator did not carry passes a card that stayed put, in
-      any of the moves it makes: falling into the carried card's hole,
-      making way, and falling again.  (Making way along its row and then
-      rising up an empty column is two moves; their sum is no L.)
+    - every card but the two that swapped makes way only right along its row
+      or straight down its column, then falls only up and left; making way
+      rightward and falling pass no card the drop left untouched.  (Making
+      way along its row and then rising up an empty column is two moves;
+      their sum is no L.)
     """
 
     made_way: dict[int, tuple[int, int]] = {}
     fall = board_layout.gravity_slot
 
-    def falling(cfg, placed, board_w, metrics):
+    def falling(cfg, placed, metrics):
         # The first place pack lets a card fall from is where it made way to.
         made_way.setdefault(id(cfg), (cfg.col, cfg.row))
-        return fall(cfg, placed, board_w, metrics)
+        return fall(cfg, placed, metrics)
 
     monkeypatch.setattr(board_layout, "gravity_slot", falling)
-    rng = random.Random(1000 + seed)
-    for _board in range(60):
+    rng = random.Random(1000)
+    for _board in range(120):
         board, board_w = _random_board(rng)
         for _drag in range(rng.randint(1, 3)):
             carried = rng.choice(board)
+            seen = (carried.col, carried.row)
+            back = _slot(board, carried, seen, _hold(rng, carried), board_w)
+            assert back == seen, (places(board), seen, back)
+            assert places(_let_go(board, carried, back, board_w)) == places(board)
             if rng.random() < 0.5:
                 target = rng.choice([c for c in board if c is not carried])
                 drawn = (target.col + rng.randint(-12, 12), target.row + rng.randint(-12, 12))
             else:
                 bottom = max(c.row + c.height for c in board)
                 drawn = (rng.randint(0, board_w - carried.width), rng.randint(0, bottom + 100))
-            hold = _hold(rng, carried)
-            frame, _home = _lifted(board, carried)
-            slot = slot_under(
-                (drawn[0] + hold[0], drawn[1] + STRIP), carried, frame, METRICS, board_w, seen=drawn
-            )
-            made_way.clear()
-            after, carried_over = _drop(board, carried, slot, board_w)
-            moves = {
-                id(a): ((b.col, b.row), lifted, made_way.get(id(a), (a.col, a.row)), (a.col, a.row))
-                for b, a, lifted in zip(board, after, carried_over)
-                if b is not carried
+            slot = _slot(board, carried, drawn, _hold(rng, carried), board_w)
+            swapped = {
+                id(c)
+                for c in board
+                if c is carried or (c.col <= slot[0] < c.col + c.width and c.row <= slot[1] < c.row + c.height)
             }
+            made_way.clear()
+            after = _let_go(board, carried, slot, board_w)
             for index, a in enumerate(after):
                 for b in after[index + 1:]:
                     assert not _overlaps(a, b), places(after)
@@ -337,19 +338,29 @@ def test_random_mixed_drags_keep_every_rule(seed, monkeypatch) -> None:
             pack(again, METRICS, board_w)
             assert places(again) == places(after)
             for c in after:
-                rest = gravity_slot(c, [o for o in after if o is not c], board_w, METRICS)
+                rest = fall(c, [o for o in after if o is not c], METRICS)
                 assert rest == (c.col, c.row), (places(after), places([c]))
-            stayed = [
-                (a.col, a.row, a.width, a.height)
+            moves = {
+                id(a): ((b.col, b.row), made_way.get(id(a), (a.col, a.row)), (a.col, a.row))
                 for b, a in zip(board, after)
-                if b is not carried and (a.col, a.row) == (b.col, b.row)
+                if id(b) not in swapped
+            }
+            untouched = [
+                (a.col, a.row, a.width, a.height) for a in after if id(a) in moves and len(set(moves[id(a)])) == 1
             ]
-            for b, a in zip(board, after):
-                if b is carried or (a.col, a.row) == (b.col, b.row):
+            for a in after:
+                if id(a) not in moves:
                     continue
-                steps = moves[id(a)]
-                for start, end in zip(steps, steps[1:]):
-                    assert not _passed(_centre(a, start), _centre(a, end), stayed), (
-                        places(board), places(after), steps,
+                start, way, end = moves[id(a)]
+                assert (
+                    way == start
+                    or (way[1] == start[1] and way[0] > start[0])
+                    or (way[0] == start[0] and way[1] > start[1])
+                ), ("made way neither right nor down", places(board), places(after), moves[id(a)])
+                assert end[0] <= way[0] and end[1] <= way[1], ("fell other than north-west", moves[id(a)])
+                runs = ((start, way), (way, end)) if way[1] == start[1] else ((way, end),)
+                for run in runs:
+                    assert not _passed(_centre(a, run[0]), _centre(a, run[1]), untouched), (
+                        places(board), places(after), moves[id(a)],
                     )
             board = after
