@@ -7665,6 +7665,8 @@ class FluentScrollArea(QtWidgets.QScrollArea):
         #: viewport made the bar appear and narrowed EVERY control by the
         #: bar's width, in the same instant the operator added that row.
         self._bounded = False
+        #: Hold the vertical bar's gutter without bounding the width.
+        self._gutter = False
         self._reserving = False
         self.verticalScrollBar().rangeChanged.connect(self._reserve_scrollbar_gutter)
         self.setWidgetResizable(True)
@@ -7703,6 +7705,15 @@ class FluentScrollArea(QtWidgets.QScrollArea):
         self.setWidget(widget)
         self._reserve_scrollbar_gutter()
 
+    def reserve_vertical_gutter(self) -> None:
+        """Keep the viewport as wide whether or not the vertical bar shows,
+        without bounding the content's width: a Monitor board may be wider
+        than its viewport and scroll sideways, but a carried card's spare
+        row must not bring the bar in and narrow the board under the drag."""
+
+        self._gutter = True
+        self._reserve_scrollbar_gutter()
+
     @QtCore.pyqtSlot()
     def _reserve_scrollbar_gutter(self) -> None:
         """Hold the vertical bar's width whether or not the bar is there.
@@ -7712,7 +7723,7 @@ class FluentScrollArea(QtWidgets.QScrollArea):
         changes, and this must be a function of the content alone.
         """
 
-        if not self._bounded or self._reserving:
+        if not (self._bounded or self._gutter) or self._reserving:
             return
         self._reserving = True
         try:

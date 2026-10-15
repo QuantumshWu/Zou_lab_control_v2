@@ -146,9 +146,8 @@ a signal in Setting`, or `No data yet` once a signal is picked.  Its body is
 the blank frame its size preset plans, and `set_surface(None)` returns a
 card to that frame.  `handle_rect()` is what carries the card: a drawn
 card's strip (`strip_rect()`) -- its body is its plot's -- and the whole of
-an empty card, whose blank body shows the open hand; the drop is the slot
-in the pointer's column on the row the card's strip is in, wherever the card
-is held.  Setting is as tall as every other button and the header `×` is
+an empty card, whose blank body shows the open hand; where the board puts
+a carried card does not depend on where it is held.  Setting is as tall as every other button and the header `×` is
 square at that height: the quiet one-glyph remover (red only under the
 pointer), whose first click arms it as the white-on-red confirm.  On a card
 wider than what its viewport shows, the two ride the viewport's right edge
@@ -181,18 +180,51 @@ set_cards(cards: tuple[PanelCardView, ...]) -> None
 The board's gap -- between cards and from its edges -- is one card pad
 (`card_pad()`) unless a `BoardMetrics(gap)` policy is injected, so its first
 card starts where a white page's content starts; each card's rectangle is
-the card's own.  After `set_cards`, the board owns the
-only live geometry calculation.  A card a drop put somewhere keeps that
-place; every other card takes the first free slot in board order on every
-pack, so cards tile the width the board has now -- including cards added
-before the window was first laid out -- and everything then settles under
-north-west gravity.  A carried card follows the pointer; meanwhile the other
-cards stand where the drop will leave them and the slot -- the pointer's
-column on the row the carried card's strip is in, chosen on the board
-without the carried card -- is drawn as an accent-tint card with a dashed
-edge.  Near the viewport's top or bottom edge the board
-scrolls under the pointer.  On release the card takes that slot and the new
-`panel_id` order is committed.  `text_left()` is where a card's strip text
+the card's own.  After `set_cards`, the board owns the only live geometry
+calculation, and one rule set places every card, whatever their sizes:
+every card has a place, a card goes where it is put, the cards in its way
+make room, and everything falls north-west.
+
+- **Places.**  A drop records where it left every card, for the board's
+  column count (how many of the narrowest card fit side by side); nothing
+  else writes them.  A card no drop has placed yet -- one just added --
+  takes the first free slot after them, top row left to right, in board
+  order, at the width the board has now, so Add tiles the width, including
+  for cards added before the window was first laid out.  A column count no
+  drop was made at shows the nearest wider count's arrangement packed
+  narrower (with none wider, the nearest narrower one): narrowing the window
+  packs without destroying the arrangement, widening restores it, and a drop
+  made while narrow does not overwrite the wide arrangement.
+- **Gravity.**  A card rises until a card above it stops it and slides left
+  until a card beside it stops it, until neither move is possible.  A card
+  stopped by a card above it slides left no further than that card's left
+  edge -- with several above it, the leftmost one's: a card put below
+  another stays below it, and does not slide along its bottom and rise into
+  a hole beside it.  No card passes through another or searches the board
+  for a hole.
+- **Carrying.**  Picked up, the card leaves a hole the others fall into
+  under the same gravity, none rising above the line its top stood on; that
+  board stands still while it is carried.  The slot is the place under the
+  pointer, on the line of the carried card's strip, nearest where the card
+  is drawn: a 2x4 held near Setting and an empty 4x4 held by its body land
+  where the same card held at the left of its strip would.  Rows come only
+  from the cards in the slot's column, so a short card's edge never cuts a
+  tall card beside it.
+- **Dropping.**  The card stays where it is put.  A card in its way goes
+  back to where it stood before the drag if that is free, else along its
+  row if the row has room for it and every card it pushes, else straight
+  down its column; then everything falls.  Put back where it was picked up,
+  the card leaves every card where it stood.
+
+While a card is carried it follows the pointer, the other cards already
+stand where the drop will leave them -- the preview and the drop are one
+computation -- and the slot is drawn under it as an accent-tint card with a
+dashed edge.  Near the viewport's top or bottom edge the board scrolls under
+the pointer; its scroll area keeps the vertical bar's gutter
+(`FluentScrollArea.reserve_vertical_gutter()`), so the row a carried card
+reserves never narrows the board under the drag.  On release the new
+`panel_id` order -- the cards' reading order -- is committed.
+`text_left()` is where a card's strip text
 starts, from the board's left edge, for a note on an empty board to start
 at.  On every pack, scroll and viewport resize the board tells each card
 where the viewport's right edge cuts it, for its Setting and `×`.  One
