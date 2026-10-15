@@ -174,8 +174,10 @@ presenter's fact; the view keeps no copy of it.
 `PulseEditorView` composes Edit, Preview, Scan, Config, and Target tabs and exposes
 `set_title`, `set_summary`, `set_status_color`, `ask_open_path`,
 `ask_save_path`, `confirm`, `show_warning`, `finish_close`, and the
-`close_requested`/`clear_all_requested` signals. It does not know a
-controller. A product opens it through the single `open_pulse_editor` handle;
+`close_requested`/`clear_all_requested` signals. `show_warning` and
+`show_done` hand the one Pulse dialog every message as a sentence
+(`zlc_ui.status.sentence`: a full stop, never a capital added by code). It
+does not know a controller. A product opens it through the single `open_pulse_editor` handle;
 the view does not provide a parallel raw-window launcher.
 
 ## `PulseEditorHandle`

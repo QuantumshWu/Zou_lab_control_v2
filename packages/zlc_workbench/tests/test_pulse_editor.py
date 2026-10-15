@@ -1180,7 +1180,7 @@ def test_a_shot_that_fails_leaves_the_outputs_safe(sequence) -> None:
     try:
         assert presenter.fire() is False
         assert board.events[-1] == "safe"
-        assert any("firing stopped" in text for text in view.warnings)
+        assert any("Firing stopped" in text for text in view.warnings)
     finally:
         presenter.close()
 
@@ -1777,7 +1777,7 @@ def test_a_refused_connection_says_so_and_stays_offline(sequence) -> None:
         assert presenter.sequencer is None
         assert "failed" in view.schedule_view.connection.status
         assert view.schedule_view.capabilities == (False, False, False)
-        assert any("cannot connect" in text for text in view.warnings)
+        assert any("Cannot connect" in text for text in view.warnings)
     finally:
         presenter.close()
 
@@ -1903,7 +1903,7 @@ def test_the_editor_opens_with_no_pulse_at_all() -> None:
 
         # And it refuses the things that need a pulse, by name.
         assert presenter.fire() is False
-        assert any("no pulse is open" in text for text in view.warnings)
+        assert any("No pulse is open" in text for text in view.warnings)
     finally:
         presenter.close()
 
@@ -3360,7 +3360,7 @@ def test_a_loaded_scan_file_is_checked_the_way_a_generated_one_is(presenter, tmp
         assert "bad API sweep" in api.last_warning and api.state.scan_rows == kept
         assert api.invoke_public("load_scan_array", {"path": str(tmp_path / "absent.npy")}) is True
         worker.deliver_until(lambda: not api.control_state()["pending"])
-        assert "cannot read" in api.last_warning and api.state.scan_rows == kept
+        assert "Cannot read" in api.last_warning and api.state.scan_rows == kept
         assert api.invoke_public("load_scan_array", {}) is False
         assert api.invoke_public("ask_for_pulse", {}) is False
 
@@ -3845,7 +3845,7 @@ def test_sync_brings_the_board_s_pulse_back_into_the_editor(sequence) -> None:
         assert len(presenter.sequence.periods) == held, (
             "the editor shows what the board is holding, not what it had drifted to"
         )
-        assert any("synced from the board" in text for text in view.done)
+        assert any("Synced from the board" in text for text in view.done)
     finally:
         presenter.close()
 
@@ -4451,7 +4451,7 @@ def test_a_defective_handler_warns_instead_of_killing_the_editor(sequence) -> No
         presenter.reorder_items = detonate
         view.reorder_items_requested.emit((("period", "p0"),))
         assert any(
-            "internal error" in warning and "wired to fail" in warning
+            "Internal error" in warning and "wired to fail" in warning
             for warning in view.warnings
         ), view.warnings
         with pytest.raises(LookupError):
@@ -4754,7 +4754,7 @@ def test_connect_hold_step_and_sync_run_on_the_device_worker(sequence) -> None:
         assert board.events == ["safe", "load", "fire forever"]
         assert {thread for _name, thread in board.callers} == {"pulse-device-worker"}
         assert presenter._held_point == 1
-        assert "held at scan point 2" in presenter._scan_progress  # row 1, as the running line counts it
+        assert "Held at scan point 2" in presenter._scan_progress  # row 1, as the running line counts it
         # The busy sentence comes down with the outcome, though a hold
         # refreshes nothing that would have rewritten it.
         assert view.summary.endswith(f"{SUMMARY_SEPARATOR}{counted(len(presenter.sequence.periods), 'period')}"), view.summary
@@ -4770,7 +4770,7 @@ def test_connect_hold_step_and_sync_run_on_the_device_worker(sequence) -> None:
         assert presenter._device_busy is True
         worker.deliver_until(lambda: not presenter._device_busy)
         assert board.threads_for("applied") == {"pulse-device-worker"}
-        assert not [text for text in view.warnings if "cannot sync" in text]
+        assert not [text for text in view.warnings if "Cannot sync" in text]
         # The board holds row 2 of this very draft: Sync keeps the draft, its
         # scan binding and its table instead of baking the held row in.
         assert presenter.sequence.period_by_id[period_id].duration == pytest.approx(1.0)
@@ -5034,7 +5034,7 @@ def test_control_inspects_edits_and_compiles_loaded_config_without_firing(sequen
             "path": str(tmp_path / "missing.json"), "discard_changes": True,
         })["accepted"]
         worker.deliver_until(lambda: not presenter.control_state()["pending"])
-        assert "cannot update Config" in presenter.control_state()["last_warning"]
+        assert "Cannot update Config" in presenter.control_state()["last_warning"]
         assert presenter.control_state(details=True)["config"]["draft_rows"] == rows
         assert presenter.control_action("config.load", {
             "path": config_path, "discard_changes": True,

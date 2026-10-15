@@ -1724,7 +1724,7 @@ class PulseEditorPresenter:
                 "error": None if error is None else str(error), **(result or {}),
             }
             if error is not None:
-                self._warn(f"cannot compile this pulse: {error}", present=False)
+                self._warn(f"Cannot compile this pulse: {error}", present=False)
 
         if self._run_device_work is not None:
             return self._run_device_command(work, delivered, summary="Validating pulse...", always_deliver=True)
@@ -1820,7 +1820,7 @@ class PulseEditorPresenter:
                         raise ValueError("This value is supplied by Config. Edit the Config file, or switch to Default.")
             candidate, dropped = prune_orphaned_bindings(_sequence_edited(self.sequence, action, args))
             if dropped:
-                self._warn("unbound " + ", ".join(dropped) + ": the field is no longer set here", present=present)
+                self._warn("Unbound " + ", ".join(dropped) + ": the field is no longer set here", present=present)
             return candidate
         except (TypeError, ValueError, KeyError) as error:
             self._warn(str(error), present=present)
@@ -2031,9 +2031,9 @@ class PulseEditorPresenter:
                                                                       selected.source, str(path.resolve())))
                     self.refresh()
                 if present:
-                    self._done(f"saved Subpulse {path.name}")
+                    self._done(f"Saved Subpulse {path.name}")
                 else:
-                    self.view.set_summary(f"saved Subpulse {path.name}")
+                    self.view.set_summary(f"Saved Subpulse {path.name}")
             elif action in {"insert", "insert_file"}:
                 if action == "insert_file":
                     if path is None and not present:
@@ -2112,7 +2112,7 @@ class PulseEditorPresenter:
             else:
                 raise ValueError(f"unknown Component action {action!r}")
         except (TypeError, ValueError, KeyError, OSError) as error:
-            self._warn(f"cannot {action} Component: {error}", present=present)
+            self._warn(f"Cannot {action} Component: {error}", present=present)
             return False
         finally:
             editing_after = (self._selected_subpulse_id, self._component_context, self._subpulse_draft, self._subpulse_path)
@@ -2154,7 +2154,7 @@ class PulseEditorPresenter:
                 raise ValueError("create or open the selected Subpulse source first")
             candidate, dropped = prune_orphaned_bindings(_sequence_edited(fragment.to_sequence(), action, args))
             if dropped:
-                self._warn("unbound " + ", ".join(dropped) + ": the field is no longer set here", present=present)
+                self._warn("Unbound " + ", ".join(dropped) + ": the field is no longer set here", present=present)
             edited = Subpulse(candidate.name, candidate.target, candidate.time_step_ns,
                               candidate.periods, candidate.bindings, candidate.brackets)
             if context:
@@ -2164,7 +2164,7 @@ class PulseEditorPresenter:
                     self._subpulse_draft = edited
                     self.revision += 1
         except (TypeError, ValueError, KeyError) as error:
-            self._warn(f"cannot edit Component: {error}", present=present)
+            self._warn(f"Cannot edit Component: {error}", present=present)
             return False
         self._refresh_component_document()
         return True
@@ -2181,7 +2181,7 @@ class PulseEditorPresenter:
         return _guarded_slot(handler, handler.__name__, on_error=self._slot_error)
 
     def _slot_error(self, error: Exception) -> None:
-        self._warn(f"internal error: {type(error).__name__}: {error}")
+        self._warn(f"Internal error: {type(error).__name__}: {error}")
 
     def _connect(self) -> None:
         view = self.view
@@ -2290,7 +2290,7 @@ class PulseEditorPresenter:
         try:
             candidate = read_pulse(path)
         except Exception as error:
-            self._warn(f"cannot open {Path(path).name}: {error}", present=present)
+            self._warn(f"Cannot open {Path(path).name}: {error}", present=present)
             return False
         self._saved_state = candidate
         self.path = str(path)
@@ -2455,7 +2455,7 @@ class PulseEditorPresenter:
             if error is not None:
                 if activate:
                     self._config_read_error = str(error)
-                self._warn(f"cannot update Config: {error}", present=present)
+                self._warn(f"Cannot update Config: {error}", present=present)
                 self.refresh()
                 return
             if activate:
@@ -2521,7 +2521,7 @@ class PulseEditorPresenter:
         for name, text, unit in self._config_rows:
             key = name.strip()
             if key in entries:
-                self._warn(f"duplicate Config name: {key}", present=present)
+                self._warn(f"Duplicate Config name: {key}", present=present)
                 return False
             try:
                 value = float(text)
@@ -2655,7 +2655,7 @@ class PulseEditorPresenter:
                 ),
             )
         except Exception as error:
-            self._warn(f"cannot start a pulse for this board: {error}")
+            self._warn(f"Cannot start a pulse for this board: {error}")
             return False
         self._accept_state(PulseEditorState(sequence=candidate))
         self.path = ""
@@ -2777,7 +2777,7 @@ class PulseEditorPresenter:
         ):
             raise TypeError("insert target must be a schedule item tuple or None")
         if self.sequence is None:
-            self._warn("add a period first: a spacer is time between periods")
+            self._warn("Add a period first: a spacer is time between periods")
             return
         self._apply(self._edited_candidate("insert_spacer", (before_item,)))
 
@@ -3037,7 +3037,7 @@ class PulseEditorPresenter:
         if self._connection_locked:
             raise RuntimeError("the experiment session owns this connection")
         if mode != CONNECTION_OFFLINE and self._dial is None:
-            self._warn("this editor was built without a way to connect")
+            self._warn("This editor was built without a way to connect")
             return None
         return mode, endpoint
 
@@ -3092,7 +3092,7 @@ class PulseEditorPresenter:
         def delivered(result: object, failure: BaseException | None) -> None:
             if unsafe:
                 self._warn(
-                    "the pulse server connection ended before the previous "
+                    "The pulse server connection ended before the previous "
                     f"board could be told to stop ({unsafe[0]}). If that "
                     "server is still running it drives the board safe when a "
                     "client disconnects; if it is not, THAT SEQUENCE IS STILL "
@@ -3100,13 +3100,13 @@ class PulseEditorPresenter:
                 )
             if failure is not None:
                 self._show_connection(f"failed: {failure}")
-                self._warn(f"cannot connect to {_connection_name(mode, endpoint)}: {failure}")
+                self._warn(f"Cannot connect to {_connection_name(mode, endpoint)}: {failure}")
                 self._render_run_state()
                 return
             stage, payload, error = result
             if stage == "release":
                 self._show_connection(f"disconnect failed: {error}")
-                self._warn(f"cannot close the current sequencer connection: {error}")
+                self._warn(f"Cannot close the current sequencer connection: {error}")
                 self._render_run_state()
                 return
             if previous is not None:
@@ -3190,7 +3190,7 @@ class PulseEditorPresenter:
     def _show_disconnected(self, mode: str, endpoint: str) -> None:
         self.connection = (mode, endpoint)
         self._show_connection("edit only")
-        self._done("disconnected - this editor is now edit only")
+        self._done("Disconnected; this editor is now edit only")
         # Hanging up changes the whole window, not just its status line:
         # the board's ports are gone, the Target page is authorable again,
         # and the run buttons have nothing to fire on.
@@ -3199,7 +3199,7 @@ class PulseEditorPresenter:
     def _dial_failed(self, mode: str, endpoint: str, error: BaseException) -> None:
         self.connection = (CONNECTION_OFFLINE, endpoint)
         self._show_connection(f"failed: {error}")
-        self._warn(f"cannot connect to {_connection_name(mode, endpoint)}: {error}")
+        self._warn(f"Cannot connect to {_connection_name(mode, endpoint)}: {error}")
 
     def _release_for_connection_change(self) -> bool:
         """Keep the current connection truthful when it refuses to close."""
@@ -3208,7 +3208,7 @@ class PulseEditorPresenter:
             self._release()
         except Exception as error:
             self._show_connection(f"disconnect failed: {error}")
-            self._warn(f"cannot close the current sequencer connection: {error}")
+            self._warn(f"Cannot close the current sequencer connection: {error}")
             return False
         return True
 
@@ -3242,7 +3242,7 @@ class PulseEditorPresenter:
 
     def _describe_failed(self, error: BaseException) -> None:
         self._show_connection(f"connected, but cannot read the board: {error}")
-        self._warn(f"connected, but the board would not describe itself: {error}")
+        self._warn(f"Connected, but the board would not describe itself: {error}")
 
     def _adopt_described(self, board: object, state: BoardState) -> bool:
         """Install one board description and the state it was read with."""
@@ -3377,7 +3377,7 @@ class PulseEditorPresenter:
             )
         except ValueError as error:
             self._warn(
-                f"this pulse does not fit the attached board ({error}); it keeps "
+                f"This pulse does not fit the attached board ({error}); it keeps "
                 "the wiring it was written for, which this board will not load: "
                 "edit it to fit, save it and open it again", present=present
             )
@@ -3392,7 +3392,7 @@ class PulseEditorPresenter:
         if lost or dropped_ports or dropped_bindings:
             missing = ", ".join(lost + dropped_ports + dropped_bindings)
             self._warn(
-                f"this board has no matching {missing}; those outputs or bindings were dropped from "
+                f"This board has no matching {missing}; those outputs or bindings were dropped from "
                 "the pulse rather than driven blind", present=present
             )
 
@@ -3482,7 +3482,7 @@ class PulseEditorPresenter:
 
         def delivered(result: object, failure: BaseException | None) -> None:
             if failure is not None:
-                self._warn(f"cannot sync from the board: {failure}")
+                self._warn(f"Cannot sync from the board: {failure}")
                 self._render_run_state()
                 return
             self._adopt_applied(*result)
@@ -3496,7 +3496,7 @@ class PulseEditorPresenter:
 
         sequencer = self.sequencer
         if sequencer is None:
-            self._warn("this editor is not connected to a sequencer")
+            self._warn("This editor is not connected to a sequencer")
             return None
         applied = getattr(sequencer, "applied", None)
 
@@ -3511,13 +3511,13 @@ class PulseEditorPresenter:
 
         if state is None:
             self._adopt_board_state(board_state)
-            self._warn("the board has no pulse applied yet; there is nothing to sync")
+            self._warn("The board has no pulse applied yet; there is nothing to sync")
             return False
         source = getattr(state, "source", None)
         if source is None:
             self._adopt_board_state(board_state)
             self._warn(
-                "the board is holding a compiled program it was given without "
+                "The board is holding a compiled program it was given without "
                 "its pulse, so there is nothing an editor can show"
             )
             return False
@@ -3525,7 +3525,7 @@ class PulseEditorPresenter:
         program = getattr(state, "program", None)
         if wire_rows and program is None:
             self._adopt_board_state(board_state)
-            self._warn("the board returned scan rows without their compiled program")
+            self._warn("The board returned scan rows without their compiled program")
             return False
         authored_rows: tuple[tuple[float, ...], ...] = ()
         if wire_rows:
@@ -3626,10 +3626,10 @@ class PulseEditorPresenter:
         # the board is playing something older the moment it no longer is.
         self._adopt_board_state(board_state)
         self._done(
-            f"the board is holding scan point {held + 1} of this pulse; "
+            f"The board is holding scan point {held + 1} of this pulse; "
             "the draft and its scan table are kept"
             if held is not None
-            else f"synced from the board{SUMMARY_SEPARATOR}{_period_counts(source.periods)}"
+            else f"Synced from the board{SUMMARY_SEPARATOR}{_period_counts(source.periods)}"
             + (f"{SUMMARY_SEPARATOR}{counted(len(wire_rows), 'scan point')}" if wire_rows else "")
         )
         return True
@@ -3725,7 +3725,7 @@ class PulseEditorPresenter:
 
     def _acquire_command(self, *, present: bool = True) -> bool:
         if self.sequencer is None:
-            self._warn("this editor is not connected to a sequencer")
+            self._warn("This editor is not connected to a sequencer")
             return False
         if self._drive_lease is not None:
             return True
@@ -3779,17 +3779,17 @@ class PulseEditorPresenter:
         if not self._device_available(present=present):
             return False
         if self.sequence is None:
-            self._warn("no pulse is open", present=present)
+            self._warn("No pulse is open", present=present)
             return False
         sequencer = self.sequencer
         if sequencer is None:
-            self._warn("this editor is not connected to a sequencer", present=present)
+            self._warn("This editor is not connected to a sequencer", present=present)
             return False
         authored_revision = self.revision
         try:
             source, rows, sweeps = self._execution_request()
         except Exception as error:
-            self._warn(f"cannot load this pulse: {error}", present=present)
+            self._warn(f"Cannot load this pulse: {error}", present=present)
             return False
         if not self._acquire_command(present=present):
             return False
@@ -3842,7 +3842,7 @@ class PulseEditorPresenter:
                 elif previous_run is not None:
                     self._finite_run = previous_run
                     self._watch_completion()
-                message = f"firing stopped: {error}"
+                message = f"Firing stopped: {error}"
                 self.view.set_summary(message)
                 self._warn(message, present=present)
             self._render_run_state()
@@ -3855,7 +3855,7 @@ class PulseEditorPresenter:
             # now would hold its lease past the window that took it.
             return False
         if self._device_busy or self._stop_busy:
-            self._warn("a pulse command is already in progress", present=present)
+            self._warn("A pulse command is already in progress", present=present)
             return False
         return True
 
@@ -4020,15 +4020,15 @@ class PulseEditorPresenter:
         if not self._check_bracket(present=present):
             return False
         if self.sequence is None:
-            self._warn("no pulse is open", present=present)
+            self._warn("No pulse is open", present=present)
             return False
         if self.sequencer is None:
-            self._warn("this editor is not connected to a sequencer", present=present)
+            self._warn("This editor is not connected to a sequencer", present=present)
             return False
         try:
             prepared = self._prepare_execution()
         except Exception as error:
-            self._warn(f"cannot load this pulse: {error}", present=present)
+            self._warn(f"Cannot load this pulse: {error}", present=present)
             return False
         if not self._acquire_command(present=present):
             return False
@@ -4051,7 +4051,7 @@ class PulseEditorPresenter:
             self._remember_applied_scan(program, source, rows, digest=self._board_state.applied_digest)
             self.refresh()
         except Exception as error:
-            self._warn(f"firing stopped: {error}", present=present)
+            self._warn(f"Firing stopped: {error}", present=present)
             self._safe_drive(release=True, present=present)
             return False
         return True
@@ -4084,7 +4084,7 @@ class PulseEditorPresenter:
         self._safe_drive(release=False, present=present)
         self._poll_board()
         if self.running:
-            self._warn("the board is still playing and would not stop; not loading over it", present=present)
+            self._warn("The board is still playing and would not stop; not loading over it", present=present)
             return False
         return True
 
@@ -4113,7 +4113,7 @@ class PulseEditorPresenter:
             # sequence is still playing.
             self._release_drive()
             self._warn(
-                "the pulse server connection ended before the board could be "
+                "The pulse server connection ended before the board could be "
                 f"told to stop ({error}). If that server is still running it "
                 "drives the board safe when a client disconnects; if it is "
                 "not, THE SEQUENCE IS STILL PLAYING and the board must be "
@@ -4124,7 +4124,7 @@ class PulseEditorPresenter:
             if not present:
                 raise RuntimeError(f"the board did not go safe: {error}") from error
             worked = False
-            self._warn(f"the board did not go safe: {error}")
+            self._warn(f"The board did not go safe: {error}")
         finally:
             if present:
                 self._poll_board()
@@ -4209,7 +4209,7 @@ class PulseEditorPresenter:
             if worked:
                 self.view.set_summary("Stopped")
             else:
-                message = f"Stop failed: {error}" if error else "the board did not confirm SAFE"
+                message = f"Stop failed: {error}" if error else "The board did not confirm SAFE"
                 self.view.set_summary(message)
                 self._warn(message, present=present)
             self._wake_close_guard()
@@ -4372,7 +4372,7 @@ class PulseEditorPresenter:
 
         def failed(error: BaseException) -> None:
             if current():
-                self._warn(f"finite pulse completion failed: {error}")
+                self._warn(f"Finite pulse completion failed: {error}")
             self._wake_close_guard()
 
         self._submit_work(runner, work, delivered, failed)
@@ -4449,7 +4449,7 @@ class PulseEditorPresenter:
             try:
                 answer = question()
             except Exception as error:
-                self._warn(f"board status failed: {error}")
+                self._warn(f"Board status failed: {error}")
                 self._run_status_followups()
                 return False
             answered(answer)
@@ -4468,7 +4468,7 @@ class PulseEditorPresenter:
         def finished(answer: object, error: BaseException | None) -> None:
             self._status_in_flight = False
             if error is not None:
-                self._warn(f"board status failed: {error}")
+                self._warn(f"Board status failed: {error}")
             elif (
                 operation == self._device_operation and sequencer is self.sequencer
                 and finite_run == self._finite_run
@@ -4492,7 +4492,7 @@ class PulseEditorPresenter:
             try:
                 followup()
             except Exception as error:  # noqa: BLE001 -- one follow-up must not eat the rest
-                self._warn(f"internal error after a board answer: {error}")
+                self._warn(f"Internal error after a board answer: {error}")
 
     def _board_answer(
         self, sequencer: object, finite: bool
@@ -4520,7 +4520,7 @@ class PulseEditorPresenter:
         if finite_answer is not None:
             kind, payload = finite_answer
             if kind == "failed":
-                self._warn(f"finite pulse status failed: {payload}")
+                self._warn(f"Finite pulse status failed: {payload}")
             elif payload is not None:
                 fault = str(getattr(payload, "fault", "") or "")
                 if fault:
@@ -4531,7 +4531,7 @@ class PulseEditorPresenter:
                     # the sticky bit and stalls, still running -- so
                     # releasing the lease here and saying nothing left the
                     # sequence playing behind an idle-looking window.
-                    self._warn(f"finite pulse stopped: {fault}")
+                    self._warn(f"Finite pulse stopped: {fault}")
                     faulted = True
                 else:
                     self._release_drive()
@@ -4642,7 +4642,7 @@ class PulseEditorPresenter:
         if not self._check_bracket(present=present):
             return ""
         if self.sequence is None:
-            self._warn("there is no pulse to save", present=present)
+            self._warn("There is no pulse to save", present=present)
             return ""
         if path is None and not present:
             self._warn("save_pulse requires an explicit path", present=False)
@@ -4677,15 +4677,15 @@ class PulseEditorPresenter:
             target.parent.mkdir(parents=True, exist_ok=True)
             write_pulse(target, self._state)
         except Exception as error:
-            self._warn(f"cannot save {target.name}: {error}", present=present)
+            self._warn(f"Cannot save {target.name}: {error}", present=present)
             return ""
         self.path = str(target)
         self._saved_state = self._state
         self._show_connection(self._connection_status)
         if present:
-            self._done(f"saved {target.name}")
+            self._done(f"Saved {target.name}")
         else:
-            self.view.set_summary(f"saved {target.name}")
+            self.view.set_summary(f"Saved {target.name}")
         return str(target)
 
     # -------------------------------------------------------------- the target
@@ -4860,7 +4860,7 @@ class PulseEditorPresenter:
             self._warn(str(error), present=present)
             return False
         self._warn(
-            "bind at least one field to a scan slot first "
+            "Bind at least one field to a scan slot first "
             "(click a dot in the Edit tab)", present=present
         )
         return False
@@ -4984,19 +4984,19 @@ class PulseEditorPresenter:
             try:
                 table = _scan_table_of(source)
             except Exception as error:
-                return self._scan_program_refused(f"scan program failed: {error}", present=present)
+                return self._scan_program_refused(f"Scan program failed: {error}", present=present)
             return self._take_scan_program_table(source, table, fields, present=present)
         if self._preview_close_requested:
             return False
         if self._scan_running:
-            self._warn("the scan program is still running", present=present)
+            self._warn("The scan program is still running", present=present)
             return False
         # Queued behind any drawing on that worker, and never counted as
         # one: it touches nothing a close retires, so the retire does not
         # wait for it.  The window does -- its preview worker cannot close
         # under a running program -- and says what it is waiting for.
         self._scan_running = True
-        self._scan_progress = "running the scan program…"
+        self._scan_progress = "Running the scan program…"
         self._refresh_scan_page()
 
         def delivered(table: object) -> None:
@@ -5011,7 +5011,7 @@ class PulseEditorPresenter:
             if self._preview_close_requested:
                 self._wake_close_guard()
                 return
-            self._scan_program_refused(f"scan program failed: {error}", present=present)
+            self._scan_program_refused(f"Scan program failed: {error}", present=present)
 
         return self._submit_work(runner, lambda: _scan_table_of(source), delivered, failed)
 
@@ -5029,7 +5029,7 @@ class PulseEditorPresenter:
         from zlc_pulse import scan_columns_for, validate_scan_table
 
         if table is None:
-            return self._scan_program_refused("the scan program did not assign scan_table", present=present)
+            return self._scan_program_refused("The scan program did not assign scan_table", present=present)
         if self.sequence is None:
             return False
         # Through zlc_pulse, which owns what a legal table is.  This window
@@ -5117,9 +5117,9 @@ class PulseEditorPresenter:
                 except Exception as caught:
                     error = caught
             if error is not None:
-                self._scan_program_refused(f"cannot read {selected.name}: {error}", present=present)
+                self._scan_program_refused(f"Cannot read {selected.name}: {error}", present=present)
                 return
-            self._scan_progress = f"loaded {counted(len(rows), 'scan point')} from {selected}"
+            self._scan_progress = f"Loaded {counted(len(rows), 'scan point')} from {selected}"
             self._done(self._scan_progress, present=present)
             self._refresh_scan_page()
 
@@ -5157,10 +5157,10 @@ class PulseEditorPresenter:
 
         def delivered(source, error):
             if error is not None:
-                self._scan_program_refused(f"cannot read {Path(chosen).name}: {error}", present=present)
+                self._scan_program_refused(f"Cannot read {Path(chosen).name}: {error}", present=present)
                 return
             self.edit_scan_source(source)
-            self._scan_progress = f"loaded scan source from {chosen}"
+            self._scan_progress = f"Loaded scan source from {chosen}"
             self._done(self._scan_progress, present=present)
             self._refresh_scan_page()
 
@@ -5185,7 +5185,7 @@ class PulseEditorPresenter:
         import numpy as np
 
         if not self._state.scan_rows:
-            self._warn("there is no scan table to save", present=present)
+            self._warn("There is no scan table to save", present=present)
             return ""
         if not self._device_available(present=present):
             return False
@@ -5210,9 +5210,9 @@ class PulseEditorPresenter:
 
         def delivered(target, error):
             if error is not None:
-                self._scan_program_refused(f"cannot save the scan table: {error}", present=present)
+                self._scan_program_refused(f"Cannot save the scan table: {error}", present=present)
                 return
-            self._scan_progress = f"saved {target}"
+            self._scan_progress = f"Saved {target}"
             self._refresh_scan_page()
 
         if self._run_device_work is not None:
@@ -5244,10 +5244,10 @@ class PulseEditorPresenter:
         """
 
         if self.sequencer is None:
-            self._warn("this editor is not connected to a sequencer", present=present)
+            self._warn("This editor is not connected to a sequencer", present=present)
             return False
         if not self._scan_armed():
-            self._warn("there is no scan to hold a point of", present=present)
+            self._warn("There is no scan to hold a point of", present=present)
             return False
         return self._hold(None, worker=self._run_device_work if worker is None else worker, present=present)
 
@@ -5259,7 +5259,7 @@ class PulseEditorPresenter:
         """
 
         if self.sequencer is None or not self._scan_armed():
-            self._warn("nothing is held to step", present=present)
+            self._warn("Nothing is held to step", present=present)
             return False
         held = 0 if self._held_point is None else self._held_point
         return self._hold(held + int(delta), worker=self._run_device_work if worker is None else worker, present=present)
@@ -5396,8 +5396,8 @@ class PulseEditorPresenter:
             return None
 
     def _hold_failed(self, held: int, error: BaseException, *, present: bool = True) -> None:
-        self._scan_progress = f"cannot hold that point: {error}"
-        self._warn(f"cannot hold scan point {held + 1}: {error}", present=present)
+        self._scan_progress = f"Cannot hold that point: {error}"
+        self._warn(f"Cannot hold scan point {held + 1}: {error}", present=present)
         self._refresh_scan_page()
 
     def _settle_hold(
@@ -5417,10 +5417,10 @@ class PulseEditorPresenter:
             # for ``synchronized`` to recognise until the draft changes.
             self._held_program = (revision, state.applied_digest)
             # Counted from 1, as the running line counts it.
-            self._scan_progress = f"held at scan point {figure_padded(held + 1, count)} of {count}"
+            self._scan_progress = f"Held at scan point {figure_padded(held + 1, count)} of {count}"
         else:
-            self._scan_progress = f"cannot hold that point: {error}"
-            self._warn(f"cannot hold scan point {held + 1}: {error}", present=present)
+            self._scan_progress = f"Cannot hold that point: {error}"
+            self._warn(f"Cannot hold scan point {held + 1}: {error}", present=present)
             if not state.firing:
                 self._release_drive()
         self._adopt_board_state(state)
@@ -5443,7 +5443,7 @@ class PulseEditorPresenter:
 
     def clear_scan_array(self) -> bool:
         self._edit_state(scan_rows=(), scan_fields=(), scan_source_dirty=bool(self._state.scan_source))
-        self._scan_progress = "Scan array cleared; the Python source is unchanged."
+        self._scan_progress = "Scan array cleared; the Python source is unchanged"
         self.refresh()
         return True
 
@@ -5759,7 +5759,7 @@ class PulseEditorPresenter:
         if not self._check_bracket() or self._preview_close_requested:
             return
         if self._preview_host is None:
-            self._warn("there is no preview to save")
+            self._warn("There is no preview to save")
             return
         name = (self.sequence.name if self.sequence is not None else "pulse") or "pulse"
         folder = self._save_folder()
@@ -5768,7 +5768,7 @@ class PulseEditorPresenter:
         # the shipped window while the test substituted a fake that could.
         save = getattr(self._preview_host, "save", None)
         if not callable(save):
-            self._warn("this preview cannot save itself")
+            self._warn("This preview cannot save itself")
             return
 
         if self._preview_busy:
@@ -5798,7 +5798,7 @@ class PulseEditorPresenter:
             self._finish_preview_operation()
 
         def failed(error: BaseException) -> None:
-            self._warn(f"cannot save the preview: {error}")
+            self._warn(f"Cannot save the preview: {error}")
             self._finish_preview_operation()
 
         try:
@@ -5867,7 +5867,7 @@ class PulseEditorPresenter:
             pruned, dropped = prune_orphaned_bindings(candidate)
             if dropped:
                 self._warn(
-                    "unbound "
+                    "Unbound "
                     + ", ".join(dropped)
                     + ": the field it named is no longer set here"
                 )

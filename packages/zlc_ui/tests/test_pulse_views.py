@@ -2366,6 +2366,29 @@ scan.close()
 ''')
 
 
+def test_the_pulse_dialog_says_every_message_as_a_sentence(run_qt) -> None:
+    """A warning or a confirmation ends in a full stop whoever worded it; a
+    name at its start keeps the case it is written in."""
+
+    run_qt(r'''
+from zlc_ui.qt import ensure_qt_app
+from zlc_ui.pulse import PulseEditorView
+app = ensure_qt_app(["pulse-dialog-sentence"])
+view = PulseEditorView()
+said = []
+for signal in (view.warning_requested, view.done_requested):
+    signal.disconnect()  # the modal itself; what it is handed is the point
+    signal.connect(said.append)
+view.show_warning("F15 is not a port on this target")
+view.show_warning("This Subpulse comes from a file. Open the source file to edit it.")
+view.show_done("Saved lifetime.json")
+assert said == ["F15 is not a port on this target.",
+                "This Subpulse comes from a file. Open the source file to edit it.",
+                "Saved lifetime.json."], said
+view.finish_close()
+''')
+
+
 def test_the_header_dot_is_the_status_strips_dot(run_qt) -> None:
     run_qt(r'''
 from zlc_ui.qt import ensure_qt_app

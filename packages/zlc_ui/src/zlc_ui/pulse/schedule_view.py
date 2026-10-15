@@ -2692,7 +2692,7 @@ class PulseScheduleView(QtWidgets.QWidget):
         if not driven:
             # Hiding every row is not a view of the board.  Say so instead.
             self.feedback_requested.emit(
-                "nothing is driven yet, so there is nothing to hide"
+                "Nothing is driven yet, so there is nothing to hide."
             )
             return
         self.visible_ports_committed.emit(

@@ -32,6 +32,7 @@ from .config_view import PulseConfigView
 from .component_view import PulseComponentView
 from .schedule_view import PulseScheduleView
 from .target_view import PulseTargetView
+from zlc_ui.status import sentence
 
 
 class PulseEditorView(QtWidgets.QWidget):
@@ -173,9 +174,10 @@ class PulseEditorView(QtWidgets.QWidget):
         )
 
     def show_done(self, text: str) -> None:
-        """Say that something asked for has happened."""
+        """Say that something asked for has happened, as a sentence: the
+        dialog reads every message in one form, whoever worded it."""
 
-        self.done_requested.emit(str(text))
+        self.done_requested.emit(sentence(text))
 
     def show_warning(self, text: str) -> None:
         """Say what was refused, where it stays until something else happens.
@@ -183,9 +185,13 @@ class PulseEditorView(QtWidgets.QWidget):
         It used to also overwrite the summary -- a derived line about the pulse
         -- so the message survived only until the next redraw, and the summary
         then lied about the pulse until something recomputed it.
+
+        Written as a sentence, ending in a full stop, as every message the
+        dialog shows; the words are the sender's, a name at the start kept
+        as it is written.
         """
 
-        self.warning_requested.emit(str(text))
+        self.warning_requested.emit(sentence(text))
 
     def finish_close(self) -> None:
         self._closing = True
