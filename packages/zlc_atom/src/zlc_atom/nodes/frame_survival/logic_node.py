@@ -152,35 +152,20 @@ def _editor_factory(parent=None):
     class SurvivalForm(QtWidgets.QWidget):
         """Mark pairs on a start x end grid, or pick a named selection.
 
-        The grid takes the ordinary table gestures: a click selects one pair,
-        a drag a rectangle, Ctrl adds or removes, a row or column header every
-        pair from or to that frame. Edits retain the current rule and record
-        only exceptions; None starts an explicit list.
-
-        The grid reads the way Occupancy's does: a pair the RULE selects is
-        a derived card (the light wash, dashed), a pair the operator added
-        against the rule is a chosen card, and one they left out is an
-        empty card -- so what the rule decided and what was decided by hand
-        are told apart at a glance.  The strip is the selection's closed
-        set and always marks the one picked: a rule, None (no pair), or
-        Selected (the marked list, empty while it is begun).  Selected has a
-        list of its own, kept while a rule or None is picked: picked again,
-        it comes back.  With no list to come back to, Selected picked under
-        a rule keeps the rule's pairs as the list; picked under None it
-        begins an empty one.  A pair marked under None joins the list and
-        picks Selected.
-
-        In Selected's list a pair unmarked leaves the list and one marked is
-        added, or selected in place when the list keeps it parked; every
-        other row -- parked, or selected but not in this source -- stays as
-        written.  A pair kept but not published this time is said, never
-        refused or dropped: one whose middle frame the source does not carry
-        is named in an amber note, one the list keeps unselected in a muted
-        one.  A list the grid cannot read (written through the lab API) is
-        said in red and the grid is locked, so no gesture writes over it.
-
-        "Pairs" heads the section in the editor's label column, so the strip
-        and the grid's first card start on the form's field edge.
+        The grid takes the ordinary table gestures; under a rule, edits are
+        recorded as the rule's exceptions.  It reads the way Occupancy's
+        does: a pair the RULE selects is a derived card, one added against
+        the rule a chosen card, one left out an empty card.  The strip is
+        the selection's closed set (``_SELECTIONS``); Selected keeps its own
+        list (``_LIST``) while a rule or None is picked.  With no list to
+        come back to, Selected picked under a rule keeps the rule's pairs as
+        the list, under None it begins an empty one, and a pair marked under
+        None joins the list and picks Selected.  In the list a pair unmarked
+        leaves it and one marked is added, or selected in place when it is
+        parked; every other row stays as written.  A pair kept but not
+        published is said (amber when the source lacks its middle frame,
+        muted when parked); a list the grid cannot read is said in red and
+        the grid is locked.
         """
 
         draft_changed = QtCore.pyqtSignal(object)

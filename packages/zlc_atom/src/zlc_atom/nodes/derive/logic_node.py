@@ -19,14 +19,8 @@ from .processor import DeriveProcessor, declared_outputs
 
 
 def _readable(values: Mapping[str, object]) -> None:
-    """A complete draft is one whose variables read without data or the
-    source: every name, at least one published variable, and the formula
-    and statistic of every variable a published one reads.  What each one
-    reads is checked where the inputs' names are known: admission, build.
-
-    Refused here, by what was written, while the draft is being edited --
-    not at Start, where the same words would arrive as a failure to run.
-    """
+    """Refuse, while the draft is edited rather than at Start, variables
+    that do not read without data or the source (:func:`checked_variables`)."""
 
     checked_variables(values["variables"])
 
@@ -54,14 +48,10 @@ def _draft_outputs(
     values: Mapping[str, object],
     devices: Mapping[str, object],
 ) -> tuple[DatasetOutputDeclaration, ...]:
-    """What one draft publishes: its published variables, in card order.
-
-    Each one whose name reads is declared -- a formula being edited does
-    not withdraw the signal a panel shows, and a variable being renamed
-    withdraws only its own -- and nothing while the rows do not project;
-    the schema's validator says why, to the editor, in the draft's own
-    words.
-    """
+    """What one draft publishes: its published variables whose names read,
+    in card order (:func:`published`) -- a formula being edited does not
+    withdraw the signal a panel shows; nothing while the rows do not
+    project."""
 
     del devices
     try:
@@ -74,24 +64,10 @@ def _draft_outputs(
 def _describe_output_frames(values: Mapping[str, object], output_name: str,
                             source: tuple[str | None, tuple[str, ...]] | None,
                             ) -> tuple[str | None, tuple[str, ...]] | None:
-    """A published variable's readout-event axis before any data: typing's
-    own rules on the axis the source names (:func:`frames_kept`), every
-    member carrying the source's labels -- the camera's ``frame``, Frame
-    Survival's ``pair``, whatever it is called; no axis, one frame, when
-    the variable keeps none; None when the source or the draft cannot say.
-
-    The console answers one axis for the whole bundle, and only when every
-    member carries the same.  The source names the axis, so one frame is
-    told apart from none: ``("frame", ("0",))`` is a frame axis of one
-    label every member carries, ``(None, ("0",))`` members without one, so
-    every variable keeps one frame -- whether they have an axis a pick or
-    statistic names is then their schemas' to say, as for any axis but the
-    source's.
-
-    A name no variable has is read as a member's, so a name nothing has, or
-    a variable named like a member, is refused by typing once the members
-    publish and by Start, not here.
-    """
+    """A published variable's readout-event axis before any data, by
+    :func:`frames_kept` on the axis the source names: ``(axis, labels)``,
+    ``(None, ("0",))`` (one frame) when it keeps none, None when the source
+    or the draft cannot say (rules: ARCHITECTURE_DESIGN.md, frames)."""
 
     if source is None:
         return None
@@ -109,18 +85,11 @@ def _describe_output_frames(values: Mapping[str, object], output_name: str,
 
 
 def _admit_source(values: Mapping[str, object], publication: object) -> tuple[str, ...]:
-    """What the variables cannot compute from what the producer publishes.
-
-    Every variable typed against the schemas an evaluation reads -- the
-    run's whole geometry for a finite source, the latest event for a
-    monitor -- by the evaluation's own rules, the typing the editor shows
-    under each card: what each one reads, its picks (never on an axis each
-    publication carries its own part of, :func:`changing_axes`), operators
-    and statistic.  Each problem of a LIVE variable, and any variable's
-    name problem, in its ``<variable> · <stage>: …`` words.  Asked with the
-    rest of the draft's admission, so the Edit page says it as a draft and
-    Start waits; a parked helper's problems never hold Start.
-    """
+    """What the variables cannot compute from what the producer publishes:
+    each LIVE variable's problem and any variable's name problem from
+    :func:`typed_variables`, in its ``<variable> · <stage>: …`` words.
+    Asked with the draft's admission, so the Edit page says it as a draft
+    and Start waits; a parked helper's problems never hold Start."""
 
     inputs, changing = {}, {}
     for key, value in publication.signals.items():
@@ -137,15 +106,9 @@ def _admit_source(values: Mapping[str, object], publication: object) -> tuple[st
 
 
 def _build(*, signal_plane: object, source_signal: str, **values: object) -> DeriveProcessor:
-    """The processor for the variables over the bound producer's bundle.
-
-    The plane says which outputs the bound producer has, so a name a live
-    variable reads that the producer never publishes is refused here, by
-    variable and stage, before anything runs -- and the bound signal is
-    recognised among them by the plane's own resolution, never by taking
-    its name apart.  What the variables cannot compute from the producer's
-    latest publication was admitted with the draft (``_admit_source``).
-    """
+    """The processor for the variables over the bound producer's bundle; a
+    name a live variable reads that the producer never publishes is
+    refused here, by variable and stage, before anything runs."""
 
     rows = DERIVE_SCHEMA.project_values(values)["variables"]
     selected_source = str(source_signal).strip()

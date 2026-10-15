@@ -109,20 +109,11 @@ class OccupancyProcessor:
     """Evaluate the calibrated readout once per camera frame.
 
     Every frame of a cycle reads the SAME sites, with the calibration that
-    claims it: a load frame and a readout frame taken under different
-    exposures are each read with the thresholds and kernels trained on frames
-    like them.  Which calibration reads which frame is resolved against the
-    frames that actually arrive, so "first", "last" and "rest" follow a cycle
-    that gains or loses a frame.  A frame two calibrations read, or none
-    does, refuses the run by name; a middle number the cycle does not carry
-    between its ends reads nothing and refuses nothing.  One calibration on
-    its own reads every frame.
-
-    A calibration claiming no frame is PARKED: the operator keeps it at hand
-    without using it.  Only its file goes on, into the run record; it is
-    never read, and never checked against the calibrations that are -- the
-    one kept aside is usually the one that would not fit.  ``parked`` names
-    such files directly, for a caller that never decoded them.
+    claims it (:mod:`zlc_atom.nodes._framework.frames`), resolved against the
+    frames that actually arrive.  One calibration on its own reads every
+    frame.  A parked calibration's file only goes into the run record;
+    ``parked`` names such files directly, for a caller that never decoded
+    them.
     """
 
     def __init__(

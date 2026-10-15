@@ -114,9 +114,8 @@ class ArtifactInputSpec:
     required: bool = True
     argument_name: str = ""
     #: The run takes SEVERAL of these, each claiming frames of its Dataset
-    #: input's cycle (:mod:`.frames`): an occupancy reads a load frame and a
-    #: readout frame with calibrations trained on each.  The draft value is
-    #: then a list of ``{"path": ..., "frames": [...]}`` entries
+    #: input's cycle (:mod:`.frames`).  The draft value is then a list of
+    #: ``{"path": ..., "frames": [...]}`` entries
     #: (:func:`frame_claim_entries`) and the build receives a tuple of
     #: :class:`~.frames.FrameClaim` whose values are the resolved artifacts
     #: (None for a row with no file, which only a row reading no frame may be).

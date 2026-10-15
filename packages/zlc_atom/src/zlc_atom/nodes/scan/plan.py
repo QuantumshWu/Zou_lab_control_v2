@@ -137,9 +137,7 @@ def port_label(port: str) -> str:
     if text.startswith(DEVICE_PARAM_FAMILY):
         return ".".join(device_port_parts(text))
     if text.startswith(MANUAL_PARAM_FAMILY):
-        # The one definition, here with the others: labels for manual axes
-        # used to be produced at a call site instead, so axis naming had two
-        # owners that could drift.
+        # The one definition of a manual axis's label, here with the others.
         return manual_axis_name(text)
     raise ValueError(f"{port!r} belongs to no known port family")
 

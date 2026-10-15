@@ -1,29 +1,20 @@
 """Derive's variables, edited as the cards they are, each line with its typed answer.
 
-This leaf edits plain draft values.  Its answers come from
-``typed_variables`` -- the evaluation's own plans applied to the schemas the
-Runtime already published -- so it neither evaluates variables nor asks a
-device or Runtime to materialize data on the Qt thread.
+This leaf edits plain draft values; its answers come from ``typed_variables``
+on the schemas the Runtime already published, so it never evaluates variables
+or materializes data on the Qt thread.
 
-A variable is a card that reads as a vertical formula: its name, "=" and
-first operand on the head line, with Publish and the card's ×; one line per
-later term, the term's operator strip standing right before its operand and
-ending where the name field ends; then its statistic.  Every line of every
-card is a line of ONE column set -- the operand under the operand, ``at``
-under ``at``, the labels under the labels, Publish and every × on one x
-each -- and the operand column is the page's control column: the bundle
-combo's text, the Inputs' names, every operand, result and problem read
-down one x.  Fixed sets (an operator kind, the statistics) are segmented
-strips; whatever comes from the data (members, variables, axes and
-domains, labels, ``over``) is a combo, several values a checkable one --
-a pick's values led by All (no pick), ``first`` and ``last`` (its ends,
-whatever its length, spelled as the draft, the collapsed box and its
-tooltip spell them).  A
-problem stands under the line it is about, as one sentence
-(``show_problem``); a parked helper's in muted ink, because it blocks
-nothing.  A line's two wide commands -- the statistic strip with its
-``over``, the add commands -- run on to a second row when the page is too
-narrow for them, rather than squeeze.
+A variable is a card that reads as a vertical formula: name, "=" and first
+operand on the head line (with Publish and the ×), one line per later term
+(its operator strip right before its operand), then its statistic.  Every
+line of every card is a line of ONE column set, whose operand column is the
+page's control column.  Fixed sets (an operator kind, the statistics) are
+segmented strips; whatever comes from the data is a combo, several values a
+checkable one (a pick's values led by All, ``first`` and ``last``).  A
+problem stands under its line as one sentence (``show_problem``), a parked
+helper's in muted ink.  A line's two wide commands -- the statistic strip
+with its ``over``, the add commands -- run on to a second row when the page
+is too narrow for them.
 """
 
 from __future__ import annotations
