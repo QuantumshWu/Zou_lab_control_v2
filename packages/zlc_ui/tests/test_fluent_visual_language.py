@@ -72,14 +72,14 @@ def _under_pointer(widget, pos=None) -> None:
 def test_a_chosen_grid_card_is_the_selected_fill_and_nothing_round_it(app, host) -> None:
     from zlc_ui.fluent import FluentSelectionGrid, control_height, row_gap
     from zlc_ui.fluent.fluent import _grid_row_insets
-    from zlc_ui.fluent.style import ACCENT_TINT, BG, RED_TINT, SELECTED, SELECTION_EDGE
+    from zlc_ui.fluent.style import ACCENT_TINT, BG, ORANGE_TINT, RED_TINT, SELECTED, SELECTION_EDGE
 
     grid = FluentSelectionGrid(host)
     grid.set_grid(("a", "b"), ("0", "1", "2", "3"),
                   {(row, column): str(column) for row in range(2) for column in range(4)})
-    grid.set_selected([(0, 0), (0, 1), (1, 2)])
+    grid.set_selected([(0, 0), (0, 1), (1, 2), (1, 3)])
     # (0, 1) is chosen by a rule: derived wins over the selection's fill.
-    grid.set_cell_states({(0, 1): "derived", (1, 2): "warning"})
+    grid.set_cell_states({(0, 1): "derived", (1, 2): "warning", (1, 3): "kept"})
     grid.resize(grid.sizeHint())
     _shown(app, host, grid)
     viewport = grid.viewport()
@@ -106,6 +106,9 @@ def test_a_chosen_grid_card_is_the_selected_fill_and_nothing_round_it(app, host)
     assert ACCENT_TINT.upper() in top_row or len(top_row) > 1, "dashed, not solid"
     assert colour(warned.left() + 6, warned.center().y()) == RED_TINT.upper(), (
         "a warning shows even on a chosen card")
+    kept = card(1, 3)
+    assert colour(kept.left() + 6, kept.center().y()) == ORANGE_TINT.upper(), (
+        "a card kept with nothing to act on is amber, a note's ink, never red")
     # One extent for every card: the chosen face is as large as the edged one.
     def extent(rect):
         row = rect.center().y()

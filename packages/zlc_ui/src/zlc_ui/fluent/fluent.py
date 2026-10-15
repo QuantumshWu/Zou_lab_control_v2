@@ -63,6 +63,7 @@ from .style import (
     MUTED_LABEL_STYLE,
     ORANGE,
     ORANGE_DARK,
+    ORANGE_TINT,
     PADDING_V,
     PLACEHOLDER,
     RADIUS,
@@ -8567,12 +8568,15 @@ _GRID_STATE_ROLE = QtCore.Qt.UserRole + 1
 _GRID_NOTE_ROLE = QtCore.Qt.UserRole + 2
 #: The value a trailing action cell reports; None on every other cell.
 _GRID_ACTION_ROLE = QtCore.Qt.UserRole + 3
+#: Whether a row label reads as a row kept but not in use.
+_GRID_MUTED_ROLE = QtCore.Qt.UserRole + 4
 #: Cell states besides chosen/unchosen: reached by a rule rather than marked
 #: (a cell may be chosen AND derived: a pair a rule chose); marked but not
-#: honoured; wanted by nobody (an empty card in red dashes, so a name in a
-#: cell still means it was chosen); held by another row (an empty dashed
-#: outline that cannot be chosen here).
-GRID_CELL_STATES = ("derived", "warning", "missing", "held")
+#: honoured; marked and kept, with nothing to act on this time (amber, the
+#: ink of a note: nothing is wrong); wanted by nobody (an empty card in red
+#: dashes, so a name in a cell still means it was chosen); held by another
+#: row (an empty dashed outline that cannot be chosen here).
+GRID_CELL_STATES = ("derived", "warning", "kept", "missing", "held")
 
 
 def _mixed(first: str, second: str, weight: float) -> QtGui.QColor:
@@ -8604,12 +8608,14 @@ class _SelectionGridModel(QtCore.QAbstractTableModel):
         self._tips: dict[tuple[int, int], str] = {}
         self._row_notes: tuple[str, ...] = ()
         self._row_tips: tuple[str, ...] = ()
+        self._muted_rows: frozenset[int] = frozenset()
 
-    def reset(self, rows, columns, cells, *, row_notes=(), row_tips=()) -> None:
+    def reset(self, rows, columns, cells, *, row_notes=(), row_tips=(), muted_rows=()) -> None:
         self.beginResetModel()
         self._rows, self._columns, self._cells = tuple(rows), tuple(columns), dict(cells)
         self._states, self._tips = {}, {}
         self._row_notes, self._row_tips = tuple(row_notes), tuple(row_tips)
+        self._muted_rows = frozenset(int(row) for row in muted_rows)
         self.endResetModel()
 
     def set_states(self, states, tips) -> None:
@@ -8658,6 +8664,8 @@ class _SelectionGridModel(QtCore.QAbstractTableModel):
             return labels[section] if 0 <= section < len(labels) else None
         if rows and role == _GRID_NOTE_ROLE and 0 <= section < len(self._row_notes):
             return self._row_notes[section]
+        if rows and role == _GRID_MUTED_ROLE:
+            return section in self._muted_rows
         if rows and role == QtCore.Qt.ToolTipRole and 0 <= section < len(self._rows):
             tip = self._row_tips[section] if section < len(self._row_tips) else ""
             return "\n".join(part for part in (tip, self._label_tip) if part) or None
@@ -8774,7 +8782,9 @@ class _SelectionGridDelegate(QtWidgets.QStyledItemDelegate):
     and its name in DERIVED_INK: the dashes say "a rule put this here".  A
     WARNING cell -- chosen but not honoured -- is RED_TINT with its name in
     RED_DARK, chosen or not, so the problem is never hidden under the
-    selection; a MISSING cell is an empty card in red dashes and a HELD one
+    selection; a KEPT cell -- chosen, kept, with nothing to act on this
+    time -- is the same card in amber (ORANGE_TINT, its name in
+    ORANGE_DARK), the ink of a note rather than a problem; a MISSING cell is an empty card in red dashes and a HELD one
     an empty dashed outline (somebody else's frame).  A disabled grid shows
     every card on the BG face with the chosen names in DISABLED_INK, so
     what is chosen still reads but nothing invites a click.  Names sit on
@@ -8796,6 +8806,7 @@ class _SelectionGridDelegate(QtWidgets.QStyledItemDelegate):
         hovered = bool(option.state & QtWidgets.QStyle.State_MouseOver) and not held and live
         derived = state == "derived"
         warning = state == "warning"
+        kept = state == "kept"
         edge = None
         if held:
             fill, edge = None, DIVIDER
@@ -8803,6 +8814,8 @@ class _SelectionGridDelegate(QtWidgets.QStyledItemDelegate):
             fill = BG
         elif warning:
             fill = _mixed(RED_TINT, RED, 0.19).name() if hovered else RED_TINT
+        elif kept:
+            fill = _mixed(ORANGE_TINT, ORANGE, 0.19).name() if hovered else ORANGE_TINT
         elif derived:
             fill, edge = (_mixed(ACCENT_TINT, SELECTED, 0.4).name() if hovered else ACCENT_TINT), SELECTION_EDGE
         elif selected:
@@ -8815,10 +8828,10 @@ class _SelectionGridDelegate(QtWidgets.QStyledItemDelegate):
         rect = _paint_grid_card(painter, grid.viewport(), cell, fill, edge)
         # A name says the row has the cell; the empty states say nobody, or
         # somebody else, has it -- named only as the preview under the pointer.
-        if selected or hovered or derived or warning:
+        if selected or hovered or derived or warning or kept:
             ink = (
                 DISABLED_INK if not live
-                else RED_DARK if warning else DERIVED_INK if derived
+                else RED_DARK if warning else ORANGE_DARK if kept else DERIVED_INK if derived
                 else TEXT if selected else MUTED_INK
             )
             # The font the grid sizes its columns with (set_grid).
@@ -8892,6 +8905,10 @@ class _SelectionGridRowHeader(QtWidgets.QHeaderView):
         note = model.headerData(section, QtCore.Qt.Vertical, _GRID_NOTE_ROLE)
         return str(label or ""), str(note or "")
 
+    def _muted(self, section: int) -> bool:
+        model = self.model()
+        return model is not None and bool(model.headerData(section, QtCore.Qt.Vertical, _GRID_MUTED_ROLE))
+
     def two_line_height(self) -> int:
         label, note = self._fonts()
         return QtGui.QFontMetrics(label).height() + QtGui.QFontMetrics(note).height() + row_gap()
@@ -8946,9 +8963,10 @@ class _SelectionGridRowHeader(QtWidgets.QHeaderView):
             painter.setPen(QtCore.Qt.NoPen)
             painter.setBrush(QtGui.QColor(ACCENT_TINT))
             painter.drawRoundedRect(wash, _radius(), _radius())
+        # A muted row -- kept, not in use -- reads quieter until the pointer is on it.
         ink = (
             DISABLED_INK if not self.isEnabled()
-            else TEXT if self.activatable or hovered else MUTED_INK
+            else TEXT if hovered or self.activatable and not self._muted(section) else MUTED_INK
         )
         painter.setFont(label_font)
         painter.setPen(QtGui.QColor(ink))
@@ -9006,13 +9024,15 @@ class FluentSelectionGrid(QtWidgets.QTableView):
     ``toggle=True`` is the grid for marking many cells one by one: a click
     turns one cell on or off and a drag sweeps a run of them, headers select
     nothing, and ``selection_edited`` comes once the gesture is over.  Rows
-    may carry a muted second line (:meth:`set_grid` ``row_notes``).
+    may carry a muted second line (:meth:`set_grid` ``row_notes``), and a row
+    kept but not in use reads muted (``muted_rows``).
     ``row_actions`` -- ``(value, glyph, tooltip)`` -- end every row with one
     small glyph cell per action, after a narrow gap; ``label_action`` --
     ``(value, tooltip)`` -- makes each row label a link.  Both are reported
     as ``row_action(row, value)`` and never change the selection.
     :meth:`set_cell_states` marks cells a rule reached ("derived"), that
-    cannot be honoured ("warning"), that nobody has ("missing") or that
+    cannot be honoured ("warning"), that are kept with nothing to act on
+    this time ("kept"), that nobody has ("missing") or that
     another row holds ("held", not choosable: the pointer says so, and a
     click shows the cell's tooltip at once).  :meth:`set_label_width` ends
     the row-label column where a form's label column ends, so the first
@@ -9096,16 +9116,19 @@ class FluentSelectionGrid(QtWidgets.QTableView):
     def set_grid(self, rows: Sequence[str], columns: Sequence[str],
                  cells: "dict[tuple[int, int], str]", *,
                  row_notes: Sequence[str] = (), row_tips: Sequence[str] = (),
+                 muted_rows: Sequence[int] = (),
                  narrow_columns: Sequence[int] = ()) -> None:
         """Header labels, and the label of every selectable ``(row, column)``.
 
         ``row_notes`` puts a muted second line under row labels;
+        ``muted_rows`` are rows kept but not in use, whose labels read muted;
         ``narrow_columns`` are gaps between column groups, holding no cells.
         """
 
         self._programmatic = True
         try:
-            self._grid_model.reset(rows, columns, cells, row_notes=row_notes, row_tips=row_tips)
+            self._grid_model.reset(rows, columns, cells, row_notes=row_notes, row_tips=row_tips,
+                                   muted_rows=muted_rows)
         finally:
             self._programmatic = False
         # Wide enough for the longest label: a frame may be named, not numbered.
