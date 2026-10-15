@@ -16,8 +16,11 @@ WHAT IT PUBLISHES.  One dataset, ``survival``, holding the selected forward
 frame pairs as ONE labelled point axis.  The selection is a rule resolved
 against the frames a cycle actually carries -- every forward pair, the
 consecutive ones, those from the first frame or those to the last -- or an
-explicit list of pairs.  Every forward pair of a three-frame cycle is the pair
-entries "0→1", "0→2", "1→2" straight from the data (:func:`pair_label`, the
+explicit list of pairs.  A selected pair whose middle frame the cycle does
+not carry is kept, not refused: it is published again once a cycle that has
+it returns, and the run record names it (``absent_pairs``).  Every forward
+pair of a three-frame cycle is the pair entries "0→1", "0→2", "1→2"
+straight from the data (:func:`pair_label`, the
 one spelling of a pair; a dash is a range of frames) -- one identity per
 pair, the calibration model-axis pattern (numeric identity, readable
 labels).  A pair is WHICH sub-measurement of the cycle is being asked
@@ -321,15 +324,15 @@ class FrameSurvivalProcessor:
         if saved is not None and (saved[0] is schema or saved[0] == schema):
             return saved[1]
         frame_axis, _site_axis = self._source_axes(schema)
+        # A selected pair the cycle does not carry stays authored and is left
+        # out of this source's pairs: the pair axis names what is published.
         pairs, absent = _selected_pairs(self.pairs, self.pair_overrides, frame_axis.size)
-        if any(selected for _start, _end, selected in absent):
-            raise ValueError(
-                "frame survival selected pairs need frame "
-                + ", ".join(str(end) for _start, end, selected in absent if selected) + " "
-                f"but the source carries {frame_axis.size} frames"
-            )
         if not pairs:
-            raise ValueError("frame survival pairs must contain at least one pair for this source")
+            kept = ", ".join(pair_label(start, end) for start, end, selected in absent if selected)
+            raise ValueError(
+                f"this {frame_axis.size}-frame source has no selected frame survival pair"
+                + (f" (kept for a longer cycle: {kept})" if kept else "")
+            )
         rows = _frame_rows(schema, frame_axis)
         output = self._output_schema(schema, frame_rows=rows, pairs=pairs)
         if canonical:
@@ -438,11 +441,15 @@ class FrameSurvivalProcessor:
         source = next(iter(inputs.values()))
         frame_axis, _site = self._source_axes(source.schema)
         pairs = self._plan(source.schema)[3]
+        _pairs, absent = _selected_pairs(self.pairs, self.pair_overrides, frame_axis.size)
         return {
             "parameters": {
                 "occupancy_signal": self.source_signal or source.name,
                 "frames": frame_axis.size,
                 "pairs": pairs,
+                # Kept in the draft and in this record, never published: the
+                # selected pairs this cycle does not carry, as authored.
+                "absent_pairs": tuple((start, end) for start, end, selected in absent if selected),
             },
         }
 

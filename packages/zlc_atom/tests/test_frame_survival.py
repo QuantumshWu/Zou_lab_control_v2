@@ -180,11 +180,18 @@ def test_single_frame_and_wrong_shapes_are_refused() -> None:
                   ((-1, 1),), ((0., 1),), ((False, 1),)):
         with pytest.raises(ValueError, match="pair"):
             FrameSurvivalProcessor(pairs=pairs)
-    selected = FrameSurvivalProcessor(pairs=((1, 3),))
-    with pytest.raises(ValueError, match="need frame 3"):
-        selected._pair(_occupied_snapshot(np.zeros((1, 3, 2), dtype=bool)))
+    # A selected pair the cycle does not carry is kept and left out, named in
+    # the run record; it is published again once a cycle that has it returns.
+    selected = FrameSurvivalProcessor(pairs=((0, 1), (1, 3)))
+    three = _occupied_snapshot(np.zeros((1, 3, 2), dtype=bool))
+    assert selected._pair(three).block.schema.point_domain.axes[0].coordinate_labels == ("0→1",)
+    parameters = selected.describe_run({"occupied": SignalValue("occupied", three, None)})["parameters"]
+    assert parameters["pairs"] == ((0, 1),) and parameters["absent_pairs"] == ((1, 3),)
     restored = selected._pair(_occupied_snapshot(np.zeros((1, 5, 2), dtype=bool)))
-    assert restored.block.schema.point_domain.axes[0].coordinate_labels == ("1→3",)
+    assert restored.block.schema.point_domain.axes[0].coordinate_labels == ("0→1", "1→3")
+    # Only a source with none of the selected pairs fails the run.
+    with pytest.raises(ValueError, match=r"has no selected frame survival pair \(kept for a longer cycle: 1→3\)"):
+        FrameSurvivalProcessor(pairs=((1, 3),))._pair(three)
 
 
 @pytest.mark.parametrize("rule, expected", (
@@ -240,12 +247,15 @@ def test_pair_overrides_keep_the_rule_and_last_identity() -> None:
                             (4, ("0→1", "0→3"))):
         result = built._pair(_occupied_snapshot(np.zeros((1, count, 2), dtype=bool)))
         assert result.block.schema.point_domain.axes[0].coordinate_labels == expected
-    # A middle index never becomes the last frame when the source shrinks.
+    # A middle index never becomes the last frame when the source shrinks:
+    # it is kept, left out, and named in the run record.
     middle = LOGIC_NODE.build(source_signal="@logic/occupancy/occupied", selection="custom",
-                             pairs=({"start": "0", "end": "2"},))
-    with pytest.raises(ValueError, match="need frame 2"):
-        middle._pair(_occupied_snapshot(np.zeros((1, 3, 2), dtype=bool)))
-    assert middle._pair(_occupied_snapshot(np.zeros((1, 4, 2), dtype=bool))).block.values.shape == (1, 1, 2)
+                              pairs=({"start": "0", "end": "2"}, {"start": "1", "end": "last"}))
+    three = _occupied_snapshot(np.zeros((1, 3, 2), dtype=bool))
+    assert middle._pair(three).block.schema.point_domain.axes[0].coordinate_labels == ("1→2",)
+    assert middle.describe_run({"occupied": SignalValue("occupied", three, None)})[
+        "parameters"]["absent_pairs"] == ((0, 2),)
+    assert middle._pair(_occupied_snapshot(np.zeros((1, 4, 2), dtype=bool))).block.values.shape == (1, 2, 2)
 
 
 def test_pair_matrix_selects_like_a_table_and_writes_the_draft() -> None:
@@ -351,10 +361,10 @@ def test_pair_matrix_selects_like_a_table_and_writes_the_draft() -> None:
             {"start": "0", "end": "1", "selected": True},)}}
         project(**drafts[-1]["values"])
         assert marked() == [(0, 1)] and form.presets.current() == "custom"
-        # Pairs the source no longer carries are named, not dropped silently.
+        # Pairs the source no longer carries are kept and named in amber, not dropped.
         drafts.clear()
         project(selection="custom", pairs=({"start": "0", "end": "1"}, {"start": "2", "end": "5"}))
-        assert marked() == [(0, 1)] and form.note.text() == "not in this source: 2→5." and drafts == []
+        assert marked() == [(0, 1)] and form.note.text() == "kept, not in this source: 2→5." and drafts == []
         # The strip always marks one choice: a list with pairs is Selected.
         assert derived() == [] and form.presets.current() == "custom"
         # The reported 22-frame case: a real Ctrl click excludes only first→last.

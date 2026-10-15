@@ -78,9 +78,11 @@ def _build(*, source_signal: str, **values: object) -> FrameSurvivalProcessor:
 def _editor_factory(parent=None):
     from PyQt5 import QtCore, QtWidgets
     from zlc_ui.fluent import (
-        FluentSegmentedButtons, FluentSelectionGrid, error_note_label, muted_note_label, row_gap, show_problem,
+        FONT, ORANGE_DARK, FluentSegmentedButtons, FluentSelectionGrid, error_note_label, fluent_font_size,
+        muted_note_label, row_gap, show_note,
     )
     from zlc_ui.fluent.column_set import section_header
+    from zlc_ui.status import sentence
     from .processor import PAIR_RULES
 
     labels = {choice.value: choice.label for choice in _SELECTIONS}
@@ -104,6 +106,9 @@ def _editor_factory(parent=None):
         under None it begins an empty one.  A pair marked under None begins
         a Selected list with it.
 
+        A selected pair whose middle frame the source does not carry is kept,
+        never refused or dropped: an amber note names it.
+
         "Pairs" heads the section in the editor's label column, so the strip
         and the grid's first card start on the form's field edge.
         """
@@ -126,7 +131,10 @@ def _editor_factory(parent=None):
             self.table = FluentSelectionGrid(self)
             self.table.selection_edited.connect(self._marked)
             layout.addWidget(self.table, 0, QtCore.Qt.AlignLeft)
+            # The error line's shape in the amber of a note: said, not refused.
             self.note = error_note_label()
+            self.note.setStyleSheet(
+                f'color: {ORANGE_DARK}; background: transparent; border: none; font: {fluent_font_size()}pt "{FONT}";')
             layout.addWidget(self.note)
             self._frames = None
             self._selection = "all"
@@ -208,7 +216,7 @@ def _editor_factory(parent=None):
                 self.table.set_cell_states({})
                 self._wanted = ()
                 self.summary.setText("Waiting for the source frames")
-                show_problem(self.note, "")
+                show_note(self.note, "")
                 return
             count = len(frames)
             listed = () if selection == "none" else tuple(
@@ -234,8 +242,8 @@ def _editor_factory(parent=None):
             # Named with the strip's own word for its current segment.
             self.summary.setText(
                 f"{self.presets.button(selection).text()} · {len(wanted)} of {count * (count - 1) // 2} pairs")
-            show_problem(self.note, "" if not absent else "not in this source: " + ", ".join(
-                pair_label(start, end) for start, end, _selected in absent))
+            show_note(self.note, "" if not absent else sentence("kept, not in this source: " + ", ".join(
+                pair_label(start, end) for start, end, _selected in absent)))
 
         def set_mutation_enabled(self, enabled):
             self.setEnabled(enabled)
@@ -256,7 +264,9 @@ LOGIC_NODE = LogicNodeDescriptor(
         "frames the source carries; none asks for no pair (Start waits for a rule or a pair). "
         "Pair rows override the rule with selected=true/false; "
         "custom lists only included pairs. Endpoints use text '0'/'last'; numbered "
-        "middle frames keep their index when the cycle changes. "
+        "middle frames keep their index when the cycle changes, and a selected pair "
+        "whose middle frame the source lacks is kept and left out of the run, which "
+        "fails only when no selected pair is left. "
         "Feed survival to Seamless Scan and use a site Facet with native Exponential "
         "fitting for per-site lifetimes."
     ),

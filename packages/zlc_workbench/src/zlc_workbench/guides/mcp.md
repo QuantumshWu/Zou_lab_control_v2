@@ -145,9 +145,13 @@ rule and store only exceptions, e.g. `{"selection":"from_first","pairs":[
 pair, including newly added middle frames, but excludes first-to-last. `custom`
 starts with no pairs and explicitly selects rows, e.g. `{"selection":"custom",
 "pairs":[{"start":"0","end":"last","selected":true}]}`. Endpoints are text:
-`0` is first, `last` is last, and positive indices name middle frames. Camera
-draft changes update Occupancy and Frame Survival editors before new data arrives;
-runtime data still follows the actual acquired source schema.
+`0` is first, `last` is last, and positive indices name middle frames. A selected
+pair whose middle frame the source does not carry stays in the draft, is left out
+of this source's pairs and is named in the run record (`absent_pairs`); it does
+not stop Start, and a run fails only when none of its selected pairs is in the
+source. The operator keeps such pairs on purpose: never delete one to make Start
+work. Camera draft changes update Occupancy and Frame Survival editors before new
+data arrives; runtime data still follows the actual acquired source schema.
 
 Derive is within-shot algebra on one producer's bundle; averages over shots,
 per-site probabilities and fits belong in a plot panel. Read the exact member,
