@@ -20,6 +20,10 @@ from __future__ import annotations
 #: Every severity a console status line may carry, worst last.
 STATUS_SEVERITIES: tuple[str, ...] = ("idle", "warning", "task", "error")
 
+#: Every state a status DOT shows for something that lasts -- a node, a board,
+#: a session, a device field, the console.
+STATUS_STATES: tuple[str, ...] = ("idle", "running", "warning", "error")
+
 #: Between the parts of one summary line -- a file and its period count, a
 #: panel count and a node count, what is shown and what is hidden.  One
 #: mark for every window, so no two summaries part their words differently.
@@ -73,4 +77,4 @@ def name_words(name: str) -> str:
     return " ".join(words)
 
 
-__all__ = ["STATUS_SEVERITIES", "SUMMARY_SEPARATOR", "counted", "name_words", "sentence"]
+__all__ = ["STATUS_SEVERITIES", "STATUS_STATES", "SUMMARY_SEPARATOR", "counted", "name_words", "sentence"]

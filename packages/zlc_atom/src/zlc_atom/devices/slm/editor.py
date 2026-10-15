@@ -15,10 +15,10 @@ from PyQt5 import QtCore, QtWidgets
 from zlc_data import SPATIAL_X, SPATIAL_Y
 from zlc_plot import PANEL_SIZE_NAMES, AxisRef, ImagePlot, PlotLabels
 from zlc_ui.fluent import (
-    FluentButton, FluentComboBox, FluentDoubleSpinBox, FluentFrame,
+    FluentButton, FluentComboBox, FluentDoubleSpinBox, FluentFrame, FluentLabel,
     FluentLineEdit, FluentPopup, FluentScrollArea, FluentSegmentedButtons, FluentSettingsPopupAnchor,
     FluentSpinBox, FluentSwitch, FluentTabWidget, add_row_switch, fluent_open_path, fluent_save_path,
-    open_fluent_window,
+    open_fluent_window, set_status_ink,
 )
 from zlc_ui.status import name_words
 
@@ -299,6 +299,7 @@ class SlmEditorControl(QtCore.QObject):
             )
         )
         clear = FluentButton("Clear", edit, role="destructive")
+        clear.setToolTip("Empty the target; the SLM keeps its current phase")
         clear.clicked.connect(
             lambda: self.set_target(
                 np.zeros(self.shape, dtype=np.float32), objective_kind="spots"
@@ -321,9 +322,10 @@ class SlmEditorControl(QtCore.QObject):
             "uniform full-raster illumination; center and diameter still define "
             "the Zernike unit disk."
         )
-        self._pupil_status = QtWidgets.QLabel(
-            self._pupil_applied_description, layers
-        )
+        # The two layer lines describe a setting, not an event: the idle
+        # status ink (nothing under way, nothing wrong).
+        self._pupil_status = FluentLabel(self._pupil_applied_description, layers)
+        set_status_ink(self._pupil_status, "idle")
         self._pupil_edit = FluentButton("Edit…", layers)
         self._build_pupil_popup(page)
         self._pupil_edit.clicked.connect(
@@ -335,7 +337,8 @@ class SlmEditorControl(QtCore.QObject):
 
         self._zernike_enabled = FluentSwitch("Zernike", layers)
         self._zernike_enabled.setChecked(False)
-        self._zernike_status = QtWidgets.QLabel("Off", layers)
+        self._zernike_status = FluentLabel("Off", layers)
+        set_status_ink(self._zernike_status, "idle")
         zernike_edit = FluentButton("Edit…", layers)
         zernike_edit.clicked.connect(
             lambda: self._layer_tabs.setCurrentIndex(self._wavefront_tab_index)
@@ -395,9 +398,11 @@ class SlmEditorControl(QtCore.QObject):
         self._sync_send_enabled()
         buttons.addWidget(self._send)
         root.addWidget(files)
-        self._status = QtWidgets.QLabel("Solving latest target…", page)
+        self._status = FluentLabel("", page)
+        self._show_status("Solving latest target…")
         root.addWidget(self._status)
-        self._device_status = QtWidgets.QLabel("Device command: checking…", page)
+        self._device_status = FluentLabel("Device command: checking…", page)
+        set_status_ink(self._device_status, "idle")
         root.addWidget(self._device_status)
         return page
 
@@ -409,9 +414,9 @@ class SlmEditorControl(QtCore.QObject):
         self._phase_host.set_size(selected)
         self._wavefront_host.set_size(selected)
         if self._running or self._pending is not None:
-            self._status.setText("Solving latest target…")
+            self._show_status("Solving latest target…")
         else:
-            self._status.setText(f"Plot size {selected}; hardware unchanged")
+            self._show_status(f"Plot size {selected}; hardware unchanged")
 
     @staticmethod
     def _popup_form(parent: QtWidgets.QWidget, anchor: QtWidgets.QWidget):
@@ -640,7 +645,7 @@ class SlmEditorControl(QtCore.QObject):
             self._queue_solve()
         else:
             self._pending = None
-            self._status.setText("Empty target; hardware unchanged")
+            self._show_status("Empty target; hardware unchanged")
 
     def _build_layer_tabs(self, parent: QtWidgets.QWidget) -> FluentTabWidget:
         tabs = FluentTabWidget(parent)
@@ -691,7 +696,10 @@ class SlmEditorControl(QtCore.QObject):
                 setattr(self, key, spin)
             else:
                 self._zernike[key] = spin
-        reset = FluentButton("Reset wavefront", parameter_page)
+        reset = FluentButton("Reset wavefront", parameter_page, role="destructive")
+        reset.setToolTip(
+            "Set steering and every Zernike coefficient to zero; the SLM keeps its current phase"
+        )
         reset.clicked.connect(self._reset_wavefront)
         wave_layout.addWidget(reset, 7, 0, 1, 4)
         wave_root.addWidget(self._wavefront_parameter_scroll, 0)
@@ -738,13 +746,11 @@ class SlmEditorControl(QtCore.QObject):
         )
         self._compose_phase()
         self._sync_send_enabled()
-        status = getattr(self, "_status", None)
-        if status is not None:
-            status.setText(
-                "Solving latest target…"
-                if self._running or self._pending is not None
-                else "Science phase updated; hardware unchanged"
-            )
+        self._show_status(
+            "Solving latest target…"
+            if self._running or self._pending is not None
+            else "Science phase updated; hardware unchanged"
+        )
 
     def _compose_phase(self) -> None:
         operator = self._operator_settings()
@@ -807,7 +813,7 @@ class SlmEditorControl(QtCore.QObject):
             self._queue_solve()
         else:
             self._pending = None
-            self._status.setText("Empty target; hardware unchanged")
+            self._show_status("Empty target; hardware unchanged")
 
     def set_phase(self, values: object, metadata: object = None) -> None:
         self._last_error = None
@@ -848,7 +854,7 @@ class SlmEditorControl(QtCore.QObject):
         self._show_phase()
         self._show_wavefront()
         self._sync_send_enabled()
-        self._status.setText(
+        self._show_status(
             "Science phase loaded; wavefront reset; hardware unchanged"
         )
         self._sync_device_state()
@@ -1073,7 +1079,15 @@ class SlmEditorControl(QtCore.QObject):
 
     def _report_error(self, error: object) -> None:
         self._last_error = str(error)
-        self._status.setText(self._last_error)
+        self._show_status(self._last_error, "error")
+
+    def _show_status(self, text: str, word: str = "task") -> None:
+        """The status line: what the editor last did or is doing (``task``),
+        in the ink of its status word -- an error red, a wait that is
+        overdue orange (:data:`zlc_ui.fluent.STATUS_CUES`)."""
+
+        self._status.setText(text)
+        set_status_ink(self._status, word)
 
     def _guarded(self, what: str, handler):
         """Wrap one device-touching slot so a defect cannot kill the bench.
@@ -1146,6 +1160,7 @@ class SlmEditorControl(QtCore.QObject):
         except Exception as error:
             self._last_error = f"Device state unavailable: {error}"
             self._device_status.setText(self._last_error)
+            set_status_ink(self._device_status, "error")
             return
         # A poll started before an explicit Adopt/command may arrive afterward.
         # Device revisions, not callback order, decide which observation is new.
@@ -1180,6 +1195,7 @@ class SlmEditorControl(QtCore.QObject):
         if self._phase_metadata.get("source") == "science-context":
             text += f" · context provenance {self._context_command_receipt['identity']}"
         self._device_status.setText(text)
+        set_status_ink(self._device_status, "warning" if self._device_diverged else "idle")
         self._adopt.setEnabled(not self._command_active and phase is not None)
         self._sync_send_enabled()
 
@@ -1203,7 +1219,7 @@ class SlmEditorControl(QtCore.QObject):
             self._report_error("Device command outcome is unknown; nothing can be adopted")
             return False
         self.set_phase(phase, {"source": "explicit-device-adopt"})
-        self._status.setText("Device command adopted as a 16-bit frozen Pattern draft")
+        self._show_status("Device command adopted as a 16-bit frozen Pattern draft")
         return True
 
     def _queue_solve(self) -> None:
@@ -1219,7 +1235,7 @@ class SlmEditorControl(QtCore.QObject):
             np.array(self._pupil_amplitude, copy=True),
             optimizer_state,
         )
-        self._status.setText("Solving latest target…")
+        self._show_status("Solving latest target…")
         if not self._running:
             self._start_pending()
 
@@ -1264,7 +1280,7 @@ class SlmEditorControl(QtCore.QObject):
                 )
                 self._phase_request_revision = revision
                 self._compose_phase()
-                self._status.setText(f"Solved with {metadata['method']}; hardware unchanged")
+                self._show_status(f"Solved with {metadata['method']}; hardware unchanged")
         self._sync_send_enabled()
         self._start_pending()
         if self._closed and self._window is not None:
@@ -1455,7 +1471,7 @@ class SlmEditorControl(QtCore.QObject):
         self._phase_request_revision = self._request_revision
         self._show_phase(); self._show_wavefront(); self._sync_device_state()
         self._last_error = None
-        self._status.setText("Frozen Science Context loaded; hardware unchanged")
+        self._show_status("Frozen Science Context loaded; hardware unchanged")
 
     def _save_context_operation(self, path: object):
         if self._phase_request_revision != self._request_revision:
@@ -1506,7 +1522,7 @@ class SlmEditorControl(QtCore.QObject):
         self._command_active = True
         self._last_error = None
         self._sync_send_enabled()
-        self._status.setText("Working…")
+        self._show_status("Working…")
         try:
             future = self._command_executor.submit(
                 self._run_device_command, label, operation,
@@ -1586,7 +1602,7 @@ class SlmEditorControl(QtCore.QObject):
                     self._draft_command_revision = command_revision
                     self._context_command_receipt = receipt
             if completion is None:
-                self._status.setText(label)
+                self._show_status(label)
         self._sync_device_state()
         if self._closed and self._window is not None:
             QtCore.QTimer.singleShot(0, self._window.close)
@@ -1668,7 +1684,7 @@ class SlmEditorControl(QtCore.QObject):
             self._spot_optimizer_state = None
             self._stop.set()
             self._body.setEnabled(False)
-            self._status.setText("Stopping SLM Editor…")
+            self._show_status("Stopping SLM Editor…")
             self._executor.shutdown(wait=False, cancel_futures=True)
             self._command_executor.shutdown(wait=False, cancel_futures=False)
             # Painting is over: the filter comes off the target widget NOW.
@@ -1702,8 +1718,9 @@ class SlmEditorControl(QtCore.QObject):
                 # finish the close when it does.  Stopping altogether
                 # left the operator a window that said it was waiting
                 # for active work to finish and then never closed.
-                self._status.setText(
-                    "SLM Editor close timed out; waiting for active work to finish"
+                self._show_status(
+                    "SLM Editor close timed out; waiting for active work to finish",
+                    "warning",
                 )
                 QtCore.QTimer.singleShot(500, self._window.close)
             else:

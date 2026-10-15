@@ -25,6 +25,9 @@ marks a successfully applied value: it is green and read-only, while the binding
 button remains usable. `binding_editable=False` locks an external Subpulse's
 internal bindings. Config selection is carried by `config_mode_committed(bool)`
 and projected through `set_config_mode`; Refresh uses `refresh_effective_requested`.
+`ConnectionVM.status_word` is the connection's state (`running` attached and
+read, `idle` attached to nothing, `warning` attached but undescribed, `error` a
+failed connect, disconnect or read); its `status` line is written in that ink.
 
 `ScheduleVM` carries `(document_generation, revision)`. `PulseScheduleView`
 rejects an older pair and accepts an identical pair idempotently; a different
@@ -64,7 +67,10 @@ row. It applies to the whole Pulse; switching it off restores embedded defaults.
 
 Value Config and Subpulse Config remain adjacent. A Subpulse's small source
 control on the main timeline selects Default or Config. The three vertical
-operations remain Expand, Edit and Ungroup. Edit selects that Subpulse in the
+operations remain Expand, Edit and Ungroup. Expand reads Collapse on an
+expanded Subpulse and is held down (the active face) while it is expanded.
+Ungroup dissolves the Subpulse: it is red, like every command that takes
+something away, and acts on one click. Edit selects that Subpulse in the
 original single-object editor: a selector, one Subpulse file/Browse row and the
 horizontal Period/Bracket surface, then its Subpulse bindings (a field and the
 Config name it binds, as in Value Config's Pulse bindings).
@@ -78,7 +84,8 @@ measure, `count_box_width`: a five-digit count whole beside the stepper,
 widened before a longer count is shown and while one is typed.  The two whose
 0 runs forever show it as ∞.  The
 Control card's Hide side panels / Show side panels hides and restores the
-Port catalog and Delay / Scan; Collapse is only an expanded Subpulse's command.
+Port catalog and Delay / Scan, and is held down while the panels are hidden;
+Collapse is only an expanded Subpulse's command.
 
 `set_subpulse_sources` supplies selector/reference metadata; `selected_id` in
 `set_component_document` identifies the selected Subpulse independently of
@@ -130,7 +137,10 @@ The value-level setters (`set_period`, `set_delay_row`, `set_port_label`,
 `set_visible_ports`) update the accepted `ScheduleVM` the view holds as
 well as the controls, so the next rebuild from that model shows the same
 thing the controls do.  A port whose `kind` changes under the same key is
-rebuilt as a new row.  `set_visible_ports` re-flags the rows only; the
+rebuilt as a new row.  A delay row's last two commands turn a digital output
+on or off in every period (the ring, with a dot for on); an analog output has
+no level to fill, so its fill is disabled and its other command is the ghost
+`×` that removes the output's steps on one click.  `set_visible_ports` re-flags the rows only; the
 `visible_text` count is worded by the presenter and arrives with
 `set_summary`.
 
@@ -179,14 +189,18 @@ facts from the presenter, never inferred from the unsaved table. Open array… i
 on Scan; Edit has only a compact jump-to-Config status button.
 
 `PulseTargetView` accepts `set_ports(records, editable, status_text,
-reserved=())`, `set_width_rules(digital, dac)`, and `set_feedback(text)`.
+reserved=())`, `set_width_rules(digital, dac)`, and `set_feedback(text, word)`.
 `reserved` names ports the target holds with no row on the page (a clock no
-DAC latches with); Add never mints one. The `apply_requested` payload is
+DAC latches with); Add never mints one.  `status_text` is a note in the idle
+ink; `set_feedback` writes its line in the ink of status `word`
+(`STATUS_CUES`), so a refusal is red.  Each port row ends in the ghost `×`
+that removes it on one click. The `apply_requested` payload is
 `tuple[TargetPortRecord, ...]`; manifest construction and domain validation
 stay in the presenter.
 
 `PulsePreviewView` accepts `set_size_names(tuple[str, ...])`,
-`set_preview_size(size)`, `set_status`, `show_placeholder`, and
+`set_preview_size(size)`, `set_status(text, word)` (its line in the ink of
+status `word`), `show_placeholder`, and
 `mount_content(widget, logical_size=..., wheel_target=...)`. The latter is a
 QWidget mount point, not a renderer. It emits `include_off_toggled`,
 `selectors_toggled`, `size_committed`, and `save_requested`.  Whether the

@@ -7,11 +7,10 @@ from difflib import SequenceMatcher
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 from zlc_ui.fluent import (
-    FONT, MUTED_INK, TEXT, FluentButton, FluentComboBox,
-    ElidedLabel, FluentGroupBox, FluentLabel, FluentReadoutEdit, FluentScrollArea,
-    FluentSectionLabel, FluentTableView, centred_line_top, column_header_label, field_text_inset,
-    fluent_font_size, fluent_scrollbar_thickness,
-    read_editable_combo, retire_widget, signals_blocked,
+    FONT, MUTED_INK, TEXT, FluentButton, FluentComboBox, set_status_ink, ElidedLabel, FluentGroupBox,
+    FluentLabel, FluentReadoutEdit, FluentScrollArea, FluentSectionLabel, FluentTableView, centred_line_top,
+    column_header_label, field_text_inset, fluent_font_size, fluent_scrollbar_thickness, read_editable_combo,
+    retire_widget, signals_blocked,
 )
 
 from ._layout import (
@@ -183,8 +182,12 @@ class PulseConfigView(QtWidgets.QWidget):
         content.addStretch(1)
 
     def set_config_mode(self, enabled: bool, error: str = "") -> None:
+        """Say what Config does now -- a note -- or why it cannot, in the
+        error ink."""
+
         self.mode_label.setText(error or ("Config is on. Saved sources are applied."
                                         if enabled else "Config is off. Pulse defaults are used."))
+        set_status_ink(self.mode_label, "error" if error else "idle")
 
     def _entries(self) -> tuple[tuple[str, str, str], ...]:
         return tuple(

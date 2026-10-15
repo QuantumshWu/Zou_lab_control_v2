@@ -1686,7 +1686,7 @@ def test_control_apply_sends_the_authored_unit_and_keeps_canonical_provenance(wo
     flow._queue_device_tune("rf", "power", 135.0, "mVpp")
     assert calls == [("power", 135.0, "mVpp")], model["status"]
     assert len(refreshes) == 2, "Apply must consume its command readback, not refresh every field"
-    assert model["status"]["power"] == ("Applied", "ready")
+    assert model["status"]["power"] == ("Applied", "idle")
     assert model["desired"]["power"][0] == pytest.approx(135.125)
     assert model["desired"]["power"][1] == "mVpp"
     assert model["tunables"][0].metadata.unit == "mVpp"

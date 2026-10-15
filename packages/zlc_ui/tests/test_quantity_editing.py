@@ -164,10 +164,10 @@ projection = {
     'fields': {
         'drive': {'current': 120000000.0, 'desired': 120000000.0, 'editable': True,
                   'live_apply': False, 'live_enabled': True, 'apply_enabled': True,
-                  'status': '', 'severity': 'ready', 'reason': ''},
+                  'status': '', 'severity': 'idle', 'reason': ''},
         'mode': {'current': 'holding', 'desired': 'holding', 'editable': False,
                  'live_apply': False, 'live_enabled': False, 'apply_enabled': False,
-                 'status': '', 'severity': 'ready', 'reason': ''},
+                 'status': '', 'severity': 'idle', 'reason': ''},
     },
     'owners': (), 'reason': '', 'risk_accepted': False, 'risk_enabled': False,
 }

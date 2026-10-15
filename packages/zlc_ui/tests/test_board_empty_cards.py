@@ -278,7 +278,7 @@ assert face(remover, band) == QtGui.QColor(BG).name(), face(remover, band)
 QtTest.QTest.mouseClick(remover, QtCore.Qt.LeftButton)
 assert remover.role() == 'destructive_primary'
 assert face(remover, band) == QtGui.QColor(RED_DARK).name()
-card._disarm_header_remove()
+remover.disarm()
 app.processEvents()
 assert remover.role() == 'destructive'
 assert face(remover, band) == QtGui.QColor(BG).name()
@@ -286,7 +286,7 @@ assert face(remover, band) == QtGui.QColor(BG).name()
 card._open_settings(); app.processEvents()
 closer = card._settings_close_button
 popup = card._settings_popup
-assert closer.role() == 'quiet' and closer._glyph_ink() == MUTED_INK
+assert closer.role() == 'quiet' and closer.glyph_ink() == MUTED_INK
 assert closer.size() == QtCore.QSize(control_height(), control_height())
 assert face(closer, popup) == QtGui.QColor(SURFACE).name(), face(closer, popup)
 field = card._settings_form.widget_for('title')

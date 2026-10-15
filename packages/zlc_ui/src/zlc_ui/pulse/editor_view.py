@@ -8,11 +8,6 @@ from zlc_ui.fluent import (
     fluent_open_path,
     fluent_save_path,
     fluent_confirm,
-    ACCENT,
-    GREEN,
-    GREY,
-    ORANGE,
-    RED,
     FluentButton,
     fluent_message,
     FluentFrame,
@@ -33,6 +28,17 @@ from .component_view import PulseComponentView
 from .schedule_view import PulseScheduleView
 from .target_view import PulseTargetView
 from zlc_ui.status import sentence
+
+#: The board token the presenter projects -> the status word its dot shows.
+#: An open pulse on an idle board is idle: nothing is running yet.  Attached
+#: and silent is a failure, not a calm grey.
+PULSE_BOARD_STATES = {
+    "idle": "idle",
+    "dirty-ready": "idle",
+    "running-synced": "running",
+    "running-stale": "warning",
+    "unreachable": "error",
+}
 
 
 class PulseEditorView(QtWidgets.QWidget):
@@ -140,14 +146,7 @@ class PulseEditorView(QtWidgets.QWidget):
         self.summary_label.setText(str(text))
 
     def set_status_color(self, token: str) -> None:
-        colors = {
-            "running-synced": GREEN,
-            "running-stale": ORANGE,
-            "failed": RED,
-            "dirty-ready": ACCENT,
-            "idle": GREY,
-        }
-        self.status_dot.set_color(colors.get(str(token), GREY))
+        self.status_dot.set_state(PULSE_BOARD_STATES[str(token)])
 
     def set_capabilities(self, can_sync: bool, can_hold: bool, can_step: bool) -> None:
         self.schedule_view.set_capabilities(can_sync, can_hold, can_step)

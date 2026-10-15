@@ -60,6 +60,18 @@ QtTest.QTest.keyClicks(card.role_edit, 'output')
 QtTest.QTest.keyClick(card.role_edit, QtCore.Qt.Key_Return)
 card.type_combo.setCurrentIndex(1)
 card.form.widget_for('count').setValue(3)
+# The fold is a disclosure: its chevron's direction is its state, and it
+# never wears the held-down (active) face a toggle command does.
+fold = card.collapse_button
+assert fold.toolTip() == 'Hide parameters' and not fold.is_active()
+QtTest.QTest.mouseClick(fold, QtCore.Qt.LeftButton)
+assert card.form.isHidden() and fold.toolTip() == 'Show parameters'
+assert not fold.is_active()
+QtTest.QTest.mouseClick(fold, QtCore.Qt.LeftButton)
+assert not card.form.isHidden() and fold.toolTip() == 'Hide parameters'
+# Remove takes the device out on ONE click: only a logic node and a plot
+# panel are armed.
+assert card.remove_button.role() == 'destructive'
 QtTest.QTest.mouseClick(card.remove_button, QtCore.Qt.LeftButton)
 assert ('add', 'sensor.fake') in events
 assert ('role', 'id-1', 'output') in events
@@ -287,7 +299,7 @@ control.set_projection(spec, {
         'gain': {
             'current': 2, 'desired': 2, 'editable': True,
             'live_apply': False, 'live_enabled': True, 'apply_enabled': True,
-            'status': 'Ready', 'severity': 'ready', 'reason': '',
+            'status': 'Ready', 'severity': 'idle', 'reason': '',
         },
     },
 })
@@ -319,7 +331,7 @@ control.set_projection(spec, {
         'gain': {
             'current': 2, 'desired': 6, 'editable': True,
             'live_apply': True, 'live_enabled': True, 'apply_enabled': True,
-            'status': 'Ready', 'severity': 'ready', 'reason': '',
+            'status': 'Ready', 'severity': 'idle', 'reason': '',
         },
     },
 })
@@ -527,7 +539,7 @@ spec = FormSpec((
 def state(current, limits):
     return {'current': current, 'desired': current, 'editable': True,
             'live_apply': False, 'live_enabled': True, 'apply_enabled': False,
-            'status': '', 'severity': 'ready', 'reason': '', 'device_limits': limits}
+            'status': '', 'severity': 'idle', 'reason': '', 'device_limits': limits}
 initial = {
     'fields': {'power': state(-3.0, (-120.0, 30.0)), 'output': state(False, None),
                'frequency': state(1000.0, (1e-6, 160e6))},

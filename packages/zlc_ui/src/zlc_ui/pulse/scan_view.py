@@ -6,8 +6,8 @@ from PyQt5 import QtCore, QtWidgets
 
 from zlc_ui.fluent import (
     FONT, MUTED_LABEL_STYLE, ElidedLabel, FluentButton, FluentCodeEdit, FluentGroupBox, FluentLabel,
-    FluentSectionLabel, centred_line_top, fluent_count_box, fluent_font_size, retire_widget,
-    signals_blocked,
+    FluentSectionLabel, centred_line_top, fluent_count_box, fluent_font_size, retire_widget, signals_blocked,
+    set_status_ink,
 )
 from zlc_ui.form import being_edited
 
@@ -240,7 +240,7 @@ class PulseScanView(QtWidgets.QWidget):
         self.table_note_label.setText(str(record.table_note))
         self.table_note_label.setVisible(not record.table_text and bool(record.table_note))
         self.set_repeats(record.repeats)
-        self.set_progress_text(record.progress_text)
+        self.set_progress_text(record.progress_text, record.progress_word)
         self.set_workspace_busy(record.busy)
         self.set_progress_polling(record.progress_polling)
         if record.source_text != self.scan_code.toPlainText():
@@ -278,8 +278,11 @@ class PulseScanView(QtWidgets.QWidget):
                 self._bindings_layout.addWidget(line)
         self.bindings_box.setVisible(bool(records))
 
-    def set_progress_text(self, text: str) -> None:
+    def set_progress_text(self, text: str, word: str) -> None:
+        """The Scan page's line, in the ink of status ``word``."""
+
         self.scan_progress_label.setText(str(text))
+        set_status_ink(self.scan_progress_label, word)
 
     def set_scan_table_text(self, text: str) -> None:
         text = str(text)

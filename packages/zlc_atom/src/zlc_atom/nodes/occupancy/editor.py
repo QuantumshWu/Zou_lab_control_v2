@@ -18,8 +18,9 @@ A file with no frame is PARKED, not wrong: kept in the list, read for
 nothing and checked against nothing, its name muted and counted in the
 summary ("· 1 file not read") -- a later "Add calibration…" while another
 file reads the rest starts that way, and so does a file whose last frame
-was given to another.  A file is removed by the × that ends its row and
-replaced by clicking its name.  A file row is one line, as tall as every
+was given to another.  A file is replaced by the … and removed by the ×
+that end its row -- both on the row, where they are looked for -- and
+clicking its name replaces it too.  A file row is one line, as tall as every
 other control and one row pitch from the next: what the file is (its
 exposure, sites and model, or why it cannot be read) is in the name's
 tooltip with its path.  The readout model -- which model each file is read
@@ -47,22 +48,9 @@ from __future__ import annotations
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 from zlc_ui.fluent import (
-    FONT,
-    ORANGE_DARK,
-    TEXT,
-    FluentButton,
-    FluentLabel,
-    FluentSegmentedButtons,
-    FluentSelectionGrid,
-    error_note_label,
-    fluent_font_size,
-    fluent_open_path,
-    muted_note_label,
-    retire_widget,
-    row_gap,
-    scaled_px,
-    setting_label_width,
-    show_problem,
+    FONT, ORANGE_DARK, FluentButton, FluentLabel, FluentSegmentedButtons, FluentSelectionGrid,
+    error_note_label, fluent_font_size, fluent_open_path, muted_note_label, retire_widget, row_gap, scaled_px,
+    setting_label_width, show_problem,
 )
 from zlc_ui.fluent.column_set import section_header
 
@@ -100,7 +88,10 @@ class CalibrationsEditor(QtWidgets.QWidget):
         layout.addLayout(header)
         self.grid = FluentSelectionGrid(
             self, toggle=True,
-            row_actions=(("remove", "×", "Remove this calibration"),),
+            row_actions=(
+                ("replace", "…", "Choose another file", "quiet"),
+                ("remove", "×", "Remove this calibration"),
+            ),
             label_action=("replace", "Click to choose another file"),
         )
         # File names read as a list: they start on the editor's content edge.
@@ -114,7 +105,6 @@ class CalibrationsEditor(QtWidgets.QWidget):
         model_layout.setSpacing(row_gap())
         # A field label like "Frames" above it, not a second hint line.
         self.model_label = FluentLabel("Readout model")
-        self.model_label.setStyleSheet(f"color: {TEXT}; background: transparent; border: none;")
         model_layout.addWidget(self.model_label)
         self.model = FluentSegmentedButtons(
             tuple((choice.value, choice.label) for choice in READOUT_MODEL_CHOICES), self.model_row)

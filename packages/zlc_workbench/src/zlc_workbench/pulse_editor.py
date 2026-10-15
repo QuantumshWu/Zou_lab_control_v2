@@ -1294,6 +1294,7 @@ class PulseEditorPresenter:
         #: Runtime-only scan feedback.  Authored source, rows and repeats live
         #: only in ``_state`` beside the sequence they belong to.
         self._scan_progress = ""
+        self._scan_progress_word = "task"
         self._applied_scan: tuple[
             str,
             tuple[str, ...],
@@ -1365,6 +1366,7 @@ class PulseEditorPresenter:
         )
         self._owns_sequencer = False
         self._connection_status = "connected" if sequencer is not None else "not connected"
+        self._connection_word = "running" if sequencer is not None else "idle"
         #: The last model handed to the schedule page, so a new one can be
         #: recognised as new without every caller remembering to say so.
         self._shown: ScheduleVM | None = None
@@ -1844,10 +1846,11 @@ class PulseEditorPresenter:
         enabled = bool(sequence is not None and sequence.config_enabled)
         self.view.set_subpulse_sources(
             tuple((c.component_id, c.name, c.source, c.config_path,
-                   "Default" if c.source != "config" else
-                   "No file — plays Default" if not c.config_path else
-                   "Config off" if not enabled else
-                   "Not applied — Config error" if self._config_error else "Applied")
+                   *(("Default", "idle") if c.source != "config" else
+                     ("No file — plays Default", "idle") if not c.config_path else
+                     ("Config off", "idle") if not enabled else
+                     ("Not applied — Config error", "error") if self._config_error else
+                     ("Applied", "idle")))
                   for c in (() if sequence is None else sequence.components)),
             enabled=enabled, busy=self._device_busy or self._stop_busy, error=self._config_error,
         )
@@ -2306,7 +2309,7 @@ class PulseEditorPresenter:
     def _set_device_label(self, label: str) -> None:
         if self._connection_locked:
             self._connection_choices = (ConnectionChoiceVM(str(label), CONNECTION_GIVEN),)
-            self._show_connection(self._connection_status)
+            self._show_connection(self._connection_status, self._connection_word)
 
     def _config_values_directory(self) -> Path | None:
         """Where saved sets of the board's calibrated numbers live."""
@@ -3046,12 +3049,12 @@ class PulseEditorPresenter:
         self.connection = (mode, endpoint)
         had_sequence = self.sequence is not None
         if not self.adopt_board():
-            failure_status = self._connection_status
+            failure = (self._connection_status, self._connection_word)
             if not self._release_for_connection_change():
                 self.refresh()
                 return False
             self.connection = (CONNECTION_OFFLINE, endpoint)
-            self._show_connection(failure_status)
+            self._show_connection(*failure)
             self.refresh()
             return False
         if not had_sequence:
@@ -3130,13 +3133,13 @@ class PulseEditorPresenter:
                     "PLAYING and the board must be stopped another way."
                 )
             if failure is not None:
-                self._show_connection(f"failed: {failure}")
+                self._show_connection(f"failed: {failure}", "error")
                 self._warn(f"Cannot connect to {_connection_name(mode, endpoint)}: {failure}")
                 self._render_run_state()
                 return
             stage, payload, error = result
             if stage == "release":
-                self._show_connection(f"disconnect failed: {error}")
+                self._show_connection(f"disconnect failed: {error}", "error")
                 self._warn(f"Cannot close the current sequencer connection: {error}")
                 self._render_run_state()
                 return
@@ -3161,7 +3164,7 @@ class PulseEditorPresenter:
             self.connection = (mode, endpoint)
             if board is None:
                 self._adopt_board_state(state)
-                self._show_connection("connected (board did not describe itself)")
+                self._show_connection("connected (board did not describe itself)", "warning")
                 self.refresh()
                 return
             self._adopt_described(board, state)
@@ -3220,7 +3223,7 @@ class PulseEditorPresenter:
 
     def _show_disconnected(self, mode: str, endpoint: str) -> None:
         self.connection = (mode, endpoint)
-        self._show_connection("edit only")
+        self._show_connection("edit only", "idle")
         self._done("Disconnected; this editor is now edit only")
         # Hanging up changes the whole window, not just its status line:
         # the board's ports are gone, the Target page is authorable again,
@@ -3229,7 +3232,7 @@ class PulseEditorPresenter:
 
     def _dial_failed(self, mode: str, endpoint: str, error: BaseException) -> None:
         self.connection = (CONNECTION_OFFLINE, endpoint)
-        self._show_connection(f"failed: {error}")
+        self._show_connection(f"failed: {error}", "error")
         self._warn(f"Cannot connect to {_connection_name(mode, endpoint)}: {error}")
 
     def _release_for_connection_change(self) -> bool:
@@ -3238,7 +3241,7 @@ class PulseEditorPresenter:
         try:
             self._release()
         except Exception as error:
-            self._show_connection(f"disconnect failed: {error}")
+            self._show_connection(f"disconnect failed: {error}", "error")
             self._warn(f"Cannot close the current sequencer connection: {error}")
             return False
         return True
@@ -3261,7 +3264,7 @@ class PulseEditorPresenter:
         sequencer = self.sequencer
         describe = getattr(sequencer, "describe", None)
         if not callable(describe):
-            self._show_connection("connected (board did not describe itself)")
+            self._show_connection("connected (board did not describe itself)", "warning")
             return False
         try:
             board = describe()
@@ -3272,7 +3275,7 @@ class PulseEditorPresenter:
         return self._adopt_described(board, state)
 
     def _describe_failed(self, error: BaseException) -> None:
-        self._show_connection(f"connected, but cannot read the board: {error}")
+        self._show_connection(f"connected, but cannot read the board: {error}", "error")
         self._warn(f"Connected, but the board would not describe itself: {error}")
 
     def _adopt_described(self, board: object, state: BoardState) -> bool:
@@ -3293,7 +3296,7 @@ class PulseEditorPresenter:
                 f"{format_quantity(board.clock_hz / 1e6, '1')} MHz",
             ))
         )
-        self._show_connection(where)
+        self._show_connection(where, "running")
         self.refresh()
         return True
 
@@ -3457,21 +3460,27 @@ class PulseEditorPresenter:
         ):
             raise RuntimeError("PulseGUI could not release its sequencer command")
 
-    def _show_connection(self, status: str) -> None:
+    def _show_connection(self, status: str, word: str) -> None:
         """Say what the editor is attached to, and what that makes possible.
 
         Running needs both a pulse to fire and a board to fire it on; either
         one missing is a button that cannot work, so it is shown as one.
+        ``word`` is the connection's status word (``ConnectionVM.status_word``):
+        ``running`` attached and read, ``idle`` attached to nothing,
+        ``warning`` attached but undescribed, ``error`` a failed connect,
+        disconnect or read.
         """
 
         mode, endpoint = self.connection
         self._connection_status = str(status)
+        self._connection_word = str(word)
         self.view.set_connection(
             ConnectionVM(
                 choices=self._connection_choices,
                 selected=mode,
                 endpoint=endpoint,
                 status=self._connection_status,
+                status_word=self._connection_word,
                 locked=self._connection_locked,
             )
         )
@@ -4726,7 +4735,7 @@ class PulseEditorPresenter:
             return ""
         self.path = str(target)
         self._saved_state = self._state
-        self._show_connection(self._connection_status)
+        self._show_connection(self._connection_status, self._connection_word)
         if present:
             self._done(f"Saved {target.name}")
         else:
@@ -4798,7 +4807,7 @@ class PulseEditorPresenter:
 
         target = self._current_target()
         if target is None:
-            self.view.set_target_feedback("there is no target to apply to")
+            self.view.set_target_feedback("there is no target to apply to", "error")
             return False
         records = tuple(records)
         if self.board is not None:
@@ -4809,12 +4818,13 @@ class PulseEditorPresenter:
             if set(wanted) != keys:
                 self.view.set_target_feedback(
                     "this target is the attached board's; ports cannot be added or "
-                    "removed here, only renamed"
+                    "removed here, only renamed",
+                    "error",
                 )
                 return False
             renamed = self._retarget_labels(target, wanted)
             if renamed is None:
-                self.view.set_target_feedback("nothing to rename")
+                self.view.set_target_feedback("nothing to rename", "idle")
                 return False
             changes: dict[str, Any] = {"target": renamed}
             feedback = f"renamed {counted(sum(1 for name in wanted.values() if name), 'output')}"
@@ -4825,13 +4835,13 @@ class PulseEditorPresenter:
                     rewired == target
                     and dict(rewired.package_pins) == dict(target.package_pins)
                 ):
-                    self.view.set_target_feedback("nothing to change")
+                    self.view.set_target_feedback("nothing to change", "idle")
                     return False
                 changes = {"target": rewired}
                 if self.sequence is not None:
                     changes.update(_carried_onto(self.sequence, rewired))
             except ValueError as error:
-                self.view.set_target_feedback(str(error))
+                self.view.set_target_feedback(str(error), "error")
                 return False
             feedback = f"applied {counted(len(records), 'output')}"
         if self.sequence is not None:
@@ -4843,8 +4853,9 @@ class PulseEditorPresenter:
             self._board_target = changes["target"]
             self.revision += 1
             self.refresh()
-        self.view.set_target_feedback(feedback)
+        # After the page is re-shown: its caption would cover the report.
         self.refresh_target()
+        self.view.set_target_feedback(feedback, "task")
         return True
 
     def _retarget_labels(self, target: object, labels: Mapping[str, str]) -> object | None:
@@ -4967,6 +4978,7 @@ class PulseEditorPresenter:
                 repeats=self._state.scan_repeats,
                 busy=False,
                 progress_text=self._scan_progress,
+                progress_word=self._scan_progress_word,
                 progress_polling=bool(
                     self._board_state.firing and rows
                     and str(getattr(view, "current_page", "")) == SCAN_PAGE
@@ -5045,7 +5057,7 @@ class PulseEditorPresenter:
         # wait for it.  The window does -- its preview worker cannot close
         # under a running program -- and says what it is waiting for.
         self._scan_running = True
-        self._scan_progress = "Running the scan program…"
+        self._say_scan("Running the scan program…", "task")
         self._refresh_scan_page()
 
         def delivered(table: object) -> None:
@@ -5067,7 +5079,7 @@ class PulseEditorPresenter:
     def _scan_program_refused(self, message: str, *, present: bool = True) -> bool:
         """Say why a run left no table, where its progress was being shown."""
 
-        self._scan_progress = message
+        self._say_scan(message, "error")
         self._warn(message, present=present)
         self._refresh_scan_page()
         return False
@@ -5108,7 +5120,7 @@ class PulseEditorPresenter:
                 scan_source_dirty=self._state.scan_source != source,
             )
         )
-        self._scan_progress = f"{counted(len(self._state.scan_rows), 'scan point')} ready"
+        self._say_scan(f"{counted(len(self._state.scan_rows), 'scan point')} ready", "task")
         self.refresh()
         return True
 
@@ -5198,7 +5210,7 @@ class PulseEditorPresenter:
             if error is not None:
                 self._scan_program_refused(f"Cannot read {selected.name}: {error}", present=present)
                 return
-            self._scan_progress = f"Loaded {counted(len(rows), 'scan point')} from {selected}"
+            self._say_scan(f"Loaded {counted(len(rows), 'scan point')} from {selected}", "task")
             self._done(self._scan_progress, present=present)
             self._refresh_scan_page()
 
@@ -5239,7 +5251,7 @@ class PulseEditorPresenter:
                 self._scan_program_refused(f"Cannot read {Path(chosen).name}: {error}", present=present)
                 return
             self.edit_scan_source(source)
-            self._scan_progress = f"Loaded scan source from {chosen}"
+            self._say_scan(f"Loaded scan source from {chosen}", "task")
             self._done(self._scan_progress, present=present)
             self._refresh_scan_page()
 
@@ -5297,7 +5309,7 @@ class PulseEditorPresenter:
             if error is not None:
                 self._scan_program_refused(f"Cannot save the scan table: {error}", present=present)
                 return
-            self._scan_progress = f"Saved {target}"
+            self._say_scan(f"Saved {target}", "task")
             self._refresh_scan_page()
 
         if self._run_device_work is not None:
@@ -5481,7 +5493,7 @@ class PulseEditorPresenter:
             return None
 
     def _hold_failed(self, held: int, error: BaseException, *, present: bool = True) -> None:
-        self._scan_progress = f"Cannot hold that point: {error}"
+        self._say_scan(f"Cannot hold that point: {error}", "error")
         self._warn(f"Cannot hold scan point {held + 1}: {error}", present=present)
         self._refresh_scan_page()
 
@@ -5502,9 +5514,9 @@ class PulseEditorPresenter:
             # for ``synchronized`` to recognise until the draft changes.
             self._held_program = (revision, state.applied_digest)
             # Counted from 1, as the running line counts it.
-            self._scan_progress = f"Held at scan point {figure_padded(held + 1, count)} of {count}"
+            self._say_scan(f"Held at scan point {figure_padded(held + 1, count)} of {count}", "task")
         else:
-            self._scan_progress = f"Cannot hold that point: {error}"
+            self._say_scan(f"Cannot hold that point: {error}", "error")
             self._warn(f"Cannot hold scan point {held + 1}: {error}", present=present)
             if not state.firing:
                 self._release_drive()
@@ -5529,7 +5541,7 @@ class PulseEditorPresenter:
 
     def clear_scan_array(self) -> bool:
         self._edit_state(scan_rows=(), scan_fields=(), scan_source_dirty=bool(self._state.scan_source))
-        self._scan_progress = "Scan array cleared; the Python source is unchanged"
+        self._say_scan("Scan array cleared; the Python source is unchanged", "task")
         self.refresh()
         return True
 
@@ -5579,27 +5591,35 @@ class PulseEditorPresenter:
             return
         self.ask_run_state(then=self._render_scan_progress)
 
+    def _say_scan(self, text: str, word: str) -> None:
+        """The Scan page's line and its status word: ``task`` for what the
+        page is doing or just did, ``error`` for why it could not."""
+
+        self._scan_progress = str(text)
+        self._scan_progress_word = str(word)
+
     def _render_scan_progress(self) -> None:
         cursor = self._board_state.cursor
         applied = self._applied_scan
         if not self.running or cursor is None or applied is None:
-            self._scan_progress = ""
-            self.view.set_scan_progress_text(self._scan_progress)
+            self._say_scan("", "task")
+            self.view.set_scan_progress_text(self._scan_progress, self._scan_progress_word)
             return
         digest, names, rows = applied
         if digest != self._board_state.applied_digest or not rows:
-            self._scan_progress = ""
-            self.view.set_scan_progress_text(self._scan_progress)
+            self._say_scan("", "task")
+            self.view.set_scan_progress_text(self._scan_progress, self._scan_progress_word)
             return
         point = int(cursor) % len(rows)
         values = ", ".join(
             f"{name} = {text}" for name, text in zip(names, rows[point], strict=True)
         )
-        self._scan_progress = (
+        self._say_scan(
             f"Scan: point {figure_padded(point + 1, len(rows))} / {len(rows)}"
-            + (f"  {values}" if values else "")
+            + (f"  {values}" if values else ""),
+            "task",
         )
-        self.view.set_scan_progress_text(self._scan_progress)
+        self.view.set_scan_progress_text(self._scan_progress, self._scan_progress_word)
 
 
     def _push_schedule(self, vm: ScheduleVM) -> None:
@@ -5659,7 +5679,7 @@ class PulseEditorPresenter:
             self.view.set_title(f"PulseGUI{SUMMARY_SEPARATOR}no pulse")
             self.view.set_summary(self._document_summary())
             self.view.show_preview_placeholder("Open a pulse to see its timeline")
-            self._show_connection(self._connection_status)
+            self._show_connection(self._connection_status, self._connection_word)
             self.refresh_target()
             return
         self._push_schedule(
@@ -5679,7 +5699,7 @@ class PulseEditorPresenter:
         )
         self.view.set_title(f"PulseGUI{SUMMARY_SEPARATOR}{self.sequence.name}")
         self.view.set_summary(f"Config error: {self._config_error}" if self._config_error else self._document_summary())
-        self._show_connection(self._connection_status)
+        self._show_connection(self._connection_status, self._connection_word)
         self.refresh_target()
         self._refresh_scan_page()
         self.refresh_preview()
@@ -5777,7 +5797,7 @@ class PulseEditorPresenter:
         self._preview_busy = True
         sequence, include_off, pinned_size = request
         previous = self._preview_host
-        self.view.set_preview_status("drawing preview…")
+        self.view.set_preview_status("drawing preview…", "task")
 
         def work() -> object:
             data, size, rows, periods, total_ns = preview_candidate(
@@ -5817,7 +5837,7 @@ class PulseEditorPresenter:
             if self._preview_host is None:
                 self.view.show_preview_placeholder(message)
             else:
-                self.view.set_preview_status(message)
+                self.view.set_preview_status(message, "error")
             self._finish_preview_operation()
 
         try:
@@ -5851,7 +5871,8 @@ class PulseEditorPresenter:
         view.set_preview_status(
             SUMMARY_SEPARATOR.join((
                 counted(periods, "period"), counted(rows, "channel"), _readable(total_ns), size,
-            ))
+            )),
+            "task",
         )
 
     def save_preview_image(self) -> None:
@@ -5878,12 +5899,12 @@ class PulseEditorPresenter:
 
         if self._preview_busy:
             self.view.set_preview_status(
-                "preview is busy; save again when the drawing is ready"
+                "preview is busy; save again when the drawing is ready", "warning"
             )
             return
 
         self._preview_busy = True
-        self.view.set_preview_status("saving preview…")
+        self.view.set_preview_status("saving preview…", "task")
 
         def work() -> object:
             def write(temporary: Path) -> None:
@@ -5899,7 +5920,7 @@ class PulseEditorPresenter:
             return unique_path(folder, name, ".png", writer=write)
 
         def delivered(target: object) -> None:
-            self.view.set_preview_status(f"saved {target}")
+            self.view.set_preview_status(f"saved {target}", "task")
             self._finish_preview_operation()
 
         def failed(error: BaseException) -> None:

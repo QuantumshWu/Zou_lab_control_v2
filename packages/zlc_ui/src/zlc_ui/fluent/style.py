@@ -89,7 +89,7 @@ RED = "#CD7380"
 #: text on white it was 3.3:1, too pale to read as the warning it is.
 RED_DARK = "#9E3B4A"
 #: RED as a wash: the face of every LABELLED destructive command -- Remove,
-#: Delete, Clear, Unload, Close, Shutdown, Stop -- no edge, RED_DARK
+#: Clear, Unload, Close, Shut down, Stop -- no edge, RED_DARK
 #: ink 5.4:1.  It sits CIEDE2000 10.1 from white, the weight of BUTTON_TINT
 #: (10.3), so a Remove among light-blue commands is a command too; a fainter
 #: seat (#FBF0F1, 5.9 from white) sat nearer the disabled face (2.4) and

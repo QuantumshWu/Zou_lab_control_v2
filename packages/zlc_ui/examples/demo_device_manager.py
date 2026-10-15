@@ -68,7 +68,7 @@ def populate(view) -> None:
                 "live_enabled": True,
                 "apply_enabled": False,
                 "status": "Ready",
-                "severity": "ready",
+                "severity": "idle",
                 "reason": "",
             },
             "enabled": {
@@ -79,7 +79,7 @@ def populate(view) -> None:
                 "live_enabled": True,
                 "apply_enabled": False,
                 "status": "Ready",
-                "severity": "ready",
+                "severity": "idle",
                 "reason": "",
             },
         }

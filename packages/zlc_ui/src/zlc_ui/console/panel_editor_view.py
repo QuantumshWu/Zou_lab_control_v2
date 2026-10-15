@@ -29,14 +29,14 @@ from zlc_ui.fluent import (
     FluentSegmentedButtons,
     FluentSettingRow,
     FluentSwitch,
-    MUTED_INK,
-    ORANGE_DARK,
+    MUTED_LABEL_STYLE,
     card_pad,
     card_title_row,
     muted_note_label,
     row_gap,
     scaled_px,
     section_gap,
+    set_status_ink,
     setting_label_width,
     stamped_file_name,
     retire_widget,
@@ -107,7 +107,6 @@ class PanelEditorView(QtWidgets.QWidget):
         #: reconciled from.  A shot that changes neither rebuilds nothing.
         self._applied_structure: dict[str, object] | None = None
         self._applied_producer: dict[str, object] | None = None
-        self._snapshot_colour = ""
         self._state: dict[str, Any] = {}
         self._parameter_fields: dict[str, dict[str, dict[str, object]]] = {
             "semantic": {},
@@ -152,9 +151,7 @@ class PanelEditorView(QtWidgets.QWidget):
         header_layout.setSpacing(row_gap())
         self.title_label = FluentSectionLabel(self.panel_id)
         self.kind_label = FluentLabel("")
-        self.kind_label.setStyleSheet(
-            f"color: {MUTED_INK}; background: transparent; border: none;"
-        )
+        self.kind_label.setStyleSheet(MUTED_LABEL_STYLE)
         self.kind_label.setToolTip("The plot kind is fixed when the panel is added")
         header_layout.addWidget(self.title_label)
         header_layout.addWidget(self.kind_label)
@@ -223,13 +220,10 @@ class PanelEditorView(QtWidgets.QWidget):
         producer_layout.setContentsMargins(pad, pad, pad, pad)
         producer_layout.setSpacing(row_gap())
         producer_layout.addLayout(card_title_row("Direct producer")[0])
-        self.producer_summary = FluentLabel(
+        self.producer_summary = muted_note_label(
             "This signal has no editable direct producer."
         )
         self.producer_summary.setWordWrap(True)
-        self.producer_summary.setStyleSheet(
-            f"color: {MUTED_INK}; background: transparent; border: none;"
-        )
         producer_layout.addWidget(self.producer_summary)
         self.producer_form = FluentParameterForm(FormSpec(()), {})
         self.producer_form.setEnabled(False)
@@ -498,13 +492,11 @@ class PanelEditorView(QtWidgets.QWidget):
         snapshot = self._projection.get("frozen_snapshot")
         aged = bool(self._projection.get("data_advanced") or self._projection.get("source_status"))
         self.snapshot_label.setText(self._snapshot_text(self._projection, stale=stale))
-        # Written when it CHANGES: two values, a re-parse and a repolish.
-        colour = ORANGE_DARK if stale or aged or self._projection.get("snapshot_error") else MUTED_INK
-        if colour != self._snapshot_colour:
-            self._snapshot_colour = colour
-            self.snapshot_label.setStyleSheet(
-                f"color: {colour}; background: transparent; border: none;"
-            )
+        set_status_ink(
+            self.snapshot_label,
+            "error" if self._projection.get("snapshot_error")
+            else "warning" if stale or aged else "idle",
+        )
         self._snapshot_can_save = snapshot is not None and not stale
         self.save_button.setToolTip(
             "Refresh the stale snapshot before saving" if stale else ""
