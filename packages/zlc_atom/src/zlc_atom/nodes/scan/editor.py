@@ -80,6 +80,7 @@ from .plan import (
     host_advanced_port,
     port_group,
     port_leaf,
+    unscannable_api_ports,
     plan_input_rows,
     parse_scan_values,
     DEVICE_PARAM_FAMILY,
@@ -145,7 +146,8 @@ class _AxisRow(QtWidgets.QWidget):
     remove_requested = QtCore.pyqtSignal(object)
     unit_change_requested = QtCore.pyqtSignal(object, object, str)
 
-    def __init__(self, ports, axis: Mapping | None, columns, parent=None, *, device_labels=None) -> None:
+    def __init__(self, ports, axis: Mapping | None, columns, parent=None, *, device_labels=None,
+                 withheld: Mapping[str, str] | None = None) -> None:
         super().__init__(parent)
         # A DEVICE's knobs gather under the device, the way an operator looks
         # for one; the flat list put a laser current beside a pulse parameter
@@ -158,6 +160,9 @@ class _AxisRow(QtWidgets.QWidget):
         self._build_inputs(columns, self.port_combo)
         self._device_labels = dict(device_labels or {})
         self._ports = label_device_scan_ports(ports, self._device_labels)
+        # Ports the pulse has but does not offer, each with why
+        # (:func:`unscannable_api_ports`).
+        self._withheld = dict(withheld or {})
         self._fill_ports(None if axis is None else axis["port"])
         self._apply_port_limits()
         if axis is not None:
@@ -321,8 +326,14 @@ class _AxisRow(QtWidgets.QWidget):
             # authored: silently selecting whatever sits first re-points their
             # axis at an unrelated knob and the run would sweep it without a
             # word.  Left as it is, bind_plan refuses by name before anything
-            # arms.
-            labels[chosen] = f"{port_leaf(chosen)} (not in this pulse)"
+            # arms.  An empty bracket's repeat count IS in the pulse, and
+            # saying otherwise sends the operator looking for a deleted
+            # parameter.
+            labels[chosen] = (
+                f"{port_leaf(chosen)} (its bracket is empty)"
+                if chosen in self._withheld
+                else f"{port_leaf(chosen)} (not in this pulse)"
+            )
             sources[chosen] = (branch(chosen),)
         fill_grouped_choice_combo(
             self.port_combo,
@@ -426,7 +437,7 @@ class _AxisRow(QtWidgets.QWidget):
         show_note(self.error_label, "")
         return True
 
-    def reconcile(self, ports, entry: Mapping) -> None:
+    def reconcile(self, ports, entry: Mapping, withheld: Mapping[str, str]) -> None:
         """Bring this row to its authored inputs, touching only what differs.
 
         The row the operator is inside is theirs: its port, range and
@@ -434,8 +445,9 @@ class _AxisRow(QtWidgets.QWidget):
         """
 
         ports = tuple(ports)
-        if ports != self._ports:
+        if ports != self._ports or withheld != self._withheld:
             self._ports = ports
+            self._withheld = dict(withheld)
             self._fill_ports(entry["port"])
             self._apply_port_limits(entry["unit"])
         elif str(self.port_combo.currentData()) != entry["port"]:
@@ -551,10 +563,10 @@ class _ManualAxisRow(_AxisRow):
         self.name_edit.textChanged.connect(lambda _text: self.edited.emit())
         self._connect_inputs()
 
-    def reconcile(self, ports, entry: Mapping) -> None:
+    def reconcile(self, ports, entry: Mapping, withheld: Mapping[str, str]) -> None:
         """Bring this row to its inputs; a hand's row has no port to follow."""
 
-        del ports
+        del ports, withheld
         name = entry["port"][len(MANUAL_PARAM_FAMILY):]
         if self.name_edit.text().strip() != name and not being_edited(self.name_edit):
             with signals_blocked(self.name_edit):
@@ -627,6 +639,7 @@ class ScanPlanEditor(QtWidgets.QWidget):
         column.addWidget(self.values_note)
 
         self._ports: tuple = ()
+        self._withheld: dict[str, str] = {}
         self._device_labels: dict[str, str] = {}
         self._rows: list[_AxisRow] = []
         self._loading = False
@@ -834,9 +847,11 @@ class ScanPlanEditor(QtWidgets.QWidget):
         """Adopt plain port metadata only on the widget's owner thread."""
         ports = label_device_scan_ports(ports, self._device_labels)
 
-        ports_changed = tuple(ports) != self._ports
+        withheld = {} if sequence is None else unscannable_api_ports(sequence)
+        ports_changed = tuple(ports) != self._ports or withheld != self._withheld
         if ports_changed:
             self._ports = tuple(ports)
+            self._withheld = withheld
         if ports_changed or plan_text != self._plan_text:
             self._plan_text = plan_text
             self._reconcile_rows(plan_text)
@@ -1174,7 +1189,7 @@ class ScanPlanEditor(QtWidgets.QWidget):
                 manual = axis["port"].startswith(MANUAL_PARAM_FAMILY)
                 row = self._rows[position] if position < len(self._rows) else None
                 if row is not None and row.manual == manual:
-                    row.reconcile(self._ports, axis)
+                    row.reconcile(self._ports, axis, self._withheld)
                     kept.append(row)
                     continue
                 if row is not None:
@@ -1191,7 +1206,7 @@ class ScanPlanEditor(QtWidgets.QWidget):
 
     def _build_row(self, axis: Mapping | None) -> _AxisRow:
         row = _AxisRow(self._ports, axis, (self._columns, self._range_columns), self,
-                       device_labels=self._device_labels)
+                       device_labels=self._device_labels, withheld=self._withheld)
         row.edited.connect(self._emit_plan)
         row.normalized.connect(lambda: self._emit_plan(normalized=True))
         row.unit_change_requested.connect(self._convert_axis_unit)

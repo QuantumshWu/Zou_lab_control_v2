@@ -841,14 +841,15 @@ class ExperimentSession:
         path = self.workspace.pulse(name)
         if not path.is_file():
             raise FileNotFoundError(f"no pulse named {name!r} in {self.workspace.pulses}")
-        from zlc_pulse import resolve_api_parameters
+        from zlc_pulse import resolve_api_parameters, resolve_scan_point
 
         state = read_pulse(path)
-        # API parameters resolve at their AUTHORED values -- the same thing
-        # On Pulse means in the editor.  Without this, any template declaring
-        # API parameters (the scan and imaging templates both do) could not be
-        # loaded by name at all.
-        sequence = resolve_api_parameters(state.sequence)
+        # API parameters resolve at their AUTHORED values and Scan fields
+        # play their authored values -- the same document On Pulse runs in
+        # the editor without a scan table.  A Scan mark says a field CAN be
+        # scanned; nothing scans it here, and a slotted program with no
+        # table is one the board refuses to load.
+        sequence = resolve_scan_point(resolve_api_parameters(state.sequence))
         board = self.sequencer.describe()
         # Match the same execution ABI checked at LOAD, not display labels.
         if sequence.target.abi_fingerprint != board.target.abi_fingerprint:

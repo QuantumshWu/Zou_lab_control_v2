@@ -42,7 +42,11 @@ returns the accepted `FieldVM`. The popup also edits the field's Config referenc
 through `config_key_committed`; names come from `FieldVM.config_names`, and
 `FieldVM.field_id` carries the domain-owned field identity. It shows the editable
 default and current effective source together. Config values and files are still
-edited and saved separately on Value Config.
+edited and saved separately on Value Config. A field switched from Config to
+Default or API keeps its Config name: the popup shows it disabled, Value Config
+lists the field muted as `Default (Config name kept)` (`ConfigPageRecord.parked`),
+nothing applies it, and choosing Config again uses it. Clearing the kept name on
+Value Config lets the binding go.
 S/A/C badges contain no numeric identity; Scan defaults remain editable.
 
 For a DAC channel, `PortRowVM.kind == "dac"` plus a
@@ -85,9 +89,21 @@ Browsing or editing the file path does not change the main-card source choice.
 Save Pulse writes embedded defaults; Save writes the selected file. Only applied
 Config sources get green cards/boundaries on the main timeline.
 
-Saved scan arrays retain ordered field IDs and units. A source update that changes
-this schema requires regeneration or an explicit Clear array; that action keeps
-the Python draft and emits `scan_array_clear_requested` through the handle.
+A scan table drives the fields it names, which need not be every field marked
+Scan: the program assigns `scan_table` as a mapping from field id (or the label
+the editor shows) to its column -- the Template: columns / grid starters write
+one entry per Scan field, and deleting an entry leaves that field playing its
+own value -- or as an array with one column per Scan field. The editor keeps the
+table's ordered field IDs and units; Save array writes them as the .npy's column
+names, and Open array reads names from such a file or from a CSV/text header:
+the first line that is neither blank nor a `#` comment, when it is not numbers
+(one name per column, each once). Marking another field Scan, or unmarking one
+the table does not drive, keeps the table, also while its program runs or its
+file loads; only an unnamed table, whose columns are the Scan fields, is refused
+when they change then. An edit that takes one of its own fields off Scan or
+changes its unit requires regeneration or an explicit Clear array; that action
+keeps the Python draft and emits `scan_array_clear_requested` through the
+handle.
 
 ```python
 view = PulseScheduleView()
@@ -119,7 +135,9 @@ both post and period drags emit `reorder_items_requested(item_order)`.
 Add targets the next visual item, not the next period, so both sides of a
 post are distinct gaps. Neither drag mutates local state; the presenter
 commits period order and bracket anchors atomically in the new `ScheduleVM`.
-Empty brackets remain editable; running or saving requires nonempty content.
+An empty bracket (its two posts side by side) is an ordinary draft: it saves,
+reopens and runs, looping nothing, until periods are dragged in; the preview
+draws no loop for it.
 `bracket_committed(bracket_id, start_period_id, end_period_id, count)` moves or
 recounts one bracket; `bracket_add_requested(start_period_id, end_period_id,
 count)` asks for a new one (the presenter names it). Removing is one

@@ -323,6 +323,9 @@ class ConfigPageRecord:
     active_path: str = ""
     busy: bool = False
     binding_groups: tuple[tuple[str, str, str], ...] = ()
+    #: Fields in ``bindings`` whose source is Default or API but which kept
+    #: their Config name: listed muted, the name kept to switch back to.
+    parked: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

@@ -30,8 +30,10 @@ disjoint or one lies inside the other, and the board plays them as nested
 loops (`loop_depth` levels deep, `max_loops` per Pulse, both geometry
 constants). Each count is at least one -- a count of one plays the range once,
 exactly as if unbracketed, so a loop can be debugged without deleting it -- and
-compiles only to the program's loop table. Even a bracket spanning the whole Pulse does not become or alter
-`run_repeats`. The sequence's authored `run_repeats` defaults to `0`; a task
+compiles only to the program's loop table. A bracket with no period inside it
+is a placeholder: it saves and reopens as written, compiles to no loop and
+takes none of `max_loops`; a Scan plan is not offered its repeat count. Even a
+bracket spanning the whole Pulse does not become or alter `run_repeats`. The sequence's authored `run_repeats` defaults to `0`; a task
 may explicitly override it for one execution without changing the saved Pulse.
 
 Each physical field has one default value and at most one `PulseBinding`.
@@ -39,12 +41,17 @@ The binding stores independent Scan capability and a Default/API/Config source.
 Scan may coexist with API or Config; API and Config are mutually exclusive.
 The editor always permits editing the default. A Plan activates only its explicit
 Scan fields; omitted Scan capabilities become constants using their selected base
-source. An explicit scan point overrides the base source for that execution.
+source. The editor's scan table works the same way: `scan_table_for` reads a
+mapping from the Scan fields a table drives to their columns (or an array with
+one column per Scan field) and returns the pulse with Scan on those fields only.
+An explicit scan point overrides the base source for that execution.
 
 Scan and API are addressed by stable physical field identity internally and by
 readable paths such as `MOT.duration` in authoring. They have no user-assigned
 numbers or aliases. A Config binding instead references a named entry shared
-across Pulses; multiple fields can reference the same name.
+across Pulses; multiple fields can reference the same name. A Default or API
+binding may keep the Config name it had; it is read only while the source is
+Config, so switching back finds it again.
 
 Config files contain only `format: zlc.pulse.config_values` and `values`:
 each name maps to a numeric `value` and `unit`. Unassigned or missing entries
@@ -54,8 +61,10 @@ Runtime readers reject old numbered/source/export formats. The explicit offline
 byte backups; it is not an automatic load-time compatibility path.
 
 The Config tab edits that independent values file. Only explicit Save/Save as
-writes it; unsaved rows never reach execution. Pulse Save stores the Pulse and
-its field references, not a copy of the Config values. Device `load`/`fire`
+writes it; unsaved rows never reach execution. A row left entirely blank is
+left out when the file is saved; a row with a value or unit needs a name. Pulse
+Save stores the Pulse and its field references, not a copy of the Config
+values. Device `load`/`fire`
 reread the selected saved file and update the executable only when effective
 values change. The authored source remains separate from the applied source;
 an override never becomes the next default. Running output is not modified by

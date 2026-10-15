@@ -269,26 +269,17 @@ def test_pulse_tree_uses_only_brackets_and_run_repeats() -> None:
     assert not hasattr(authored, "repeat") and not hasattr(authored, "bracket")
     assert sequence_from_tree(tree) == authored
 
+    # An empty bracket is a placeholder waiting for periods: it saves and
+    # reopens as written, and compiles to no loop, so the board never sees it
+    # and it takes none of the board's loops.
     for start, end, gap in (("p0", None, 0), ("p1", "p0", 1), (None, "p2", 3)):
-        empty = replace(authored, brackets=(PulseBracket("loop", start, end, 3),))
-        assert empty.bracket_bounds == ((gap, gap),)
-        raw = {**tree, "brackets": [
-            {"bracket_id": "loop", "start_period_id": start, "end_period_id": end, "count": 3},
-        ]}
-        messages = []
-        for operation in (
-            empty.require_nonempty_brackets,
-            lambda: compile_sequence(empty, StreamerParams(max_rows=8, bank_size=2), 50e6),
-            lambda: sequence_to_tree(empty),
-            lambda: sequence_from_tree(raw),
-        ):
-            try:
-                operation()
-            except ValueError as error:
-                messages.append(str(error))
-            else:
-                raise AssertionError("empty authoring bracket escaped the execution/save boundary")
-        assert len(set(messages)) == 1 and "Bracket loop is empty" in messages[0]
+        empty = replace(authored, brackets=(PulseBracket("wait", start, end, 3),))
+        assert empty.bracket_bounds == ((gap, gap),) and empty.loops == ()
+        assert sequence_from_tree(sequence_to_tree(empty)) == empty
+        assert compile_sequence(empty, StreamerParams(max_rows=8, bank_size=2), 50e6).loops == ()
+    beside = replace(authored, brackets=(*authored.brackets, PulseBracket("wait", "p1", "p0", 2)))
+    one_loop = StreamerParams(max_rows=8, bank_size=2, max_loops=1, loop_depth=1)
+    assert compile_sequence(beside, one_loop, 50e6).loops == ((0, 2, 3),)
     with np.testing.assert_raises_regex(ValueError, "end precedes"):
         replace(authored, brackets=(PulseBracket("loop", "p2", "p0", 3),))
 
@@ -564,8 +555,14 @@ def test_scan_and_value_source_share_one_physical_field_declaration() -> None:
         assert sequence_from_tree(sequence_to_tree(combined)) == combined
         with np.testing.assert_raises_regex(ValueError, "one binding"):
             replace(base, bindings=(binding, replace(binding, scan=False)))
-    with np.testing.assert_raises(ValueError):
-        PulseBinding(duration, "ns", source="api", config_key="shared")
+    # A non-Config binding may keep its Config name; nothing applies it.
+    kept = replace(base, config_enabled=True, bindings=(
+        PulseBinding(duration, "ns", source="api", config_key="shared"),
+        PulseBinding(PulseFieldRef("duration", "p1"), "ns", config_key="shared"),
+    ))
+    assert kept.config_bindings == ()
+    assert apply_config_values(kept, {"shared": (0.08, "us")})[0].periods == kept.periods
+    assert sequence_from_tree(sequence_to_tree(kept)) == kept
     with np.testing.assert_raises(ValueError):
         PulseBinding(PulseFieldRef("delay", port="d0"), "ns", scan=True)
     for old_member in ("slots", "api_parameters", "config_parameters"):

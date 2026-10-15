@@ -33,6 +33,7 @@ from .plan import (
     api_overrides_to_authored,
     plan_from_authored,
     scan_ports_for_devices,
+    unscannable_api_ports,
 )
 from .source import (
     PublishedSignalSource,
@@ -72,4 +73,5 @@ __all__ = [
     "scan_dataset_schema",
     "scan_repeat_domain",
     "scan_ports_for_devices",
+    "unscannable_api_ports",
 ]

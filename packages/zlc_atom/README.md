@@ -269,7 +269,9 @@ The runtime has one direction of responsibility:
 
 For a manually controlled experiment, the product notebook calls
 `ExperimentSession.load_pulse` and `ExperimentSession.fire` around a pure
-camera measurement; those methods own compile/load and sequencer execution. For
+camera measurement; those methods own compile/load and sequencer execution.
+`load_pulse` plays every API and Scan field at its authored value, as On Pulse
+does without a scan table: a Scan mark only makes a field scannable. For
 an automated experiment, hosted Calibration owns that whole sequence and
 returns a saved calibration artifact. With Frames set to Saved frames it
 instead calibrates again the samples a run kept with Save every sample, taking

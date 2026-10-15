@@ -190,6 +190,10 @@ def test_scan_time_projection_uses_the_played_pulse_without_expanding_repeats() 
     assert huge["total_pulse_seconds"] == pytest.approx(.125 * 2 * 10**18)
     capped = ScanPlan((ScanAxis("api:bracket_count:load_loop", tuple(range(1, 258)), "count"),))
     assert "preview budget" in estimate_scan_time(sequence, capped, **inputs)["reason"]
+    # Emptied, the same bracket's count is no knob: the estimate says why.
+    emptied = replace(sequence, brackets=(PulseBracket("load_loop", "image", "load", 1),))
+    with pytest.raises(ValueError, match="^Bracket 1 is empty, so scanning its repeat count changes nothing"):
+        estimate_scan_time(emptied, plan, **inputs)
 
 
 def test_binding_refuses_unknown_ports_and_out_of_range_values() -> None:
@@ -508,3 +512,31 @@ def test_api_parameters_are_host_walked_ports_unless_a_slot_sweeps_them() -> Non
         API_PARAM_FAMILY + "dac:load:da_bias_y",
         API_PARAM_FAMILY + "dac:load:da_bias_z",
     ]
+
+    # An empty bracket loops nothing: its API repeat count is kept but is no
+    # knob to scan, so a plan naming it is refused, saying why.
+    from zlc_atom.nodes.scan import unscannable_api_ports
+    from zlc_atom.nodes.scan.plan import ScanAxis, ScanPlan, bind_plan
+    from zlc_pulse import PulseBinding, PulseBracket, PulseFieldRef
+
+    first_id = raw.periods[1].period_id
+    waiting = replace(raw, brackets=(PulseBracket("wait", first_id, raw.periods[0].period_id, 2),),
+                      bindings=(*raw.bindings, PulseBinding(
+                          PulseFieldRef("bracket_count", bracket_id="wait"), "count", source="api")))
+    assert "bracket_count:wait" in {binding.field_id for binding in waiting.api_bindings}
+    offered = api_scan_ports_for(waiting)
+    assert [port.port for port in offered] == [port.port for port in ports]
+    walked = ScanPlan((ScanAxis("api:bracket_count:wait", (1.0, 2.0)),))
+    with pytest.raises(ValueError, match="offers no scan port named 'api:bracket_count:wait'"):
+        bind_plan(walked, offered)
+    reason = "Bracket 1 is empty, so scanning its repeat count changes nothing"
+    assert unscannable_api_ports(waiting) == {"api:bracket_count:wait": reason}
+    with pytest.raises(ValueError) as refused:
+        bind_plan(walked, offered, withheld=unscannable_api_ports(waiting))
+    assert str(refused.value) == (
+        f"{reason}; remove axis 'api:bracket_count:wait' or put a period inside the bracket"
+    )
+    # With a period inside, the same count is an ordinary port.
+    looping = replace(waiting, brackets=(PulseBracket("wait", raw.periods[0].period_id, first_id, 2),))
+    assert unscannable_api_ports(looping) == {}
+    assert API_PARAM_FAMILY + "bracket_count:wait" in {port.port for port in api_scan_ports_for(looping)}
