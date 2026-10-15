@@ -40,10 +40,9 @@ RUN = FIXTURES / "main_readout_oracle.npz"
 
 MODEL_NAMES = ("box", "psf", "uniform_psf")
 
-#: Gaussian calibration is deliberately blind to the true labels.  On this
-#: short, overlapping 60-shot run the unsupervised population fit measures
-#: 0.869 / 0.908 / 0.908 agreement and 0.780 at the worst site; the labels are
-#: used below only to evaluate those answers.
+#: The short-frame populations are fitted using the long-frame reference
+#: labels. These floors still check recovery against the independent simulated
+#: occupancy that produced this overlapping sixty-shot run.
 AGREEMENT_FLOOR = 0.85
 SITE_FIDELITY_FLOOR = 0.75
 
@@ -133,8 +132,8 @@ def test_every_model_recovers_the_occupancy_that_produced_the_frames() -> None:
         assert float((mutated == truth).mean()) < float((honest == truth).mean())
 
 
-def test_a_threshold_is_the_weighted_crossing_of_the_unlabelled_fit() -> None:
-    """Gaussian calibration fits values only; labels evaluate its result."""
+def test_a_threshold_is_the_weighted_crossing_of_the_labelled_populations() -> None:
+    """Each real reference-label group determines its own normal population."""
 
     result, _truth = _calibration()
     for model in result.calibration.models:
@@ -151,6 +150,17 @@ def test_a_threshold_is_the_weighted_crossing_of_the_unlabelled_fit() -> None:
             bright_mean = float(report["gaussian_bright_mean"][site])
             bright_sigma = float(report["gaussian_bright_sigma"][site])
             bright_weight = float(report["gaussian_bright_weight"][site])
+            values = np.asarray(report["short_signals"])[:, site]
+            valid = np.asarray(result.report["labels_valid"])[:, site] & np.isfinite(values)
+            occupied = np.asarray(result.report["labels_occupied"])[:, site]
+            dark = values[valid & ~occupied]
+            bright = values[valid & occupied]
+            assert dark_mean == pytest.approx(float(np.mean(dark)))
+            assert dark_sigma == pytest.approx(float(np.std(dark, ddof=0)))
+            assert bright_mean == pytest.approx(float(np.mean(bright)))
+            assert bright_sigma == pytest.approx(float(np.std(bright, ddof=0)))
+            assert dark_weight == pytest.approx(dark.size / (dark.size + bright.size))
+            assert bright_weight == pytest.approx(bright.size / (dark.size + bright.size))
             assert dark_mean < threshold < bright_mean
             dark_log_curve = (
                 np.log(dark_weight)
@@ -199,13 +209,15 @@ def test_a_threshold_is_the_weighted_crossing_of_the_unlabelled_fit() -> None:
     assert 5.0 < eightfold.bright_sigma / eightfold.dark_sigma < 10.0
     assert eightfold.dark_mean < eightfold.threshold < eightfold.bright_mean
 
-    # Changing truth labels cannot move a Gaussian model or threshold.  It can
-    # only change the empirical evaluation of that already chosen threshold.
+    # Invalid-reference shots cannot affect either population or its weight.
+    # Reversing the labels cannot be repaired by silently swapping states:
+    # occupied means the supplied reference identity, not the higher mean.
     samples = np.concatenate(
-        (rng.normal(0.0, 0.5, 80), rng.normal(4.0, 0.8, 120))
+        (rng.normal(0.0, 0.5, 80), rng.normal(4.0, 0.8, 120), [-1e5, 1e5, np.nan])
     )[:, np.newaxis]
     labels_a = np.arange(samples.shape[0])[:, np.newaxis] >= 80
     labels_b = ~labels_a
+    valid = np.arange(samples.shape[0])[:, np.newaxis] < 200
     fitted = []
     for labels in (labels_a, labels_b):
         fitted.append(
@@ -216,22 +228,29 @@ def test_a_threshold_is_the_weighted_crossing_of_the_unlabelled_fit() -> None:
                 ),
                 short_signals=samples,
                 labels_occupied=labels,
-                labels_valid=np.ones(samples.shape, dtype=bool),
+                labels_valid=valid,
                 threshold_method="gaussian",
                 model_parameters={"integration_half_width": 0},
             )
         )
-    for field in (
-        "gaussian_thresholds",
-        "gaussian_dark_mean",
-        "gaussian_dark_sigma",
-        "gaussian_dark_weight",
-        "gaussian_bright_mean",
-        "gaussian_bright_sigma",
-        "gaussian_bright_weight",
-    ):
-        np.testing.assert_allclose(fitted[0][1][field], fitted[1][1][field])
-    assert fitted[0][1]["site_fidelity"][0] != fitted[1][1]["site_fidelity"][0]
+    labelled_model, labelled_report = fitted[0]
+    assert labelled_model.usable_sites[0]
+    assert labelled_report["gaussian_dark_mean"][0] == pytest.approx(samples[:80].mean())
+    assert labelled_report["gaussian_dark_sigma"][0] == pytest.approx(samples[:80].std(ddof=0))
+    assert labelled_report["gaussian_bright_mean"][0] == pytest.approx(samples[80:200].mean())
+    assert labelled_report["gaussian_bright_sigma"][0] == pytest.approx(samples[80:200].std(ddof=0))
+    assert labelled_report["gaussian_dark_weight"][0] == pytest.approx(0.4)
+    assert labelled_report["gaussian_bright_weight"][0] == pytest.approx(0.6)
+    assert labelled_report["site_n_actual"][0] == 200
+    assert labelled_report["site_fidelity"][0] == pytest.approx(
+        np.mean(labelled_report["predictions"][valid] == labels_a[valid])
+    )
+    reversed_model, reversed_report = fitted[1]
+    assert not reversed_model.usable_sites[0]
+    assert reversed_report["threshold_fallback"][0]
+    assert np.isnan(reversed_report["gaussian_thresholds"][0])
+    assert np.isnan(reversed_report["site_gaussian_fidelity"][0])
+    assert reversed_model.bright_mean[0] < reversed_model.dark_mean[0]
 
     empirical, _truth = _calibration("empirical")
     for model in empirical.calibration.models:
@@ -243,19 +262,30 @@ def test_a_threshold_is_the_weighted_crossing_of_the_unlabelled_fit() -> None:
             ~np.isclose(model.thresholds, report["gaussian_thresholds"])
         )
 
-    fallback_model, fallback_report = _fit_readout_model(
-        kind=ReadoutModelKind.BOX,
-        site_map=SiteMap(("site_0000",), [[0.0, 0.0]], [True], [1.0]),
-        short_signals=np.asarray([[0.0], [10.0]]),
-        labels_occupied=np.asarray([[False], [True]]),
-        labels_valid=np.ones((2, 1), dtype=bool),
-        threshold_method="gaussian",
-        model_parameters={"integration_half_width": 0},
-    )
-    np.testing.assert_allclose(fallback_model.thresholds, [5.0])
-    np.testing.assert_array_equal(fallback_report["threshold_fallback"], [True])
-    np.testing.assert_allclose(fallback_report["site_fidelity"], [1.0])
-    assert np.isnan(fallback_report["site_gaussian_fidelity"][0])
+    # A singleton has no measured Gaussian width; repeated non-binary
+    # constants must not turn roundoff in std into a fictitious narrow peak.
+    for dark, bright, expected in (([0.0], [10.0], 5.0),
+                                   ([0.1] * 3, [0.2] * 3, 0.15),
+                                   ([], [9.0, 10.0, 11.0], np.nan)):
+        fallback_samples = np.asarray(dark + bright)[:, np.newaxis]
+        fallback_model, fallback_report = _fit_readout_model(
+            kind=ReadoutModelKind.BOX,
+            site_map=SiteMap(("site_0000",), [[0.0, 0.0]], [True], [1.0]),
+            short_signals=fallback_samples,
+            labels_occupied=(np.arange(len(fallback_samples)) >= len(dark))[:, np.newaxis],
+            labels_valid=np.ones(fallback_samples.shape, dtype=bool),
+            threshold_method="gaussian",
+            model_parameters={"integration_half_width": 0},
+        )
+        np.testing.assert_allclose(fallback_model.thresholds, [expected], equal_nan=True)
+        assert np.isnan(fallback_report["gaussian_thresholds"][0])
+        assert np.isnan(fallback_report["site_gaussian_fidelity"][0])
+        if dark:
+            assert fallback_report["threshold_fallback"][0]
+            assert fallback_report["site_fidelity"][0] == 1.0
+        else:
+            assert not fallback_model.usable_sites[0]
+            assert not fallback_report["threshold_fallback"][0]
     assert _empirical_threshold([0.0, 10.0], [0.0, 10.0]) == 5.0
 
 

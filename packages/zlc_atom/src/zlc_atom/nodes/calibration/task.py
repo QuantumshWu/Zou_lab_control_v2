@@ -1573,6 +1573,14 @@ class CalibrationTask:
         run_record: Mapping[str, object],
     ) -> CalibrationResult:
         site_map_filter = self._site_map_filter(context, contract, run_record)
+        # Replay uses the saved capture's effective units and camera, not the
+        # current draft/device. Live and saved frames enter this same analysis.
+        captured_request = run_record["request"]
+        captured_camera = run_record["actual_devices"][contract.camera_id]
+        electrons_per_count = (
+            1.0 if captured_request.get(PHOTOELECTRONS, False)
+            else captured_camera.get("electrons_per_count")
+        )
         return calibrate(
             capture.reference,
             capture.short,
@@ -1584,6 +1592,7 @@ class CalibrationTask:
             psf_padding=self.request.psf_padding,
             detection_spot_sigma=self.request.detection_spot_sigma,
             detection_sigma=self.request.detection_sigma,
+            electrons_per_count=electrons_per_count,
             site_map_filter=site_map_filter,
         )
 

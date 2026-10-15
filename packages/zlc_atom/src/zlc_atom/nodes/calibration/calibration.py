@@ -18,7 +18,9 @@ from zlc_durable import strict_json_loads, write_readable_json
 
 from zlc_atom.authoring import AuthoringChoice
 
-from .bimodal import fit_bimodal, per_site_fidelity
+from .bimodal import (
+    fit_bimodal, gaussian_fidelity, optimal_gaussian_threshold, per_site_fidelity,
+)
 from .psf import extract_psf_window, gaussian_psf_kernel
 
 
@@ -1700,6 +1702,7 @@ def _accumulate_run(
     *,
     spot_sigma: float,
     detection_sigma: float,
+    electrons_per_count: float | None = None,
 ) -> _RunEvidence:
     """Read the run once, keeping every quantity a later step could want.
 
@@ -1724,6 +1727,15 @@ def _accumulate_run(
     total_image = np.zeros(stack.shape[1:], dtype=float)
     transitions = 0
     previous_smoothed: np.ndarray | None = None
+    previous_source_variance: np.ndarray | None = None
+    if electrons_per_count is not None:
+        # Exactly the finite Gaussian used by gaussian_filter, squared rather
+        # than renormalised: Var(sum(w * photons)) = sum(w**2 * photons).
+        radius = int(4.0 * spot_sigma + 0.5)
+        offsets = np.arange(-radius, radius + 1, dtype=float)
+        kernel = np.exp(-0.5 * (offsets / spot_sigma) ** 2)
+        kernel /= np.sum(kernel)
+        variance_kernel = kernel ** 2
     # Frames are filtered many at a time, in blocks sized by memory rather than
     # by frame count: one SciPy call over a block costs a fraction of one call
     # per frame, and filtering makes two more copies of whatever it is given,
@@ -1736,6 +1748,25 @@ def _accumulate_run(
         smoothed = ndimage.gaussian_filter(
             frames, sigma=(0.0, spot_sigma, spot_sigma)
         )
+        source_variance = None
+        if electrons_per_count is not None:
+            # Background/read noise is already measured below. Add only the
+            # source's excess photon noise, in the INPUT's units; a raw ADU is
+            # not one electron. Do not infer gain from signal dtype or offset.
+            excess = np.maximum(
+                frames - np.median(frames, axis=(1, 2), keepdims=True), 0.0
+            ) / electrons_per_count
+            variance = ndimage.correlate1d(excess, variance_kernel, axis=1)
+            del excess
+            variance = ndimage.correlate1d(variance, variance_kernel, axis=2)
+            source_variance = variance[1:] + variance[:-1]
+            if previous_source_variance is not None:
+                source_variance = np.concatenate((
+                    variance[:1] + previous_source_variance[np.newaxis, ...],
+                    source_variance,
+                ), axis=0)
+            previous_source_variance = np.array(variance[-1], copy=True)
+            del variance
         response = smoothed - ndimage.gaussian_filter(
             frames, sigma=(0.0, background_sigma, background_sigma)
         )
@@ -1768,6 +1799,9 @@ def _accumulate_run(
             np.finfo(float).eps
             * np.maximum(1.0, np.max(magnitude, axis=(1, 2), keepdims=True)),
         )
+        if source_variance is not None:
+            noise = np.sqrt(noise ** 2 + source_variance)
+            del source_variance
         # Preserve identity BEFORE combining transitions. A rare site's peak
         # can disappear in a sum (or maximum) of images from different times.
         # The ring belongs to the same transition as its local peak, never a
@@ -1777,7 +1811,7 @@ def _accumulate_run(
             - inner * ndimage.uniform_filter(magnitude, size=(1, change_window - 2, change_window - 2), mode="nearest")
         ) / float(outer - inner)
         # Score the localized change, not a bright neighbour's broad skirt.
-        # Keep the pre-contrast background scatter as the conservative scale;
+        # Keep the pre-contrast local scatter as the conservative scale;
         # this is not an exact per-pixel photon-noise probability.
         standardized = (magnitude - ring) / noise
         del ring
@@ -2050,6 +2084,7 @@ def detect_sites(
     spot_sigma: float = 1.0,
     detection_sigma: float = 6.0,
     measurement_radius: int = 0,
+    electrons_per_count: float | None = None,
 ) -> SiteMap:
     """Find the traps in a run of frames, and say where each one is.
 
@@ -2059,7 +2094,8 @@ def detect_sites(
     * BETWEEN NEIGHBOURING FRAMES.  Loading or unloading makes one spatially
       shaped difference peak.  A site that loaded on only one frame therefore
       remains a possible site even when its complete average is weak.  The
-      change threshold is measured on each difference image's own background.
+      Its noise includes the measured background and the source's photon
+      variance when the input's electron conversion is known.
       A difference has no direction -- that is the point of it: a weak trap
       in its bright neighbours' band-pass dark ring is never bright on any
       one frame, and it is still a trap.
@@ -2076,6 +2112,9 @@ def detect_sites(
     ``detection_sigma`` is how sure one neighbouring-frame change must be.
     ``measurement_radius`` is the box the readout will later ask for round
     each site, which a published site must be able to carry.
+    ``electrons_per_count`` describes these input numbers: 1 for electrons,
+    the camera's conversion for raw counts, None for an unknown conversion.
+    Unknown units do not license assuming one count is one photon.
     """
 
     # The frames' own dtype: the run is filtered in blocks, each widened to
@@ -2095,13 +2134,18 @@ def detect_sites(
         raise ValueError("spot_sigma must be positive and finite")
     if detection_sigma <= 0 or not np.isfinite(detection_sigma):
         raise ValueError("detection_sigma must be positive and finite")
+    if electrons_per_count is not None:
+        electrons_per_count = float(electrons_per_count)
+        if electrons_per_count <= 0 or not np.isfinite(electrons_per_count):
+            raise ValueError("electrons_per_count must be positive and finite")
     # How near in y two sites must be to be READ as one row of the array.
     # Ordering only: it decides the order site ids are handed out in, never
     # which places are sites.
     row_tolerance = max(2.0, float(spot_sigma))
 
     evidence = _accumulate_run(
-        stack, spot_sigma=spot_sigma, detection_sigma=detection_sigma
+        stack, spot_sigma=spot_sigma, detection_sigma=detection_sigma,
+        electrons_per_count=electrons_per_count,
     )
     admission = _admission_thresholds(
         stack, evidence, detection_sigma=detection_sigma
@@ -2437,7 +2481,12 @@ def _fit_readout_model(
     model_parameters: Mapping[str, Any],
     diagnostics: Mapping[str, Any] | None = None,
 ) -> tuple[ReadoutModel, dict[str, Any]]:
-    """Fit one feature model and evaluate it on the complete labelled run."""
+    """Fit each reference-labelled population and evaluate its threshold.
+
+    For a known state, the Gaussian maximum-likelihood solution is its sample
+    mean and population standard deviation. The short frame cannot relabel
+    its own overlapping populations; only agreeing long references label it.
+    """
 
     centers = site_map.centers_xy
     thresholds = np.full(len(centers), np.nan, dtype=float)
@@ -2471,20 +2520,28 @@ def _fit_readout_model(
             dark_sample_count[site] = dark_reference.size
             dark_sample_variance[site] = float(np.var(dark_reference, ddof=1))
         gaussian_threshold = float("nan")
-        mixture = fit_bimodal(short_signals[finite, site])
-        # The fit's own threshold and fidelity are already the weighted
-        # crossing and its weighted fidelity; ``ok`` includes that the
-        # crossing exists between the two means.
-        if mixture.ok:
-            gaussian_threshold = mixture.threshold
-            gaussian_thresholds[site] = mixture.threshold
-            gaussian_dark_means[site] = mixture.dark_mean
-            gaussian_dark_sigmas[site] = mixture.dark_sigma
-            gaussian_bright_means[site] = mixture.bright_mean
-            gaussian_bright_sigmas[site] = mixture.bright_sigma
-            gaussian_dark_weights[site] = 1.0 - mixture.bright_fraction
-            gaussian_bright_weights[site] = mixture.bright_fraction
-            site_gaussian_fidelity[site] = mixture.fidelity
+        if (dark.size >= 2 and bright_values.size >= 2
+                and np.ptp(dark) > 0.0 and np.ptp(bright_values) > 0.0):
+            dark_mean, bright_mean = float(np.mean(dark)), float(np.mean(bright_values))
+            dark_sigma, bright_sigma = float(np.std(dark)), float(np.std(bright_values))
+            total = dark.size + bright_values.size
+            dark_weight, bright_weight = dark.size / total, bright_values.size / total
+            gaussian_threshold = optimal_gaussian_threshold(
+                dark_mean, dark_sigma, bright_mean, bright_sigma,
+                dark_weight, bright_weight,
+            )
+            if np.isfinite(gaussian_threshold):
+                gaussian_thresholds[site] = gaussian_threshold
+                gaussian_dark_means[site] = dark_mean
+                gaussian_dark_sigmas[site] = dark_sigma
+                gaussian_bright_means[site] = bright_mean
+                gaussian_bright_sigmas[site] = bright_sigma
+                gaussian_dark_weights[site] = dark_weight
+                gaussian_bright_weights[site] = bright_weight
+                site_gaussian_fidelity[site] = gaussian_fidelity(
+                    dark_mean, dark_sigma, bright_mean, bright_sigma,
+                    gaussian_threshold, dark_weight, bright_weight,
+                )[2]
         threshold = gaussian_threshold
         if threshold_method == "empirical" or not np.isfinite(gaussian_threshold):
             threshold = (
@@ -2504,8 +2561,8 @@ def _fit_readout_model(
                 short_values,
                 np.full(short_values.shape, threshold, dtype=float),
             )
-    # Labels enter only here (and the empirical path above): they evaluate the
-    # final operating point but never determine a Gaussian fit or its threshold.
+    # This is the observed agreement on the calibration samples, not held-out
+    # validation: the same reference labels also trained the two populations.
     confusion = per_site_fidelity(
         short_signals,
         labels_occupied,
@@ -2575,6 +2632,7 @@ def calibrate(
     psf_padding: int = 3,
     detection_spot_sigma: float = 1.0,
     detection_sigma: float = 6.0,
+    electrons_per_count: float | None = None,
     site_map_filter: Callable[[SiteMap, np.ndarray], SiteMap] | None = None,
 ) -> CalibrationResult:
     """Discover sites and fit all readout models from one complete capture."""
@@ -2610,6 +2668,7 @@ def calibrate(
         references.reshape(-1, *references.shape[2:]),
         spot_sigma=detection_spot_sigma,
         detection_sigma=detection_sigma,
+        electrons_per_count=electrons_per_count,
         # Every box this calibration will read out of a site: the integration
         # box, and the PSF box with the background ring round it.  A place that
         # cannot carry all of them is not a site THIS calibration can use.

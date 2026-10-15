@@ -364,6 +364,40 @@ def test_average_peak_identity_preserves_close_lattices_without_duplicates() -> 
     assert found.n_sites == 1, found.centers_xy
     assert np.linalg.norm(found.centers_xy[0] - center) < .05
 
+    # Bench failure: a single PSF has a faint asymmetric shoulder. Bright→bright
+    # photon fluctuations there are not a second atom, even though they exceed
+    # six times the empty background's scatter. One hundred two-reference cycles.
+    grid_y, grid_x = np.mgrid[:40, :40]
+
+    def photon_profile(x, y):
+        qx = .5 * (erf((grid_x + .5 - x) / (.75 * np.sqrt(2)))
+                   - erf((grid_x - .5 - x) / (.75 * np.sqrt(2))))
+        qy = .5 * (erf((grid_y + .5 - y) / (.75 * np.sqrt(2)))
+                   - erf((grid_y - .5 - y) / (.75 * np.sqrt(2))))
+        return qx * qy
+
+    rng = np.random.default_rng(17)
+    loaded = np.repeat(rng.random(100) < .6, 2)
+    profile = photon_profile(20.25, 19.7) + .09 * photon_profile(22.25, 19.7)
+    photons = (rng.poisson(1. + loaded[:, None, None] * 650. * profile)
+               + rng.normal(0., 2., (200, 40, 40)))
+    found = detect_sites(photons, spot_sigma=1., electrons_per_count=1.)
+    assert found.n_sites == 1, found.centers_xy
+    assert np.linalg.norm(found.centers_xy[0] - (20.25, 19.7)) < .1
+    scaled = detect_sites(photons / 2.7 + 120., spot_sigma=1., electrons_per_count=2.7)
+    np.testing.assert_allclose(scaled.centers_xy, found.centers_xy, atol=1e-8, rtol=0.)
+
+    # An independently loaded nearby site still survives, even at only two of
+    # 200 reference frames; a bright neighbour cannot veto its change evidence.
+    rare = np.isin(np.arange(200), (21, 102))
+    close = photons + np.random.default_rng(113).poisson(
+        rare[:, None, None] * 650. * photon_profile(25.25, 19.7))
+    found = detect_sites(close, spot_sigma=1., electrons_per_count=1.)
+    assert found.n_sites == 2, found.centers_xy
+    distances = np.linalg.norm(found.centers_xy[:, None]
+                               - np.asarray(((20.25, 19.7), (25.25, 19.7)))[None], axis=2)
+    assert np.max(np.min(distances, axis=0)) < .5
+
     # Resolved narrow spots stay separate. For an elliptical PSF, separation
     # along its narrow axis must not be judged using the broad-axis width.
     grid_y, grid_x = np.mgrid[:56, :56]
