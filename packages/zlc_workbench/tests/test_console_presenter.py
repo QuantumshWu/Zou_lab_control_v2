@@ -1049,6 +1049,13 @@ def test_add_panel_puts_a_blank_fixed_kind_panel_on_the_board(presenter) -> None
     original_state = binding.state
     assert presenter.update_panel_state(binding.panel_id, {"interval_ms": 500}) is False
     assert binding.state is original_state
+    # A control client is offered exactly the intervals the GUI offers, and
+    # values only, not how a control draws them.
+    catalog = presenter.control_catalog(panel_id=binding.panel_id)
+    assert catalog["panel_intervals"] == list(presenter.view.panel_intervals)
+    assert not any({"segmented", "step"} & set(field)
+                   for group in ("semantic", "display", "fit")
+                   for field in catalog["panel"]["parameter_surface"][group])
 
 
 def test_a_card_is_captioned_through_the_signal_key_grammar(presenter) -> None:
