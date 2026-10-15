@@ -345,6 +345,31 @@ class AxisSpec:
             self.coordinate_labels, self.coordinate_of, self.coordinate_origins,
         )
 
+    def labels(self) -> tuple[str, ...]:
+        """The exact text naming each coordinate, in axis order.
+
+        The declared ``coordinate_labels`` when there are some; otherwise
+        each coordinate written out exactly -- text as it is, an integer in
+        decimal, a NumPy float as its own dtype's shortest round-trip text,
+        a Python float as its ``repr`` -- with a trailing ``.0`` removed:
+        ``0``, ``0.1``, ``6834700000``, ``1e-06``.  What a person or an agent
+        picks a coordinate by, so two coordinates never read alike (``:g``
+        printed 6834700000 and 6834700001 both as ``6.8347e+09``).
+        """
+
+        if self.coordinate_labels is not None:
+            return self.coordinate_labels
+
+        def written(value: Any) -> str:
+            if isinstance(value, str):
+                return value
+            if isinstance(value, (int, np.integer)):
+                return str(int(value))
+            text = str(value) if isinstance(value, np.floating) else repr(value)
+            return text[:-2] if text.endswith(".0") else text
+
+        return tuple(written(value) for value in self.coordinate_values())
+
     def coordinate_values(self) -> np.ndarray | tuple[CoordinateScalar, ...]:
         """Read actual coordinates; only a factored time axis needs expansion."""
 

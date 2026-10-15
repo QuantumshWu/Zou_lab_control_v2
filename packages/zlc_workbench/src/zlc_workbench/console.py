@@ -498,17 +498,18 @@ def _plain_inputs(projection: Mapping[str, Any]) -> list[dict[str, Any]]:
     """What a node reads, as the plain facts an agent writes against.
 
     One entry per input member: dtype, unit and every named axis with its
-    AxisId, domain, role, size and coordinate labels -- the exact names a
-    Derive output or a panel's axis choice must use.  Read from the latest
-    publication's event, or the declared schema before there is one.
+    AxisId, domain, role, size and exact labels (``AxisSpec.labels``) --
+    the names and labels a Derive pick or a panel's axis choice must use.
+    Read from the schema a Derive draft is typed against: the run's whole
+    geometry for a finite source, the latest event for a monitor, or the
+    declared schema before there is a publication.
     """
 
     bundle = tuple(projection.get("input_bundle") or ())
     if not bundle and projection.get("source_schema") is not None:
         bundle = ((signal_output_name(str(projection["source_signal"])), projection["source_schema"], None),)
     inputs = []
-    for name, schema, snapshot in bundle:
-        schema = snapshot.block.schema if snapshot is not None else schema
+    for name, schema, _snapshot in bundle:
         if schema is None:
             inputs.append({"member": str(name), "schema": "known after its first publication"})
             continue
@@ -518,12 +519,9 @@ def _plain_inputs(projection: Mapping[str, Any]) -> list[dict[str, Any]]:
             for axis in spec.axes:
                 if axis.role.value == "scalar":
                     continue
-                shown = range(min(axis.size, 16))
-                labels = [
-                    axis.coordinate_labels[index] if axis.coordinate_labels is not None
-                    else value if isinstance(value, str) else str(value) if isinstance(value, int) else f"{value:g}"
-                    for index in shown for value in (axis.coordinate_at(index),)
-                ]
+                labels = list(axis.labels())
+                if len(labels) > 64:
+                    labels = labels[:16]
                 entry = {"name": axis.name, "id": axis.axis_id.value, "domain": domain,
                          "role": axis.role.value, "size": axis.size, "labels": labels}
                 if axis.size > len(labels):
