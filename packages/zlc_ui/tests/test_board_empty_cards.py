@@ -442,8 +442,8 @@ for hold in ('left', 'right'):
     end = board.mapTo(window, QtCore.QPoint(slots[3][0] + 12, slots[3][1] + 12))
     press_and_carry(window, mover, held, end)
     assert mover.mapTo(window, held) == end, (hold, mover.pos())
-    # The others fell north-west into the hole it left ...
-    assert places(cards[1:]) == [slots[0], slots[2], slots[1]], (hold, places(cards[1:]))
+    # The card it is let go onto already stands in the place it left ...
+    assert places(cards[1:]) == [slots[1], slots[2], slots[0]], (hold, places(cards[1:]))
     # ... and the slot is drawn wherever the carried card leaves it showing.
     target = QtCore.QRect(*slots[3], w, h)
     picture = board.grab().toImage()
@@ -463,8 +463,8 @@ for hold in ('left', 'right'):
     events = []
     board.order_committed.connect(events.append)
     release(window, end)
-    assert events and events[-1] == ('panel-1', 'panel-3', 'panel-2', 'panel-0'), (hold, events)
-    assert places(cards) == [slots[3], slots[0], slots[2], slots[1]], (hold, places(cards))
+    assert events and events[-1] == ('panel-3', 'panel-1', 'panel-2', 'panel-0'), (hold, events)
+    assert places(cards) == [slots[3], slots[1], slots[2], slots[0]], (hold, places(cards))
     # The presenter hands the cards back in the committed order: nothing moves.
     by_id = {card.panel_id: card for card in cards}
     before = places(cards)

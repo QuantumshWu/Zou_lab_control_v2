@@ -5,7 +5,7 @@ from .board_layout import (
     GeomProxy,
     slot_under,
     first_free_slot,
-    lift,
+    drop,
     min_board_width,
     pack,
 )
@@ -22,7 +22,7 @@ __all__ = [
     "GeomProxy",
     "slot_under",
     "first_free_slot",
-    "lift",
+    "drop",
     "min_board_width",
     "pack",
     "panel_display_size",

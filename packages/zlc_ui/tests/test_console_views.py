@@ -696,10 +696,11 @@ assert all(card.geometry().x() == 10 for card in cards)
 board.resize(3 * w + 4 * 10, 2 * h + 3 * 10); app.processEvents()
 assert tuple(card.geometry().getRect()[:2] for card in cards) == second_row
 
+# Onto panel-0: the two change places.
 drop_top_left_at(board, cards[2], (12, 14))
-assert events[-1] == ('panel-2', 'panel-0', 'panel-1'), events
+assert events[-1] == ('panel-2', 'panel-1', 'panel-0'), events
 by_id = {card.panel_id: card for card in cards}
-assert tuple(by_id[panel_id].geometry().getRect()[:2] for panel_id in events[-1]) == row
+assert tuple(by_id[panel_id].geometry().getRect()[:2] for panel_id in events[-1]) == second_row
 
 # Every place a drop authored stands through the next drop.
 board.close()
@@ -723,9 +724,8 @@ assert cards[2].geometry().getRect()[:2] == (10, 30 + 2 * h), cards[2].geometry(
 
 def test_board_qtest_drag_previews_the_drop_while_the_card_follows_the_pointer(run_qt) -> None:
     """While a card is carried it follows the pointer, and the board already
-    stands as the drop will leave it: the other cards fallen north-west into
-    the hole it left or making way for it, and the slot drawn where the card
-    will rest."""
+    stands as the drop will leave it: the card it is let go onto in the place
+    it left, and the slot drawn where the card will rest."""
 
     run_qt(
         """
@@ -759,21 +759,20 @@ def places(ids):
 
 drag_to(cards[0], (w + 60, h + 60))
 assert cards[0].pos() == QtCore.QPoint(w + 42, h + 42)
-# Picked up, panel-0 leaves a hole the others fall into north-west: panel-1
-# slides left into it and panel-3 rises into the place panel-1 left.
-assert places(('panel-1', 'panel-3', 'panel-2')) == slots[:3]
+# Over panel-3: panel-3 already stands in the place panel-0 left, and the
+# other two have not moved.
+assert places(('panel-3', 'panel-1', 'panel-2')) == slots[:3]
 assert board._drop_rect == QtCore.QRect(20 + w, 20 + h, w, h), board._drop_rect
 drop_at(cards[0], (w + 60, h + 60))
-assert board._order == ('panel-1', 'panel-3', 'panel-2', 'panel-0')
+assert board._order == ('panel-3', 'panel-1', 'panel-2', 'panel-0')
 assert places(board._order) == slots and board._drop_rect is None
 
-# Over the slot panel-2 stands in: panel-0 goes there and panel-2 makes
-# way along its row, into the place panel-0 left.
+# Over panel-2: the two change places.
 drag_to(cards[0], (35, 2 * h))
-assert places(('panel-1', 'panel-3', 'panel-2')) == (slots[0], slots[1], slots[3])
+assert places(('panel-3', 'panel-1', 'panel-2')) == (slots[0], slots[1], slots[3])
 assert board._drop_rect == QtCore.QRect(10, 20 + h, w, h), board._drop_rect
 drop_at(cards[0], (35, 2 * h))
-assert board._order == ('panel-1', 'panel-3', 'panel-0', 'panel-2')
+assert board._order == ('panel-3', 'panel-1', 'panel-0', 'panel-2')
 assert places(board._order) == slots
 """
     )
