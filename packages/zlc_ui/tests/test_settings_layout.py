@@ -139,8 +139,12 @@ label_lefts = {
     key: form._labels[key].mapTo(body, QtCore.QPoint(0, 0)).x() for key in form.spec.keys
 }
 assert len(set(label_lefts.values())) == 1, label_lefts
-plain = next(key for key in form.spec.keys if key not in form._auto_switches)
-control_left = form.cell_for(plain).mapTo(body, QtCore.QPoint(0, 0)).x()
+# Every Display row here is an Auto row; the plain rows are the Panel
+# section's, on the same column (one label column across the sections).
+panel_form = card._settings_form
+plain = next(key for key in panel_form.spec.keys if key not in panel_form._auto_switches)
+control_left = panel_form.cell_for(plain).mapTo(body, QtCore.QPoint(0, 0)).x()
+assert panel_form._labels[plain].mapTo(body, QtCore.QPoint(0, 0)).x() in set(label_lefts.values())
 for key, switch in form._auto_switches.items():
     assert switch.text() in ('Auto', 'Manual'), (key, switch.text())
     assert form._labels[key].text() == form.shown_labels()[form.spec.keys.index(key)]
