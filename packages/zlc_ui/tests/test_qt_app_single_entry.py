@@ -243,7 +243,10 @@ later = Deferred(400)
 later.show(); app.processEvents()
 later.close()
 closed, waited = _wait_closed(app, later, 5000)
-assert closed and 400 <= waited < 5000, (closed, waited)
+# The owner's timer starts inside close(), a moment before the wait does,
+# and a coarse timer may fire a little early: the wait lasted about the
+# owner's 400 ms, not one settle and not the whole deadline.
+assert closed and 300 <= waited < 5000, (closed, waited)
 
 refused = Deferred(None)
 refused.show(); app.processEvents()
