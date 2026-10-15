@@ -4875,10 +4875,11 @@ class PulseEditorPresenter:
     def _has_scan_slots(self, *, present: bool = True) -> bool:
         """Whether anything is bound, and say what to do when nothing is.
 
-        A scan table has one column per bound field, so with nothing bound
-        there is no table to make or read -- and the operator's next move is a
-        click on a dot in the Edit tab.  Failing later, on a column count,
-        names the symptom instead.
+        A scan table's columns are fields marked Scan -- all of them, in slot
+        order, or the ones it names -- so with nothing bound there is no table
+        to make or read, and the operator's next move is a click on a dot in
+        the Edit tab.  Failing later, on a column count, names the symptom
+        instead.
         """
 
         try:
@@ -5059,8 +5060,13 @@ class PulseEditorPresenter:
         self._refresh_scan_page()
         return False
 
-    def _take_scan_program_table(self, source: str, table: object, fields=None, *, present: bool = True) -> bool:
-        """Keep the table a scan program produced, if it is one."""
+    def _take_scan_program_table(
+        self, source: str, table: object, fields: tuple[tuple[str, str], ...], *, present: bool = True,
+    ) -> bool:
+        """Keep the table a scan program produced, if it is one.
+
+        ``fields`` are the Scan fields when the program started.
+        """
 
         from zlc_pulse import scan_table_for
 
@@ -5073,9 +5079,11 @@ class PulseEditorPresenter:
         # did not agree: the loader skipped the width check entirely.  Checked
         # against the fields marked Scan NOW, which is what the table drives.
         try:
-            if fields is not None and fields != self._scan_fields():
-                raise ValueError("Scan fields or units changed while generating the table. Generate it again.")
             scanned, rows = scan_table_for(self.sequence, table)
+            self._check_table_fields(
+                fields, scanned, named=isinstance(table, Mapping),
+                changed="while generating the table. Generate it again.",
+            )
         except Exception as error:
             return self._scan_program_refused(str(error), present=present)
         self._accept_state(
@@ -5092,6 +5100,28 @@ class PulseEditorPresenter:
         self.refresh()
         return True
 
+    def _check_table_fields(
+        self, fields: tuple[tuple[str, str], ...], scanned: PulseSequence, *, named: bool, changed: str,
+    ) -> None:
+        """Refuse a table whose fields changed while it was being made or read.
+
+        ``fields`` were the Scan fields when it started and ``scanned`` is
+        the pulse with Scan only on the fields the table drives.  An unnamed
+        table's columns ARE the Scan fields, in slot order, so any change to
+        them re-reads its columns.  A named table says which fields it
+        drives: only a change to one of those -- off Scan, another unit,
+        another order -- matters, and marking or unmarking any other field
+        leaves it meaning what it meant.
+        """
+
+        if not named:
+            if fields != self._scan_fields():
+                raise ValueError(f"Scan fields or units changed {changed}")
+            return
+        held = tuple((binding.field_id, binding.unit) for binding in scanned.scan_bindings)
+        if any(pair not in fields for pair in held) or self._fields_moved(held):
+            raise ValueError(f"A field the table names stopped being Scan or changed unit {changed}")
+
     def set_scan_repeats(self, repeats: int) -> None:
         """How many times the table is played; zero means until Stop."""
 
@@ -5102,9 +5132,10 @@ class PulseEditorPresenter:
         """Load an explicit .npy/.csv/.txt scan table, or show the GUI picker.
 
         A file's columns are named when it says so -- a .npy saved by Save
-        array carries its fields' ids, and a .csv/.txt whose first line is
-        not numbers names its columns there -- and then drive only those
-        fields; an unnamed file has one column per Scan field, in order.
+        array carries its fields' ids, and a .csv/.txt names them in its
+        first line that is neither blank nor a '#' comment, when that line
+        is not numbers -- and then drive only those fields; an unnamed file
+        has one column per Scan field, in order.
         With the window's command worker, True means submitted; inspect
         control_state().pending and scan.progress for completion or refusal.
         """
@@ -5139,33 +5170,23 @@ class PulseEditorPresenter:
                     # One field, one value per point, however it was saved.
                     data = data.reshape(-1, 1)
             else:
-                with selected.open(encoding="utf-8") as file:
-                    header = [cell.strip() for cell in file.readline().split(",")]
-                try:
-                    [float(cell) for cell in header]
-                    names = None
-                except ValueError:
-                    names = header
-                # A one-column file is one field's points, not one point of
-                # many fields: without ndmin the reader squeezed it flat, and
-                # the commonest sweep file was refused on its column count.
-                data = np.loadtxt(selected, delimiter=",", ndmin=2, skiprows=0 if names is None else 1)
-                if names is not None:
-                    data = {name: data[:, index] for index, name in enumerate(names)}
-            return scan_table_for(sequence, data)
+                data = _read_text_table(selected)
+            return isinstance(data, Mapping), *scan_table_for(sequence, data)
 
         def delivered(table, error):
             if error is None:
                 try:
-                    if fields != self._scan_fields():
-                        raise ValueError("Scan fields or units changed while loading the table. Open it again.")
-                    self._take_scan_rows(*table)
+                    named, scanned, rows = table
+                    self._check_table_fields(
+                        fields, scanned, named=named, changed="while loading the table. Open it again.",
+                    )
+                    self._take_scan_rows(scanned, rows)
                 except Exception as caught:
                     error = caught
             if error is not None:
                 self._scan_program_refused(f"Cannot read {selected.name}: {error}", present=present)
                 return
-            self._scan_progress = f"Loaded {counted(len(table[1]), 'scan point')} from {selected}"
+            self._scan_progress = f"Loaded {counted(len(rows), 'scan point')} from {selected}"
             self._done(self._scan_progress, present=present)
             self._refresh_scan_page()
 
@@ -5532,7 +5553,12 @@ class PulseEditorPresenter:
         """
 
         held = self._state.scan_fields
-        return not held or tuple(pair for pair in self._scan_fields() if pair in held) != held
+        return not held or self._fields_moved(held)
+
+    def _fields_moved(self, held: tuple[tuple[str, str], ...]) -> bool:
+        """Whether one of ``held`` is no longer Scan in its unit, or they play in another order."""
+
+        return tuple(pair for pair in self._scan_fields() if pair in held) != held
 
     def _scan_progress_from_view(self) -> None:
         """The Scan page asking where the board is, answered when the board does."""
@@ -6714,6 +6740,47 @@ def _carried_onto(sequence: PulseSequence, target: PulseTarget) -> dict[str, Any
         "periods": tuple(periods),
         "delays": tuple(delay for delay in sequence.delays if delay.port in kept),
     }
+
+
+def _read_text_table(path: Path) -> object:
+    """A .csv/.txt scan table: an array, or its columns by the names it gives.
+
+    Blank lines and lines starting with ``#`` are not rows -- ``np.savetxt``
+    writes its header as one -- and the first other line names the columns
+    when it is not numbers.  A spreadsheet's export may start with a
+    byte-order mark, which is not part of the first name.
+    """
+
+    import numpy as np
+
+    lines = [
+        line for line in path.read_text(encoding="utf-8-sig").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    names = [cell.strip() for cell in lines[0].split(",")] if lines else []
+    try:
+        [float(cell) for cell in names]
+        names = []
+    except ValueError:
+        lines = lines[1:]
+    if not lines:
+        raise ValueError("the file holds no scan points")
+    # A one-column file is one field's points, not one point of many fields:
+    # without ndmin the reader squeezed it flat, and the commonest sweep file
+    # was refused on its column count.
+    data = np.loadtxt(lines, delimiter=",", ndmin=2)
+    if not names:
+        return data
+    for position, name in enumerate(names, 1):
+        if not name:
+            raise ValueError(f"column {position} of the header has no name")
+        if names.count(name) > 1:
+            raise ValueError(f"the header names {name!r} more than once")
+    if len(names) != data.shape[1]:
+        raise ValueError(
+            f"the header names {counted(len(names), 'column')} but each row holds {data.shape[1]}"
+        )
+    return {name: data[:, index] for index, name in enumerate(names)}
 
 
 def _scan_table_of(source: str) -> object:

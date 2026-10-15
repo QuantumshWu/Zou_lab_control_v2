@@ -95,11 +95,15 @@ the editor shows) to its column -- the Template: columns / grid starters write
 one entry per Scan field, and deleting an entry leaves that field playing its
 own value -- or as an array with one column per Scan field. The editor keeps the
 table's ordered field IDs and units; Save array writes them as the .npy's column
-names, and Open array reads names from such a file or from a CSV/text first line.
-Marking another field Scan, or unmarking one the table does not drive, keeps the
-table. An edit that takes one of its own fields off Scan or changes its unit
-requires regeneration or an explicit Clear array; that action keeps the Python
-draft and emits `scan_array_clear_requested` through the handle.
+names, and Open array reads names from such a file or from a CSV/text header:
+the first line that is neither blank nor a `#` comment, when it is not numbers
+(one name per column, each once). Marking another field Scan, or unmarking one
+the table does not drive, keeps the table, also while its program runs or its
+file loads; only an unnamed table, whose columns are the Scan fields, is refused
+when they change then. An edit that takes one of its own fields off Scan or
+changes its unit requires regeneration or an explicit Clear array; that action
+keeps the Python draft and emits `scan_array_clear_requested` through the
+handle.
 
 ```python
 view = PulseScheduleView()

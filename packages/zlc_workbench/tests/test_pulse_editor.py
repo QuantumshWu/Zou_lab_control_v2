@@ -4178,6 +4178,116 @@ def test_a_number_shown_in_a_field_is_the_number_the_document_holds(sequence) ->
         assert "e" not in shown.lower(), shown
 
 
+def test_open_array_reads_a_text_file_the_way_it_was_written(presenter, tmp_path) -> None:
+    """Comment and blank lines are not rows, and a header names its columns.
+
+    The header used to be whatever the first line held, so the header
+    np.savetxt writes (a '#' line), a blank first line and a spreadsheet's
+    byte-order mark were all read as field names and refused; a header that
+    named fewer columns than the rows held dropped the rest without a word.
+    """
+
+    import numpy as np
+
+    ids = [period.period_id for period in presenter.sequence.periods]
+    presenter.view.binding_committed.emit('duration', ids[3], None, True, 'default')
+    field = f"duration:{ids[3]}"
+    np.savetxt(tmp_path / "savetxt.csv", np.array([0.0041, 0.0052]), delimiter=",", header=field)
+    written = {
+        "comment_first.csv": "# a sweep of the readout\n0.0041\n0.0052\n",
+        "blank_first.csv": "\n0.0041\n\n0.0052\n",
+        "bom_named.csv": "﻿" + field + "\n0.0041\n0.0052\n",
+        "comment_then_named.txt": f"# made by hand\n\n{field}\n0.0041\n0.0052\n",
+    }
+    for name, text in written.items():
+        (tmp_path / name).write_text(text, encoding="utf-8")
+    for name in ("savetxt.csv", *written):
+        presenter._take_scan_rows(presenter.sequence, ((0.01,),))
+        presenter.view.open_answer = str(tmp_path / name)
+        assert presenter.load_scan_array() is True, (name, presenter.view.warnings)
+        assert presenter._state.scan_rows == ((0.0041,), (0.0052,)), name
+
+    presenter.view.binding_committed.emit('duration', ids[1], None, True, 'default')
+    other = f"duration:{ids[1]}"
+    kept = presenter._state.scan_rows
+    for name, text, problem in (
+        ("fewer.csv", f"{field}\n0.004,0.006\n", "the header names 1 column but each row holds 2"),
+        ("more.csv", f"{field},{other}\n0.004\n", "the header names 2 columns but each row holds 1"),
+        ("twice.csv", f"{field},{field}\n0.004,0.005\n", f"the header names {field!r} more than once"),
+        ("unnamed.csv", f"{field},\n0.004,0.005\n", "column 2 of the header has no name"),
+        ("header_only.csv", f"{field}\n", "the file holds no scan points"),
+    ):
+        (tmp_path / name).write_text(text, encoding="utf-8")
+        presenter.view.open_answer = str(tmp_path / name)
+        assert presenter.load_scan_array() is False
+        assert presenter.view.warnings[-1] == f"Cannot read {name}: {problem}"
+        assert presenter._state.scan_rows == kept
+
+
+def test_a_named_table_ignores_scan_marks_it_does_not_name(sequence, tmp_path) -> None:
+    """Marking or unmarking a field the table does not name, while its
+    program runs or its file loads, leaves the table meaning what it meant.
+
+    Only an unnamed table -- one column per Scan field, in slot order -- is
+    re-read by such a change, and a named table is refused only when one of
+    ITS fields changes.
+    """
+
+    worker, view = _DeviceWorker(), _EditorView()
+    api = PulseEditorPresenter(view, sequence, run_device_work=worker,
+                               run_safe_work=_run_preview_immediately, run_preview_work=worker)
+    ids = [period.period_id for period in sequence.periods]
+    named = f"duration:{ids[3]}"
+    try:
+        for period_id in (ids[1], ids[3]):
+            view.binding_committed.emit('duration', period_id, None, True, 'default')
+        unit = next(binding.unit for binding in api.sequence.scan_bindings if binding.field_id == named)
+
+        def run(source: str) -> None:
+            api.invoke_public("edit_scan_source", {"source": source})
+            assert api.invoke_public("run_scan_program", {}) is True
+            # Marks change while the program is on the worker.
+            view.binding_committed.emit('duration', ids[1], None, False, 'default')
+            view.binding_committed.emit('duration', ids[5], None, True, 'default')
+            worker.deliver_until(lambda: not api.control_state()["scan"]["pending"])
+            view.binding_committed.emit('duration', ids[5], None, False, 'default')
+            view.binding_committed.emit('duration', ids[1], None, True, 'default')
+
+        run(f"scan_table = {{'{named}': [0.004, 0.005]}}\n")
+        assert api.state.scan_rows == ((0.004,), (0.005,))
+        assert api.state.scan_fields == ((named, unit),)
+
+        api.clear_scan_array()
+        run("scan_table = [[0.004, 0.006], [0.005, 0.007]]\n")
+        assert api.state.scan_rows == ()
+        assert api.last_warning == "Scan fields or units changed while generating the table. Generate it again."
+
+        path = tmp_path / "named.csv"
+        path.write_text(f"{named}\n0.004\n0.005\n", encoding="utf-8")
+        assert api.invoke_public("load_scan_array", {"path": str(path)}) is True
+        view.binding_committed.emit('duration', ids[1], None, False, 'default')
+        worker.deliver_until(lambda: not api.control_state()["pending"])
+        assert api.state.scan_rows == ((0.004,), (0.005,))
+        assert api.state.scan_fields == ((named, unit),)
+
+        # A field the table names changing unit under it is still refused.
+        api.clear_scan_array()
+        api.invoke_public("edit_scan_source", {"source": f"scan_table = {{'{named}': [0.004, 0.005]}}\n"})
+        assert api.invoke_public("run_scan_program", {}) is True
+        api._edit_state(sequence=replace(api.sequence, bindings=tuple(
+            replace(binding, unit="ms" if unit != "ms" else "us") if binding.field_id == named else binding
+            for binding in api.sequence.bindings
+        )))
+        worker.deliver_until(lambda: not api.control_state()["scan"]["pending"])
+        assert api.state.scan_rows == ()
+        assert api.last_warning == (
+            "A field the table names stopped being Scan or changed unit while generating the table. "
+            "Generate it again."
+        )
+    finally:
+        api.close()
+
+
 def test_the_edit_page_says_how_many_points_will_be_played(presenter, sequence) -> None:
     """Slots is half the question; the other half is what will actually run."""
 
