@@ -8218,7 +8218,8 @@ def test_a_queued_restart_says_what_it_is_waiting_for() -> None:
 
     generation = object()
     binding = LogicBinding("camera_measurement", LOGIC_NODE, LogicDraft(values={}))
-    binding.pending = SimpleNamespace(waiting_for=())
+    # A queued candidate carries the configuration it was built from.
+    binding.pending = SimpleNamespace(waiting_for=(), draft=LogicDraft(values={}))
     stopping = SimpleNamespace(
         running=True, error="", phase="stopping", terminal=False, progress=None, warnings=(),
     )
@@ -8267,7 +8268,9 @@ def test_a_queued_restart_says_what_it_is_waiting_for() -> None:
     assert ConsolePresenter._generation_holders(console, binding.host) == (("panel-1", 3.0),)
     console.panels["panel-1"].configuration = None
 
-    binding.pending = SimpleNamespace(waiting_for=("camera_measurement",))
+    binding.pending = SimpleNamespace(
+        waiting_for=("camera_measurement",), draft=LogicDraft(values={}),
+    )
     assert ConsolePresenter._logic_state(console, binding)[1] == "waiting for camera_measurement"
 
 
@@ -8333,6 +8336,9 @@ def test_a_run_makes_the_values_a_region_wrote_the_producers_own() -> None:
     console.update_logic_draft = lambda node_id, **kwargs: (
         ConsolePresenter.update_logic_draft(console, node_id, **kwargs)
     )
+    console._commit_logic_draft = lambda binding, draft, **kwargs: (
+        ConsolePresenter._commit_logic_draft(console, binding, draft, **kwargs)
+    )
     # The region's write, the way routing does it: the patch, then the undo.
     assert console.update_logic_draft("scan-owner", values={"plan": routed})
     binding.selection_restore["plan"] = ("panel-1", original)
@@ -8346,6 +8352,7 @@ def test_a_run_makes_the_values_a_region_wrote_the_producers_own() -> None:
         previews=(),
         run_root=None,
         input_summary=None,
+        draft=LogicDraft(values={"plan": routed}),
     )
     assert ConsolePresenter._activate_candidate(console, binding, candidate) is True
     assert started and binding.selection_restore == {}
@@ -8397,6 +8404,9 @@ def test_a_region_on_a_scan_curve_reaches_the_scan_as_its_next_sweep() -> None:
             routed.append((name, patch)),
             ConsolePresenter.update_logic_draft(console, name, **patch),
         )[1],
+        _commit_logic_draft=lambda binding, draft, **kwargs: (
+            ConsolePresenter._commit_logic_draft(console, binding, draft, **kwargs)
+        ),
     )
     publication = SimpleNamespace(run_record={})
 

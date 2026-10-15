@@ -273,12 +273,19 @@ projection's `edited` says the draft differs from the configuration the
 current run (running, following or queued) was started with.  While it holds,
 Revert -- a standard command in its own fixed slot left of the Plot group,
 always shown -- is enabled and raises `revert_requested`
-(`logic_revert_requested` on the handle), which puts that whole configuration
-back into the draft without restarting; Restart wears the dirty star and the
+(`logic_revert_requested` on the handle), which makes that whole configuration
+the draft again -- replacing it, so a device or artifact input only the edit
+named goes too -- without restarting; Restart wears the dirty star and the
 primary role (`set_dirty`, the On Pulse rule) with the tooltip "Restart to run
 the edited configuration".  A Restart of an unedited run is a standard
 command; Start, with nothing running, is the page's primary.  The presenter
-also ends the row's and the header's status with `· edited`.
+also ends the row's and the header's status with `· edited`.  Only Restart
+or Revert ends an edit: a following processor whose source restarts rebuilds
+the configuration it was started with, so the cue stays, and while it
+follows its status names that configuration's source even when the edit has
+issues -- those are the next run's.  A queued Restart's configuration is the
+one the node runs only until the Restart is discarded (Stop, another node
+taking its device); then it is the old run's again.
 
 ## `StatusStrip` (internal)
 

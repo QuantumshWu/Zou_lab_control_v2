@@ -903,8 +903,9 @@ def start_server(flow, *, host="127.0.0.1", port: int, token: str, allow_control
             still carries the old generation (pending.generation null), so read the new one from lab_state once
             pending is null. Editing a running, following or queued node changes only its draft;
             lab_state logic[].edited_since_start is true while that draft differs from the configuration the
-            current run started with. logic.revert (node_id) puts that whole configuration back into the draft
-            without restarting; it is refused when there is no current run or nothing differs.
+            current run started with; lab_state(details=True) shows it as logic[].running_draft. logic.revert
+            (node_id) makes that whole configuration the draft again without restarting; it is refused when there
+            is no current run or nothing differs. Value names outside the node's schema are refused.
             Draft issues name fields by their on-screen labels; map them back through
             lab_catalog(node_id).node.source_label and form_spec. Panel add: kind; update: panel_id,patch.
             view.monitor/view.logic take empty arguments and navigate directly, without pixel clicks.
