@@ -358,6 +358,9 @@ or Selected, marked on a start × end matrix with ordinary table selection
 (drag a rectangle, Ctrl to add or remove, a row or column header for every pair
 from or to that frame). Grid edits retain the rule with sparse pair overrides:
 excluding `0` to `last` from From first still selects newly added middle frames.
+Selected keeps a list of its own (`custom_pairs`) while a rule is picked, so
+picking it again brings the list back; None clears it. A pair the list keeps
+unselected is parked: recorded with the run (`parked_pairs`) and never published.
 Endpoint text `0`/`last` follows the first/last identity; middle indices never
 become a new endpoint when the count shrinks: a selected pair whose middle frame
 the source does not carry is kept, named in an amber note and in the run record

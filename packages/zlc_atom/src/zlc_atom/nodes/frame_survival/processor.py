@@ -18,8 +18,9 @@ against the frames a cycle actually carries -- every forward pair, the
 consecutive ones, those from the first frame or those to the last -- or an
 explicit list of pairs.  A selected pair whose middle frame the cycle does
 not carry is kept, not refused: it is published again once a cycle that has
-it returns, and the run record names it (``absent_pairs``).  Every forward
-pair of a three-frame cycle is the pair entries "0→1", "0→2", "1→2"
+it returns, and the run record names it (``absent_pairs``) beside the pairs
+a Selected list keeps without asking for them (``parked_pairs``).  Every
+forward pair of a three-frame cycle is the pair entries "0→1", "0→2", "1→2"
 straight from the data (:func:`pair_label`, the
 one spelling of a pair; a dash is a range of frames) -- one identity per
 pair, the calibration model-axis pattern (numeric identity, readable
@@ -210,6 +211,7 @@ class FrameSurvivalProcessor:
         source_signal: str | None = None,
         pairs: str | tuple[tuple[int, int | str], ...] = "all",
         pair_overrides: tuple[tuple[int, int | str, bool], ...] = (),
+        parked_pairs: tuple[tuple[int, int | str], ...] = (),
     ) -> None:
         self.instance_id = str(producer).strip()
         if not self.instance_id:
@@ -221,6 +223,9 @@ class FrameSurvivalProcessor:
         self.pair_overrides = _checked_overrides(pair_overrides)
         if not isinstance(self.pairs, str) and self.pair_overrides:
             raise ValueError("explicit frame survival pairs cannot also have rule overrides")
+        # Pairs a Selected list keeps without asking for them: never
+        # published, only recorded with the run.
+        self.parked_pairs = tuple(parked_pairs)
         # Event and canonical geometry coexist; neither evicts the other's plan.
         self._plans: dict[bool, tuple[DatasetSchema, tuple]] = {}
 
@@ -448,8 +453,10 @@ class FrameSurvivalProcessor:
                 "frames": frame_axis.size,
                 "pairs": pairs,
                 # Kept in the draft and in this record, never published: the
-                # selected pairs this cycle does not carry, as authored.
+                # selected pairs this cycle does not carry, as authored, and
+                # those a Selected list keeps without asking for them.
                 "absent_pairs": tuple((start, end) for start, end, selected in absent if selected),
+                "parked_pairs": self.parked_pairs,
             },
         }
 

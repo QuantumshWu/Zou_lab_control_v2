@@ -450,15 +450,19 @@ def _sequence(value: object, where: str) -> Sequence[object]:
 
 
 def _current_authoring_values(fields, saved: Mapping[str, Any]) -> dict[str, Any]:
-    """Read only today's declared leaves, including columns of authored rows."""
+    """Read only today's declared leaves, including columns of authored rows.
+
+    Rows come back as the draft holds them, a tuple: a field its switch has
+    turned off is kept as read, not projected.
+    """
     values = {}
     for field in fields:
         if field.name not in saved:
             continue
         value = saved[field.name]
         if str(field.value_type) == "rows" and isinstance(value, (list, tuple)):
-            value = [_current_authoring_values(field.columns, row) if isinstance(row, Mapping)
-                     else row for row in value]
+            value = tuple(_current_authoring_values(field.columns, row) if isinstance(row, Mapping)
+                          else row for row in value)
         values[field.name] = value
     return values
 

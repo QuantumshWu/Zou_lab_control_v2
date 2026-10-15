@@ -140,18 +140,23 @@ the site axis remains available for per-site analysis. Its `selection` field
 chooses the published forward pairs: `all`, `consecutive` (k→k+1), `from_first`
 (0→k) and `to_last` (k→last) are resolved against the frames the source carries,
 so they survive a Pulse that adds or removes a photograph. Grid edits retain that
-rule and store only exceptions, e.g. `{"selection":"from_first","pairs":[
-{"start":"0","end":"last","selected":false}]}` selects every first-to-middle
-pair, including newly added middle frames, but excludes first-to-last. `custom`
-starts with no pairs and explicitly selects rows, e.g. `{"selection":"custom",
-"pairs":[{"start":"0","end":"last","selected":true}]}`. Endpoints are text:
-`0` is first, `last` is last, and positive indices name middle frames. A selected
-pair whose middle frame the source does not carry stays in the draft, is left out
-of this source's pairs and is named in the run record (`absent_pairs`); it does
-not stop Start, and a run fails only when none of its selected pairs is in the
-source. The operator keeps such pairs on purpose: never delete one to make Start
-work. Camera draft changes update Occupancy and Frame Survival editors before new
-data arrives; runtime data still follows the actual acquired source schema.
+rule and store only its exceptions in `pairs`, e.g. `{"selection":"from_first",
+"pairs":[{"start":"0","end":"last","selected":false}]}` selects every
+first-to-middle pair, including newly added middle frames, but excludes
+first-to-last. `none` asks for no pair. `custom` publishes its own list,
+`custom_pairs`, e.g. `{"selection":"custom","custom_pairs":[{"start":"0",
+"end":"last","selected":true}]}`. A `custom_pairs` row with `"selected":false` is
+parked: kept in the draft, the layout and the run record (`parked_pairs`), never
+published and never in the way of Start. The list stays in the draft while a rule
+is selected, so selecting `custom` again brings it back. Endpoints are text: `0`
+is first, `last` is last, and positive indices name middle frames. A selected pair
+whose middle frame the source does not carry stays in the draft, is left out of
+this source's pairs and is named in the run record (`absent_pairs`); it does not
+stop Start, and a run fails only when none of its selected pairs is in the source.
+The operator keeps parked and absent pairs on purpose: never delete one to make
+Start work. Camera draft changes update Occupancy and Frame Survival editors
+before new data arrives; runtime data still follows the actual acquired source
+schema.
 
 Derive is within-shot algebra on one producer's bundle; averages over shots,
 per-site probabilities and fits belong in a plot panel. Read the exact member,

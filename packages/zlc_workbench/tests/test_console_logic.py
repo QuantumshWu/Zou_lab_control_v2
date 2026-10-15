@@ -1341,7 +1341,8 @@ def test_an_occupancys_frame_claims_survive_its_camera_changing_frame_count(pres
     assert presenter.view.logic_editors[node_id]["source_frames"] == ("0", "1", "2")
     survival_id = presenter.add_logic("frame_survival", source_signal=stable_signal_key(node_id, "occupied"))
     assert presenter.view.logic_editors[survival_id]["source_frames"] == ("0", "1", "2")
-    selection = {"selection": "from_first", "pairs": ({"start": "0", "end": "last", "selected": False},)}
+    selection = {"selection": "from_first", "pairs": ({"start": "0", "end": "last", "selected": False},),
+                 "custom_pairs": ()}
     presenter.view.logic_draft_changed.emit(survival_id, {"values": selection})
     claims = (
         {"path": "load.json", "frames": (2,)},
