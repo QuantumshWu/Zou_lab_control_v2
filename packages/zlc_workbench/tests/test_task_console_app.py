@@ -1504,7 +1504,14 @@ try:
     else:
         raise AssertionError('invalid programmatic exposure was accepted')
     assert flow._device_control_models['camera']['desired'] == previous_desired
-    assert flow.control_device('inspect', 'camera')['fields']['exposure']['severity'] == 'error'
+    inspected = flow.control_device('inspect', 'camera')
+    assert inspected['fields']['exposure']['severity'] == 'error'
+    # The schema an AI reads holds values, not the GUI's presentation hints.
+    schema_fields = inspected['schema']
+    assert schema_fields
+    for field in schema_fields:
+        for entry in (field, *field.get('columns', ())):
+            assert not {'segmented', 'step'} & set(entry), entry
     assert len(calls) == 2, 'invalid Desired reached the device'
     control.close(); application.processEvents()
     assert not control.is_visible()
@@ -2099,8 +2106,8 @@ async def client():
                 semantic["fate:point:scan.duration:gap_1"] = "x"
                 recipe = await call("lab_run_recipe", {"name":"trap_lifetime", "parameters":{
                     "camera":"camera", "sequencer":"sequencer", "pulse_path":"imaging_test.json",
-                    "calibrations":[{"path":"calibration.json", "frames":["rest"]}], "frames_per_cycle":3, "start_frame":0,
-                    "end_frame":2, "repeats":1, "shots_per_point":2,
+                    "calibrations":[{"path":"calibration.json", "frames":["rest"]}], "frames_per_cycle":3, "start_frame":"0",
+                    "end_frame":"last", "repeats":1, "shots_per_point":2,
                     "fit_fixed":{"amplitude":1., "offset":0.},
                     "panel_semantic":semantic,
                     "scan_plan":plan(points[:1] if SINGLE_FIRST else points)}})
@@ -2131,7 +2138,9 @@ async def client():
                     if "no axis holds" in table["panel_error"] or time.monotonic() >= deadline:
                         break
                     await asyncio.sleep(.05)
-                panel = (await call("lab_catalog", {"panel_id":panel_id}))["panel"]
+                catalog = await call("lab_catalog", {"panel_id":panel_id})
+                assert catalog["panel_intervals"] == [100, 200, 400, 800], catalog["panel_intervals"]
+                panel = catalog["panel"]
                 patch_fields = panel["update"]["patch_fields"]
                 assert "published_outputs" not in patch_fields and {
                     "signal", "kind", "cell_kind", "size", "interval_ms", "title",
@@ -2208,6 +2217,12 @@ dialog_watchdog.setInterval(10)
 dialog_watchdog.timeout.connect(dismiss_unexpected_dialog)
 dialog_watchdog.start()
 flow = create_experiment_flow(workspace=WORKSPACE, template="virtual")
+state_reads = [0]  # Every lab_state projection reads the Devices status once.
+status_snapshot = flow.devices.status_snapshot
+def counted_status_snapshot():
+    state_reads[0] += 1
+    return status_snapshot()
+flow.devices.status_snapshot = counted_status_snapshot
 with socket.socket() as held:
     held.bind(("127.0.0.1", 0))
     port = held.getsockname()[1]
@@ -2226,6 +2241,8 @@ def release_editor_gate():
     for args, kwargs, answer in pending:
         actual = editor_gate['original'](*args, **kwargs)
         def finish(done, answer=answer):
+            if answer.cancelled():
+                return  # The panel superseded the held update; nobody reads it.
             try:
                 answer.set_result(done.result())
             except BaseException as error:
@@ -2237,23 +2254,33 @@ def future_public_probe(self, note: str, outcome: dict | None = None):
         panel = flow.console_presenter.panels[outcome['panel_id']]
         editor = panel.editor_host
         assert editor is not None and panel.editor_configuration is None
-        editor_gate.update(host=editor, original=editor.update_data, pending=[])
+        editor_gate.update(host=editor, original=editor.update_data, pending=[], failing=False)
         def hold(*args, **kwargs):
             answer = Future()
-            editor_gate['pending'].append((args, kwargs, answer))
+            if editor_gate['failing']:
+                answer.set_exception(RuntimeError('Rejected snapshot update'))
+            else:
+                editor_gate['pending'].append((args, kwargs, answer))
             return answer
         editor.update_data = hold
         return {'generation':panel.frozen_data.snapshot.ref.stream_generation.value}
     if note == 'release-editor':
-        assert editor_gate['pending'], 'Refresh never reached the editor'
+        # A refresh can complete without calling the held update; releasing
+        # then has nothing to let through.
         release_editor_gate()
         return {'released':True}
     if note == 'fail-editor':
         assert editor_gate['pending'], 'Refresh never reached the editor'
+        # Refresh adopts the card's picture at once and, when a newer
+        # publication is still being drawn, that one as well: both fail.
+        editor_gate['failing'] = True
         pending, editor_gate['pending'] = editor_gate['pending'], []
         for _args, _kwargs, answer in pending:
             answer.set_exception(RuntimeError('Rejected snapshot update'))
         return {'failed':True}
+    if note == 'hold-editor-again':
+        editor_gate['failing'] = False
+        return {'holding':True}
     if note == 'request-review':
         binding = flow.console_presenter.logic[outcome['node_id']]
         host = binding.host
@@ -2288,7 +2315,9 @@ async def client():
     async with httpx2.AsyncClient() as http:
         assert (await http.get(url)).status_code == 401
         assert (await http.get(url, headers={"Authorization":"Bearer virtual-test", "Origin":"https://example.com"})).status_code == 403
-    async with httpx2.AsyncClient(headers={"Authorization":"Bearer virtual-test"}, timeout=10.) as http:
+    # Longer than the longest server-side wait issued below (lab_save's
+    # 30 s refresh) plus 10 s, as lab_wait asks of every client.
+    async with httpx2.AsyncClient(headers={"Authorization":"Bearer virtual-test"}, timeout=60.) as http:
         async with streamable_http_client(url, http_client=http) as (read, write, *_):
             async with ClientSession(read, write) as c:
                 await c.initialize()
@@ -2361,6 +2390,14 @@ async def client():
                 assert timeout["timed_out"] and not timeout["matched"]
                 refused_wait = await c.call_tool("lab_wait_for", {"tool_name":"lab_initialize", "arguments":{}, "path":["accepted"], "equals":True, "timeout_seconds":0})
                 assert refused_wait.is_error and "read-only" in str(refused_wait.content)
+                reflected = await c.call_tool("lab_wait_for", {"tool_name":"lab_api", "arguments":{"handle":"devices"},
+                    "path":["handle"], "equals":"devices", "timeout_seconds":0})
+                assert reflected.is_error and "operator read tools" in reflected.content[0].text
+                reads = state_reads[0]
+                unmet = await call("lab_wait_for", {"tool_name":"lab_state", "arguments":{}, "path":["closing"],
+                    "equals":True, "timeout_seconds":1})
+                # Backing off to 250 ms: about ten projections a second, not fifty.
+                assert unmet["timed_out"] and 2 <= state_reads[0] - reads <= 12, state_reads[0] - reads
                 for _ in range(100):
                     state = await call("lab_state")
                     if state["session_open"]:
@@ -2377,8 +2414,12 @@ async def client():
                 pulse = await edit("subpulse.group", {"items":[["period","load"]]})
                 component = pulse["components"][0]["component_id"]
                 await edit("subpulse.export", {"component_id":component, "path":"pulses/load.subpulse.json"})
-                await edit("subpulse.source", {"component_id":component, "source":"default",
-                                               "path":"pulses/load.subpulse.json"})
+                referenced = await edit("subpulse.source", {"component_id":component, "source":"default",
+                                                            "path":"pulses/load.subpulse.json"})
+                kept = await edit("subpulse.source", {"component_id":component, "source":"default", "path":None})
+                # Null is omitted: the reference stays, never '<workspace>/None'.
+                assert kept["components"][0]["path"] == referenced["components"][0]["path"]
+                assert kept["components"][0]["path"].endswith("load.subpulse.json")
                 pulse = await edit("subpulse.source", {"component_id":component, "source":"default", "path":""})
                 assert pulse["components"][0]["path"] == ""  # Clear, not workspace root.
                 pulse = await edit("subpulse.open", {"path":"pulses/load.subpulse.json"})
@@ -2458,6 +2499,11 @@ async def client():
                 done = await waiting
                 assert done["reached"] and done["observation"]["terminal"] and done["still_current"]
                 assert done['observation']['phase'] == 'cancelled'
+                # A stopped run never becomes ready: its outcome, not a bare tool error.
+                never_ready = await call('lab_wait', {'node_id':node,'generation':generation,
+                    'until':'ready','timeout_seconds':0})
+                assert not never_ready['reached'] and never_ready['still_current'], never_ready
+                assert never_ready['observation']['phase'] == 'cancelled' and never_ready['error'] is None
                 after_cancel = await call('lab_batch', {'calls':[
                     {'tool':'lab_wait','arguments':{'node_id':node,'generation':generation,'timeout_seconds':0}},
                     {'tool':'lab_action','arguments':{'action':'logic.add','arguments':{'api_name':'derive','node_id':'must_not_start_after_cancel'}}},
@@ -2501,7 +2547,7 @@ async def client():
                 assert not saving.done() and not (Path(WORKSPACE)/'data/pending-refresh.npz').exists()
                 await call('lab_call', {'handle':'devices','method':'future_public_probe','arguments':{'note':'fail-editor'}})
                 failed = await saving
-                assert not failed['accepted'] and not failed['saved'] and 'Rejected snapshot update' in failed['error']
+                assert not failed['accepted'] and not failed['saved'] and 'Rejected snapshot update' in failed['error'], failed
                 assert not (Path(WORKSPACE)/'data/pending-refresh.npz').exists()
                 retained = await call('lab_save', {'panel_id':panel_id,'path':'data/retained-old.png'})
                 assert retained['accepted'], retained
@@ -2509,6 +2555,7 @@ async def client():
                     'path':['console','panels',0,'saving'],'equals':False,'timeout_seconds':20}))['matched']
                 old_archive = await call('lab_artifact', {'path':'data/retained-old.npz','limit':64000})
                 assert old_archive['datasets']['data']['ref']['stream_generation'] == old['result']['generation']
+                await call('lab_call', {'handle':'devices','method':'future_public_probe','arguments':{'note':'hold-editor-again'}})
                 saving = asyncio.create_task(call('lab_save', {'panel_id':panel_id,'path':'data/pending-refresh.png','refresh':True}))
                 retry_pending = await call('lab_wait_for', {'tool_name':'lab_state','arguments':{'panel_id':panel_id},
                     'path':['console','panels',0,'configuration_pending'],'equals':True,'timeout_seconds':10})
@@ -2552,6 +2599,21 @@ async def client():
                 assert not screenshot.is_error
                 image = next(item for item in screenshot.content if item.type == "image")
                 assert base64.b64decode(image.data).startswith(b"\x89PNG")
+                # Each refusal says what was unknown or missing, in words.
+                for name, arguments, reason in (
+                    ("lab_screenshot", {"device_id":"camera"}, "Device Control 'camera' is not open"),
+                    ("lab_close", {"scope":"editor", "device_id":"camera"}, "Device Control 'camera' is not open"),
+                    ("lab_wait", {"node_id":"missing", "generation":"x", "timeout_seconds":0},
+                     "unknown logic node 'missing'"),
+                    ("lab_action", {"action":"panel.save", "arguments":{"panel_id":panel_id}},
+                     "panel.save needs selected"),
+                    ("lab_wait_for", {"tool_name":"lab_screenshot", "arguments":{}, "path":["image"],
+                                      "equals":1, "timeout_seconds":0}, "lab_screenshot returns no JSON fields"),
+                    ("lab_wait_for", {"tool_name":"lab_health", "arguments":{}, "path":["missing"],
+                                      "equals":1, "timeout_seconds":0}, "field ['missing'] is not in lab_health's result"),
+                ):
+                    refused = await c.call_tool(name, arguments)
+                    assert refused.is_error and reason in refused.content[0].text, (name, refused.content)
                 invalid = await c.call_tool("lab_signal", {"signal":"missing"})
                 assert invalid.is_error
                 assert "No publication" in str(invalid.content)

@@ -14,7 +14,7 @@ session below it does not know a window exists.
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from concurrent.futures import CancelledError, Future, TimeoutError as _AnswerTimeout
 from dataclasses import dataclass, field, fields, is_dataclass, replace
 from enum import Enum
@@ -138,6 +138,21 @@ _PANEL_UPDATE_FIELDS = (
     "signal", "kind", "cell_kind", "size", "interval_ms", "title",
     "semantic", "display", "fit", "overlay_signal",
 )
+#: How a GUI control draws a field -- choices side by side, one wheel notch.
+#: A control client sends values, so no catalog projection carries these.
+_PRESENTATION_KEYS = frozenset({"segmented", "step"})
+
+
+def _plain_fields(declared: Iterable[Any]) -> list[dict[str, Any]]:
+    """Declared fields (and a rows field's columns) without presentation keys."""
+
+    def plain(item: Mapping[str, Any]) -> dict[str, Any]:
+        return {
+            key: [plain(column) for column in value] if key == "columns" else value
+            for key, value in item.items() if key not in _PRESENTATION_KEYS
+        }
+
+    return [plain(item) for item in _control_plain(tuple(declared))]
 
 
 def control_capabilities(
@@ -178,10 +193,10 @@ def control_capabilities(
         if api_name is not None:
             artifact_specs = artifact_input_specs(descriptor)
             row.update({
-                "fields": _control_plain(descriptor.authoring_schema.fields),
-                "form_spec": _control_plain(project_logic_schema(
+                "fields": _plain_fields(descriptor.authoring_schema.fields),
+                "form_spec": {"fields": _plain_fields(project_logic_schema(
                     descriptor, workspace_root=str(root),
-                )),
+                ).fields)},
                 "artifact_inputs": [
                     {"name": spec.name, "label": spec.label,
                      "contract_id": spec.contract_id, "required": spec.required,
@@ -353,9 +368,14 @@ def _error_text(error: BaseException) -> str:
 
     ``CancelledError``, a bare ``assert`` and ``TimeoutError`` all stringify
     to nothing, and ``f"{title}: {error}"`` then put a red line on the status
-    strip with nothing after the colon.
+    strip with nothing after the colon.  A ``KeyError`` stringifies to the
+    repr of its argument, so one raised with a sentence ("unknown logic node
+    'x'") is read as that sentence, not inside a second pair of quotes.
     """
 
+    if (isinstance(error, KeyError) and len(error.args) == 1
+            and isinstance(error.args[0], str) and " " in error.args[0]):
+        return error.args[0]
     return str(error) or type(error).__name__
 
 
@@ -7403,14 +7423,19 @@ class ConsolePresenter:
             # and what the node reads is described plainly instead.
             result["node"] = _control_plain({
                 key: value for key, value in projection.items()
-                if key not in {"input_bundle", "output_bundle", "source_schema",
-                               "workspace_resources", "ui_contributions", "bench_extras", "run_device_read"}
+                if key not in {"input_bundle", "output_bundle", "source_schema", "form_spec",
+                               "artifact_form_spec", "workspace_resources", "ui_contributions",
+                               "bench_extras", "run_device_read"}
             })
+            for key in ("form_spec", "artifact_form_spec"):
+                result["node"][key] = {"fields": _plain_fields(projection[key].fields)}
             result["node"]["inputs"] = _plain_inputs(projection)
         if panel_id is not None:
             projection = self.panel_editor_projection(panel_id)
             if projection is None:
                 raise KeyError(f"unknown panel {panel_id!r}")
+            # The closed set panel.update's interval_ms takes.
+            result["panel_intervals"] = list(self._intervals)
             result["panel"] = _control_plain({
                 key: value for key, value in projection.items()
                 if key not in {"frozen_snapshot", "frozen_publication", "producer_projection"}
@@ -7421,7 +7446,7 @@ class ConsolePresenter:
                 for field in surface.get(group, ()):
                     public = {
                         key: value for key, value in field.items()
-                        if key not in {"cycle_choices", "cycle_label", "co_edited_with", "segmented"}
+                        if key not in {"cycle_choices", "cycle_label", "co_edited_with"} | _PRESENTATION_KEYS
                         and (key == "value" or value is not None and value != "" and value != ())
                     }
                     cycle = field.get("cycle_choices")
@@ -7684,8 +7709,14 @@ class ConsolePresenter:
             if action in {"logic.start", "logic.stop"}:
                 status = next(item["status"] for item in state["logic"] if item["node_id"] == node_id)
         if not accepted and error is None:
-            messages = [item["message"] for item in state["reports"] if item["severity"] in {"warning", "error", "task"}]
-            error = messages[-1] if messages else "The requested action was not accepted"
+            # The refusal is the most severe report since the request: a
+            # projection refresh after it can still add a "task" progress line.
+            error = "The requested action was not accepted"
+            for level in ("error", "warning", "task"):
+                messages = [item["message"] for item in state["reports"] if item["severity"] == level]
+                if messages:
+                    error = messages[-1]
+                    break
         return {"action": action, "accepted": accepted, "status": status,
                 "node_id": node_id or None, "panel_id": panel_id or None,
                 "error": error, "state": state}

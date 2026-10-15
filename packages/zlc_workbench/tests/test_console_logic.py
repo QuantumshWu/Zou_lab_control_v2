@@ -223,6 +223,18 @@ def test_adding_a_node_creates_only_a_stopped_draft_and_opens_edit(bench_present
     assert updated["state"]["logic"][0]["draft_revision"] == 1
     stale = presenter.control_action("logic.start", {"node_id": node_id}, expected_draft_revision=0)
     assert not stale["accepted"] and "draft changed" in stale["error"]
+    missing = presenter.control_action("logic.start", {"node_id": "missing"})
+    assert missing["error"] == "unknown logic node 'missing'"
+    # A refusal without an error of its own answers with the most severe
+    # report since the request, not a progress line a refresh added after it.
+    def refused_start(selected):
+        presenter._report(f"{selected}: Frames must be selected", severity="error")
+        presenter._report("calibration: running", severity="task")
+        return False
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(presenter, "start_logic", refused_start)
+        refused = presenter.control_action("logic.start", {"node_id": node_id})
+    assert not refused["accepted"] and refused["error"] == f"{node_id}: Frames must be selected"
     draft = presenter.logic[node_id].draft
     assert set(draft.values) == set(
         presenter.logic[node_id].descriptor.authoring_schema.field_names
@@ -252,6 +264,17 @@ def test_adding_a_node_creates_only_a_stopped_draft_and_opens_edit(bench_present
     assert artifact["relative_to"] == str(presenter.session.workspace.data)
     assert "do not prepend" in artifact["path_rule"]
     assert presenter.control_catalog(api_name="camera_measurement")["logic"][0]["fields"]
+    # A control client sends values: no field, column or form field says
+    # how a GUI control draws it (side-by-side choices, a wheel notch).
+    def keys(fields):
+        for field in fields:
+            yield from field
+            yield from keys(field.get("columns", ()))
+    for fields in (catalog["logic"][0]["fields"], catalog["logic"][0]["form_spec"]["fields"],
+                   catalog["node"]["form_spec"]["fields"], occupancy["logic"][0]["fields"],
+                   occupancy["logic"][0]["form_spec"]["fields"]):
+        assert fields and {"name", "key"} & set(keys(fields))
+        assert not {"segmented", "step"} & set(keys(fields))
     presenter.add_logic("camera_measurement", node_id="other_camera")
     selected = presenter.control_state(node_id=node_id)
     assert [item["node_id"] for item in selected["logic"]] == [node_id]

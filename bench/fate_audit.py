@@ -79,7 +79,7 @@ def survival_schema():
 
     repeat = AxisSpec(AxisId("sv.repeat"), "repeat", REPEAT, 4, tuple(range(4)))
     pair = AxisSpec(AxisId("sv.pair"), "pair", READOUT_EVENT, 3, (0, 1, 2),
-                    coordinate_labels=("0-1", "0-2", "1-2"))
+                    coordinate_labels=("0→1", "0→2", "1→2"))
     site = AxisSpec(AxisId("sv.site"), "site", SITE, 5, tuple(range(5)))
     return dataset(
         repeat,

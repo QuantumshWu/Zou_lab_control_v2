@@ -591,7 +591,7 @@ class ExperimentGuiFlow:
         worker. Acceptance is not completion. Inspect again after ``pending``
         clears to read the same readback and errors the operator sees.
         """
-        from dataclasses import asdict
+        from ..console import _plain_fields
 
         key = str(key)
         if self.session is None or key not in self.session.installation.devices:
@@ -643,7 +643,7 @@ class ExperimentGuiFlow:
             result["generic_control"] = True
             result["device_session_id"] = model["device_session_id"]
             result["settings_epoch"] = model["settings_epoch"]
-            result["schema"] = tuple(asdict(item.metadata) for item in model["tunables"])
+            result["schema"] = _plain_fields(item.metadata for item in model["tunables"])
             result["status"] = model["control"].status_snapshot()
         return result
 
@@ -694,6 +694,8 @@ class ExperimentGuiFlow:
             raise ValueError("close decision must be discard or cancel")
         if (scope == "editor") != (device_id is not None):
             raise ValueError("supply device_id only when closing an editor")
+        if scope == "editor" and device_id not in self.device_controls:
+            raise ValueError(f"Device Control {device_id!r} is not open")
         controls = ([(device_id, self.device_controls[device_id])] if scope == "editor"
                     else list(self.device_controls.items()))
         confirmations = []
