@@ -54,6 +54,7 @@ from zlc_ui.fluent import (
     setting_label_width,
     show_note,
 )
+from zlc_ui.status import sentence
 from zlc_ui.fluent.column_set import section_header
 
 from zlc_atom.nodes._framework.frames import FIRST, LAST, REST, canonical_frames, claim_names, reach_frames
@@ -283,7 +284,7 @@ class CalibrationsEditor(QtWidgets.QWidget):
             labels.append(error_note_label())
             self._problem_layout.addWidget(labels[-1])
         for label, problem in zip(labels, problems):
-            show_note(label, problem if problem.endswith(".") else f"{problem}.")
+            show_note(label, sentence(problem))
         self.problems.setVisible(bool(problems))
 
     # ---------------------------------------------------------------- editing

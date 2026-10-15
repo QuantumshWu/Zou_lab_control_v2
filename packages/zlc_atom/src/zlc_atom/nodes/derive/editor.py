@@ -27,6 +27,7 @@ from zlc_ui.fluent import (
     error_note_label, field_text_inset, fluent_scrollbar_thickness, hold_place, muted_note_label, popup_gap,
     retire_widget, row_gap, scaled_px, section_gap, show_note, signals_blocked,
 )
+from zlc_ui.status import sentence
 from zlc_ui.fluent.column_set import section_header
 from zlc_ui.fluent.fluent import _FluentRoundedMenu
 
@@ -377,9 +378,9 @@ class _OutputCard(FluentFrame):
             _output, stage, detail = context["failure"]
         else:
             stage, detail = None, ""
-        show_note(self.value_error, detail if stage in ("name", "value") else "")
+        show_note(self.value_error, sentence(detail) if stage in ("name", "value") else "")
         for name, label in self.errors.items():
-            show_note(label, detail if stage == name else "")
+            show_note(label, sentence(detail) if stage == name else "")
         # The draft's own problem, when it stands under a line shown here.
         stated = stage in ("name", "value") or (stage in self.lines and not self.lines[stage].isHidden())
         self.problem = str(error) if error is not None and stated else ""
@@ -518,7 +519,7 @@ class _CodeCard(FluentFrame):
         error = "" if not row["code"].strip() else (
             answer["error"].detail if answer["error"] is not None
             else failure[2] if failure is not None else "")
-        show_note(self.error, error)
+        show_note(self.error, sentence(error))
         self.problem = str(answer["error"]) if row["code"].strip() and answer["error"] is not None else ""
         published = context["published"]
         self.status.setText(

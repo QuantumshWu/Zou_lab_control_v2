@@ -38,4 +38,16 @@ def counted(count: int, noun: str, plural: str = "") -> str:
     return f"{count} {noun if count == 1 else plural or noun + 's'}"
 
 
-__all__ = ["STATUS_SEVERITIES", "SUMMARY_SEPARATOR", "counted"]
+def sentence(text: str) -> str:
+    """``text`` written as a sentence of its own: ending in a full stop.
+
+    A problem shown on its own line under the row it is about reads as one
+    sentence, whoever words it.  Not capitalised: a problem may start with
+    a name ("load_20ms reads frame 2 twice").  Empty stays empty.
+    """
+
+    text = str(text).rstrip()
+    return text if not text or text.endswith((".", "?", "!", "…")) else f"{text}."
+
+
+__all__ = ["STATUS_SEVERITIES", "SUMMARY_SEPARATOR", "counted", "sentence"]
