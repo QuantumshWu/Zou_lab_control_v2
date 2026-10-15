@@ -40,6 +40,13 @@ from .panel_card_view import PanelCardView
 from .status_strip import StatusStrip
 
 
+def plot_choice_text(label: str) -> str:
+    """How a plot kind reads in a chooser that adds a panel of it: one
+    wording in every window that offers one."""
+
+    return f"Plot: {label}"
+
+
 class TaskConsoleView(QtWidgets.QWidget):
     """A presenter-friendly shell with the product arrangement."""
 
@@ -267,7 +274,7 @@ class TaskConsoleView(QtWidgets.QWidget):
         self.kind_combo.blockSignals(True)
         self.kind_combo.clear()
         for key, label in self._panel_kind_choices:
-            self.kind_combo.addItem(f"Plot: {label}", ("plot", key))
+            self.kind_combo.addItem(plot_choice_text(label), ("plot", key))
         # A node is listed by its api_name, the name its row, its Edit tab
         # and its Edit page call it by -- as a plot is by its kind key.
         for api_name, kind, publishes in self._logic_kind_choices:
@@ -390,4 +397,4 @@ class TaskConsoleView(QtWidgets.QWidget):
         return True
 
 
-__all__ = ["TaskConsoleView"]
+__all__ = ["TaskConsoleView", "plot_choice_text"]

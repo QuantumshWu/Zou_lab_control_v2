@@ -23,6 +23,7 @@ from zlc_ui.console.panel_editor_view import (
     new_panel_editor,
     panel_editor_projection,
 )
+from zlc_ui.console.task_console_view import plot_choice_text
 from zlc_ui.form.qt_form import being_edited
 from zlc_ui.fluent import (
     retire_widget,
@@ -59,6 +60,7 @@ from zlc_ui.fluent import (
     signals_blocked,
     window_pad,
 )
+from zlc_ui.status import sentence
 
 
 #: The editor's fixed row labels.  Its label column is the widest of these
@@ -594,6 +596,13 @@ class _DataEditorView(QtWidgets.QWidget):
         self._table_fit.setSingleShot(True)
         self._table_fit.setInterval(0)
         self._table_fit.timeout.connect(self._fit_table_to_page)
+        # A horizontal bar that comes or goes -- columns widened to their
+        # measured values, a window narrowed -- is a row the page loses or
+        # gains.
+        for table, _card in self._page_tables.values():
+            table.horizontalScrollBar().rangeChanged.connect(
+                lambda _low, _high: self._table_fit.start()
+            )
 
         self.name_edit.editingFinished.connect(lambda: self._dataset_field("name", self.name_edit.text()))
         self.dtype_combo.activated.connect(lambda _index: self._dataset_field("dtype", self.dtype_combo.currentData()))
@@ -698,9 +707,13 @@ class _DataEditorView(QtWidgets.QWidget):
         below = card.layout().contentsMargins().bottom()
         rows = table.verticalHeader()
         pitch = rows.sectionSize(0) if rows.count() else rows.defaultSectionSize()
+        # The horizontal bar only while the columns overflow, as the table
+        # counts it in its own height: one stretched Value column never
+        # shows it, and the row it was held for is a row of values.
+        bar = table.horizontalScrollBar()
         chrome = (
             table.horizontalHeader().sizeHint().height()
-            + table.horizontalScrollBar().sizeHint().height()
+            + (bar.sizeHint().height() if bar.maximum() > bar.minimum() else 0)
             + 2 * table.frameWidth()
         )
         fit = max(_LEAST_TABLE_ROWS, (viewport - above - below - chrome) // max(1, pitch))
@@ -722,7 +735,9 @@ class _DataEditorView(QtWidgets.QWidget):
         self._show_message(message)
 
     def _show_message(self, message: object) -> None:
-        text = str(message)
+        # One sentence, whoever words it: this editor's own refusals and
+        # what its presenter says alike.
+        text = sentence(str(message))
         self.message_label.setText(text)
         self.message_label.setVisible(bool(text))
         # A line over the commands is room the page no longer has.
@@ -1120,6 +1135,10 @@ class FigureViewerView(QtWidgets.QWidget):
         self.tabs = FluentTabWidget(holder)
         # Every page of this surface starts its content one card pad in.
         self.tabs.set_page_inset(side)
+        # The strip stands over Monitor alone too: editor tabs come and go
+        # beside it, and the board under it -- level with the left pane's
+        # filter -- does not move when the first opens or the last closes.
+        self.tabs.set_lone_bar_visible(True)
         self.tabs.tab_close_requested.connect(self._tab_close_clicked)
         monitor = QtWidgets.QWidget()
         monitor.setStyleSheet("background: white;")
@@ -1152,6 +1171,17 @@ class FigureViewerView(QtWidgets.QWidget):
         monitor_layout.addLayout(board_actions)
         self.board = ConsoleBoardView()
         self.board.order_committed.connect(self.panel_order_committed)
+        # An empty board says its next step where its first card will
+        # stand, as the console's does: the words start where a card's
+        # title does and end where its text would, and their top is a
+        # card's top -- the board's gap under the commands.
+        self.board_hint = muted_note_label("")
+        self.board_hint.setWordWrap(True)
+        words = self.board.text_left()
+        self.board_hint.setContentsMargins(
+            words, words - PanelCardView.strip_text_inset(), words, 0
+        )
+        monitor_layout.addWidget(self.board_hint)
         self.scroll = FluentScrollArea()
         self.scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
         self.scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
@@ -1159,15 +1189,6 @@ class FigureViewerView(QtWidgets.QWidget):
         monitor_layout.addWidget(self.scroll, 1)
         self.tabs.add_permanent_tab(monitor, "Monitor")
         self._surface_layout.addWidget(self.tabs, 1)
-
-        self._placeholder = FluentFrame(parent=holder, bordered=False)
-        placeholder_layout = QtWidgets.QVBoxLayout(self._placeholder)
-        placeholder_layout.addStretch(1)
-        placeholder_label = FluentLabel("Open a saved figure to begin", self._placeholder)
-        placeholder_label.setAlignment(QtCore.Qt.AlignCenter)
-        placeholder_layout.addWidget(placeholder_label)
-        placeholder_layout.addStretch(1)
-        monitor_layout.addWidget(self._placeholder, 1)
         root.addWidget(holder, 1)
         self._sync_monitor_empty()
 
@@ -1189,6 +1210,7 @@ class FigureViewerView(QtWidgets.QWidget):
             self._flow_graph = previous_graph
             self._render_info()
             raise
+        self._sync_monitor_empty()
 
     def _render_info(self) -> None:
         rows = dict(self._info_tabs)
@@ -1203,7 +1225,9 @@ class FigureViewerView(QtWidgets.QWidget):
         current = self.kind_combo.currentData()
         self.kind_combo.clear()
         for key, label in rows:
-            self.kind_combo.addItem(label, key)
+            # Worded as the console's chooser words it: the box says what
+            # Add panel will add.
+            self.kind_combo.addItem(plot_choice_text(label), key)
         if current is not None:
             index = self.kind_combo.findData(current)
             if index >= 0:
@@ -1225,6 +1249,7 @@ class FigureViewerView(QtWidgets.QWidget):
         enabled = bool(rows)
         self.data_combo.setEnabled(enabled)
         self.edit_data_button.setEnabled(enabled)
+        self._sync_monitor_empty()
 
     def _edit_selected_data(self) -> None:
         key = self.data_combo.currentData()
@@ -1335,9 +1360,16 @@ class FigureViewerView(QtWidgets.QWidget):
         self._cards[str(panel_id)].set_status(str(text), error=bool(error))
 
     def _sync_monitor_empty(self) -> None:
-        has_panels = bool(self._cards)
-        self.scroll.setVisible(has_panels)
-        self._placeholder.setVisible(not has_panels)
+        """What an empty board's next step is: a figure to open, until
+        there is a figure or data to plot; a panel to add, after."""
+
+        has_data = bool(self._info_tabs) or self.data_combo.count() > 0
+        self.board_hint.setText(
+            "No panels yet. Choose a Plot above and click Add panel."
+            if has_data
+            else "Open a saved figure to begin, or make data with New data."
+        )
+        self.board_hint.setVisible(not self._cards)
 
     def open_panel_editor(
         self, panel_id: str, projection: object, title: str

@@ -510,6 +510,7 @@ class PanelCardView(FluentGroupBox):
         # Setting and x sit concentric in the band's corner: as far from its
         # right end as from its top and bottom, not pressed against the edge.
         trailing = max(title_pad, (band_height - self._title_commands.sizeHint().height()) // 2)
+        self._commands_trailing = trailing
         band_layout.setContentsMargins(pad - FIELD_BORDER_PX, title_pad, trailing, title_pad)
 
         # The body is exactly CARD_PAD / 2 px / CARD_PAD around the surface,
@@ -589,6 +590,28 @@ class PanelCardView(FluentGroupBox):
             self.setCursor(cursor)
         else:
             self.unsetCursor()
+
+    def keep_commands_within(self, right: int) -> None:
+        """Keep Setting and × on screen: ``right`` (card x) is where what
+        the viewport shows of this card ends.
+
+        A card that runs past it has the two commands ride that edge, as far
+        in from it as they stand from the card's own end, so a card wider
+        than its window is edited and removed without scrolling sideways to
+        find its corner; scrolled into view, they are back in the corner.
+        They never ride past the strip's text edge."""
+
+        band = self._title_band.layout()
+        margins = band.contentsMargins()
+        base = self._commands_trailing
+        room = self._title_band.width() - (band.minimumSize().width() - margins.right() + base)
+        trailing = base + max(0, min(self.width() - int(right), room))
+        if margins.right() == trailing:
+            return
+        band.setContentsMargins(margins.left(), margins.top(), trailing, margins.bottom())
+        band.activate()
+        # The strip's words end where the commands now start.
+        self._refresh_title_band()
 
     def follow_pointer(self, pointer: QtCore.QPoint) -> None:
         """Keep the point this card is held by under ``pointer`` (global).

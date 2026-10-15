@@ -53,7 +53,27 @@ assert (view.tabs.mapTo(view, QtCore.QPoint()).y()
 assert view.tabs.widget(0).isAncestorOf(view.add_panel_button)
 assert view.tabs.widget(0).isAncestorOf(view.save_image_button)
 assert view.board._cards['panel-1'] is view._cards['panel-1']
-assert view.scroll.isVisible() and not view._placeholder.isVisible()
+assert view.scroll.isVisible() and not view.board_hint.isVisible()
+# The plot chooser is worded as the console's: the box says what Add panel adds.
+from zlc_ui.console.task_console_view import plot_choice_text
+assert view.kind_combo.currentText() == plot_choice_text('Image') == 'Plot: Image'
+assert view.kind_combo.currentData() == 'image'
+# An empty board says its next step where the first card will stand: a
+# figure to open before there is one, a panel to add once there is.
+blank = FigureViewerView(); blank.set_panel_sizes(('2x2',), '2x2')
+blank.resize(1200, 700); blank.show(); app.processEvents()
+assert blank.board_hint.isVisible() and blank.board_hint.text().startswith('Open a saved figure')
+blank.set_archive_info((("Plot", (("data", "1x1x80x88 float32"),)),), {'nodes': (), 'edges': ()})
+assert blank.board_hint.text() == 'No panels yet. Choose a Plot above and click Add panel.'
+hint = blank.board_hint
+words = hint.mapTo(blank, QtCore.QPoint(hint.contentsMargins().left(), hint.contentsMargins().top()))
+assert words.x() == blank.board.mapTo(blank, QtCore.QPoint(blank.board.text_left(), 0)).x()
+blank.add_panel('panel-1', 'Camera frame'); app.processEvents()
+assert not blank.board_hint.isVisible()
+assert blank._cards['panel-1'].mapTo(blank, QtCore.QPoint()).y() == words.y()
+blank.remove_panel('panel-1'); app.processEvents()
+assert blank.board_hint.isVisible() and blank.board_hint.text().startswith('No panels yet.')
+blank.finish_close()
 
 # Showing which file is open must not re-ask for it to be opened.
 committed = []; view.path_committed.connect(committed.append)
@@ -610,6 +630,10 @@ label = view.data_combo.parentWidget().layout().itemAt(0).widget()
 assert isinstance(label, FluentLabel) and not isinstance(label, FluentSectionLabel)
 assert box(label, surface)[0] == edge
 assert box(view.new_data_button, surface)[2] == end
+# The strip stands over Monitor alone too: the first editor tab to open
+# moves nothing on the board's page.
+assert bar.isVisible() and view.tabs.count() == 1
+lone_commands, lone_card = box(view.kind_combo, surface), box(view._cards['panel-1'], surface)
 view.open_data_editor('frame', projection, 'Data · frame')
 editor = view._data_editors['frame']
 settle()
@@ -627,6 +651,7 @@ card = view._cards['panel-1']
 assert box(card, surface)[0] == edge
 assert box(card, surface)[1] - box(view.kind_combo, surface)[3] == pad
 board_commands, board_card = box(view.kind_combo, surface), box(card, surface)
+assert (board_commands, board_card) == (lone_commands, lone_card)
 view.tabs.setCurrentWidget(editor); settle()
 for page, cards in (('dataset', (editor.dataset_group, editor.axes_group)),
                     ('data', (editor.data_group,))):
@@ -680,6 +705,12 @@ for page, table, card in (('dataset', editor.axis_value_table, editor.axes_group
     assert page_bar.maximum() == 0 and not page_bar.isVisible(), page
     assert table.verticalScrollBar().maximum() > 0
     assert box(card, viewport)[3] <= viewport.height(), (page, box(card, viewport), viewport.height())
+    # Every row the room holds is a row of values: under the card, less
+    # than one more -- no room kept for a horizontal bar the axis's one
+    # stretched column never shows.
+    spare = viewport.height() - box(card, viewport)[3]
+    assert spare < table.verticalHeader().sectionSize(0), (page, spare)
+assert editor.axis_value_table.horizontalScrollBar().maximum() == 0
 # A value is never shown in part: the table scrolls by whole columns, and
 # the column the viewport's right edge cuts shows nothing.
 table = editor.value_table
@@ -830,6 +861,21 @@ pane.set_tabs((
     ('Raw', (('source', {'signal': '@logic/cm/frames', 'title': 'camera'}),)),
 ))
 pane.resize(520, 640); pane.show(); app.processEvents()
+
+# A tab of single rows keeps no chevron column: its names start where the
+# filter's words over them do (the same word, so the same side bearing).
+# A tab that nests keeps the column its chevrons are drawn in.
+def ink_left(widget):
+    image = widget.grab().toImage()
+    ratio = image.devicePixelRatio() or 1.0
+    x = next(x for x in range(image.width())
+             if any(image.pixelColor(x, y).lightness() < 110 for y in range(image.height())))
+    return widget.mapTo(pane, QtCore.QPoint()).x() + x / ratio
+plot = pane._rows_tabs['Plot']
+assert not plot.tree.rootIsDecorated() and pane._rows_tabs['Logic'].tree.rootIsDecorated()
+plot.filter_edit.setText('data'); app.processEvents()
+assert ink_left(plot.tree.viewport()) == ink_left(plot.filter_edit)
+plot.filter_edit.clear(); app.processEvents()
 
 # The record is a tree: the run's name, then its fields, then the fields
 # of its fields -- every one on a row of its own, open from the start, a

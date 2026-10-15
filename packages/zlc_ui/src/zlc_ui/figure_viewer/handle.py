@@ -272,7 +272,7 @@ class FigureViewerHandle(QtCore.QObject):
         self, panel_id: str, projection: Any, *, title: str = ""
     ) -> None:
         state = dict(projection).get("state", {}) if isinstance(projection, dict) else {}
-        resolved_title = str(title or f"Edit Panel · {dict(state).get('title', panel_id)}")
+        resolved_title = str(title or f"Edit panel · {dict(state).get('title', panel_id)}")
         self._view.open_panel_editor(panel_id, projection, resolved_title)
 
     def close_panel_editor(self, panel_id: str) -> bool:
