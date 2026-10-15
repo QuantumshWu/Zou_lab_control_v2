@@ -224,6 +224,8 @@ Node new chunk
 
 ### 5.1 Exact Data/Fit pairing
 
+- Live Fit首次配置的数据求解失败与后续失败同义：保留请求、呈现原数据与invalid fit诊断，后续同代数据自动继续；不因首点不足销毁Host。非法作者初值/边界仍拒绝，静态显式fit仍报错，取消与超时沿原处理。
+
 - 数值名称由生产该量的owner写入`ValueSchema.name`，不是Runtime地址或Plot猜测。普通named snapshot使用信号短名；Occupancy/FrameSurvival与用户Derive的已发布变量声明各自的新量名，Fit参数与ROI统计使用输出名。仅增加扫描/历史维度或裁剪ROI时保留输入value schema/name，Seamless接survival仍标survival而不是scan。Plot从同一QuantityArray.label读取：Curve/Rolling的Y、Histogram的X、Image/Heatmap/3D的色条或Z均用值名＋单位；Histogram的计数/密度轴仍由统计定义命名。显式Plot标签优先，真正无名Dataset才使用value占位。名称与Dataset/Figure同存同读，不另加标签注册表、来源追踪或图种/节点特判；Manual编辑已有Dataset保留值名，新建无名数据用其作者名称。
 - Facet的layout只拥有title，轴/值的显式标签由现有cell.labels唯一保存。构造时将外层显式x/y/value优先规范到cell后清外层对应项；renderer、Focus、label carry均读同一semantic cell，不在每次渲染时重建spec。换轴删除失去角色的旧标签，不能被旧cell fallback重新带回。
 - Pulse字段显示由field_label统一读取`period.name or period_id`：duration为`MOT.duration`，DAC为`MOT.<port label>`，delay为`<port label>.delay`。同一Pulse的有效Period显示名必须唯一，空Name允许使用唯一ID；错误输入只提示并恢复已有字段显示，不改执行程序。ScanColumn/ScanPort的name/port保留变量ID，label用于界面；扫描Dataset的AxisId继续由原port identity产生，Axis.name单独承接显示label，Period改名不得破坏Plan/selector接线或改写值/单位。

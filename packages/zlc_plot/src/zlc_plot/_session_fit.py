@@ -33,7 +33,9 @@ from .fit import (
     FitModelSpec,
     FitOptions,
     FitResult,
+    _authored_seed,
     _bimodal_classifier_metrics,
+    _solver_bounds,
 )
 from .parameters import RenderEffect
 from .selectors import (
@@ -114,14 +116,14 @@ class FitSessionMixin:
         return result.with_batch_revision(batch_revision)
 
 
-    def _failed_live_fit_event(
+    def _failed_fit_result(
         self,
         request: _LiveFitRequest,
         projection: FitProjection,
         source_revision: int,
         error: BaseException,
-    ) -> FitEvent:
-        """One explicit invalid parameter sample for an unpresented revision."""
+    ) -> FitResult | FacetFitBatchResult:
+        """One invalid result with the failed input's model, units and revision."""
 
         model = request.model
         message = str(error) or type(error).__name__
@@ -144,15 +146,7 @@ class FitSessionMixin:
                 parameter_units=units,
                 sample_axes=projection._fit_sample_axes(targets),
             )
-            result = self._stamp_fit_batch_revision(failed)
-            return FitEvent(
-                result,
-                projection.data_generation,
-                None,
-                (),
-                "",
-                result.overlays,
-            )
+            return failed
 
         count = len(model.parameters)
         invalid = np.full(count, np.nan, dtype=np.float64)
@@ -171,13 +165,7 @@ class FitSessionMixin:
             covariance_valid=False,
             parameter_units=units,
         )
-        return FitEvent(
-            self._stamp_fit_batch_revision(failed),
-            projection.data_generation,
-            None,
-            (),
-            "",
-        )
+        return failed
 
     def publish_live_fit_gap(
         self,
@@ -198,9 +186,12 @@ class FitSessionMixin:
             selected = self._projected if projection is None else projection
         if not isinstance(selected, FitProjection):
             raise TypeError("fit gap projection must be FitProjection or None")
-        self._notify_fit(
-            self._failed_live_fit_event(request, selected, revision, error)
-        )
+        result = self._stamp_fit_batch_revision(
+            self._failed_fit_result(request, selected, revision, error))
+        self._notify_fit(FitEvent(
+            result, selected.data_generation, None, (), "",
+            result.overlays if isinstance(result, FacetFitBatchResult) else (),
+        ))
         return True
 
     def _forget_fit_warm_starts(self, request_generation: int | None) -> None:
@@ -506,9 +497,12 @@ class FitSessionMixin:
             raise RuntimeError("configured fit request has no selection")
         try:
             result = self._solve_started_fit(started)
-        except BaseException:
+        except Exception as error:
             self._forget_fit_warm_starts(started.request_generation)
-            raise
+            if not live or isinstance(error, (FitCancelled, FitDeadlineExceeded)):
+                raise
+            result = self._failed_fit_result(
+                started.request, started.projection, started.projection.data_revision, error)
         presentation = self._accept_fit(result, started)
         if presentation is None:
             raise FitCancelled("fit target was superseded before acceptance")
@@ -1014,6 +1008,11 @@ class FitSessionMixin:
             frozen_bounds = MappingProxyType(prepared_bounds)
         if selector_kind is not None and not isinstance(selector_kind, SelectorKind):
             raise TypeError("selector_kind must be SelectorKind or None")
+        # Authoring errors are refused before an invalid data-dependent fit can commit.
+        if frozen_initial is not None:
+            _authored_seed(model_spec, frozen_initial)
+        if frozen_bounds:
+            _solver_bounds(model_spec, None, frozen_bounds)
         return _LiveFitRequest(
             model_spec,
             selector_kind,

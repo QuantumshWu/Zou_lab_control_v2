@@ -396,6 +396,8 @@
 
 ### 2.3 Figure与Viewer
 
+- 首次Live Fit和运行中失败共用原invalid FitResult；失败overlay只显示诊断、不生成NaN参数文字。首点不足保留单图Host和live请求，数据足够后同代恢复；作者输入校验与静态fit的拒绝语义不变。
+
 - PNG通过公共PlotSession.save默认无损level1，保持原像素及显式pil_kwargs覆盖；不为Task另建writer或绘图路径。
 
 - 公共Figure API严格编码/解码PlotSpec、parameters、size、viewport、selectors、facet focus、classifier、fit与
