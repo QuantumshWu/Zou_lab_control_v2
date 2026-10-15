@@ -58,6 +58,7 @@ from zlc_pulse import (
     write_subpulse,
     resolve_subpulse_sources,
     set_subpulse_source,
+    stale_subpulse_bindings,
 )
 from zlc_pulse import (
     TIME_UNIT_CHOICES,
@@ -2329,7 +2330,11 @@ class PulseEditorPresenter:
         return Path.cwd()
 
     def _binding_records(self) -> tuple[BindingRecord, ...]:
-        """Read-only physical fields, never separately authored aliases."""
+        """Read-only physical fields, never separately authored aliases.
+
+        A Scan/API mark inside a file-backed Subpulse whose file no longer
+        offers it is listed too, as not in file: it plays the file's constant.
+        """
         sequence = None if self.sequence is None else self._effective_sequence(self.sequence)
         if sequence is None:
             return ()
@@ -2341,6 +2346,13 @@ class PulseEditorPresenter:
             )
             for b in sequence.bindings if b.scan or b.source == "api"
             for component in (sequence.component_for_field(b.field_ref),)
+        ) + tuple(
+            BindingRecord(
+                b.field_id, _grouped_label(self.sequence, b.field_ref, component), b.scan, b.source,
+                component.component_id, component.name, note="not in file",
+            )
+            for b in stale_subpulse_bindings(self.sequence, sequence)
+            for component in (self.sequence.component_for_field(b.field_ref),)
         )
 
     def _config_dirty(self) -> bool:

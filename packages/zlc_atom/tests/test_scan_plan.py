@@ -94,6 +94,17 @@ def test_scan_accepts_the_complete_document_saved_by_the_pulse_editor(
     grouped = set_subpulse_source(replace(grouped, config_enabled=True), "mot", "config", str(fragment_path))
     path.write_text(json.dumps(sequence_to_tree(grouped)), encoding="utf-8")
     fixed = resource.resolve(path).value
+    # A file that holds the scanned field constant: a plan that leaves that
+    # port alone builds, and only one that sweeps it is refused, by name.
+    write_subpulse(fragment_path, replace(extract_subpulse(grouped, "mot"), bindings=()))
+    constant = resource.resolve(path)
+    port = PULSE_PARAM_FAMILY + slotted.scan_bindings[0].field_id
+    assert port not in {item.port for item in hardware_scan_ports_for(constant.value)}
+    build = dict(sequencer=object(), signal_plane=object(), source_signal="camera.frames",
+                 pulse_resource=constant)
+    assert SEAMLESS_NODE.build(plan={"axes": [{"port": "manual:power", "values": [1.0]}]}, **build).plan.shape == (1,)
+    with pytest.raises(ValueError, match=f"offers no scan port named '{port}'"):
+        SEAMLESS_NODE.build(plan={"axes": [{"port": port, "values": [0.0]}]}, **build)
     fragment_path.unlink()
     assert fixed.components[0].source == "default"
     assert fixed.scan_bindings == slotted.scan_bindings
