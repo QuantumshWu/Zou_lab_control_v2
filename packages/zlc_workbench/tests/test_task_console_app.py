@@ -2905,7 +2905,7 @@ async def client():
                 assert waited["still_current"] and waited["state"]["console"]["logic"][0]["name"] == "Camera A"
                 refused = await call("lab_action", {"action":"logic.rename", "arguments":{"node_id":node, "name":"a/b"}})
                 assert (refused["accepted"], refused["status"]) == (False, "rejected")
-                assert refused["error"] == "A name is one line of text without “/”."
+                assert refused["error"] == "Camera A: A name is one line of text without “/”."
                 same = await call("lab_action", {"action":"logic.rename", "arguments":{"node_id":node, "name":"Camera A"}})
                 assert (same["accepted"], same["status"]) == (True, "unchanged")
                 loading = await call("lab_action", {"action":"logic.add", "arguments":{

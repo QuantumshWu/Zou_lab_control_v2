@@ -2451,18 +2451,19 @@ def test_an_armed_silent_source_admits_a_scan_draft(bench) -> None:
             source_options=(signal,) if offered else (),
         )
 
-    # An issue names the signal as a person reads it: its producer and output.
-    said = "camera/frames"
+    # An issue names the source by its row on the page, never by the
+    # producer, whose name may change while the issue stands.
     source_issues = [
-        text for text in finalized(armed=True).issues if said in text
+        text for text in finalized(armed=True).issues if "not declared" in text
     ]
     assert source_issues == []
     waiting_issues = [
-        text for text in finalized(armed=False).issues if said in text
+        text for text in finalized(armed=False).issues if "not declared" in text
     ]
     assert waiting_issues == []
-    assert any(said in text and "not declared" in text
-               for text in finalized(armed=False, offered=False).issues)
+    refused = [text for text in finalized(armed=False, offered=False).issues
+               if "not declared" in text]
+    assert refused and not [text for text in refused if "camera" in text], refused
 
     with _console_over(bench) as presenter:
         panel = presenter.add_blank_panel("curve")
@@ -2486,12 +2487,12 @@ def test_an_armed_silent_source_admits_a_scan_draft(bench) -> None:
         assert {choice.value for choice in field.choices} == {"", camera_id}
         assert "settle_seconds" not in projection["form_values"]
         presenter.update_logic_draft(scan_id, values={"acquisition_logic": scan_id})
-        assert any("acquisition Measurement" in text for text in
+        assert any("not an available Measurement" in text for text in
                    presenter.logic_editor_projection(scan_id)["issues"])
         presenter.update_logic_draft(scan_id, values={
             "acquisition_logic": camera_id,
         })
-        assert not any("acquisition Measurement" in text for text in
+        assert not any("not an available Measurement" in text for text in
                        presenter.logic_editor_projection(scan_id)["issues"])
         saved = presenter.layout()
         assert presenter.apply_layout(saved)
@@ -2574,6 +2575,25 @@ def test_a_renamed_node_is_called_by_its_name_and_addressed_by_its_id(presenter,
     ]
     assert not [text for text in said if camera_id in text], said
 
+    # The Panel name field shows "Camera A/frames"; sent back as shown, it is
+    # still the automatic title -- the signal's key -- and follows the next
+    # rename, instead of freezing this one into the panel record.
+    assert presenter.update_panel_state(panel.panel_id, {"title": "Camera A/frames"}) is False
+    assert panel.state.title == frames
+    assert presenter.rename_logic(camera_id, "Camera B")
+    surface = presenter.view.panel_parameter_surfaces[panel.panel_id]
+    assert (surface["caption"], surface["panel_name"]) == (
+        f"{panel.panel_id}@Camera B/frames", "Camera B/frames"
+    )
+    assert presenter.update_panel_state(panel.panel_id, {"title": "MOT shot"})
+    assert panel.state.title == "MOT shot"
+    presenter.beat()
+    # Its publisher row on the Logic page says the panel's name too.
+    assert presenter.view.panel_publisher_names[panel.panel_id] == "MOT shot"
+    assert presenter.update_panel_state(panel.panel_id, {"title": "Camera B/frames"})
+    assert panel.state.title == frames
+    assert presenter.rename_logic(camera_id, "Camera A")
+
     # A device refusal names the owner as the operator calls it.
     with pytest.raises(DeviceUseBusy, match="device is in use by Camera A$"):
         session.device_use.acquire_command(
@@ -2606,37 +2626,80 @@ def test_a_renamed_node_is_called_by_its_name_and_addressed_by_its_id(presenter,
     assert presenter.logic[second].pending is not None
     assert presenter.view._rows[second].state[1] == "waiting for Camera A"
     assert presenter.view.status[-1] == ("task", f"{second} queued while Camera A stops")
+    # Renamed while its Start is queued, the run it starts carries the new
+    # name: the name is asked when the run declares its record.
+    assert presenter.rename_logic(second, "Camera C")
     deadline = time.monotonic() + 10.0
-    while time.monotonic() < deadline and holder.running:
+    second_frames = stable_signal_key(second, "frames")
+    latest = None
+    while time.monotonic() < deadline and (latest is None or holder.running):
+        session.fire(shots=1)
         presenter.beat()
+        latest = session.signal_plane.latest_publication(second_frames)
         time.sleep(0.005)
     assert not holder.running
+    assert latest.run_record["node"] == second
+    assert latest.run_record["node_name"] == "Camera C"
     assert presenter.stop_logic(second)
+    # An empty name is the internal ID, as the empty Name box's hint says.
+    assert presenter.rename_logic(second, "")
+    assert presenter.logic[second].name == second
+    assert presenter.view.status[-1] == ("task", f"renamed Camera C to {second}")
 
-    # Refusals: one sentence each, under the Name line and on the strip; the
-    # name is unchanged.  The current name needs no report.
+    # Refusals from the Edit page: one sentence each, under its Name line
+    # and on the strip; the name is unchanged.  Names a person reads alike
+    # -- another case, a no-break or doubled space, full-width letters -- are
+    # one name.  The current name needs no report and clears the sentence.
+    presenter.edit_logic(second)
     for typed, problem in (
-        ("", "A node needs a name."),
         ("a/b", "A name is one line of text without “/”."),
-        ("a\nb", "A name is one line of text without “/”."),
+        ("a\u200bb", "A name is one line of text without “/”."),
         ("Panel-2", "“Panel-2” is how a panel is named; choose another name."),
         ("CAMERA A", "Another node is already called “Camera A”."),
+        ("Camera\u00a0A", "Another node is already called “Camera A”."),
+        ("Camera  A", "Another node is already called “Camera A”."),
+        ("\uff23\uff41\uff4d\uff45\uff52\uff41 \uff21", "Another node is already called “Camera A”."),
         ("Camera_Measurement", "“camera_measurement” is another node's internal ID; choose another name."),
+        ("Signals", "“Signals” already names a signal producer; choose another name."),
     ):
-        assert presenter.rename_logic(second, typed) is False, typed
-        assert presenter.logic[second].name == second
-        assert presenter.logic_editor_projection(second)["name_problem"] == problem
-        assert presenter.view.status[-1] == ("warning", problem)
+        presenter.view.logic_name_committed.emit(second, typed)
+        assert presenter.logic[second].name == second, typed
+        assert presenter.view.logic_editors[second]["name_problem"] == problem
+        assert presenter.view.status[-1] == ("warning", f"{second}: {problem}")
     reports = len(presenter.view.status)
-    assert presenter.rename_logic(second, second) is True
+    presenter.view.logic_name_committed.emit(second, second)
     assert len(presenter.view.status) == reports
-    assert presenter.logic_editor_projection(second)["name_problem"] == ""
+    assert presenter.view.logic_editors[second]["name_problem"] == ""
+    # An agent's refusal is the agent's error, not a sentence under the
+    # operator's Name line; a name that is not text is refused outright.
     refused = presenter.control_action("logic.rename", {"node_id": second, "name": "camera a"})
     assert (refused["accepted"], refused["status"]) == (False, "rejected")
-    assert refused["error"] == "Another node is already called “Camera A”."
+    assert refused["error"] == f"{second}: Another node is already called “Camera A”."
+    assert presenter.view.logic_editors[second]["name_problem"] == ""
+    for action, arguments in (
+        ("logic.rename", {"node_id": second, "name": None}),
+        ("logic.add", {"api_name": "occupancy", "name": 5}),
+    ):
+        refused = presenter.control_action(action, arguments)
+        assert not refused["accepted"] and "must be text" in refused["error"], refused
+    assert presenter.logic[second].name == second and "None" not in presenter.logic_names().values()
     renamed = presenter.control_action("logic.rename", {"node_id": occupancy_id, "name": "Loading"})
     assert (renamed["accepted"], renamed["status"]) == (True, "renamed")
     assert renamed["state"]["logic"][0]["name"] == "Loading"
+    # A draft's issues name no node -- the acquisition's picker beside them
+    # says which, by its name now -- so the refusal a Start leaves on the
+    # row, a copy of the first, never keeps a name a rename changed.
+    assert presenter.update_logic_draft(scan_id, values={"acquisition_logic": occupancy_id})
+    issues = presenter.logic_editor_projection(scan_id)["issues"]
+    assert "the selected acquisition is not an available Measurement" in issues
+    assert not [text for text in issues if "Loading" in text or occupancy_id in text], issues
+    assert presenter.start_logic(scan_id) is False
+    refusal = presenter.logic[scan_id].draft_error
+    assert refusal in issues
+    assert presenter.rename_logic(occupancy_id, "Counting")
+    assert presenter.view._rows[scan_id].state == ("error", refusal)
+    assert presenter.control_state(node_id=scan_id)["logic"][0]["error"] == refusal
+    assert presenter.rename_logic(occupancy_id, "Loading")
 
     # Minting skips every name and id; an added node may be named at once.
     assert presenter.rename_logic(second, "occupancy2")
@@ -2660,7 +2723,7 @@ def test_a_board_keeps_its_names_and_refuses_one_no_operator_could_type(
     makes the whole file one sentence."""
 
     from zlc_workbench.console_layout import (
-        LayoutDocument, LayoutError, logic_name_problem, read_experiment_recipe,
+        LayoutDocument, LayoutError, read_experiment_recipe, resolve_layout,
     )
 
     presenter = bench_presenter
@@ -2698,7 +2761,19 @@ def test_a_board_keeps_its_names_and_refuses_one_no_operator_could_type(
             LayoutDocument.from_tree(tree)
         assert str(refused.value) == problem
     assert read_experiment_recipe(Path(presenter.session.workspace.root), "trap_lifetime")
-    # A notebook's producer heading is not a name a node may take.
-    assert logic_name_problem("Calibration", "occupancy", {}, {"calibration"}) == (
-        "“Calibration” already names a signal producer; choose another name."
+    # A name a notebook's producer heads on this session would merge with it
+    # in every picker: that row is called by its internal ID, and the load
+    # says so.
+    entry["name"] = "Calibration"
+    loaded = resolve_layout(
+        LayoutDocument.from_tree(tree),
+        catalog=presenter.catalog,
+        installation=presenter.session.installation,
+        panel_ids=tuple(f"panel-{index + 1}" for index in range(len(tree["panels"]))),
+        external_outputs=(("@logic/calibration/frames", "camera.frames"),),
     )
+    assert loaded.logic[0].name == camera_id
+    assert (
+        f"logic {camera_id} is called by its internal ID: “Calibration” already "
+        "names a signal producer; choose another name."
+    ) in loaded.notes

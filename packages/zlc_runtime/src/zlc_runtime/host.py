@@ -342,7 +342,7 @@ class NodeHost:
         follow_max_bytes: int | None = None,
         required_artifacts: Mapping[str, str] | None = None,
         task_name: str | None = None,
-        display_name: str | None = None,
+        display_name: Callable[[], str] | None = None,
     ) -> None:
         if not callable(getattr(data_plane, "freeze", None)):
             raise TypeError("data_plane must provide the SignalDataPlane surface")
@@ -435,11 +435,8 @@ class NodeHost:
             if task_name is None
             else canonical_text(task_name, "Task run name")
         )
-        selected_display_name = (
-            None
-            if display_name is None
-            else canonical_text(display_name, "node display name")
-        )
+        if display_name is not None and not callable(display_name):
+            raise TypeError("display_name must be callable")
 
         self._node = node
         self._mode = mode
@@ -455,7 +452,7 @@ class NodeHost:
         self._follow_max_bytes = follow_max_bytes
         self._required_artifacts = artifacts
         self._task_name = selected_task_name
-        self._display_name = selected_display_name
+        self._display_name = display_name
         self._data_plane = data_plane
         self._request_owner_wake = request_owner_wake
         self._execution_context = NodeExecutionContext(self)
@@ -504,13 +501,16 @@ class NodeHost:
 
     @property
     def display_name(self) -> str | None:
-        """What the operator called this node when this run was built.
+        """What the operator calls this node now, asked of its owner.
 
-        History, frozen with the run like its ``instance_id`` and stamped
-        beside it on the run record; never an address.
+        Read when a run declares its record, which keeps it beside the
+        ``instance_id`` as history: a run started after a rename -- one
+        queued before it, too -- carries the new name.  Never an address.
         """
 
-        return self._display_name
+        if self._display_name is None:
+            return None
+        return canonical_text(self._display_name(), "node display name")
 
     def signal_key(self, output_name: str) -> str:
         name = canonical_text(output_name, "node output name")

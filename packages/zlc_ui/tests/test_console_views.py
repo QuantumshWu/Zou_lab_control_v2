@@ -910,7 +910,7 @@ view = TaskConsoleView()
 handle = TaskConsoleHandle(None, view)
 handle.set_panel_sizes(('2x2',), '2x2')
 handle.add_logic_row('camera-1', 'measurement')
-handle.set_panel_publishers((('panel-1', (
+handle.set_panel_publishers((('panel-1', 'panel-1', (
     ('center_x', '35', 'held · @logic/panel-1/center_x'),
     ('roi', '4', 'live · @logic/panel-1/roi'),
 )),))
@@ -1231,7 +1231,7 @@ assert 'panel-1' not in handle._panel_publisher_editors
 def test_a_logic_node_is_renamed_on_its_edit_page_and_called_by_its_name(run_qt) -> None:
     run_qt(
         """
-from PyQt5 import QtCore
+from PyQt5 import QtCore, QtTest, QtWidgets
 from zlc_ui.console import TaskConsoleHandle, TaskConsoleView
 from zlc_ui.fluent import FluentSettingRow
 from zlc_ui.form import FormFieldProps, FormSpec
@@ -1240,12 +1240,30 @@ app = ensure_qt_app(['logic-name'])
 view = TaskConsoleView()
 handle = TaskConsoleHandle(None, view)
 handle.set_panel_sizes(('2x2',), '2x2')
-# A row is made blank; what the node is called arrives by one channel.
+# A row is made blank; what the node is called arrives by one channel, and
+# its tooltip says what the node is and the ID it is addressed by.
 handle.add_logic_row('occupancy2', 'processor')
 row = handle._rows['occupancy2']
 assert row.name_label.text() == ''
-handle.set_logic_name('occupancy2', 'Loading')
-assert row.name_label.text() == 'Loading' and row.name_label.toolTip() == 'Loading'
+handle.set_logic_name('occupancy2', 'Loading', 'occupancy')
+assert row.name_label.text() == 'Loading'
+assert row.name_label.toolTip() == 'Loading · occupancy · internal ID occupancy2'
+# A name is shown as typed, never read as markup.
+handle.set_logic_name('occupancy2', '<i>Cam', 'occupancy')
+assert row.name_label.textFormat() == QtCore.Qt.PlainText
+handle.set_logic_name('occupancy2', 'Loading', 'occupancy')
+# Two names that differ at their end still read differently in the column.
+handle.add_logic_row('occupancy3', 'processor')
+handle.set_logic_name('occupancy2', 'Loading occupancy of the upper MOT, shot 1', 'occupancy')
+handle.set_logic_name('occupancy3', 'Loading occupancy of the upper MOT, shot 2', 'occupancy')
+view.resize(1000, 700)
+view.show()
+app.processEvents()
+shown = lambda label: QtWidgets.QLabel.text(label)
+assert '…' in shown(row.name_label)
+assert shown(row.name_label) != shown(handle._rows['occupancy3'].name_label)
+handle.set_logic_name('occupancy2', 'Loading', 'occupancy')
+handle.remove_logic_row('occupancy3')
 projection = {
     'node_id': 'occupancy2', 'name': 'Loading', 'name_problem': '',
     'api_name': 'occupancy', 'kind': 'processor',
@@ -1262,24 +1280,24 @@ projection = {
 }
 sent = []
 def answer(node_id, text):
-    # The presenter's part: refuse a slash, otherwise take the name.
+    # The presenter's part: refuse a slash, an empty name is the internal
+    # ID, an unchanged one withdraws a standing refusal.
     sent.append((node_id, text))
     if '/' in text:
         projection['name_problem'] = 'A name is one line of text without “/”.'
     else:
-        projection.update(name=text, name_problem='')
+        projection.update(name=text or node_id, name_problem='')
     handle.update_logic_editor(node_id, projection)
 handle.logic_name_committed.connect(answer)
 handle.open_logic_editor('occupancy2', projection)
 editor = handle._logic_editors['occupancy2']
-view.resize(1000, 700)
-view.show()
 app.processEvents()
 tab = lambda: view.tabs.tabText(view.tabs.indexOf(editor))
 assert tab() == 'Edit · Loading'
 assert editor.title_label.text() == 'Loading'
 assert editor.kind_label.text() == '(occupancy · processor)'
-# The Name is the first row, in the one label column and the one control column.
+# The Name is the first row, in the one label column and the one control
+# column, and the first stop of Tab on the page's rows.
 top = lambda widget: widget.mapTo(editor, QtCore.QPoint()).y()
 left = lambda widget: widget.mapTo(editor, QtCore.QPoint()).x()
 rows = sorted((r for r in editor.findChildren(FluentSettingRow) if r.isVisible()), key=top)
@@ -1288,46 +1306,97 @@ assert rows[0].isAncestorOf(box), [r.layout().itemAt(0).widget().text() for r in
 assert editor.name_form._labels['name'].text() == 'Name'
 assert left(box) == left(editor.source_combo) == left(editor.form.widget_for('repeat'))
 assert box.text() == 'Loading' and box.toolTip() == 'Internal ID: occupancy2'
-# Finishing the box (Return, then the focus leaving) sends the name once,
-# stripped; the page and its tab follow the presenter's answer.
-box.setText('  Counts ')
-box.editingFinished.emit()
-box.editingFinished.emit()
+chain, widget = [], box.nextInFocusChain()
+while widget is not box and len(chain) < 500:
+    chain.append(widget)
+    widget = widget.nextInFocusChain()
+assert chain.index(editor.source_combo) < chain.index(editor.start_button), 'Tab from Name goes to the rows'
+view.activateWindow()
+def type_in(text):
+    box.setFocus()
+    app.processEvents()
+    assert QtWidgets.QApplication.focusWidget() is box
+    box.selectAll()
+    QtTest.QTest.keyClicks(box, text)
+def leave():
+    editor.form.widget_for('repeat').setFocus()
+    app.processEvents()
+# Return sends what was typed, once, stripped; leaving afterwards sends
+# nothing more, and the box then shows the name the node has.
+type_in('  Counts ')
+QtTest.QTest.keyClick(box, QtCore.Qt.Key_Return)
 assert sent == [('occupancy2', 'Counts')], sent
 assert tab() == 'Edit · Counts' and editor.title_label.text() == 'Counts'
+leave()
+assert sent == [('occupancy2', 'Counts')], sent
 assert box.text() == 'Counts'
-# Leaving an unchanged box sends nothing.
-box.editingFinished.emit()
-assert sent == [('occupancy2', 'Counts')]
-# A refusal is one sentence under the line, from the control column; the box
-# goes back to the name the node still has, and the sentence stays.
+# A box nobody typed in sends nothing, even when an agent renamed the node
+# while the focus stood in it: leaving shows the agent's name, not the old.
+box.setFocus()
+app.processEvents()
+projection.update(name='Agent name')
+handle.update_logic_editor('occupancy2', projection)
+assert box.text() == 'Counts'
+leave()
+assert sent == [('occupancy2', 'Counts')], sent
+assert box.text() == 'Agent name' and tab() == 'Edit · Agent name'
+# Escape takes back what was typed.
+type_in('Oops')
+QtTest.QTest.keyClick(box, QtCore.Qt.Key_Escape)
+app.processEvents()
+assert box.text() == 'Agent name' and not box.hasFocus()
+assert sent == [('occupancy2', 'Counts')], sent
+# A refusal is one sentence under the line, in the control column, while
+# the refused text is in the box; leaving it puts the name back and the
+# refusal goes with the text it answered.
 assert editor.name_problem_label.isHidden()
 below = top(editor.source_combo)
-box.setText('a/b')
-box.editingFinished.emit()
+type_in('a/b')
+QtTest.QTest.keyClick(box, QtCore.Qt.Key_Return)
 app.processEvents()
 assert sent[-1] == ('occupancy2', 'a/b')
+assert box.text() == 'a/b'
 assert editor.name_problem_label.isVisible()
 assert editor.name_problem_label.text() == 'A name is one line of text without “/”.'
 assert left(editor.name_problem_label) == left(box)
 assert top(box) < top(editor.name_problem_label) < top(editor.source_combo)
 assert top(editor.source_combo) > below, 'the sentence takes its own line'
-assert box.text() == 'Counts' and tab() == 'Edit · Counts'
-# Answering a standing refusal with the name the node has clears it.
-box.editingFinished.emit()
+leave()
 app.processEvents()
-assert sent[-1] == ('occupancy2', 'Counts')
-assert editor.name_problem_label.isHidden() and tab() == 'Edit · Counts'
-box.setText('Loading')
-box.editingFinished.emit()
+assert sent[-1] == ('occupancy2', 'Agent name')
+assert box.text() == 'Agent name' and editor.name_problem_label.isHidden()
+# An emptied box is sent as it is: the node is then called by its ID.
+type_in('')
+QtTest.QTest.keyClick(box, QtCore.Qt.Key_Backspace)
+QtTest.QTest.keyClick(box, QtCore.Qt.Key_Return)
+leave()
+assert sent[-1] == ('occupancy2', ''), sent
+assert box.text() == 'occupancy2' and tab() == 'Edit · occupancy2'
+# Called by its type's own name, the header does not say the type twice.
+projection.update(name='occupancy')
+handle.update_logic_editor('occupancy2', projection)
+assert editor.kind_label.text() == '(processor)'
+# A long name gives up its middle in the header; it never widens the page.
+narrowest = editor.minimumSizeHint().width()
+projection.update(name='Loading occupancy of the upper MOT ' * 5)
+handle.update_logic_editor('occupancy2', projection)
 app.processEvents()
-assert tab() == 'Edit · Loading'
-# A Task holding the console leaves the Name editable.
+assert editor.minimumSizeHint().width() == narrowest
+assert '…' in QtWidgets.QLabel.text(editor.title_label) or editor.title_label.width() >= editor.title_label.maximumWidth()
+projection.update(name='Loading')
+handle.update_logic_editor('occupancy2', projection)
+# A Task holding the console leaves the Name editable, and the row's Edit,
+# the way to it.
 handle.set_task_takeover('another_task')
 assert box.isEnabled() and not editor.form.isEnabled()
+assert row.edit_button.isEnabled() and not row.remove_button.isEnabled()
 handle.set_task_takeover('')
-# A panel publisher's page has nothing to rename.
-handle.set_panel_publishers((('panel-1', (('roi', '4', 'live · panel-1/roi'),)),))
+# A panel publisher's row says the panel's name, its id in the tooltip; its
+# page has nothing to rename.
+handle.set_panel_publishers((('panel-1', 'Camera A/frames', (('roi', '4', 'live · panel-1/roi'),)),))
+publisher_row = handle._panel_publisher_rows['panel-1']
+assert publisher_row.name_label.text() == 'Camera A/frames'
+assert publisher_row.name_label.toolTip() == 'Camera A/frames · panel-1'
 handle.open_panel_publisher_editor('panel-1', {
     'node_id': 'panel-1', 'api_name': 'Camera A/frames outputs', 'kind': 'panel publisher',
     'form_spec': FormSpec((FormFieldProps(key='roi_mean', kind='bool', label='Mean', default=True),)),
@@ -2253,7 +2322,8 @@ assert view.save_screenshot_button.isEnabled()
 assert preview.settings_button.isEnabled()
 for row in (task_row, camera_row):
     assert not row.start_button.isEnabled()
-    assert not row.edit_button.isEnabled()
+    # Edit stays: its page is read-only under the Task but for the Name.
+    assert row.edit_button.isEnabled()
     assert not row.remove_button.isEnabled()
 # The running Task's own row keeps its Stop, in its place; every other
 # row's Stop waits for the Task like the rest of its commands.
@@ -2915,7 +2985,18 @@ assert card._caption() == 'panel-2@camera_measurement/frames', card._caption()
 line = card._band_fragments()[0]
 # The card's own id leads in muted ink; the name the operator reads follows it.
 assert line[0][:2] == ('panel-2', tested_module.MUTED_INK), line
-assert line[0][0] + line[1][0] == 'panel-2@camera_measurement/frames', line
+assert ''.join(text for text, _colour, _elide in line[:3]) == 'panel-2@camera_measurement/frames', line
+# Too long for the strip, the producer -- a name the operator chose --
+# gives up its middle; which of its signals this is stays whole.
+long = 'panel-2@Camera A upper MOT loading fluorescence, shot 1/frames'
+project(card, signal, signal, long)
+from PyQt5 import QtGui
+shown = tested_module.elide_fragments(
+    card._band_fragments()[0], QtGui.QFontMetrics(card._title_label.font()), 200,
+)
+assert shown[2][0] == '/frames' and '\u2026' in shown[1][0], shown
+assert shown[1][0].endswith('shot 1'), shown
+project(card, signal, signal, 'panel-2@camera_measurement/frames')
 
 # The name itself is untouched, everywhere it is the NAME and not a caption.
 assert card._base_title == signal

@@ -638,8 +638,11 @@ class TaskConsoleHandle(QtCore.QObject):
         self._show_logic_rows()
         self._show_console_state()
 
-    def set_logic_name(self, node_id: str, name: str) -> None:
-        self._rows[str(node_id)].set_name(name)
+    def set_logic_name(self, node_id: str, name: str, api_name: str = "") -> None:
+        """What the node is called; its tooltip adds what it is (its type)
+        and the internal ID it is addressed by."""
+
+        self._rows[str(node_id)].set_name(name, (api_name, f"internal ID {node_id}"))
 
     def set_logic_state(self, node_id: str, state: str, status_text: str = "") -> None:
         self._rows[str(node_id)].set_state(state, status_text)
@@ -669,16 +672,21 @@ class TaskConsoleHandle(QtCore.QObject):
 
     def set_panel_publishers(
         self,
-        publishers: tuple[tuple[str, tuple[tuple[str, str, str], ...]], ...],
+        publishers: tuple[tuple[str, str, tuple[tuple[str, str, str], ...]], ...],
     ) -> None:
-        """Show panel-owned signals beside, not inside, LogicNode rows."""
+        """Show panel-owned signals beside, not inside, LogicNode rows.
+
+        Each is ``(panel id, what the panel is called, its outputs)``: the
+        row says the panel's name, as its card and Setting do, and its id in
+        the tooltip, as the card's caption does.
+        """
 
         incoming: dict[str, LogicRowView] = {}
-        for panel_id, published in publishers:
+        for panel_id, name, published in publishers:
             key = str(panel_id)
             row = self._panel_publisher_rows.get(key)
             if row is None:
-                row = LogicRowView(key, "panel publisher")
+                row = LogicRowView("", "panel publisher")
                 # No node behind this row, so nothing here can be started or
                 # removed and nothing decides what a Start would open.  Each
                 # keeps its place while hidden: the name and Edit then stand
@@ -698,6 +706,7 @@ class TaskConsoleHandle(QtCore.QObject):
                 row.edit_requested.connect(
                     lambda _=None, pid=key: self.panel_publisher_edit_requested.emit(pid)
                 )
+            row.set_name(str(name), (key,))
             row.set_publishes(published)
             row.edit_button.setEnabled(True)
             incoming[key] = row

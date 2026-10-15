@@ -36,7 +36,7 @@ from .logic import (
 )
 from .panel_catalog import task_console_panel_kind
 from .panel_state import PanelState
-from .topology import signal_text
+from .topology import UNGROUPED_HEADING, signal_text
 
 
 def experiment_recipes(workspace: Path) -> dict[str, Path]:
@@ -118,32 +118,55 @@ def _names_a_panel(producer: str) -> bool:
     )
 
 
+def logic_name_text(text: object) -> str:
+    """A name as it is kept: its words, one space apart.
+
+    Any run of white space -- a tab, a line break, a no-break or full-width
+    space -- is one space, and none leads or trails, so two names a person
+    reads alike are kept alike.  "" when nothing is left.
+    """
+
+    return " ".join(str(text).split())
+
+
+def _name_key(text: str) -> str:
+    """What two names are compared by: the characters a person reads, in
+    their compatibility form (full-width letters are letters), with case
+    and runs of space ignored."""
+
+    return unicodedata.normalize("NFKC", logic_name_text(text)).casefold()
+
+
 def logic_name_problem(
     text: str,
     node_id: str,
     board: Mapping[str, str],
     producers: Collection[str] = (),
 ) -> str:
-    """"" when ``text`` (already stripped) may name ``node_id`` on a board
-    ``{node_id: name}``; otherwise one sentence saying why not.
+    """"" when ``text`` (kept as :func:`logic_name_text` keeps it, and not
+    empty) may name ``node_id`` on a board ``{node_id: name}``; otherwise
+    one sentence saying why not.
 
     The one rule for what may call a Logic node -- its name, and its id
-    when one is minted or written down.  Comparisons ignore case, and the
-    node's own id and own name are not "another".  A name never holds a
-    ``/``: a node's signals and sub-producers are read as
-    ``<name>/<output>``, which a slash inside the name would make ambiguous;
+    when one is minted or written down.  Two names are the same name when
+    a person reads them alike (:func:`_name_key`), and the node's own id
+    and own name are not "another".  A name never holds a ``/``: a node's
+    signals and sub-producers are read as ``<name>/<output>``, which a
+    slash inside the name would make ambiguous; nor an invisible or
+    control character, which would make two names that look alike differ;
     and it is never another node's id, so a string an operator says can
     never call one node and address another.  ``producers`` are the other
-    signal producers on the session (a notebook's ``calibration``), whose
-    headings a name must not merge with.
+    headings a picker files signals under (a notebook's ``calibration``),
+    which a name must not merge with.
     """
 
-    if not text:
-        return "A node needs a name."
-    if "/" in text or any(unicodedata.category(char).startswith("C") for char in text):
+    if "/" in text or any(
+        unicodedata.category(char)[0] == "C" or unicodedata.category(char) in ("Zl", "Zp")
+        for char in text
+    ):
         return "A name is one line of text without “/”."
-    folded = text.casefold()
-    if _names_a_panel(folded):
+    key = _name_key(text)
+    if _names_a_panel(key):
         return f"“{text}” is how a panel is named; choose another name."
     others = tuple(
         (other_id, other_name)
@@ -151,12 +174,12 @@ def logic_name_problem(
         if other_id != node_id
     )
     for _other_id, other_name in others:
-        if other_name.casefold() == folded:
+        if _name_key(other_name) == key:
             return f"Another node is already called “{other_name}”."
     for other_id, _other_name in others:
-        if other_id.casefold() == folded:
+        if _name_key(other_id) == key:
             return f"“{other_id}” is another node's internal ID; choose another name."
-    if any(str(producer).casefold() == folded for producer in producers):
+    if any(_name_key(str(producer)) == key for producer in producers):
         return f"“{text}” already names a signal producer; choose another name."
     return ""
 
@@ -186,7 +209,7 @@ class LogicLayoutEntry:
             raise LayoutError("logic entries require node_id and api_name")
         object.__setattr__(self, "node_id", node_id)
         object.__setattr__(self, "api_name", api_name)
-        object.__setattr__(self, "name", str(self.name).strip() or node_id)
+        object.__setattr__(self, "name", logic_name_text(self.name) or node_id)
         object.__setattr__(self, "values", dict(self.values))
         object.__setattr__(self, "source_signal", str(self.source_signal).strip())
         object.__setattr__(
@@ -349,6 +372,15 @@ def resolve_layout(
     bindings: list[LogicBinding] = []
     installed = getattr(installation, "devices", {})
     installed_keys = set(installed) if isinstance(installed, Mapping) else set()
+    # A name a picker already heads with another producer -- a notebook's
+    # node on this session -- would merge with it there: that row is called
+    # by its internal ID, and the load says so.
+    headings = {
+        parts[0].partition("/")[0]
+        for signal, _contract in external_outputs
+        for parts in (split_signal_key(str(signal)),)
+        if parts is not None
+    } | {UNGROUPED_HEADING}
     for entry in document.logic:
         descriptor = catalog.get(entry.api_name)
         if descriptor is None:
@@ -392,6 +424,15 @@ def resolve_layout(
                 artifacts[spec.name] = value
             else:
                 raise LayoutError(f"{entry.name}: artifact input {spec.name!r} must be a path")
+        name = entry.name
+        clash = (
+            logic_name_problem(name, entry.node_id, {}, headings)
+            if name != entry.node_id
+            else ""
+        )
+        if clash:
+            notes.append(f"logic {entry.node_id} is called by its internal ID: {clash}")
+            name = entry.node_id
         bindings.append(
             LogicBinding(
                 entry.node_id,
@@ -402,7 +443,7 @@ def resolve_layout(
                     selected,
                     artifacts,
                 ),
-                name=entry.name,
+                name=name,
                 auto_preview=entry.auto_preview,
             )
         )
@@ -596,6 +637,7 @@ __all__ = [
     "LoadedLayout",
     "LogicLayoutEntry",
     "logic_name_problem",
+    "logic_name_text",
     "panel_id_for",
     "resolve_layout",
 ]

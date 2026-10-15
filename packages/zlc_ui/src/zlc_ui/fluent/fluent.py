@@ -991,6 +991,10 @@ class FluentLabel(QtWidgets.QLabel):
 
     def __init__(self, text: str = "", parent=None):
         super().__init__(text, parent)
+        # Plain, as it says: text a person typed -- a node's name, "<i>Cam"
+        # -- is shown as typed, never read as markup.  A label that does
+        # carry markup says so (``setTextFormat(Qt.RichText)``).
+        self.setTextFormat(QtCore.Qt.PlainText)
         self.setStyleSheet(f'QLabel {{ color: {TEXT}; font: {fluent_font_size()}pt "{FONT}"; background: transparent; }}')
 
     def paintEvent(self, event) -> None:  # noqa: N802 - Qt naming
@@ -3602,11 +3606,19 @@ def stamped_file_name(stem: str, extension: str, *, stamp: str | None = None) ->
     saves of the same board are two files and the second must not silently be
     the first.  ONE rule: the Edit tab's Save figure and the console's own
     Save… (layout) and Save image… had begun to grow their own.
+
+    The name is often one an operator gave (a node's, a panel's), so every
+    character a Windows file name cannot hold becomes ``_``: a ``:`` in it
+    wrote the figure into a hidden stream of another file, and ``?``, ``*``
+    or ``|`` refused the save.
     """
 
     from datetime import datetime  # noqa: PLC0415 -- only a save needs the clock
 
-    text = str(stem).strip().replace("/", "_").replace("\\", "_") or "untitled"
+    text = "".join(
+        "_" if char in '<>:"/\\|?*' or ord(char) < 32 else char
+        for char in str(stem).strip()
+    ) or "untitled"
     moment = stamp if stamp is not None else datetime.now().strftime("%Y%m%d_%H%M%S")
     suffix = str(extension).lstrip(".")
     return f"{text}_{moment}.{suffix}" if suffix else f"{text}_{moment}"
@@ -10355,6 +10367,8 @@ class ElidedLabel(QtWidgets.QLabel):
         super().__init__(parent)
         self._full = str(text)
         self._mode = mode
+        # Plain, as FluentLabel is: a path or a name is never markup.
+        self.setTextFormat(QtCore.Qt.PlainText)
         self.setAlignment(align)
         self.setStyleSheet(f'QLabel {{ color: {TEXT}; font: {fluent_font_size()}pt "{FONT}"; background: transparent; }}')
         self.setMinimumWidth(scaled_px(8))

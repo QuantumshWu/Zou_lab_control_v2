@@ -30,7 +30,6 @@ from zlc_runtime import NodeHost
 from zlc_ui.status import name_words
 
 from .device_use import DeviceClaim, DeviceLease, LogicReservation
-from .topology import producer_text, signal_text
 
 
 __all__ = [
@@ -379,7 +378,6 @@ def finalize_logic_draft(
     acquisition_options: Sequence[str] = (),
     previous: LogicDraftFinalization | None = None,
     source_frames: int | None = None,
-    node_names: Mapping[str, str] = MappingProxyType({}),
 ) -> LogicDraftFinalization:
     """Resolve every Start admission fact without building or acquiring a run.
 
@@ -394,8 +392,9 @@ def finalize_logic_draft(
     ``source_frames`` is how many frames a cycle of the source carries, when
     that is known: frame claims are then checked against it as well.
 
-    ``node_names`` is the board's {node id: name}: an issue about another
-    node calls it what the operator calls it.
+    An issue never names another node: it is copied into the refusal a
+    Start leaves on the row, which would keep a name the operator has since
+    changed.  The picker it is about, on the same page, says which.
     """
 
     from zlc_atom.nodes import ResolvedArtifact
@@ -426,10 +425,7 @@ def finalize_logic_draft(
     acquisition_field = descriptor.acquisition_input
     acquisition = str(draft.values.get(acquisition_field) or "") if descriptor.authoring_schema.is_enabled(acquisition_field, raw_values) else ""
     if acquisition and acquisition not in acquisition_options:
-        issues.append(
-            f"{producer_text(acquisition, node_names)!r} is not an available "
-            "acquisition Measurement"
-        )
+        issues.append("the selected acquisition is not an available Measurement")
 
     active_requirements = descriptor.active_device_requirements(raw_values)
     options = device_key_options(descriptor, installation=installation, values=raw_values)
@@ -540,7 +536,7 @@ def finalize_logic_draft(
                     if spec.contract_id is not None
                 ) or "a compatible"
                 issues.append(
-                    f"{signal_text(source, node_names)!r} is not declared as "
+                    f"{source_label(wants_source[0])} is not declared as "
                     f"{contracts} Dataset"
                 )
             else:
@@ -953,14 +949,15 @@ def make_host(
     values: Mapping[str, Any],
     devices: Mapping[str, object],
     request_owner_wake: Callable[[], None] | None = None,
-    display_name: str | None = None,
+    display_name: Callable[[], str] | None = None,
 ) -> NodeHost:
     """One node under the runtime's own lifecycle, named for its instance.
 
     The descriptor's output declarations for this draft, on the devices it
     bound, are the sole signal vocabulary; the plane refuses a node whose
-    own declarations differ.  ``display_name`` is what the operator called
-    the node when this run was built, kept with the run as history.
+    own declarations differ.  ``display_name`` answers what the operator
+    calls the node; the run keeps the answer it gets when it declares its
+    record, as history.
     """
 
     inputs = dataset_inputs(descriptor, values)

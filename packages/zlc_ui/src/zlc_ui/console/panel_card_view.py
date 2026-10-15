@@ -848,16 +848,33 @@ class PanelCardView(FluentGroupBox):
         shape_sizes, shape_names = data_structure_fragments(
             structure, self._parameter_surface.get("data_valid")
         )
-        # The caption is a NAME and names are read from the left, so it gives
-        # up its tail; a shape is read from both ends and gives up its middle.
-        # The card's own id leads it in muted ink: it answers "which card", and
-        # the name after it is what the operator reads.
+        # The caption is a NAME: a typed one gives up its tail, a signal's
+        # producer its middle (below); a shape is read from both ends and
+        # gives up its middle.  The card's own id leads it in muted ink: it
+        # answers "which card", and the name after it is what the operator
+        # reads.
         caption = self._caption()
-        sizes: list[tuple[str, str | None, object]] = (
-            [(self.panel_id, MUTED_INK, None), (caption[len(self.panel_id):], None, QtCore.Qt.ElideRight)]
+        rest = (
+            caption[len(self.panel_id):]
             if caption.startswith(self.panel_id) and len(caption) > len(self.panel_id)
-            else [(caption, None, QtCore.Qt.ElideRight)]
+            else ""
         )
+        head, slash, output = rest.rpartition("/")
+        sizes: list[tuple[str, str | None, object]]
+        if rest.startswith("@") and slash and len(head) > 1:
+            # A signal reads ``<producer>/<output>``.  The producer is a name
+            # the operator may have made long, and two names may differ only
+            # at their end: it gives up its middle, and the output -- which
+            # of the producer's signals this is -- stays whole.
+            sizes = [
+                (self.panel_id, MUTED_INK, None),
+                (head, None, QtCore.Qt.ElideMiddle),
+                (slash + output, None, None),
+            ]
+        elif rest:
+            sizes = [(self.panel_id, MUTED_INK, None), (rest, None, QtCore.Qt.ElideRight)]
+        else:
+            sizes = [(caption, None, QtCore.Qt.ElideRight)]
         if shape_sizes:
             sizes.append((" ", None, None))
             sizes.extend(shape_sizes)

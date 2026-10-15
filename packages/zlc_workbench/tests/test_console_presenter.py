@@ -139,7 +139,7 @@ class _LogicRowView:
         self.auto_preview = True
         self.preview_offered = True
 
-    def set_name(self, text: str) -> None:
+    def set_name(self, text: str, details: tuple[str, ...] = ()) -> None:
         self.title = str(text)
 
     def set_preview_offered(self, offered: bool) -> None:
@@ -221,6 +221,7 @@ class _ConsoleView:
         self.focused_panel_editor = ""
         self.task_takeover = False
         self.panel_publishers: dict[str, tuple] = {}
+        self.panel_publisher_names: dict[str, str] = {}
         self.panel_publisher_editors: dict[str, dict] = {}
         #: Every front the presenter put on a staged panel widget, in order.
         self.presented_fronts: list[tuple[str, object]] = []
@@ -372,7 +373,10 @@ class _ConsoleView:
     def set_panel_publishers(self, publishers) -> None:
         self.panel_publishers = {
             str(panel_id): tuple(rows)
-            for panel_id, rows in publishers
+            for panel_id, _name, rows in publishers
+        }
+        self.panel_publisher_names = {
+            str(panel_id): str(name) for panel_id, name, _rows in publishers
         }
 
     def open_panel_publisher_editor(self, panel_id: str, projection) -> None:
@@ -458,7 +462,7 @@ class _ConsoleView:
     def remove_logic_row(self, node_id: str) -> None:
         self._rows.pop(str(node_id), None)
 
-    def set_logic_name(self, node_id: str, name: str) -> None:
+    def set_logic_name(self, node_id: str, name: str, api_name: str = "") -> None:
         self._rows[str(node_id)].set_name(name)
 
     def set_logic_state(self, node_id: str, state: str, status_text: str = "") -> None:
@@ -3978,7 +3982,8 @@ def test_a_board_row_whose_device_or_source_no_longer_fits_is_kept(presenter) ->
     assert "'sequencer' does not provide camera.adapter" in camera["error"]
     presenter.control_action("logic.validate", {"node_id": "fb"})
     assert any(
-        "'cm/frames' is not declared as" in issue
+        issue.endswith("is not declared as zlc.selection.fit.parameter Dataset")
+        and "cm" not in issue
         for issue in presenter.logic["fb"].finalization.issues
     )
 

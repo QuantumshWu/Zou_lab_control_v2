@@ -2350,8 +2350,8 @@ class SignalDataPlane:
         Logic's own id, ``derive2`` beside ``derive`` -- stamped here, the one
         place that knows it.  A node naming itself names its type.  A producer
         the operator gave a name to (``display_name``) has it stamped beside
-        as ``node_name``: what the node was called when this run was built,
-        for an archive's reader, never an address.
+        as ``node_name``: what the node was called when this run declared
+        its record, for an archive's reader, never an address.
         """
         owner_id = _node_instance_id(node)
         display_name = getattr(node, "display_name", None)

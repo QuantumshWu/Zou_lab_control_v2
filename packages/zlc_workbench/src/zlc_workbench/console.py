@@ -64,6 +64,7 @@ from .console_layout import (
     LayoutError,
     LogicLayoutEntry,
     logic_name_problem,
+    logic_name_text,
     panel_id_for,
     resolve_layout,
 )
@@ -122,6 +123,7 @@ from .selection import (
     attach_selection_bridge,
 )
 from .topology import (
+    UNGROUPED_HEADING,
     format_signal_shape,
     producer_text,
     project_signals,
@@ -973,7 +975,7 @@ class ConsolePresenter:
         self._catalog_projection: tuple | None = None
         self._signal_choice_context: tuple | None = None
         self._shown_panel_publishers: tuple[
-            tuple[str, tuple[tuple[str, str, str], ...]], ...
+            tuple[str, str, tuple[tuple[str, str, str], ...]], ...
         ] = ()
         self._paused = False
         #: Whether the last staging decision staged (a plot on screen, or a
@@ -1088,7 +1090,7 @@ class ConsolePresenter:
             self.view.logic_revert_requested.connect(self._guarded(self.revert_logic_draft))
             self.view.logic_edit_requested.connect(self._guarded(self.edit_logic))
             self.view.logic_remove_requested.connect(self._guarded(self.remove_logic))
-            self.view.logic_name_committed.connect(self._guarded(self.rename_logic))
+            self.view.logic_name_committed.connect(self._guarded(self._rename_logic_on_page))
             self.view.stop_task_requested.connect(self._guarded(self.stop_active_task))
         plot_error = getattr(self.view, "panel_plot_error", None)
         if plot_error is not None:
@@ -2951,7 +2953,7 @@ class ConsolePresenter:
         # Grouped by the producer's id; headed by what a person calls it.
         names = self.logic_names()
         return tuple(
-            (producer_text(producer, names) if producer else "signals", tuple(leaves))
+            (producer_text(producer, names) if producer else UNGROUPED_HEADING, tuple(leaves))
             for producer, leaves in groups.items()
         )
 
@@ -2990,7 +2992,7 @@ class ConsolePresenter:
                 groups.setdefault(row.producer, []).append((row.label, row.name))
         names = self.logic_names()
         return tuple(
-            (producer_text(producer, names) if producer else "signals", tuple(leaves))
+            (producer_text(producer, names) if producer else UNGROUPED_HEADING, tuple(leaves))
             for producer, leaves in groups.items()
         )
 
@@ -3004,7 +3006,7 @@ class ConsolePresenter:
         directory, descriptions, projected, _families = self._signal_projection()
         wiring = tuple(
             (panel_id, binding.state.signal, binding.state.overlay_signal,
-             binding.port is None, binding.vacancy)
+             binding.port is None, binding.vacancy, binding.state.title)
             for panel_id, binding in self.panels.items()
         )
         # A rename changes every heading and label below without changing
@@ -3022,6 +3024,7 @@ class ConsolePresenter:
         panel_publishers = tuple(
             (
                 panel_id,
+                self._panel_name(binding, names),
                 tuple(
                     (
                         signal_output_name(row.name),
@@ -3032,7 +3035,7 @@ class ConsolePresenter:
                     if row.producer == panel_id
                 ),
             )
-            for panel_id in self.panels
+            for panel_id, binding in self.panels.items()
         )
         if panel_publishers != self._shown_panel_publishers:
             self._shown_panel_publishers = panel_publishers
@@ -3218,6 +3221,19 @@ class ConsolePresenter:
                     getattr(candidate_value, "canonical_schema", None)
                     or candidate_value.snapshot.block.schema
                 )
+        if "title" in changes:
+            # The Panel name field shows what the panel is CALLED -- an
+            # automatic title read through the node names -- so the text it
+            # sends back may be that reading, not a name the operator typed.
+            # Unchanged, it changes nothing; equal to how the signal reads,
+            # it is the automatic title again (the key), which follows the
+            # node's name and the next signal.  Kept as text, it froze one
+            # node name into the record.
+            typed = str(changes["title"]).strip()
+            if typed == self._panel_name(binding):
+                del changes["title"]
+            elif typed == self._signal_text(signal):
+                changes["title"] = signal
         title = str(changes.get("title", current.title)).strip()
         if signal != current.signal and "title" not in changes:
             suffix = current.title.removeprefix(f"{current.kind} ")
@@ -5228,11 +5244,11 @@ class ConsolePresenter:
         if surface is None and publication is None:
             # Nothing has ever been drawn and nothing is published: the
             # only honest refusal.
-            binding.snapshot_error = (
-                f"{self._signal_text(binding.state.signal)} has not published yet"
-            )
+            # Stands on the panel's page beside the signal it is about: it
+            # names no node, whose name may change while it stands.
+            binding.snapshot_error = "the signal has not published yet"
             self._report(
-                binding.snapshot_error,
+                f"{self._signal_text(binding.state.signal)} has not published yet",
                 severity="warning",
             )
             return False
@@ -5394,9 +5410,16 @@ class ConsolePresenter:
         # surface is open, C builds and closes the temporary host there; Save
         # has never required opening Edit first, and process isolation must not
         # change that product behaviour.  Neither path executes Plot in B.
-        # What the panel is called NOW is what the archive is titled: a
-        # saved figure is history, and the record keeps the address.
-        title = self._panel_name(binding)
+        # An archive is history, and calls each node one name: the name its
+        # lineage records -- what the node was called when its run began --
+        # in the title as on its Logic tab.  The record keeps the address.
+        recorded = {
+            str(record["node"]): str(record["node_name"])
+            for node in frozen.lineage.get("nodes", ())
+            for record in (node.get("record") or {},)
+            if record.get("node") and record.get("node_name")
+        }
+        title = signal_text(binding.state.title, {**self.logic_names(), **recorded})
         state = replace(binding.state, title=title)
         self._saving_panels.add(key)
         self._report(f"saving {title}", severity="task")
@@ -6094,7 +6117,7 @@ class ConsolePresenter:
         if running:
             text += (
                 " It first stops "
-                + ", ".join(binding.node_id for binding in running)
+                + ", ".join(binding.name for binding in running)
                 + "."
             )
         text += " A board that was not saved cannot be brought back."
@@ -6134,7 +6157,7 @@ class ConsolePresenter:
             self.stop_logic(binding.node_id)
         self._report(
             "stopping "
-            + ", ".join(binding.node_id for binding in running)
+            + ", ".join(binding.name for binding in running)
             + "; the board is replaced when they have stopped",
             severity="task",
         )
@@ -7795,13 +7818,17 @@ class ConsolePresenter:
                 accepted = self.load_layout(**params)
                 status = "queued" if self._pending_board is not None else "loaded" if accepted else "rejected"
             elif action == "logic.add":
+                if not isinstance(params.get("name", ""), str):
+                    raise TypeError("logic.add name must be text")
                 node_id = self.add_logic(**params)
                 accepted = bool(node_id)
             elif action == "logic.rename":
                 if set(params) != {"node_id", "name"}:
                     raise ValueError("logic.rename accepts node_id and name")
+                if not isinstance(params["name"], str):
+                    raise TypeError("logic.rename name must be text")
                 before_name = self.logic[node_id].name
-                accepted = self.rename_logic(node_id, str(params["name"]))
+                accepted = self.rename_logic(node_id, params["name"])
                 status = (
                     "rejected" if not accepted
                     else "unchanged" if self.logic[node_id].name == before_name
@@ -7928,14 +7955,17 @@ class ConsolePresenter:
 
         return tuple((binding.node_id, binding.name) for binding in self.logic.values())
 
-    def _other_producers(self) -> set[str]:
-        """Signal producers on the session that are not this board's nodes
-        or panels: a notebook's, whose heading a name must not take."""
+    def _reserved_headings(self) -> set[str]:
+        """The headings a node's name must not take, so no picker files two
+        producers under one: the other signal producers on the session (a
+        notebook's ``calibration``), and the heading of signals no producer
+        heads."""
 
-        return {
+        producers = {
             str(description.owner_id).partition("/")[0]
             for description in self._signal_projection()[0]
-        } - set(self.logic) - set(self.panels)
+        }
+        return (producers - set(self.logic) - set(self.panels)) | {UNGROUPED_HEADING}
 
     def rename_logic(self, node_id: str, name: str) -> bool:
         """Call one node something else; its identity does not move.
@@ -7945,30 +7975,52 @@ class ConsolePresenter:
         node runs, waits or follows, and while a Task holds the console.
         What a person reads is composed from the name at display time, so
         every place catches up on this turn (:meth:`_project_names`).  A
-        refused name stays a sentence under the Name line until the next
-        commit, and the name is unchanged.
+        refusal is reported -- the MCP caller's ``error`` -- and the name is
+        unchanged.
         """
 
         binding = self.logic.get(str(node_id))
         if binding is None or self._closing:
             return False
-        text = str(name).strip()
+        return not self._rename_logic(binding, name)
+
+    def _rename_logic_on_page(self, node_id: str, name: str) -> None:
+        """The node's Edit page committed its Name line.
+
+        A refusal stands as one sentence under that line until the
+        operator's next commit there -- leaving the box sends one -- so the
+        sentence always answers text the operator typed in it, never a name
+        an agent was refused.
+        """
+
+        binding = self.logic.get(str(node_id))
+        if binding is None or self._closing:
+            return
+        problem = self._rename_logic(binding, name)
+        if problem != binding.name_problem:
+            binding.name_problem = problem
+            self.refresh_logic_editor(binding.node_id)
+
+    def _rename_logic(self, binding: LogicBinding, name: str) -> str:
+        """Rename one node: "" when accepted, else the reported refusal.
+
+        A name is kept as :func:`logic_name_text` keeps it; nothing left is
+        the node's internal ID -- what a node never renamed is called, and
+        the hint its empty Name box shows.
+        """
+
+        text = logic_name_text(name) or binding.node_id
         problem = logic_name_problem(
-            text, binding.node_id, self.logic_names(), self._other_producers()
+            text, binding.node_id, self.logic_names(), self._reserved_headings()
         )
         if problem:
-            binding.name_problem = problem
-            self._report(problem, severity="warning")
-            self.refresh_logic_editor(binding.node_id)
-            return False
-        binding.name_problem = ""
-        if text == binding.name:
-            self.refresh_logic_editor(binding.node_id)
-            return True
-        previous, binding.name = binding.name, text
-        self._report(f"renamed {previous} to {text}", severity="task")
-        self._project_names()
-        return True
+            self._report(f"{binding.name}: {problem}", severity="warning")
+            return problem
+        if text != binding.name:
+            previous, binding.name = binding.name, text
+            self._report(f"renamed {previous} to {text}", severity="task")
+            self._project_names()
+        return ""
 
     def _project_names(self) -> None:
         """Make every place that shows a node's name catch up, on this turn.
@@ -8464,10 +8516,10 @@ class ConsolePresenter:
             self._report(f"logic row {selected_id!r} already exists", severity="error")
             return ""
         names = self.logic_names()
-        selected_name = str(name).strip() or selected_id
+        selected_name = logic_name_text(name) or selected_id
         problem = logic_name_problem(selected_id, selected_id, names) or (
             logic_name_problem(
-                selected_name, selected_id, names, self._other_producers()
+                selected_name, selected_id, names, self._reserved_headings()
             )
             if selected_name != selected_id
             else ""
@@ -8571,8 +8623,6 @@ class ConsolePresenter:
             ),
             armed,
             acquisition_options,
-            # An issue naming another node says its name: a rename re-words it.
-            self._names_key(),
         )
 
     def _finalize_logic_binding(
@@ -8613,7 +8663,6 @@ class ConsolePresenter:
                 acquisition_options=acquisition_options,
                 previous=None if force else binding.finalization,
                 source_frames=source_frames,
-                node_names=self.logic_names(),
             )
 
         if draft is not None:
@@ -8827,6 +8876,10 @@ class ConsolePresenter:
         # Opening/focusing edit is the explicit resource refresh boundary.
         # The heartbeat never polls the filesystem.
         self._finalize_logic_binding(binding, force=True)
+        has_editor = getattr(self.view, "has_logic_editor", None)
+        if callable(has_editor) and not has_editor(binding.node_id):
+            # A page opened afresh holds no refused name, so no refusal.
+            binding.name_problem = ""
         projection = self.logic_editor_projection(binding.node_id)
         opened = getattr(self.view, "open_logic_editor", None)
         focused = getattr(self.view, "focus_logic_editor", None)
@@ -9601,7 +9654,9 @@ class ConsolePresenter:
         binding.shown = shown
         # The row's name arrives by this one channel, like its state: the
         # row is made blank and told what it is called on the same turn.
-        self.view.set_logic_name(binding.node_id, binding.name)
+        self.view.set_logic_name(
+            binding.node_id, binding.name, binding.descriptor.api_name
+        )
         self.view.set_logic_state(binding.node_id, state, status)
         self.view.set_logic_commands(
             binding.node_id,
@@ -9780,7 +9835,9 @@ class ConsolePresenter:
             values=finalization.values,
             devices=finalization.devices,
             request_owner_wake=self.board.wake.request_owner_wake,
-            display_name=binding.name,
+            # Asked when the run declares its record, so a run queued before
+            # a rename carries the name it runs under.
+            display_name=lambda: binding.name,
         )
         claims = tuple(
             DeviceClaim(
@@ -10174,27 +10231,25 @@ class ConsolePresenter:
                     or str(running.values.get(field) or "") != node_id
                 ):
                     raise ValueError("the Task did not select this acquisition")
+                # What fails here becomes the caller's run error, which stands
+                # on its row: it says "the acquisition", whose picker on the
+                # caller's page says which node -- by its name now, where a
+                # name written into the error would stay the old one.
                 if node_id not in self._acquisition_options(str(context.instance_id)):
-                    raise ValueError(
-                        f"{self.logic_name(node_id)!r} is not an available acquisition Measurement"
-                    )
+                    raise ValueError("the selected acquisition is not an available Measurement")
                 if completion == "terminal" and running.source_signal and not any(
                     parts is not None and parts[0] == node_id
                     for signal in self._signal_input_chain(running.source_signal)
                     for parts in (split_signal_key(signal),)
                 ):
-                    raise ValueError(
-                        f"{self._signal_text(running.source_signal)!r} does not derive from "
-                        f"the selected acquisition {self.logic_name(node_id)!r}"
-                    )
+                    raise ValueError("the source does not derive from the selected acquisition")
                 # A restart the operator did not press runs the acquisition's
                 # current configuration when it has one -- an unrestarted
                 # edit stays an edit -- and its draft when it is not running.
                 child = _running_configuration(self.logic[node_id])
                 if not self.start_logic(node_id, _acquisition=True, _draft=child):
                     raise RuntimeError(
-                        self.logic[node_id].draft_error
-                        or f"could not restart {self.logic_name(node_id)}"
+                        self.logic[node_id].draft_error or "the acquisition could not restart"
                     )
                 binding = self.logic[node_id]
                 host = binding.pending.host if binding.pending is not None else binding.host
@@ -10220,7 +10275,7 @@ class ConsolePresenter:
                     observed = host.observation
                     if observed.phase != "done" or observed.error:
                         raise RuntimeError(
-                            observed.error or f"{self.logic_name(node_id)} ended as {observed.phase}"
+                            observed.error or f"the acquisition ended as {observed.phase}"
                         )
                     publications = {
                         name: self.session.signal_plane.latest_publication(name)
@@ -10232,7 +10287,7 @@ class ConsolePresenter:
                         for publication in publications.values()
                     ):
                         raise RuntimeError(
-                            f"{self.logic_name(node_id)} finished without retained output from this run"
+                            "the acquisition finished without retained output from this run"
                         )
                     return publications
             raise InterruptedError("stopped while waiting for acquisition")
@@ -10476,7 +10531,9 @@ class ConsolePresenter:
         ready = owners_ready and render_processes_closed
         if ready:
             self._closed = True
-            if not self._panel_only:
+            # Only the spelling this console gave: another console on the
+            # session may have named the owners since.
+            if self.session.device_use.spell_owner == self.logic_name:
                 self.session.device_use.set_owner_spelling(None)
             if self._request_close is not None and not self._close_retry_sent:
                 self._close_retry_sent = True
@@ -10488,7 +10545,7 @@ class ConsolePresenter:
             and not self._close_wait_reported
             and time.monotonic() - started >= self.CLOSE_REPORT_SECONDS
         ):
-            waiting = [binding.node_id for binding in self.logic.values()]
+            waiting = [binding.name for binding in self.logic.values()]
             if self.board.pending_projection_count:
                 waiting.append(
                     counted(self.board.pending_projection_count, "panel projection")

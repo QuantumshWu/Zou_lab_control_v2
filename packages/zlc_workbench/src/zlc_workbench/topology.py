@@ -29,9 +29,14 @@ from zlc_ui import SUMMARY_SEPARATOR
 
 
 __all__ = [
-    "SignalRow", "format_signal_shape", "producer_text", "project_signals",
-    "signal_label", "signal_output_name", "signal_text",
+    "UNGROUPED_HEADING", "SignalRow", "format_signal_shape", "producer_text",
+    "project_signals", "signal_label", "signal_output_name", "signal_text",
 ]
+
+
+#: The heading a picker files a signal under when no producer heads it.  A
+#: heading a person reads, like a producer's: a node's name never takes it.
+UNGROUPED_HEADING = "signals"
 
 
 @dataclass(frozen=True, slots=True)
