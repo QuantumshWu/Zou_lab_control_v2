@@ -1527,7 +1527,7 @@ def perform_device_action(bench, action, beat, output, *, click, choose, enter_t
     if kind in ("device_lifecycle", "device_init", "device_apply", "device_shutdown"):
         verb = action["verb"] if kind == "device_lifecycle" else kind[7:]
         label = {"init": "Init devices", "apply": "Apply device changes",
-                 "shutdown": "Shutdown devices", "refresh": "Refresh device views"}[verb]
+                 "shutdown": "Shut down devices", "refresh": "Refresh device views"}[verb]
         if manager.lifecycle_button.text() != label:
             raise UnavailableAction(f"wanted {label!r}, current action is "
                                     f"{manager.lifecycle_button.text()!r}")
@@ -2303,7 +2303,11 @@ def perform_artifact_action(bench, action, beat, output, *, click, choose, enter
                 else:
                     enter_text(widget, action["value"], bench.app)
             elif kind == "viewer_data_cell":
-                table = editor.axis_value_table if action.get("table") == "axis" else editor.value_table
+                on_axis = action.get("table") == "axis"
+                table = editor.axis_value_table if on_axis else editor.value_table
+                # Each table is on its own page of the editor: open that page
+                # as the operator does, with its segmented choice.
+                click(editor.page_choice.button("dataset" if on_axis else "data"), bench.app)
                 index = table.model().index(int(action.get("row", 0)), int(action.get("column", 0)))
                 if not index.isValid():
                     raise ValueError("requested cell is outside the shown table")
@@ -2322,9 +2326,15 @@ def perform_artifact_action(bench, action, beat, output, *, click, choose, enter
                 choose(editor.axis_combo, action["axis"], bench.app)
             elif kind == "viewer_data_axis_field":
                 fields = {"name": editor.axis_name_edit, "unit": editor.axis_unit_edit,
-                          "length": editor.axis_size_spin, "domain": editor.domain_combo}
+                          "length": editor.axis_size_spin}
                 if action["field"] == "domain":
-                    choose(fields["domain"], action["value"], bench.app)
+                    # A closed set of domains: one segmented button each.
+                    buttons = editor.domain_choice._buttons
+                    wanted = next((button for key, button in buttons.items()
+                                   if action["value"] in (key, str(key), button.text())), None)
+                    if wanted is None:
+                        raise UnavailableAction(f"no domain {action['value']!r}")
+                    click(wanted, bench.app)
                 else:
                     enter_text(fields[action["field"]], action["value"], bench.app)
             elif kind == "viewer_data_table_axis":

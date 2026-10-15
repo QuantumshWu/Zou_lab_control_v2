@@ -354,7 +354,7 @@ seen by a later one -- the pairs form one labelled `READOUT_EVENT` Point axis
 later verdict and its validity is that pair's own denominator. **Published pairs**
 is All forward pairs, Consecutive (k→k+1), From the first frame (0→k), To the
 last frame (k→last) -- each resolved against the frames the source carries --
-or Selected pairs, marked on a start × end matrix with ordinary table selection
+or Selected, marked on a start × end matrix with ordinary table selection
 (drag a rectangle, Ctrl to add or remove, a row or column header for every pair
 from or to that frame). Grid edits retain the rule with sparse pair overrides:
 excluding `0` to `last` from From first still selects newly added middle frames.

@@ -8,7 +8,7 @@ whole: nothing here builds a widget of its own or lays one out.
 This is the rule the delay-column defect came from.  A presenter that could
 reach ``view.schedule_view.channel_panel`` pushed a value into one panel and
 left the one beside it alone, so "which rows exist" quietly became two facts in
-two places and the delay column went on showing rows that Hide Off had already
+two places and the delay column went on showing rows that Hide off had already
 taken out of the cards.  Whatever the outside can hold, the outside will
 assemble, and assembling a UI is the one job a composition root does not have.
 

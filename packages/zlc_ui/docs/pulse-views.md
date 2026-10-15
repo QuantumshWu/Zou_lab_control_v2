@@ -74,7 +74,7 @@ Save Pulse writes embedded defaults; Save writes the selected file. Only applied
 Config sources get green cards/boundaries on the main timeline.
 
 Saved scan arrays retain ordered field IDs and units. A source update that changes
-this schema requires regeneration or an explicit Clear Array; that action keeps
+this schema requires regeneration or an explicit Clear array; that action keeps
 the Python draft and emits `scan_array_clear_requested` through the handle.
 
 ```python
@@ -139,7 +139,7 @@ values table, active saved file and this Pulse's field-to-name references.
 New/Load/Refresh/Save/Save as/Unload emit intents; Qt never reads or writes files.
 Editing Name/Value/Unit emits raw row text so incomplete input stays editable.
 Bindings can reuse one name across multiple fields. Saved values are read-only
-facts from the presenter, never inferred from the unsaved table. Load Array is
+facts from the presenter, never inferred from the unsaved table. Open array… is
 on Scan; Edit has only a compact jump-to-Config status button.
 
 `PulseTargetView` accepts `set_ports(records, editable, status_text,

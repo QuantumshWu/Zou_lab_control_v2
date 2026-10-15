@@ -3,7 +3,7 @@
 What the outside used to receive was the window's own widgets, so it could
 reach a sub-view and push a value into one panel of one page.  Nothing stopped
 it, so it happened, and the picture on screen ended up with two owners: the
-delay column kept showing rows that Hide Off had already taken out of the cards
+delay column kept showing rows that Hide off had already taken out of the cards
 beside it.  A composition root that can hold a widget will sooner or later
 assemble a UI, which is the one job it does not have.
 

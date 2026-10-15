@@ -144,7 +144,7 @@ def test_guard_c_header_saves_and_single_panel_save_have_distinct_semantics(
                 kind="histogram",
             )
 
-            # Panel Save Fig must use the frozen Edit snapshot and its
+            # Panel Save figure must use the frozen Edit snapshot and its
             # run-time chain.
             assert presenter.edit_panel(target.panel_id) is True
             deadline = time.monotonic() + 10.0
@@ -156,7 +156,7 @@ def test_guard_c_header_saves_and_single_panel_save_have_distinct_semantics(
             frozen_values = np.array(frozen.snapshot.block.materialize().values, copy=True)
 
             def no_latest_recapture():
-                raise AssertionError("Panel Save Fig re-froze latest instead of Edit data")
+                raise AssertionError("Panel Save figure re-froze latest instead of Edit data")
 
             before_panel_save = {
                 path.resolve() for path in tmp_path.rglob("*") if path.is_file()
@@ -175,7 +175,7 @@ def test_guard_c_header_saves_and_single_panel_save_have_distinct_semantics(
             archives = [path for path in created if path.suffix == ".npz"]
             images = [path for path in created if path.suffix == ".svg"]
             assert len(archives) == 1 and len(images) == 1, (
-                "Panel Edit Save Fig has no formal image + data archive intent seam; "
+                "Panel Edit Save figure has no formal image + data archive intent seam; "
                 f"status={view.status!r}"
             )
 

@@ -25,8 +25,8 @@ to one width, decided by the column's kind:
     a square as tall as the controls (a line's ×).
 
 A widget hidden with ``retainSizeWhenHidden`` keeps its place and its share
-of the width, as Qt's own layouts keep it, so a used "+ where" leaves its
-slot empty instead of letting "+ combine" slide into it; any other hidden
+of the width, as Qt's own layouts keep it, so a used "+ Where" leaves its
+slot empty instead of letting "+ Combine" slide into it; any other hidden
 widget takes no room.  A line that is itself hidden (a closed stage) still
 counts, so opening it moves nothing.  A cell may span to a later column
 (:meth:`FluentColumnLine.place` ``to=``): a statistic strip starts at the
@@ -113,7 +113,7 @@ def show_note(label: QtWidgets.QLabel, text: str) -> None:
 
 def hold_place(widget: QtWidgets.QWidget) -> QtWidgets.QWidget:
     """Keep ``widget``'s place in its line while it is hidden, so what
-    stands after it does not move when it goes (a used "+ where", an ``at``
+    stands after it does not move when it goes (a used "+ Where", an ``at``
     with no frames to offer)."""
 
     policy = widget.sizePolicy()

@@ -1585,7 +1585,7 @@ def test_a_two_population_fit_offers_its_evidence_threshold_in_setting(
 def test_a_saved_figure_contains_the_fit_it_was_saved_with(
     presenter, session, tmp_path
 ) -> None:
-    """Save Fig writes the analysis, not the picture that preceded it.
+    """Save figure writes the analysis, not the picture that preceded it.
 
     The saved host used to receive its fit through ``configure(fit_model=)``
     and the file was written immediately after that call returned -- so the
@@ -5952,7 +5952,7 @@ def test_a_panel_that_crossed_vocabularies_still_configures_and_saves(
 
     Right after a cell kind change and before the panel settles, the record
     still holds the previous vocabulary's names.  Anything that re-sent the
-    whole record -- an unrelated edit, Save Fig -- was refused with "unknown
+    whole record -- an unrelated edit, Save figure -- was refused with "unknown
     display parameter(s)", which is not a thing the operator did.
     """
 
@@ -7855,7 +7855,7 @@ def test_a_refresh_still_travelling_leaves_save_the_editors_picture(
 def test_save_renders_through_the_settled_editor_host(
     presenter, session, tmp_path, monkeypatch
 ) -> None:
-    """Save Fig draws the export on the Edit surface it already has.
+    """Save figure draws the export on the Edit surface it already has.
 
     A fresh host per save cost a session, a projection, a fit and a first
     paint over the frozen history before the one draw the file needed.
