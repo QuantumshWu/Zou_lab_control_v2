@@ -209,7 +209,7 @@ assert drawn.pos() == before, (drawn.pos(), before)
 assert starts == [] and events == [], (starts, events)
 carry(board, empty, body(empty), slots[2])
 assert starts == ['panel-1'], starts
-assert board._authored['panel-1'] == slots[2], board._authored
+assert empty.pos() == QtCore.QPoint(*slots[2]), empty.pos()
 assert empty.cursor().shape() == QtCore.Qt.OpenHandCursor
 retire(window, cards)
 
@@ -236,8 +236,8 @@ for target in (0, 2, 3):
             seen = slots[target]
         carry(board, mover, held, seen)
         assert starts == ['panel-1'], (kinds, target, starts)
-        # The place the drop chose IS the slot the carried card was shown in.
-        assert board._authored['panel-1'] == slots[target], (kinds, target, board._authored)
+        # The carried card lands in the slot it was shown in.
+        assert mover.pos() == QtCore.QPoint(*slots[target]), (kinds, target, mover.pos())
         assert events, (kinds, target)
         outcomes.append((events[-1], tuple(card.geometry().getRect() for card in cards)))
         retire(window, cards)
@@ -442,8 +442,8 @@ for hold in ('left', 'right'):
     end = board.mapTo(window, QtCore.QPoint(slots[3][0] + 12, slots[3][1] + 12))
     press_and_carry(window, mover, held, end)
     assert mover.mapTo(window, held) == end, (hold, mover.pos())
-    # The others closed up ahead of the slot under the pointer ...
-    assert places(cards[1:]) == slots[:3], (hold, places(cards[1:]))
+    # The others fell north-west into the hole it left ...
+    assert places(cards[1:]) == [slots[0], slots[2], slots[1]], (hold, places(cards[1:]))
     # ... and the slot is drawn wherever the carried card leaves it showing.
     target = QtCore.QRect(*slots[3], w, h)
     picture = board.grab().toImage()
@@ -463,8 +463,8 @@ for hold in ('left', 'right'):
     events = []
     board.order_committed.connect(events.append)
     release(window, end)
-    assert events and events[-1] == ('panel-1', 'panel-2', 'panel-3', 'panel-0'), (hold, events)
-    assert places(cards) == [slots[3], slots[0], slots[1], slots[2]], (hold, places(cards))
+    assert events and events[-1] == ('panel-1', 'panel-3', 'panel-2', 'panel-0'), (hold, events)
+    assert places(cards) == [slots[3], slots[0], slots[2], slots[1]], (hold, places(cards))
     # The presenter hands the cards back in the committed order: nothing moves.
     by_id = {card.panel_id: card for card in cards}
     before = places(cards)

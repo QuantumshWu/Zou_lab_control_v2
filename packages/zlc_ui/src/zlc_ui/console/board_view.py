@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+from typing import NamedTuple
+
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 from zlc_ui.board import (
     BoardMetrics,
     GeomProxy,
     first_free_slot,
+    lift,
     min_board_width,
     pack,
     slot_under,
@@ -18,39 +21,61 @@ from zlc_ui.fluent.fluent import frame_pen, frame_stroke_rect
 from .panel_card_view import PanelCardView
 
 
-class ConsoleBoardView(QtWidgets.QWidget):
-    """Cards carried by their grip and put down in the slot their strip is in.
+class _DragFrame(NamedTuple):
+    """The board a carried card is put back into, settled once per width."""
 
-    A card the operator has put somewhere keeps that place: a drop records
-    the slot and the board never writes over it.  Every other card FLOWS: on
-    every pack it takes the first free slot -- top row left to right, then
-    the next -- in board order, after the places drops hold.  That is how Add
-    tiles the board, and it is recomputed at the width the board has NOW: a
-    place recorded for a card when it arrived would be taken at whatever
-    width the board had then -- before the window's first layout, Qt's
-    default, one card wide -- and gravity, which only moves cards up and
-    left, would keep that single column on a board two cards wide for good.
+    #: Where the carried card stood when it was picked up.
+    place: tuple[int, int]
+    #: Where every other card stood then, by panel id.
+    home: dict[str, tuple[int, int]]
+    #: The other cards fallen north-west into the carried card's hole: the
+    #: board the operator sees, and the one the slot is chosen in.
+    fallen: dict[str, GeomProxy]
+    #: The width all of it was settled at.
+    board_w: int
+
+
+class ConsoleBoardView(QtWidgets.QWidget):
+    """Cards carried by their grip and put down where they are seen.
+
+    One rule set places every card: every card has a place, a card goes
+    where it is put, the cards in its way make room, and everything falls
+    north-west.
+
+    A drop records where it left EVERY card, for the board's column count
+    (how many of the narrowest card fit side by side), and nothing else
+    writes those places.  A card no drop has placed yet -- one just added --
+    takes the first free slot after them, top row left to right, in board
+    order, at the width the board has NOW: that is how Add tiles the board,
+    and why panels added before the window's first layout do not stay in the
+    one column Qt's default width had room for.  A column count no drop was
+    made at shows the nearest wider count's arrangement packed narrower (with
+    none wider, the nearest narrower one), so narrowing packs without
+    destroying the arrangement and widening restores it.
 
     What is on screen is those places settled under north-west gravity for a
-    board this wide, so a narrow window packs into one column without
-    destroying the arrangement and widening restores it, and a card put below
-    another stays below it rather than flying to a hole beside it.
+    board this wide (``pack``).  A card rises until a card above it stops it
+    and slides left until a card beside it stops it; a card stopped by a
+    card above it stays below it, rather than sliding out from under it to a
+    hole beside it, and no card ever passes another.
 
-    A drag shows the drop before it happens.  The other cards stand where
-    they will stand once the carried card is let go, and the slot it will land
-    in is drawn under it as an accent-tint card with a dashed edge.  The slot
-    is aimed at the POINTER'S column on the line of the carried card's STRIP:
-    the row is the one the card is seen in, wherever it is held, so an empty
-    card carried by a point low in its body lands where the same card carried
-    by its strip at that x would.  It is chosen on the board as it is without
-    the carried card: that frame does not move while the preview rearranges the
-    others, so the choice cannot chase its own consequence, and it is the
-    board the card is being put back into.  On the board as it stands, with
-    the carried card's own hole in it, the last free slot would sit one place
-    past the end, and a card put there would leave a hole behind the cards
-    that close up ahead of it.  Near the viewport's top or bottom edge the
-    board scrolls under the pointer, so a card can be carried to a row off
-    screen.
+    A drag shows the drop before it happens.  Picked up, the carried card
+    leaves a hole the others fall north-west into (``lift``) -- a card at or
+    below its top line never rises above that line -- and that frame stands
+    still while the card is carried, so the choice cannot chase its own
+    consequence.  The slot is the place under the pointer, on the line of
+    the carried card's strip, nearest where the card is drawn
+    (``slot_under``): the column is where the hand is and the row the one
+    the card is seen in, whatever part of it is held.  Let go there, the
+    card stays where it is put; a card in its way goes back to where it
+    stood before the drag, else along its row if the row has room, else
+    straight down its column; then everything falls.  Put back where it was
+    picked up, it leaves every card where it stood.  While it is carried the
+    other cards already stand where the drop will leave them -- preview and
+    drop are one computation -- and the slot is drawn under it as an
+    accent-tint card with a dashed edge.  Near the viewport's top or bottom
+    edge the board scrolls under the pointer, so a card can be carried to a
+    row off screen.
     """
 
     order_committed = QtCore.pyqtSignal(tuple)
@@ -69,21 +94,15 @@ class ConsoleBoardView(QtWidgets.QWidget):
         self._metrics = metrics or BoardMetrics(gap=card_pad())
         self._cards: dict[str, PanelCardView] = {}
         self._order: tuple[str, ...] = ()
-        #: Where the operator PUT a card, by panel id: written by a drop and
-        #: by nothing else.  The packed position is what this place comes to
-        #: rest at on a board of the current width, and writing that back
-        #: would ratchet a narrow packing into the arrangement itself.
-        self._authored: dict[str, tuple[int, int]] = {}
-        #: The card most recently released, which wins ties in the settling
-        #: order: when two cards want one place, the operator's is the one
-        #: that just asked for it.
-        self._dropped_id: str | None = None
+        #: Where the last drop at each column count left every card, by panel
+        #: id.  Written by a drop and by nothing else: packing a narrower or
+        #: wider board reads it and never writes it back, which would ratchet
+        #: a narrow packing into the arrangement itself.
+        self._arrangements: dict[int, dict[str, tuple[int, int]]] = {}
         self._wired_cards: set[PanelCardView] = set()
         self._active_card: PanelCardView | None = None
-        #: While a card is carried: the places drops hold for the OTHER
-        #: cards, the board settled without the carried card, and the width
-        #: both were settled at.  The slot is chosen in this frame.
-        self._frame: tuple[dict[str, tuple[int, int]], tuple[GeomProxy, ...], int] | None = None
+        #: While a card is carried: the board it is put back into.
+        self._frame: _DragFrame | None = None
         #: The slot the carried card is aimed at, and the rectangle it comes
         #: to rest in from there -- the one the board draws.
         self._drop_slot: tuple[int, int] | None = None
@@ -135,13 +154,11 @@ class ConsoleBoardView(QtWidgets.QWidget):
             card.set_surface(None)
             self._wired_cards.discard(card)
             retire_widget(card)
-        self._authored = {
-            panel_id: place
-            for panel_id, place in self._authored.items()
-            if panel_id in self._cards
-        }
-        if self._dropped_id not in self._cards:
-            self._dropped_id = None
+        kept = (
+            (columns, {panel_id: place for panel_id, place in places.items() if panel_id in self._cards})
+            for columns, places in self._arrangements.items()
+        )
+        self._arrangements = {columns: places for columns, places in kept if places}
         for card in incoming:
             card.setParent(self)
             card.show()
@@ -261,40 +278,48 @@ class ConsoleBoardView(QtWidgets.QWidget):
             return 0
         return max(self.width(), min_board_width(proxies, self._metrics))
 
-    def _settle(
-        self,
-        order: tuple[str, ...],
-        authored: dict[str, tuple[int, int]],
-        dropped_id: str | None,
-        board_w: int,
-    ) -> dict[str, GeomProxy]:
+    def _columns(self, proxies, board_w: int) -> int:
+        """How many of the narrowest card fit side by side on a board this wide."""
+
+        gap = self._metrics.gap
+        return max(1, (board_w - gap) // (min(proxy.width for proxy in proxies) + gap))
+
+    def _places(self, proxies, board_w: int) -> dict[str, tuple[int, int]]:
+        """The arrangement a board this wide shows: the one the last drop at
+        its column count left, else the nearest wider one's (a narrower
+        window packs it), else the nearest narrower one's."""
+
+        if not self._arrangements:
+            return {}
+        columns = self._columns(proxies, board_w)
+        if columns in self._arrangements:
+            return self._arrangements[columns]
+        wider = [count for count in self._arrangements if count > columns]
+        return self._arrangements[min(wider) if wider else max(self._arrangements)]
+
+    def _settle(self, order: tuple[str, ...], board_w: int) -> dict[str, GeomProxy]:
         """Where each card of ``order`` comes to rest, without moving any.
 
-        Every card falls from where it starts.  A card a drop put somewhere
-        starts there; every other card starts in the first free slot, in
-        board order, once those places are taken -- so the cards nobody
-        placed tile the board at the width it has now.
+        A card the arrangement places starts there and falls; every other
+        card -- one no drop has placed yet -- then takes the first free slot,
+        in board order, at the width the board has now.
         """
 
         proxies = {panel_id: self._proxy(self._cards[panel_id]) for panel_id in order}
-        seeded: list[GeomProxy] = []
+        if not proxies:
+            return proxies
+        places = self._places(proxies.values(), board_w)
+        placed = []
         for panel_id in order:
-            place = authored.get(panel_id)
-            if place is not None:
-                proxies[panel_id].col, proxies[panel_id].row = place
-                seeded.append(proxies[panel_id])
+            if panel_id in places:
+                proxies[panel_id].col, proxies[panel_id].row = places[panel_id]
+                placed.append(proxies[panel_id])
+        pack(tuple(placed), self._metrics, board_w)
         for panel_id in order:
-            if panel_id in authored:
-                continue
-            proxy = proxies[panel_id]
-            proxy.col, proxy.row = first_free_slot(proxy, seeded, board_w, self._metrics)
-            seeded.append(proxy)
-        pack(
-            tuple(proxies[panel_id] for panel_id in order),
-            self._metrics,
-            board_w,
-            dropped=proxies.get(dropped_id),
-        )
+            if panel_id not in places:
+                proxy = proxies[panel_id]
+                proxy.col, proxy.row = first_free_slot(proxy, placed, board_w, self._metrics)
+                placed.append(proxy)
         return proxies
 
     def _place(
@@ -340,8 +365,6 @@ class ConsoleBoardView(QtWidgets.QWidget):
             return {}
         proxies = self._settle(
             self._order,
-            self._authored,
-            self._dropped_id,
             self._board_width(self._proxy(card) for card in self._cards.values()),
         )
         bottom = self._place(proxies)
@@ -382,45 +405,73 @@ class ConsoleBoardView(QtWidgets.QWidget):
         self._steer_scroll()
 
     def _frame_drag(self) -> None:
-        """Settle the board without the carried card: the frame its slot is
-        chosen in, for as long as it is carried at this width."""
+        """Pick the carried card up: the others fall north-west into its hole.
+        The frame its slot is chosen in, for as long as it is carried at this
+        width."""
 
         card = self._active_card
-        authored = {
-            panel_id: place
-            for panel_id, place in self._authored.items()
-            if panel_id != card.panel_id
-        }
-        others = tuple(panel_id for panel_id in self._order if panel_id != card.panel_id)
         board_w = self._board_width(self._proxy(each) for each in self._cards.values())
-        base = self._settle(
-            others,
-            authored,
-            None if self._dropped_id == card.panel_id else self._dropped_id,
-            board_w,
-        )
-        self._frame = (authored, tuple(base.values()), board_w)
+        rest = self._settle(self._order, board_w)
+        lifted = rest.pop(card.panel_id)
+        home = {panel_id: (proxy.col, proxy.row) for panel_id, proxy in rest.items()}
+        lift(tuple(rest.values()), lifted, self._metrics)
+        self._frame = _DragFrame((lifted.col, lifted.row), home, rest, board_w)
         self._drop_slot = None
         self._show_drop()
 
-    def _show_drop(self) -> None:
-        """Lay the board out as letting go here would, and draw the slot."""
+    def _dropped_at(self, slot: tuple[int, int]) -> dict[str, GeomProxy]:
+        """Every card at rest once the carried card is let go at ``slot``: it
+        stays where it is put, and a card in its way goes back to where it
+        stood before the drag, or along its row, or down its column.  Let go
+        where it was picked up, it finds every card where it stood."""
 
         card = self._active_card
-        authored, base, board_w = self._frame
-        # The pointer's x on the line of the carried card's strip: the row is
-        # the one the card is seen in, not how low in it the hand holds it.
-        # The card stands where the last move put it (follow_pointer runs
-        # before every drag_moved and every scroll step).
+        frame = self._frame
+        proxies = {
+            panel_id: GeomProxy(proxy.width, proxy.height, proxy.col, proxy.row)
+            for panel_id, proxy in frame.fallen.items()
+        }
+        carried = self._proxy(card)
+        carried.col, carried.row = slot
+        proxies[card.panel_id] = carried
+        home = {proxies[panel_id]: place for panel_id, place in frame.home.items()}
+        home[carried] = frame.place
+        pack(
+            tuple(proxies[panel_id] for panel_id in self._order),
+            self._metrics,
+            frame.board_w,
+            dropped=carried,
+            home=home,
+        )
+        return proxies
+
+    def _show_drop(self) -> None:
+        """Lay the board out as letting go here would, and draw the slot.
+
+        Aimed at the pointer's x on the line of the carried card's strip --
+        the column is where the hand is, the row the one the card is seen in
+        -- and of the places that keep that point inside the card, the one
+        nearest where the card is drawn (``slot_under``).  The card stands
+        where the last move put it: follow_pointer runs before every
+        drag_moved and every scroll step.
+        """
+
+        card = self._active_card
+        frame = self._frame
         at = self.mapFromGlobal(self._pointer)
-        aim = (at.x(), card.y() + card.strip_rect().center().y())
-        slot = slot_under(aim, self._proxy(card), base, self._metrics, board_w)
+        seen = card.pos()
+        slot = slot_under(
+            (at.x(), card.y() + card.strip_rect().center().y()),
+            self._proxy(card),
+            tuple(frame.fallen.values()),
+            self._metrics,
+            frame.board_w,
+            seen=(seen.x(), seen.y()),
+        )
         if slot == self._drop_slot:
             return
         self._drop_slot = slot
-        preview = self._settle(
-            self._order, {**authored, card.panel_id: slot}, card.panel_id, board_w
-        )
+        preview = self._dropped_at(slot)
         bottom = self._place(preview, carried=card)
         target = preview[card.panel_id]
         if self._drop_rect is not None:
@@ -432,7 +483,7 @@ class ConsoleBoardView(QtWidgets.QWidget):
         # Room for one more row while a card is carried: the slot after the
         # last card is somewhere the pointer must be able to reach, and to
         # scroll to on a board taller than its viewport.
-        lowest = max((proxy.row + proxy.height for proxy in base), default=0)
+        lowest = max((proxy.row + proxy.height for proxy in frame.fallen.values()), default=0)
         gap = self._metrics.gap
         self.setMinimumSize(
             min_board_width(tuple(preview.values()), self._metrics),
@@ -510,18 +561,17 @@ class ConsoleBoardView(QtWidgets.QWidget):
             self._card_drag_started(card, pointer)
         self._pointer = QtCore.QPoint(*pointer)
         self._show_drop()
-        slot = self._drop_slot
+        preview = self._dropped_at(self._drop_slot)
+        board_w = self._frame.board_w
         self._end_drag()
-        self._authored[card.panel_id] = slot
-        self._dropped_id = card.panel_id
-        others = tuple(panel_id for panel_id in self._order if panel_id != card.panel_id)
+        # The drop records where it left EVERY card, at this column count.
+        self._arrangements[self._columns(preview.values(), board_w)] = {
+            panel_id: (int(proxy.col), int(proxy.row)) for panel_id, proxy in preview.items()
+        }
         packed = self._pack_current()
-        pin = packed[card.panel_id]
-        index = sum(
-            (packed[panel_id].row, packed[panel_id].col) < (pin.row, pin.col)
-            for panel_id in others
+        self._order = tuple(
+            sorted(self._order, key=lambda panel_id: (packed[panel_id].row, packed[panel_id].col))
         )
-        self._order = others[:index] + (card.panel_id,) + others[index:]
         self.order_committed.emit(self._order)
 
     def _end_drag(self) -> None:

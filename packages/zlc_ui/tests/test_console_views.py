@@ -723,8 +723,9 @@ assert cards[2].geometry().getRect()[:2] == (10, 30 + 2 * h), cards[2].geometry(
 
 def test_board_qtest_drag_previews_the_drop_while_the_card_follows_the_pointer(run_qt) -> None:
     """While a card is carried it follows the pointer, and the board already
-    stands as the drop will leave it: the other cards closed up ahead of the
-    slot under the pointer, and that slot drawn where the card will rest."""
+    stands as the drop will leave it: the other cards fallen north-west into
+    the hole it left or making way for it, and the slot drawn where the card
+    will rest."""
 
     run_qt(
         """
@@ -758,18 +759,21 @@ def places(ids):
 
 drag_to(cards[0], (w + 60, h + 60))
 assert cards[0].pos() == QtCore.QPoint(w + 42, h + 42)
-assert places(('panel-1', 'panel-2', 'panel-3')) == slots[:3]
+# Picked up, panel-0 leaves a hole the others fall into north-west: panel-1
+# slides left into it and panel-3 rises into the place panel-1 left.
+assert places(('panel-1', 'panel-3', 'panel-2')) == slots[:3]
 assert board._drop_rect == QtCore.QRect(20 + w, 20 + h, w, h), board._drop_rect
 drop_at(cards[0], (w + 60, h + 60))
-assert board._order == ('panel-1', 'panel-2', 'panel-3', 'panel-0')
+assert board._order == ('panel-1', 'panel-3', 'panel-2', 'panel-0')
 assert places(board._order) == slots and board._drop_rect is None
 
-# Over the slot panel-3 stands in: panel-0 goes there and panel-3 after it.
+# Over the slot panel-2 stands in: panel-0 goes there and panel-2 makes
+# way along its row, into the place panel-0 left.
 drag_to(cards[0], (35, 2 * h))
-assert places(('panel-1', 'panel-2', 'panel-3')) == (slots[0], slots[1], slots[3])
+assert places(('panel-1', 'panel-3', 'panel-2')) == (slots[0], slots[1], slots[3])
 assert board._drop_rect == QtCore.QRect(10, 20 + h, w, h), board._drop_rect
 drop_at(cards[0], (35, 2 * h))
-assert board._order == ('panel-1', 'panel-2', 'panel-0', 'panel-3')
+assert board._order == ('panel-1', 'panel-3', 'panel-0', 'panel-2')
 assert places(board._order) == slots
 """
     )
