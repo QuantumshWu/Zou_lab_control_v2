@@ -297,14 +297,34 @@ def _aligned(array, steps, shape):
     return np.broadcast_to(array, shape)
 
 
-def _where_plan(schema, condition):
+def _where_plan(schema, condition, remedy):
+    """(schema masked by ``condition``, how the mask spreads over it).
+
+    ``remedy(schema, condition)`` says what to change when the mask does
+    not fit, in the words of the place the mask was written: code selects
+    it down, a where line pins it with its ``at``.
+    """
     if condition.value_schema.dtype.kind != "b":
         raise TypeError("where needs a boolean Dataset condition")
     try:
         steps = _alignment(schema, condition, "the mask")
     except ValueError as error:
-        raise ValueError(f"the mask does not fit the value: {error}; pin or select it first") from None
+        raise ValueError(f"the mask does not fit the value: {error}; {remedy(schema, condition)}") from None
     return _schema(_domains(schema), schema.value_schema.dtype, _unit(schema), schema.value_schema.name), steps
+
+
+def _code_remedy(_schema, _condition):
+    """A mask written in code is selected down in code."""
+    return "select the mask down with .sel or .isel first"
+
+
+def _line_remedy(schema, condition):
+    """A where line's own controls: its ``at`` when the mask's readout
+    events are what the value lacks, otherwise the mask it names."""
+    axis = readout_axis(condition)
+    if axis is not None and all(axis not in domain.axes for domain in _domains(schema)):
+        return f"pin the mask at one {axis.name}"
+    return "choose another mask"
 
 
 _LOGICAL = frozenset(("bitwise_and", "bitwise_or", "bitwise_xor", "invert", "logical_not",
@@ -512,9 +532,14 @@ class Operand(NDArrayOperatorsMixin):
         The condition's axes must be among this value's; it repeats along
         the ones it lacks.
         """
+        return self._masked(condition, _code_remedy)
+
+    def _masked(self, condition, remedy):
+        """:meth:`where`, with ``remedy`` naming what to change when the
+        mask does not fit (see :func:`_where_plan`)."""
         if not isinstance(condition, Operand):
             raise TypeError("where needs a boolean Dataset condition")
-        schema, steps = _where_plan(self.schema, condition.schema)
+        schema, steps = _where_plan(self.schema, condition.schema, remedy)
         keep = _aligned(condition.values, steps, self.shape) & _aligned(condition.valid, steps, self.shape)
         return Operand(schema, self.values, self.valid & keep)
 
@@ -666,7 +691,10 @@ def _select(item, axis_id, index):
 
 
 def _where(item, mask):
-    return item.where(mask) if isinstance(item, Operand) else _where_plan(item, mask)[0]
+    """A where line's mask: a misfit is told in the line's words."""
+    if isinstance(item, Operand):
+        return item._masked(mask, _line_remedy)
+    return _where_plan(item, mask, _line_remedy)[0]
 
 
 def _invert(mask):

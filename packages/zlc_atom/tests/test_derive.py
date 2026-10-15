@@ -331,7 +331,7 @@ def test_structured_outputs_type_exactly_as_they_evaluate() -> None:
         ({"name": "x", "value": "counts", "at": "1"}, "value",
          "no frame '1'; frame labels: frame 0, frame 1, frame 2"),
         ({"name": "x", "value": "counts", "at": "frame 1", "where": "occupied"}, "where",
-         "frame is only on the mask"),
+         "frame is only on the mask; pin the mask at one frame"),
         ({"name": "x", "value": "counts", "at": "frame 1", "op": "==", "with": "occupied", "with_at": "frame 1"},
          "combine", "do not mix with numbers"),
         ({"name": "x", "value": "counts", "at": "frame 1", "statistic": "mean", "over": "Site"},
@@ -346,6 +346,35 @@ def test_structured_outputs_type_exactly_as_they_evaluate() -> None:
         (answer, *_rest) = typed_outputs((row, {"name": "later", "value": "counts"}), schemas)
         error = answer["error"]
         assert (error.output, error.stage) == (row["name"], stage) and message in error.detail, error
+
+
+def test_a_mask_that_does_not_fit_is_told_in_the_words_of_where_it_was_written() -> None:
+    """A where line has a mask and its ``at``, no ``.sel``: its misfit names
+    the line's own control -- pin the mask at one frame -- when the mask's
+    frames are what the value lacks, and the mask itself otherwise.  Typed
+    and evaluated, the line says the same.  Code selects the mask down in
+    code, so only code is told about .sel."""
+    values = np.arange(24.0).reshape(2, 3, 4)
+    outputs = {"counts": _operand(values), "occupied": _operand(values % 3 != 0, "1")}
+    schemas = {name: value.schema for name, value in outputs.items()}
+    misfit = "the mask does not fit the value: "
+    unpinned = {"name": "bright", "value": "counts", "at": "frame 1", "where": "occupied"}
+    total = {"name": "total", "value": "counts", "at": "frame 1", "statistic": "sum", "over": "site"}
+    per_site = {"name": "kept", "value": "total", "where": "occupied", "where_at": "frame 1"}
+    for rows, detail in (
+        ((unpinned,), misfit + "frame is only on the mask; pin the mask at one frame"),
+        # Pinned, the mask still has sites the per-shot total has not.
+        ((total, per_site), misfit + "site is only on the mask; choose another mask"),
+    ):
+        error = typed_outputs(rows, schemas)[-1]["error"]
+        assert (error.stage, error.detail) == ("where", detail)
+        with pytest.raises(DeriveError) as evaluated:
+            execute(compiled(rows), outputs)
+        assert (evaluated.value.stage, evaluated.value.detail) == ("where", detail)
+    with pytest.raises(DeriveError) as coded:
+        _one("a.counts.isel(frame=1).where(a.occupied)", outputs)
+    assert coded.value.detail.endswith(
+        "frame is only on the mask; select the mask down with .sel or .isel first")
 
 
 def test_processor_publishes_current_estimates_and_the_exact_program_provenance() -> None:
