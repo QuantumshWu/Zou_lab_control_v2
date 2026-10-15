@@ -43,8 +43,8 @@ _FIELD_KINDS = {
     "numeric_tuple": "text",
     #: A pair is two integers, edited as the text "y, x".  It stays one field
     #: because it is one fact -- a frame shape with a half-edited width is not a
-    #: state worth being able to reach.
-    "pair": "text",
+    #: state worth being able to reach -- and its box is a number's width.
+    "pair": "pair",
     #: A directory the operator picks, not a file: saved samples live in one.
     "folder": "path",
 }
@@ -216,6 +216,7 @@ def _project_field(field: AuthoringField) -> FormFieldProps:
         ),
         minimum=field.minimum,
         maximum=field.maximum,
+        step=field.step,
         choices=tuple(
             FormChoice(choice.label, choice.value) for choice in field.choices
         ),

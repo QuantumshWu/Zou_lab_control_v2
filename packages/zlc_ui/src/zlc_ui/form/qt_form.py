@@ -488,6 +488,18 @@ class _RowsHandler(FormWidgetHandler):
         widget.refresh()
 
 
+def _declare_step(field: FormFieldProps, widget: FluentDoubleSpinBox) -> None:
+    """Give a spin box its owner's step (:attr:`FormFieldProps.step`), or
+    the box's own 1 when the owner names none.
+
+    Only when the box is built and when the owner re-declares a different
+    step: every projection re-configures the box it keeps, and a step the
+    operator set through the step chip is theirs until the owner says
+    otherwise."""
+
+    widget.setSingleStep(1 if field.step is None else field.step)
+
+
 class _IntHandler(_StaticHandler):
     """A Python int has no width, and neither does the box that holds one.
 
@@ -525,6 +537,7 @@ class _IntHandler(_StaticHandler):
         if not field.blank_allowed:
             widget = fluent_integer_box()
             self._configure_spin(field, widget)
+            _declare_step(field, widget)
             self.write(field, widget, value)
             _connect_change(widget.valueChanged, on_change)
         else:
@@ -658,6 +671,7 @@ class _FloatHandler(_StaticHandler):
             # through an out-of-domain float and a textual sentinel.
             widget = FluentDoubleSpinBox()
             self._configure_spin(field, widget)
+            _declare_step(field, widget)
             self.write(field, widget, value)
             _connect_change(widget.valueChanged, on_change)
         else:
@@ -956,6 +970,9 @@ class _KeyedChoiceHandler(FormWidgetHandler):
 FORM_WIDGET_HANDLERS: Mapping[str, FormWidgetHandler] = MappingProxyType(
     {
         "text": _TextHandler(),
+        # A pair is text its owner reads ("y, x"); what sets it apart is the
+        # width of its box (_CAPPED_KINDS), not how it is edited.
+        "pair": _TextHandler(),
         "rows": _RowsHandler(),
         "int": _IntHandler(),
         "float": _FloatHandler(),
@@ -983,6 +1000,10 @@ def _widget_family(field: FormFieldProps) -> str:
         return f"{prefix}line-edit:{field.unit}"
     if field.kind == "text":
         return prefix + "line-edit"
+    if field.kind == "pair":
+        # Capped like a number, so a text row re-declared as a pair (or
+        # back) is another row rather than a box kept at the wrong width.
+        return "pair"
     if field.kind == "rows":
         return "rows"
     if field.kind == "choice":
@@ -1064,7 +1085,9 @@ def _in_shown_unit(widget: object, number: float, unit: str | None) -> float:
 #: The widest number a capped box shows whole: a double's seventeen
 #: significant digits with sign and point, the most a field ever holds.
 _NUMBER_SAMPLE = "-1234567890.12345678"
-_CAPPED_KINDS = frozenset({"int", "float", "number"})
+#: The kinds whose box is a number's width and ends on the form's number
+#: edge: the numbers, and a pair of them.
+_CAPPED_KINDS = frozenset({"int", "float", "number", "pair"})
 
 
 def _number_cap(widget: QtWidgets.QWidget) -> int:
@@ -1197,7 +1220,7 @@ def _reconfigure_widget(
 
     widget.setToolTip(field.unavailable_reason or field.description)
     if isinstance(widget, FluentLineEdit):
-        if field.kind == "text":
+        if field.kind in {"text", "pair"}:
             widget.setPlaceholderText(field.description[:48])
         else:
             widget.setPlaceholderText(_blank_placeholder(field))
@@ -1208,6 +1231,8 @@ def _reconfigure_widget(
     elif isinstance(widget, _RowsEditor):
         widget.reconfigure(field)
     elif isinstance(widget, FluentComboBox):
+        if old_field.step != field.step:
+            _declare_step(field, widget)
         if old_field.choices != field.choices:
             _ChoiceHandler._fill(field, widget)
         elif (

@@ -1297,3 +1297,112 @@ assert pairs.read_all() == {'pairs': ({'start': 1},)}, pairs.read_all()
 print('ok')
 """
     )
+
+
+def test_a_pair_is_a_number_wide() -> None:
+    """A pair -- two integers written "y, x" -- is one field, edited as text
+    its owner reads, in a box that ends on the number edge with the number
+    boxes of its form rather than across the whole card."""
+
+    from dataclasses import replace
+
+    import pytest
+    from PyQt5 import QtCore, QtWidgets
+
+    from zlc_ui import ensure_qt_app
+    from zlc_ui.form import FormFieldProps, FormSpec
+    from zlc_ui.form.qt_form import FluentParameterForm
+
+    app = ensure_qt_app(["zlc-ui-tests"])
+    shape = FormFieldProps(
+        "frame_shape_yx", "pair", "Frame shape (Y, X)", default="1200, 1920",
+        description="two integers as y, x",
+    )
+    spec = FormSpec((
+        shape,
+        FormFieldProps("exposure", "float", "Exposure seconds", default=0.1, minimum=1e-9),
+        FormFieldProps("roi_x", "int", "ROI x", minimum=0, allow_blank=True),
+        FormFieldProps("note", "text", "Note", default=""),
+    ))
+    values = {"frame_shape_yx": "1200, 1920", "exposure": 0.1, "roi_x": None, "note": ""}
+    form = FluentParameterForm(spec, values)
+    host = QtWidgets.QWidget()
+    QtWidgets.QVBoxLayout(host).addWidget(form)
+    host.resize(900, 300)
+    host.show()
+    app.processEvents()
+    try:
+        def right(key):
+            widget = form.widget_for(key)
+            return widget.mapTo(host, QtCore.QPoint(widget.width(), 0)).x()
+
+        assert form.read_value("frame_shape_yx") == "1200, 1920"
+        assert form.widget_for("frame_shape_yx").placeholderText() == "two integers as y, x"
+        assert right("frame_shape_yx") == right("exposure") == right("roi_x")
+        assert right("note") > right("exposure"), "prose still spans the card"
+        # A text row re-declared as a pair (or back) is another row, never a
+        # box kept at the width of the other kind.  (Not while the operator
+        # is in it: the window gave the first box focus.)
+        form.widget_for("frame_shape_yx").clearFocus()
+        form.reconcile(FormSpec((replace(shape, kind="text"), *spec.fields[1:])), values)
+        app.processEvents()
+        assert right("frame_shape_yx") == right("note")
+    finally:
+        host.close()
+        host.deleteLater()
+    with pytest.raises(ValueError, match="bounds"):
+        FormFieldProps("shape", "pair", "Shape", minimum=1)
+    with pytest.raises(TypeError, match="default"):
+        FormFieldProps("shape", "pair", "Shape", default=(1, 2))
+
+
+def test_a_number_steps_by_its_owners_step() -> None:
+    """The owner declares how far one notch moves a number; the box shows it
+    on its step chip and steps on its grid, so a notch never walks a value
+    into tiny numbers below the first grid point.  A step the operator set
+    through the chip survives the owner's re-projections until the owner
+    declares another."""
+
+    from dataclasses import replace
+    from decimal import Decimal
+
+    import pytest
+
+    from zlc_ui import ensure_qt_app
+    from zlc_ui.form import FormFieldProps, FormSpec
+    from zlc_ui.form.qt_form import FluentParameterForm
+
+    ensure_qt_app(["zlc-ui-tests"])
+    exposure = FormFieldProps(
+        "exposure", "float", "Exposure seconds", default=0.02, minimum=1e-9, step=0.001
+    )
+    count = FormFieldProps("count", "int", "Count", default=4, minimum=0, step=2)
+    spec = FormSpec((exposure, count))
+    values = {"exposure": 0.02, "count": 4}
+    form = FluentParameterForm(spec, values)
+    try:
+        box = form.widget_for("exposure")
+        assert box.singleStep() == 0.001 and box._step_chip_text() == "±0.001"
+        box.stepBy(1)
+        assert box.decimalValue() == Decimal("0.021")
+        box.setValue(0.001)
+        box.stepBy(-1)
+        assert box.decimalValue() == Decimal("0.001"), "a notch never lands on the 1 ns floor"
+        form.widget_for("count").stepBy(1)
+        assert form.read_value("count") == 6
+
+        box.setSingleStep(0.01)  # the operator, through the step chip
+        form.reconcile(spec, values)
+        assert box.singleStep() == 0.01, "a re-projection keeps the operator's step"
+        form.reconcile(FormSpec((replace(exposure, step=0.005), count)), values)
+        assert form.widget_for("exposure") is box and box.singleStep() == 0.005
+        form.reconcile(FormSpec((replace(exposure, step=None), count)), values)
+        assert box.singleStep() == 1.0, "no declared step is the box's own 1"
+    finally:
+        form.deleteLater()
+    with pytest.raises(ValueError, match="step"):
+        FormFieldProps("name", "text", "Name", step=1)
+    with pytest.raises(ValueError, match="step"):
+        FormFieldProps("x", "float", "X", step=0)
+    with pytest.raises(TypeError, match="step"):
+        FormFieldProps("n", "int", "N", step=0.5)

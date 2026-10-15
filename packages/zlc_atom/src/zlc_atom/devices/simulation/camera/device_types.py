@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 from zlc_atom.authoring import AuthoringField, AuthoringSchema
+from zlc_atom.devices.camera import EXPOSURE_STEP_SECONDS
 from zlc_atom.devices.camera.roi_grid import authored_roi_xywh
 from zlc_atom.install.descriptors import DeviceTypeDescriptor, InstalledLeaf, bind_leaf
 
@@ -30,6 +31,7 @@ VIRTUAL_CAMERA_SCHEMA = AuthoringSchema(
             "Exposure seconds",
             0.02,
             minimum=1e-9,
+            step=EXPOSURE_STEP_SECONDS,
         ),
         *_ROI_FIELDS,
     )
@@ -40,7 +42,7 @@ VIRTUAL_MOT_CAMERA_SCHEMA = AuthoringSchema(
         AuthoringField(
             "frame_shape_yx",
             "pair",
-            "Frame shape (Y,X)",
+            "Frame shape (Y, X)",
             DEFAULT_SIMULATION_MOT_IMAGE_SHAPE_YX,
         ),
         AuthoringField(
@@ -49,6 +51,7 @@ VIRTUAL_MOT_CAMERA_SCHEMA = AuthoringSchema(
             "Exposure seconds",
             0.1,
             minimum=1e-9,
+            step=EXPOSURE_STEP_SECONDS,
         ),
         *_ROI_FIELDS,
     )
