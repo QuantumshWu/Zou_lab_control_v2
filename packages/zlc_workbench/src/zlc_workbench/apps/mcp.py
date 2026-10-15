@@ -212,7 +212,13 @@ def start_server(flow, *, host="127.0.0.1", port: int, token: str, allow_control
                     # authenticated local operator needs the actual reason to
                     # recover, including queued-vs-started timeout outcomes.
                     logging.getLogger(__name__).exception("MCP %s failed", function.__name__)
-                    raise ToolError(_error_text(error)) from error
+                    text = _error_text(error)
+                    if isinstance(error, KeyError) and text == str(error):
+                        # A bare lookup: its text is only the quoted name.
+                        text = (f"{function.__name__}: unknown name {text}; "
+                                + ("lab_handles and lab_api" if function.__name__ in _DEVELOPER_TOOLS
+                                   else "lab_state and lab_catalog") + " list the valid names")
+                    raise ToolError(text) from error
             return mcp.tool(annotations=annotations)(report_error)
         return register
 
@@ -270,7 +276,9 @@ def start_server(flow, *, host="127.0.0.1", port: int, token: str, allow_control
             handle = (flow.device_controls.get(device_id) if device_id is not None else
                       flow.console if window == "console" else flow.devices)
             if handle is None:
-                raise RuntimeError(f"The {window} window is not open")
+                raise RuntimeError(
+                    f"The {window} window is not open" if device_id is None else
+                    f"Device Control {device_id!r} is not open; open it with lab_device_action(action='open')")
             return handle.screenshot_png(include_dialog=True)
         data = await owner(capture)
         return CallToolResult(content=[ImageContent(type="image", mime_type="image/png",
@@ -301,7 +309,12 @@ def start_server(flow, *, host="127.0.0.1", port: int, token: str, allow_control
             # this tool call so the operator can answer it before completion.
             if selected.operator_request is not None:
                 break
-            reached = await asyncio.to_thread(wait, min(.25, max(0., deadline-monotonic())))
+            try:
+                reached = await asyncio.to_thread(wait, min(.25, max(0., deadline-monotonic())))
+            except (RuntimeError, InterruptedError):
+                # Stopped, failed or finished before readiness: the outcome
+                # below reports which, with the run's own observation.
+                break
             if reached or monotonic() >= deadline:
                 break
         def outcome():
@@ -697,12 +710,14 @@ def start_server(flow, *, host="127.0.0.1", port: int, token: str, allow_control
                                     expected_revision: int | None = None) -> dict[str, object]:
             """Use an opened Pulse/SLM editor's discovered action, via the same authoring/worker as the GUI.
             Consult lab_editor_catalog; path arguments are workspace-relative or absolute inside the workspace.
-            An empty path stays empty for actions that explicitly clear a file reference.
+            An empty path stays empty for actions that explicitly clear a file reference; a null path is omitted.
             Saving/applying/solving can be asynchronous; inspect pending/errors afterward. expected_revision rejects
             edits against a stale draft. This does not override normal device ownership or stale-device protections.
             """
             arguments = dict(arguments)
-            if "path" in arguments and arguments["path"] != "":
+            if arguments.get("path") is None:
+                arguments.pop("path", None)
+            elif arguments["path"] != "":
                 arguments["path"] = str(workspace_path(str(arguments["path"])))
             def submit():
                 selected = editor(device_id)
@@ -894,8 +909,12 @@ def start_server(flow, *, host="127.0.0.1", port: int, token: str, allow_control
             """
             arguments = dict(arguments)
             if action == "panel.save":
+                if not arguments.get("selected"):
+                    raise ValueError("panel.save needs selected (a workspace .png/.pdf/.svg path)")
                 arguments["selected"] = str(workspace_path(arguments["selected"]))
             if action in {"layout.save", "layout.load"}:
+                if not arguments.get("path"):
+                    raise ValueError(f"{action} needs path (a workspace Layout JSON)")
                 arguments["path"] = str(workspace_path(arguments["path"]))
             return await owner(lambda: presenter().control_action(action, arguments,
                 expected_draft_revision=expected_draft_revision, expected_generation=expected_generation))
@@ -922,30 +941,41 @@ def start_server(flow, *, host="127.0.0.1", port: int, token: str, allow_control
     @tool(annotations=read)
     async def lab_wait_for(tool_name: str, arguments: dict[str, object], path: list[str | int],
                            equals: object, timeout_seconds: float = 30) -> dict[str, object]:
-        """Wait for an explicit JSON field of an existing read-only tool to equal a supplied value.
+        """Wait for an explicit JSON field of an existing operator read-only tool to equal a supplied value.
         No experiment stages or readiness rules are inferred. path is a list of object keys/list indices.
         Uses the same SDK tool dispatch, never writes/retries an action; timeout only ends observation.
         Returns matched/timed_out and the last result. Other requests, including Stop, remain available.
         """
         if not 0 <= timeout_seconds <= 1800 or tool_name in {"lab_wait_for", "lab_wait"}:
             raise ValueError("Use timeout_seconds 0..1800 and a non-wait read-only tool")
+        if tool_name in _DEVELOPER_TOOLS:
+            raise ValueError("Waiting applies to operator read tools, not developer reflection")
         descriptor = next((item for item in await mcp.list_tools() if item.name == tool_name), None)
         if descriptor is None or descriptor.annotations is None or not descriptor.annotations.read_only_hint:
             raise ValueError("Waiting requires an existing read-only tool")
         deadline = monotonic() + timeout_seconds
+        # Each read is a full owner projection on the GUI thread, which also
+        # draws the live plots: re-read quickly at first, then back off.
+        delay = .02
         while True:
             response = await mcp.call_tool(tool_name, arguments)
             if response.is_error:
                 raise ValueError(str(response.content))
             result = response.structured_content
+            if result is None:
+                raise ValueError(f"{tool_name} returns no JSON fields to wait on")
             value = result
-            for key in path:
-                value = value[key]
+            try:
+                for key in path:
+                    value = value[key]
+            except (KeyError, IndexError, TypeError):
+                raise ValueError(f"field {path!r} is not in {tool_name}'s result") from None
             if value == equals:
                 return dict(matched=True, timed_out=False, result=result)
             if monotonic() >= deadline:
                 return dict(matched=False, timed_out=True, result=result)
-            await asyncio.sleep(min(.02, max(0, deadline-monotonic())))
+            await asyncio.sleep(min(delay, max(0, deadline-monotonic())))
+            delay = min(.25, delay*1.5)
 
     if allow_control:
         @tool()

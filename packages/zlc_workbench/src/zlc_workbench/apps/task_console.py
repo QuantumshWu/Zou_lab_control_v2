@@ -694,6 +694,8 @@ class ExperimentGuiFlow:
             raise ValueError("close decision must be discard or cancel")
         if (scope == "editor") != (device_id is not None):
             raise ValueError("supply device_id only when closing an editor")
+        if scope == "editor" and device_id not in self.device_controls:
+            raise ValueError(f"Device Control {device_id!r} is not open")
         controls = ([(device_id, self.device_controls[device_id])] if scope == "editor"
                     else list(self.device_controls.items()))
         confirmations = []
