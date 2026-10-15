@@ -16,21 +16,31 @@ from .processor import (
 )
 
 #: What the operator picks: a question that follows the frames the source
-#: carries, or the pairs they marked themselves.  The labels are the words
-#: on the editor's preset strip and in its summary, so they are short; what
-#: each rule pairs (k→k+1, 0→k, k→last) is in the field's description.
+#: carries, no pair at all, or the pairs they marked themselves.  The labels
+#: are the words on the editor's preset strip and in its summary, so they are
+#: short; what each rule pairs (k→k+1, 0→k, k→last) is in the field's
+#: description.  None and Selected are two choices, not one: None asks for no
+#: pair, Selected for the list being marked -- empty while it is begun -- so
+#: the strip marks the one the operator picked and either can follow the other.
 _SELECTIONS = (
     AuthoringChoice("all", "All"),
     AuthoringChoice("consecutive", "Consecutive"),
     AuthoringChoice("from_first", "From first"),
     AuthoringChoice("to_last", "To last"),
+    AuthoringChoice("none", "None"),
     AuthoringChoice("custom", "Selected"),
 )
+#: The choices that name their pairs rather than follow a rule.
+_EXPLICIT = ("none", "custom")
 
 
 def _validate(values):
     overrides = _checked_overrides(tuple((row["start"], row["end"], row["selected"])
                                         for row in values["pairs"]))
+    if values["selection"] == "none" or (
+        values["selection"] == "custom" and not any(selected for _start, _end, selected in overrides)
+    ):
+        raise ValueError("Pick a rule or select at least one pair.")
     if values["selection"] == "custom":
         _checked_pairs(tuple((start, end) for start, end, selected in overrides if selected))
         if any(not selected for _start, _end, selected in overrides):
@@ -39,8 +49,8 @@ def _validate(values):
 FRAME_SURVIVAL_SCHEMA = AuthoringSchema((
     AuthoringField("selection", "choice", "Published pairs", "all", required=True, choices=_SELECTIONS,
                    description="A named choice follows the frames the source carries: All forward pairs, "
-                               "Consecutive (k→k+1), From first (0→k) or To last (k→last); Selected "
-                               "lists them. Grid edits override only the changed pairs; first/last follow "
+                               "Consecutive (k→k+1), From first (0→k) or To last (k→last); None asks for "
+                               "no pair; Selected lists them. Grid edits override only the changed pairs; first/last follow "
                                "the cycle."),
     AuthoringField("pairs", "rows", "Pair selections", (), columns=(
         AuthoringField("start", "text", "Start frame", "0", required=True),
@@ -88,9 +98,11 @@ def _editor_factory(parent=None):
         against the rule is a chosen card, and one they left out is an
         empty card -- so what the rule decided and what was decided by hand
         are told apart at a glance.  The strip is the selection's closed
-        set and always marks one: the rule in force, None for an explicit
-        list still empty, Selected for an explicit list with pairs in it.
-        Selected, picked under a rule, keeps the rule's pairs as the list.
+        set and always marks the one picked: a rule, None (no pair), or
+        Selected (the marked list, empty while it is begun).  Selected,
+        picked under a rule, keeps the rule's pairs as the list; picked
+        under None it begins an empty one.  A pair marked under None begins
+        a Selected list with it.
 
         "Pairs" heads the section in the editor's label column, so the strip
         and the grid's first card start on the form's field edge.
@@ -104,9 +116,9 @@ def _editor_factory(parent=None):
             layout = QtWidgets.QVBoxLayout(self)
             layout.setContentsMargins(0, 0, 0, 0)
             layout.setSpacing(row_gap())
-            # None clears every mark: an explicit, still-empty selection to mark pairs into.
             self.presets = FluentSegmentedButtons(
-                (*((rule, labels[rule]) for rule in PAIR_RULES), ("none", "None"), ("custom", labels["custom"])), self)
+                (*((rule, labels[rule]) for rule in PAIR_RULES), ("none", labels["none"]), ("custom", labels["custom"])),
+                self)
             self.presets.activated.connect(self._preset)
             self.summary = muted_note_label("")
             self.title, header = section_header("Pairs", lead=(self.presets,), summary=self.summary)
@@ -139,16 +151,16 @@ def _editor_factory(parent=None):
             self.table.set_label_width(int(width))
 
         def _preset(self, choice):
-            if choice == "custom":
-                if self._selection == "custom" or self._frames is None:
-                    return
+            if choice == self._selection:
+                return
+            pairs = ()
+            if choice == "custom" and self._frames is not None:
+                # What is selected now becomes the list: a rule's pairs, or
+                # none at all after None.
                 count = len(self._frames)
                 pairs = tuple({"start": str(frame_identity(start, count)), "end": str(frame_identity(end, count)),
                                "selected": True} for start, end in self._wanted)
-            else:
-                pairs = ()
-            self.draft_changed.emit({"values": {
-                "selection": "custom" if choice in ("none", "custom") else choice, "pairs": pairs}})
+            self.draft_changed.emit({"values": {"selection": choice, "pairs": pairs}})
 
         def _marked(self, cells):
             if self._frames is None:
@@ -157,7 +169,7 @@ def _editor_factory(parent=None):
             previous = set(self._wanted)
             current = {(row, column + 1) for row, column in cells}
             edits = {(start, end): selected for start, end, selected in self._overrides}
-            baseline = set() if self._selection == "custom" else set(_rule_pairs(self._selection, count))
+            baseline = set() if self._selection in _EXPLICIT else set(_rule_pairs(self._selection, count))
             for pair in previous ^ current:
                 identity = tuple(frame_identity(index, count) for index in pair)
                 if (pair in current) == (pair in baseline):
@@ -165,7 +177,8 @@ def _editor_factory(parent=None):
                 else:
                     edits[identity] = pair in current
             self.draft_changed.emit({"values": {
-                "selection": self._selection,
+                # A pair marked under None begins a Selected list.
+                "selection": "custom" if self._selection == "none" else self._selection,
                 "pairs": tuple({"start": str(start), "end": str(end), "selected": selected}
                                for (start, end), selected in edits.items()),
             }})
@@ -189,8 +202,7 @@ def _editor_factory(parent=None):
             self._overrides = _checked_overrides(tuple(
                 (row["start"], row["end"], row.get("selected", True)) for row in values["pairs"]
                 if row["start"] not in (None, "") and row["end"] not in (None, "")))
-            current = "none" if selection == "custom" and not self._overrides else selection
-            self.presets.set_current(current)
+            self.presets.set_current(selection)
             self.table.setEnabled(frames is not None)
             if frames is None:
                 self.table.set_cell_states({})
@@ -199,16 +211,17 @@ def _editor_factory(parent=None):
                 show_problem(self.note, "")
                 return
             count = len(frames)
+            listed = () if selection == "none" else tuple(
+                (start, end) for start, end, selected in self._overrides if selected)
             wanted, absent = _selected_pairs(
-                selection if selection != "custom" else tuple(
-                    (start, end) for start, end, selected in self._overrides if selected),
-                self._overrides if selection != "custom" else (), count)
+                selection if selection not in _EXPLICIT else listed,
+                self._overrides if selection not in _EXPLICIT else (), count)
             self._wanted = wanted
             # What the rule selects by itself is derived; what is selected
             # beyond it was marked by hand and stays a chosen card.  Either
             # way the pair is in the table's selection, so the gestures
             # (and the draft they edit) are the table's own.
-            rule = set() if selection == "custom" else set(_rule_pairs(selection, count))
+            rule = set() if selection in _EXPLICIT else set(_rule_pairs(selection, count))
             derived = tuple(pair for pair in wanted if pair in rule)
             self.table.set_cell_states(
                 {(start, end - 1): "derived" for start, end in derived},
@@ -220,7 +233,7 @@ def _editor_factory(parent=None):
                 self.table.set_selected(cells)
             # Named with the strip's own word for its current segment.
             self.summary.setText(
-                f"{self.presets.button(current).text()} · {len(wanted)} of {count * (count - 1) // 2} pairs")
+                f"{self.presets.button(selection).text()} · {len(wanted)} of {count * (count - 1) // 2} pairs")
             show_problem(self.note, "" if not absent else "not in this source: " + ", ".join(
                 pair_label(start, end) for start, end, _selected in absent))
 
@@ -240,7 +253,8 @@ LOGIC_NODE = LogicNodeDescriptor(
         "validity requires the earlier frame occupied and both frames judgeable, so "
         "Mean over repeats gives conditional survival. Choose the pairs with selection: "
         "all, consecutive (k->k+1), from_first (0->k) and to_last (k->last) follow the "
-        "frames the source carries. Pair rows override the rule with selected=true/false; "
+        "frames the source carries; none asks for no pair (Start waits for a rule or a pair). "
+        "Pair rows override the rule with selected=true/false; "
         "custom lists only included pairs. Endpoints use text '0'/'last'; numbered "
         "middle frames keep their index when the cycle changes. "
         "Feed survival to Seamless Scan and use a site Facet with native Exponential "

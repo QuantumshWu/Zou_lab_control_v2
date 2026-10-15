@@ -328,12 +328,29 @@ def test_pair_matrix_selects_like_a_table_and_writes_the_draft() -> None:
         form.presets.button("custom").click()
         assert drafts[-1] == {"values": {"selection": "custom", "pairs": tuple(
             {"start": "0", "end": end, "selected": True} for end in ("1", "2", "last"))}}
-        # None clears every mark at once, leaving an explicit selection to fill.
+        # None clears every mark at once: no pair at all.
         form.presets.button("none").click()
-        assert drafts[-1] == {"values": {"selection": "custom", "pairs": ()}}
+        assert drafts[-1] == {"values": {"selection": "none", "pairs": ()}}
         project(**drafts[-1]["values"])
         assert marked() == [] and form.presets.button("none").property("current")
         assert form.summary.text() == "None · 0 of 6 pairs", "the summary names the strip's segment"
+        # Selected after None begins an empty list, and the strip marks it:
+        # None and Selected are two choices, either follows the other.
+        form.presets.button("custom").click()
+        assert drafts[-1] == {"values": {"selection": "custom", "pairs": ()}}
+        project(**drafts[-1]["values"])
+        assert marked() == [] and form.presets.current() == "custom"
+        assert form.summary.text() == "Selected · 0 of 6 pairs"
+        form.presets.button("none").click()
+        assert drafts[-1] == {"values": {"selection": "none", "pairs": ()}}
+        project(**drafts[-1]["values"])
+        # A pair marked under None begins a Selected list with it.
+        QtTest.QTest.mouseClick(view, QtCore.Qt.LeftButton, QtCore.Qt.NoModifier,
+                               form.table.visualRect(form.model.index(0, 0)).center())
+        assert drafts[-1] == {"values": {"selection": "custom", "pairs": (
+            {"start": "0", "end": "1", "selected": True},)}}
+        project(**drafts[-1]["values"])
+        assert marked() == [(0, 1)] and form.presets.current() == "custom"
         # Pairs the source no longer carries are named, not dropped silently.
         drafts.clear()
         project(selection="custom", pairs=({"start": "0", "end": "1"}, {"start": "2", "end": "5"}))
