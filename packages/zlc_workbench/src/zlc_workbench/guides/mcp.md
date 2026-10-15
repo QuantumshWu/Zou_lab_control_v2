@@ -131,9 +131,15 @@ Each frame is read by exactly one row; a collision, a frame nobody reads or a
 number the source does not carry is reported by name, never resolved silently,
 and the rows are never rewritten when the frame count changes. A middle index
 that no longer exists stays in the draft; it cannot become the new last frame.
-Clicking the last column authors `last`, not its temporary numeric index.
+Clicking the last column authors `last`, not its temporary numeric index. A row with `"frames": []` is parked: kept in
+the draft, the layout and the run record, reading nothing, and its file is not
+checked against the other rows (it may even be missing). The operator keeps
+such rows on purpose -- never delete one, or give it frames, to make Start
+work; only a list in which no row reads a frame is refused.
 `lab_catalog(node_id=OCC).node.artifact_claims.calibrations` returns the rows,
-the frames each actually reads (`reads`) and any `problems`. Frame Survival consumes occupied, not counts.
+the frames each actually reads (`reads`), the parked rows (`unused`), what each
+file is or why it was not read (`files[i].summary`, `files[i].unread`) and
+the `problems` that refuse Start. Frame Survival consumes occupied, not counts.
 It publishes the later occupancy verdict with validity equal to earlier occupied
 AND both frames judgeable. Mean over trials is therefore conditional survival;
 the site axis remains available for per-site analysis. Its `selection` field

@@ -22,8 +22,10 @@ from ._framework.frames import (
     assign_frames,
     check_claims,
     claim_names,
+    claim_problems,
     describe_frames,
     frame_problems,
+    parked_entries,
     reach_frames,
 )
 
@@ -36,8 +38,10 @@ __all__ = [
     "assign_frames",
     "check_claims",
     "claim_names",
+    "claim_problems",
     "describe_frames",
     "frame_problems",
+    "parked_entries",
     "reach_frames",
     "ArtifactOutputSpec",
     "DatasetInputSpec",

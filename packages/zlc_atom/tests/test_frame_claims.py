@@ -9,9 +9,11 @@ from zlc_atom.nodes._framework.frames import (
     assign_frames,
     canonical_frames,
     check_claims,
+    claim_problems,
     describe_frames,
     frame_identity,
     frame_problems,
+    parked_entries,
     reach_frames,
 )
 
@@ -125,8 +127,23 @@ def test_claims_are_checked_among_themselves_before_any_count() -> None:
     # collides only in a one-frame cycle, so only a count refuses it.
     assert check_claims(((0, "first"), ("rest",)), ("A", "B")) == (("first",), ("rest",))
     assert check_claims((("first",), ("last",)), ("A", "B")) == (("first",), ("last",))
-    with pytest.raises(ValueError, match="B reads no frame"):
-        check_claims((("rest",), ()), ("A", "B"))
+    # An entry claiming no frame is parked: kept, colliding with nothing and
+    # hiding no collision of two others -- every collision is said at once.
+    assert check_claims((("rest",), ()), ("A", "B")) == (("rest",), ())
+    assert parked_entries((("rest",), (), ("first",), ())) == (1, 3)
+    assert claim_problems(((), ("rest",), ("rest", 2), (0,), ("first", 2)), ("P", "A", "B", "C", "D")) == (
+        "'rest' is claimed by both A and B",
+        "frame 2 is claimed by both B and D",
+        "'first' is claimed by both C and D",
+    )
+    assert claim_problems((("last",), ("last",), ("last",)), ("A", "B", "C")) == (
+        "'last' is claimed by A, B and C",
+    )
+    # Only an assignment in which nothing reads is refused for parking.
+    with pytest.raises(ValueError, match="no calibration reads a frame: give one the frames it reads, "
+                                         "or let one read the rest"):
+        check_claims(((), ()), ("A", "B"), what="calibration")
+    assert claim_problems((), ()) == ()
 
 
 def test_a_draft_value_is_rows_of_path_and_frames() -> None:

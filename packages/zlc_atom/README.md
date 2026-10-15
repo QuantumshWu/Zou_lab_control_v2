@@ -309,7 +309,9 @@ alone reads every frame), and selects `default`, `box`, `psf`, or `uniform_psf`
 readout.  Which calibration reads which frame is resolved against the frames
 that arrive, so `first`, `last` and `rest` follow a cycle that gains or loses a
 frame, a middle number the shorter cycle no longer has is reported absent (it
-never becomes the last frame), and any collision is refused by name.
+never becomes the last frame), and any collision is refused by name.  A calibration claiming no frame
+is parked: kept in the run record, never read and never checked against the
+calibrations that are; only a list in which none reads is refused.
 It publishes three same-publication Dataset siblings: per-site numeric
 `counts` in the source frame's effective unit; per-site boolean `occupied`,
 whose component validity is the sole truth for whether each site was readable;

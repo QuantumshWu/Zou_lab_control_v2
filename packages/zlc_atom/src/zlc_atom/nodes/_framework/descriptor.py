@@ -48,7 +48,12 @@ class DatasetInputSpec:
 
 @dataclass(frozen=True)
 class ResolvedArtifact:
-    """One exact file and the typed value decoded from those exact bytes."""
+    """One exact file and the typed value decoded from those exact bytes.
+
+    A frame-claims row whose file did not decode is answered with the error
+    decoding raised as its value: a row that reads no frame is kept whatever
+    its file, and still says what is wrong with it.
+    """
 
     path: Path
     contract_id: str
@@ -94,7 +99,8 @@ class ArtifactCodec:
                 f"{source.name!r} must use one of {self.suffixes!r}"
             )
         if not source.is_file():
-            raise FileNotFoundError(source)
+            # The sentence a refusal ends with; the path is already beside it.
+            raise FileNotFoundError("file not found")
         return ResolvedArtifact(source, self.contract_id, self.decode(source))
 
 
@@ -112,7 +118,8 @@ class ArtifactInputSpec:
     #: readout frame with calibrations trained on each.  The draft value is
     #: then a list of ``{"path": ..., "frames": [...]}`` entries
     #: (:func:`frame_claim_entries`) and the build receives a tuple of
-    #: :class:`~.frames.FrameClaim` whose values are the resolved artifacts.
+    #: :class:`~.frames.FrameClaim` whose values are the resolved artifacts
+    #: (None for a row with no file, which only a row reading no frame may be).
     frame_claims: bool = False
 
     def __post_init__(self) -> None:

@@ -131,6 +131,9 @@ FRAME_CLAIMS_RULE = (
     "middle frames between them, and 'rest' (every frame no other entry names); each frame "
     "is read by exactly one entry; at most one entry takes each of 'first', 'last', 'rest' "
     "and each middle number; one file per entry. One entry with ['rest'] reads every frame. "
+    "An entry with frames [] is kept but reads nothing: it is parked (listed in 'unused'), "
+    "its file is not checked against the others and may be missing; keep it, do not delete "
+    "it to make the draft start. At least one entry must read a frame. "
     "Claims are kept as written when the frame count changes; one the new count "
     "cannot honour is reported, never dropped. A middle index cannot become the new last frame."
 )
@@ -298,25 +301,27 @@ def _claims_projection(
     source_frames: tuple[str, ...] | None,
     base_dir: str,
 ) -> dict[str, Any]:
-    """One frame-claims input for its editor and for lab_catalog(node_id); all plain."""
+    """One frame-claims input for its editor and for lab_catalog(node_id); all plain.
 
-    from zlc_atom.nodes import check_claims, claim_names, frame_claim_entries, frame_problems, reach_frames
+    ``problems`` refuse Start; ``unused`` are the rows reading no frame,
+    kept and not read -- not an error.
+    """
+
+    from zlc_atom.nodes import (
+        claim_names, claim_problems, frame_claim_entries, frame_problems, parked_entries, reach_frames,
+    )
 
     try:
         entries = frame_claim_entries(raw)
     except ValueError as error:
         return {"label": spec.label, "entries": (), "base_dir": base_dir,
                 "file_filter": str(spec.codec.file_filter), "files": (),
-                "reads": None, "problems": (str(error),)}
+                "reads": None, "problems": (str(error),), "unused": ()}
     names = claim_names(entries)
     frames = tuple(entry["frames"] for entry in entries)
     claims = finalization.artifacts.get(spec.name)
     reads = None
-    problems: tuple[str, ...] = ()
-    try:
-        check_claims(frames, names)
-    except ValueError as error:
-        problems = (str(error),)
+    problems = claim_problems(frames, names, what="file")
     if entries and source_frames is not None:
         if not problems:
             problems = frame_problems(frames, len(source_frames), names, what="file")
@@ -328,21 +333,26 @@ def _claims_projection(
         if claims is not None and len(claims) == len(entries)
         else (None,) * len(entries)
     )
+
+    def file(item: Any) -> dict[str, str]:
+        unread = isinstance(item.value, Exception)
+        return {
+            "path": str(item.path),
+            "summary": "" if unread or describe is None else str(describe(item.value)),
+            # Why the file was not read; "" when it was.
+            "unread": str(item.value) if unread else "",
+        }
+
     return {
         "label": spec.label,
         "entries": entries,
         "base_dir": base_dir,
         "file_filter": str(spec.codec.file_filter),
-        # What each row's file is, None where it did not resolve.
-        "files": tuple(
-            None if item is None else {
-                "path": str(item.path),
-                "summary": "" if describe is None else str(describe(item.value)),
-            }
-            for item in resolved
-        ),
+        # What each row's file is; None for a row with no file.
+        "files": tuple(None if item is None else file(item) for item in resolved),
         "reads": reads,
         "problems": problems,
+        "unused": parked_entries(frames),
     }
 
 

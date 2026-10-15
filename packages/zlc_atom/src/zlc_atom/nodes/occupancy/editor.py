@@ -9,18 +9,23 @@ MIDDLE frames, which keep their number.  "Rest" takes whatever no file
 names.  A frame reached through Rest shows as a dashed card in its file's
 row (on First or Last when it is an end); a frame nobody reads is an empty
 red card in every row, and one two files reach, or a middle number the
-source no longer has between its ends, is a red-edged card with the reason
-below.  Nothing here changes a claim
-because the frame count changed: what was authored stays until the operator
-edits it.  A file is removed by the × that ends its row and replaced by
-clicking its name.  A file row is one line, as tall as every other
-control and one row pitch from the next: what the file is (its exposure,
-sites and model) is in the name's tooltip with its path.  The readout
-model -- which model each file is read with, set once -- is a segmented
-choice under the files it applies to: the four models are this node's
-closed set.  The reasons stand under that choice and above the section's
-hint, one sentence each, so the files and the model keep their place
-whether a problem is there or not.
+source no longer has between its ends, is a red card with the reason
+below.  Nothing here changes a claim because the frame count changed: what
+was authored stays until the operator edits it.
+
+A file with no frame is PARKED, not wrong: kept in the list, read for
+nothing and checked against nothing, its name muted and counted in the
+summary ("· 1 file not read") -- a later "Add calibration…" while another
+file reads the rest starts that way, and so does a file whose last frame
+was given to another.  A file is removed by the × that ends its row and
+replaced by clicking its name.  A file row is one line, as tall as every
+other control and one row pitch from the next: what the file is (its
+exposure, sites and model, or why it cannot be read) is in the name's
+tooltip with its path.  The readout model -- which model each file is read
+with, set once -- is a segmented choice under the files it applies to: the
+four models are this node's closed set.  The problems stand under that
+choice and above the section's hint, one sentence each, so the files and
+the model keep their place whether a problem is there or not.
 
 The section opens like every editor's section: its title, then at the right
 end its summary and "Add calibration…".  The file names stand in the
@@ -59,7 +64,9 @@ from zlc_ui.fluent import (
 )
 from zlc_ui.fluent.column_set import section_header
 
-from zlc_atom.nodes._framework.frames import FIRST, LAST, REST, canonical_frames, claim_names, reach_frames
+from zlc_atom.nodes._framework.frames import (
+    FIRST, LAST, REST, canonical_frames, claim_names, parked_entries, reach_frames,
+)
 from zlc_atom.nodes.calibration import DEFAULT_READOUT_MODEL_CHOICE, READOUT_MODEL_CHOICES
 
 #: The artifact input this editor manages.
@@ -69,7 +76,7 @@ _NAMED = ((FIRST, "First"), (LAST, "Last"), (REST, "Rest"))
 _FILE_NAME_ROOM = 150
 _GAP = None
 _HINT = ("Click a cell to give that frame to a file. First and Last follow the cycle's ends; "
-         "middle frames keep their number.")
+         "middle frames keep their number. A file with no frame is kept and not read.")
 _EMPTY = "Add a calibration file; the first one reads every frame."
 
 
@@ -119,12 +126,7 @@ class CalibrationsEditor(QtWidgets.QWidget):
         # the model they are read with -- so a problem coming or going
         # moves nothing above it.  One red block per problem, half a row
         # gap apart: a problem that wraps is still told from the next one.
-        self.problems = QtWidgets.QWidget(self)
-        self._problem_layout = QtWidgets.QVBoxLayout(self.problems)
-        self._problem_layout.setContentsMargins(0, 0, 0, 0)
-        self._problem_layout.setSpacing(row_gap() // 2)
-        self._problem_labels: list[QtWidgets.QLabel] = []
-        self.problems.hide()
+        self.problems, self._problem_labels = _blocks(self), []
         layout.addWidget(self.problems)
         # The section's hint is its last line, under everything it explains.
         self.hint = muted_note_label(_HINT)
@@ -184,6 +186,8 @@ class CalibrationsEditor(QtWidgets.QWidget):
     def _draw(self, frames, files, problems) -> None:
         entries = self._entries
         count = None if frames is None else len(frames)
+        # A file with no frame is kept and not read: muted, never red.
+        parked = parked_entries(tuple(entry["frames"] for entry in entries))
         claimed = sorted({
             token for entry in entries for token in entry["frames"] if isinstance(token, int)
         })
@@ -245,18 +249,19 @@ class CalibrationsEditor(QtWidgets.QWidget):
         row_tips = tuple(
             "\n".join(part for part in (
                 entry["path"] or "no file yet",
-                "cannot be read" if item is None and entry["path"] else "" if item is None else item["summary"],
-                "" if reach is None else
+                "" if item is None else
+                f"cannot be read: {item['unread']}" if item["unread"] else item["summary"],
+                _parked_tip(index, files, names) if index in parked else "" if reach is None else
                 "reads " + (", ".join(str(frame) for frame in reach.frames_of(index)) or "no frame"),
             ) if part)
             for index, (entry, item) in enumerate(zip(entries, files))
         )
         fitted = tuple(_fitted(name, self._label_width) for name in names)
-        shown = (fitted, labels, tuple(sorted(cells.items())), row_tips)
+        shown = (fitted, labels, tuple(sorted(cells.items())), row_tips, parked)
         if shown != self._shown:
             self._shown = shown
             self.grid.set_grid(
-                fitted, labels, cells, row_tips=row_tips,
+                fitted, labels, cells, row_tips=row_tips, muted_rows=parked,
                 narrow_columns=(self._columns.index(_GAP),),
             )
         self.grid.set_cell_states(states, tips)
@@ -265,30 +270,21 @@ class CalibrationsEditor(QtWidgets.QWidget):
         self.grid.setVisible(bool(entries))
         self.model_row.setVisible(bool(entries))
         self.hint.setText(_HINT if entries else _EMPTY)
+        reading = tuple(index for index in range(len(entries)) if index not in parked)
+        not_read = (f" · {len(parked)} file{'s' if len(parked) != 1 else ''} not read"
+                    if parked else "")
+        frames_word = f"frame{'s' if count != 1 else ''}"
         if not entries:
             self.summary.setText("No calibration yet")
         elif count is None:
             self.summary.setText("Waiting for the source frames")
         elif problems:
-            self.summary.setText(f"{count} frame{'s' if count != 1 else ''}")
-        elif len(entries) == 1:
-            self.summary.setText(f"{names[0]} reads every frame")
+            self.summary.setText(f"{count} {frames_word}{not_read}")
+        elif len(reading) == 1:
+            self.summary.setText(f"{names[reading[0]]} reads every frame{not_read}")
         else:
-            self.summary.setText(f"{count} frames · each read once")
-        self._show_problems(problems)
-
-    def _show_problems(self, problems) -> None:
-        """Each problem as its own sentence (:func:`show_problem`) in its own block."""
-
-        labels = self._problem_labels
-        while len(labels) > len(problems):
-            retire_widget(labels.pop())
-        while len(labels) < len(problems):
-            labels.append(error_note_label())
-            self._problem_layout.addWidget(labels[-1])
-        for label, problem in zip(labels, problems):
-            show_problem(label, problem)
-        self.problems.setVisible(bool(problems))
+            self.summary.setText(f"{count} {frames_word} · each read once{not_read}")
+        _show_sentences(self.problems, self._problem_labels, problems, error_note_label)
 
     # ---------------------------------------------------------------- editing
 
@@ -338,7 +334,8 @@ class CalibrationsEditor(QtWidgets.QWidget):
                 self.replace_file(row, path)
 
     def add_file(self, path: str) -> None:
-        """Another calibration; the first one reads every frame, a later one none yet."""
+        """Another calibration; the first one reads every frame, a later one
+        is kept reading none until it is given frames -- the draft still starts."""
 
         taken = any(REST in entry["frames"] for entry in self._entries)
         self._write((*self._entries, {"path": str(path), "frames": () if taken else (REST,)}))
@@ -366,6 +363,43 @@ class CalibrationsEditor(QtWidgets.QWidget):
 
     def set_mutation_enabled(self, enabled: bool) -> None:
         self.setEnabled(bool(enabled))
+
+
+def _parked_tip(index: int, files, names) -> str:
+    """What a row reading no frame is: kept -- and a copy of another row, if it is one."""
+
+    item = files[index]
+    same = next((
+        other for other, theirs in enumerate(files)
+        if other != index and item is not None and theirs is not None
+        and theirs["path"] == item["path"]
+    ), None)
+    return "kept · reads no frame" + ("" if same is None else f" · same file as {names[same]}")
+
+
+def _blocks(parent: QtWidgets.QWidget) -> QtWidgets.QWidget:
+    """A column of sentence blocks, half a row gap apart: one that wraps is
+    still told from the next.  Hidden while it says nothing."""
+
+    block = QtWidgets.QWidget(parent)
+    layout = QtWidgets.QVBoxLayout(block)
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.setSpacing(row_gap() // 2)
+    block.hide()
+    return block
+
+
+def _show_sentences(block: QtWidgets.QWidget, labels: list, texts, make) -> None:
+    """Each text as its own sentence (:func:`show_problem`) in its own label of ``block``."""
+
+    while len(labels) > len(texts):
+        retire_widget(labels.pop())
+    while len(labels) < len(texts):
+        labels.append(make())
+        block.layout().addWidget(labels[-1])
+    for label, text in zip(labels, texts):
+        show_problem(label, text)
+    block.setVisible(bool(texts))
 
 
 def _fitted(name: str, width: int | None) -> str:

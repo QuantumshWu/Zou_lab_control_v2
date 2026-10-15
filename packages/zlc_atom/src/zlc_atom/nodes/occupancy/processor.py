@@ -90,8 +90,9 @@ class CalibrationReading:
     """One calibration and the frames of every cycle it reads.
 
     ``frames`` are claims (:mod:`zlc_atom.nodes._framework.frames`): frame
-    numbers from 0, ``"first"``, ``"last"`` and ``"rest"``.  ``path`` is the
-    file it was read from, for the run record and for naming it in a refusal.
+    numbers from 0, ``"first"``, ``"last"`` and ``"rest"``; none at all is a
+    calibration kept but not read.  ``path`` is the file it was read from,
+    for the run record and for naming it in a refusal.
     """
 
     calibration: TrapCalibration
@@ -114,41 +115,58 @@ class OccupancyProcessor:
     frames that actually arrive, so "first", "last" and "rest" follow a cycle
     that gains or loses a frame, and a claim the cycle cannot honour refuses
     the run by name.  One calibration on its own reads every frame.
+
+    A calibration claiming no frame is PARKED: the operator keeps it at hand
+    without using it.  Only its file goes on, into the run record; it is
+    never read, and never checked against the calibrations that are -- the
+    one kept aside is usually the one that would not fit.  ``parked`` names
+    such files directly, for a caller that never decoded them.
     """
 
     def __init__(
         self,
         calibrations: TrapCalibration | Sequence[CalibrationReading],
         *,
+        parked: Sequence[Path | None] = (),
         source_signal: str | None = None,
         model_kind: ReadoutModelKind | None = None,
     ) -> None:
-        readings = (
+        given = (
             (CalibrationReading(calibrations),)
             if isinstance(calibrations, TrapCalibration)
             else tuple(calibrations)
         )
-        if not readings:
-            raise ValueError("occupancy needs at least one calibration")
-        if any(not isinstance(reading, CalibrationReading) for reading in readings):
+        if any(not isinstance(reading, CalibrationReading) for reading in given):
             raise TypeError("occupancy calibrations must be CalibrationReading")
-        self.readings = readings
+        readings = tuple(reading for reading in given if reading.frames)
+        #: The files kept but not read, for the run record only.
+        self.parked: tuple[Path | None, ...] = (
+            *(reading.path for reading in given if not reading.frames),
+            *(None if path is None else Path(path).expanduser().resolve() for path in parked),
+        )
+        if not readings and not self.parked:
+            raise ValueError("occupancy needs at least one calibration")
         #: How a refusal names each calibration: as the editor's rows name
-        #: it (claim_names) when it has a file.
-        filed = claim_names([{"path": "" if reading.path is None else str(reading.path)}
-                             for reading in readings])
+        #: it (claim_names, which reads the parked files too) when it has a file.
+        filed = claim_names([{"path": "" if path is None else str(path)}
+                             for path in (*(reading.path for reading in readings), *self.parked)])
         self._names = tuple(
             filed[index] if reading.path is not None
             else "the calibration" if len(readings) == 1
             else f"calibration {index + 1}"
             for index, reading in enumerate(readings)
         )
+        check_claims(
+            (*(reading.frames for reading in readings), *((),) * len(self.parked)),
+            (*self._names, *filed[len(readings):]),
+            what="calibration",
+        )
+        self.readings = readings
         paths = [reading.path for reading in readings]
         repeated = sorted({name for name, path in zip(self._names, paths)
                            if path is not None and paths.count(path) > 1})
         if repeated:
             raise ValueError(f"{repeated[0]} is listed twice: give it every frame it reads in one row")
-        check_claims(tuple(reading.frames for reading in readings), self._names)
         first = readings[0].calibration
         for name, reading in zip(self._names, readings):
             _require_calibration(reading.calibration, name)
@@ -537,7 +555,8 @@ class OccupancyProcessor:
             "parameters": {
                 "frames_signal": self.source_signal or source.name,
                 # What was asked for beside what it came to: the claims
-                # follow the frame count, so the record says both.
+                # follow the frame count, so the record says both.  A
+                # parked file is recorded as kept, reading nothing.
                 "calibrations": [
                     {
                         "path": None if reading.path is None else str(reading.path),
@@ -547,6 +566,9 @@ class OccupancyProcessor:
                         ],
                     }
                     for index, reading in enumerate(self.readings)
+                ] + [
+                    {"path": None if path is None else str(path), "frames": [], "read_frames": []}
+                    for path in self.parked
                 ],
                 "model_kind": self._model_kind.value,
             },

@@ -67,8 +67,10 @@ class LogicDraftFinalization:
     device_keys: Mapping[str, str]
     devices: Mapping[str, object]
     #: The resolved artifact per input.  A frame-claims input's is a tuple of
-    #: ``FrameClaim``, one per row, whose value is None where the row's file
-    #: did not resolve -- and then an issue says why.
+    #: ``FrameClaim``, one per row: its value is the ``ResolvedArtifact``,
+    #: whose own value is the error where the file did not decode, or None
+    #: for a row with no file.  A row that reads frames and has no usable
+    #: file is an issue; a row reading no frame is kept either way.
     artifacts: Mapping[str, object]
     resources: Mapping[str, object]
     #: ``{field name: why not}`` for settings this draft's bound devices
@@ -202,7 +204,8 @@ def task_input_summary(
             "contract_id": str(spec.contract_id),
             **(
                 {"claims": [
-                    {"path": str(claim.value.path), "frames": list(claim.frames)}
+                    {"path": None if claim.value is None else str(claim.value.path),
+                     "frames": list(claim.frames)}
                     for claim in finalization.artifacts[spec.name]
                 ]}
                 if spec.frame_claims
@@ -543,10 +546,15 @@ def finalize_logic_draft(
     decoded: dict[tuple[str, Path], ResolvedArtifact] = {}
     for held in () if previous is None else previous.artifacts.values():
         for item in (claim.value for claim in held) if isinstance(held, tuple) else (held,):
-            if item is not None:
+            # A file that did not decode is tried again: it may be back.
+            if item is not None and not isinstance(item.value, Exception):
                 decoded[(item.contract_id, Path(item.path))] = item
 
-    def resolve(spec: Any, text: str) -> ResolvedArtifact | None:
+    def resolve(spec: Any, text: str) -> ResolvedArtifact:
+        """The file ``text`` names, decoded; one that does not decode is
+        answered with the error as its value, and the caller says whether
+        that refuses the draft."""
+
         selected_path = Path(text).expanduser()
         if not selected_path.is_absolute():
             selected_path = data_root / selected_path
@@ -557,8 +565,7 @@ def finalize_logic_draft(
             try:
                 resolved = spec.codec.resolve(selected_path)
             except Exception as error:
-                issues.append(f"{spec.contract_id} artifact “{text}” is invalid: {error}")
-                return None
+                return ResolvedArtifact(selected_path, spec.codec.contract_id, error)
             decoded[cache_key] = resolved
         return resolved
 
@@ -581,7 +588,9 @@ def finalize_logic_draft(
                 issues.append(f"{descriptor.api_name} needs artifact input {spec.name}")
             continue
         resolved = resolve(spec, text)
-        if resolved is not None:
+        if isinstance(resolved.value, Exception):
+            issues.append(_invalid_artifact(spec, text, resolved.value))
+        else:
             artifacts[spec.name] = resolved
 
     return LogicDraftFinalization(
@@ -598,6 +607,12 @@ def finalize_logic_draft(
     )
 
 
+def _invalid_artifact(spec: Any, text: str, error: Exception) -> str:
+    """Why the file a draft names for an artifact input cannot be used."""
+
+    return f"{spec.contract_id} artifact “{text}” is invalid: {error}"
+
+
 def _resolve_frame_claims(
     descriptor: Any,
     spec: Any,
@@ -611,10 +626,15 @@ def _resolve_frame_claims(
     The claims are checked as far as what is known allows: among themselves
     always, against the source's cycle once its frame count is known.  The
     processor makes the same check against the frames that actually arrive.
-    None only when the value is not rows of claims at all, or has none.
+    A row reading no frame is parked: kept with whatever its file is, and
+    refused for nothing -- not a missing or unreadable file, not being the
+    same file as a row that reads.  None only when the value is not rows of
+    claims at all, or has none.
     """
 
-    from zlc_atom.nodes import FrameClaim, check_claims, claim_names, frame_claim_entries, frame_problems
+    from zlc_atom.nodes import (
+        FrameClaim, claim_names, claim_problems, frame_claim_entries, frame_problems, parked_entries,
+    )
 
     try:
         entries = frame_claim_entries(raw)
@@ -626,29 +646,29 @@ def _resolve_frame_claims(
             issues.append(f"{spec.label} must have at least one file")
         return None
     names = claim_names(entries)
-    resolved_rows = []
-    for name, entry in zip(names, entries):
-        if entry["path"]:
-            resolved_rows.append(resolve(spec, entry["path"]))
-        else:
-            issues.append(f"{spec.label} {name} has no file yet")
-            resolved_rows.append(None)
-    paths = [None if row is None else Path(row.path) for row in resolved_rows]
+    frames = tuple(entry["frames"] for entry in entries)
+    parked = parked_entries(frames)
+    rows = []
+    for index, (name, entry) in enumerate(zip(names, entries)):
+        row = resolve(spec, entry["path"]) if entry["path"] else None
+        if index not in parked:
+            if row is None:
+                issues.append(f"{spec.label} {name} has no file yet")
+            elif isinstance(row.value, Exception):
+                issues.append(_invalid_artifact(spec, entry["path"], row.value))
+        rows.append(row)
+    # One file reading frames in two rows; a parked copy reads nothing.
+    paths = [None if row is None or index in parked else Path(row.path)
+             for index, row in enumerate(rows)]
     repeated = sorted({name for name, path in zip(names, paths)
                        if path is not None and paths.count(path) > 1})
     if repeated:
         issues.append(f"{repeated[0]} is listed twice: give it every frame it reads in one row")
-    frames = tuple(entry["frames"] for entry in entries)
-    try:
-        check_claims(frames, names)
-    except ValueError as error:
-        issues.append(str(error))
-    else:
-        if source_frames is not None:
-            issues.extend(frame_problems(frames, source_frames, names, what="file"))
-    return tuple(
-        FrameClaim(row, entry["frames"]) for row, entry in zip(resolved_rows, entries)
-    )
+    problems = claim_problems(frames, names, what="file")
+    issues.extend(problems)
+    if not problems and source_frames is not None:
+        issues.extend(frame_problems(frames, source_frames, names, what="file"))
+    return tuple(FrameClaim(row, entry["frames"]) for row, entry in zip(rows, entries))
 
 
 def _resolve_workspace_resources(

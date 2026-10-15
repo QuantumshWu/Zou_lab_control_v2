@@ -13,6 +13,11 @@ they ARE, the frames between them by their number:
   (the numbering the camera, Frame Survival and the Calibration task use);
 * ``"rest"``, every frame no entry names.
 
+An entry claiming no frame is PARKED: it stays in the assignment, reads
+nothing and is checked against nothing (:func:`parked_entries`) -- a file
+the operator keeps at hand is not a file they must use.  Only an assignment
+in which every entry is parked is refused.
+
 So a cycle that gains or loses a frame keeps meaning what was authored: the
 ends follow the cycle, a middle number keeps its position, and a middle
 number the shorter cycle no longer has between its ends becomes ABSENT -- it
@@ -172,32 +177,58 @@ def claim_names(entries: Sequence[Mapping[str, object]]) -> tuple[str, ...]:
     return tuple(name or f"row {index + 1}" for index, name in enumerate(names))
 
 
-def check_claims(
+def parked_entries(frames_by_entry: Sequence[Sequence[object]]) -> tuple[int, ...]:
+    """The entries claiming no frame: kept where they were written, reading nothing."""
+
+    return tuple(entry for entry, frames in enumerate(frames_by_entry) if not frames)
+
+
+def claim_problems(
     frames_by_entry: Sequence[Sequence[object]],
     names: Sequence[str],
-) -> tuple[tuple[FrameToken, ...], ...]:
-    """What can be refused without knowing the frame count.
+    *,
+    what: str = "entry",
+) -> tuple[str, ...]:
+    """What can be refused without knowing the frame count, every reason at once.
 
-    Every entry claims at least one frame, and every middle number, "first",
-    "last" and "rest" belongs to at most one entry.  "first" against "last"
-    collides only in a one-frame cycle: that is :func:`frame_problems`'.
+    Every middle number, "first", "last" and "rest" belongs to at most one
+    entry, and at least one entry reads a frame.  A parked entry claims
+    nothing, so it neither collides nor hides a collision of two others.
+    "first" against "last" collides only in a one-frame cycle: that is
+    :func:`frame_problems`'.
     """
 
     if len(frames_by_entry) != len(names):
         raise ValueError("every entry needs a name")
     claims = tuple(canonical_frames(frames) for frames in frames_by_entry)
-    for name, frames in zip(names, claims):
-        if not frames:
-            raise ValueError(f"{name} reads no frame: choose its frames or remove it")
-    owners: dict[FrameToken, int] = {}
+    owners: dict[FrameToken, list[int]] = {}
     for entry, frames in enumerate(claims):
         for token in frames:
-            if token in owners:
-                what = f"frame {token}" if isinstance(token, int) else repr(token)
-                raise ValueError(
-                    f"{what} is claimed by both {names[owners[token]]} and {names[entry]}")
-            owners[token] = entry
-    return claims
+            owners.setdefault(token, []).append(entry)
+    problems = [
+        f"{f'frame {token}' if isinstance(token, int) else repr(token)} is claimed by "
+        + (f"both {names[entries[0]]} and {names[entries[1]]}" if len(entries) == 2 else
+           ", ".join(names[entry] for entry in entries[:-1]) + f" and {names[entries[-1]]}")
+        for token, entries in owners.items() if len(entries) > 1
+    ]
+    if claims and len(parked_entries(claims)) == len(claims):
+        problems.append(
+            f"no {what} reads a frame: give one the frames it reads, or let one read the rest")
+    return tuple(problems)
+
+
+def check_claims(
+    frames_by_entry: Sequence[Sequence[object]],
+    names: Sequence[str],
+    *,
+    what: str = "entry",
+) -> tuple[tuple[FrameToken, ...], ...]:
+    """The claims in their canonical form, or every :func:`claim_problems` reason."""
+
+    problems = claim_problems(frames_by_entry, names, what=what)
+    if problems:
+        raise ValueError("; ".join(problems))
+    return tuple(canonical_frames(frames) for frames in frames_by_entry)
 
 
 @dataclass(frozen=True)
@@ -325,11 +356,13 @@ __all__ = [
     "assign_frames",
     "canonical_frames",
     "check_claims",
+    "claim_problems",
     "claim_names",
     "describe_frames",
     "frame_identity",
     "frame_problems",
     "frame_token",
+    "parked_entries",
     "reach_frames",
     "resolve_frame",
 ]

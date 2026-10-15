@@ -61,8 +61,14 @@ def _build(
     selected_source = str(source_signal).strip()
     if not selected_source:
         raise ValueError("source_signal must be non-empty")
+    # A row claiming no frame is kept, not read: only its file goes on, for
+    # the run record -- whether or not that file could be decoded.
     return OccupancyProcessor(
-        tuple(_reading(claim) for claim in calibrations),
+        tuple(_reading(claim) for claim in calibrations if claim.frames),
+        parked=tuple(
+            None if claim.value is None else claim.value.path
+            for claim in calibrations if not claim.frames
+        ),
         source_signal=selected_source,
         model_kind=readout_model_kind_from_choice(authored["model_kind"]),
     )
@@ -90,8 +96,10 @@ LOGIC_NODE = LogicNodeDescriptor(
         "positive numbers for middle frames between them (a middle number the cycle no "
         "longer has between its ends is absent, never the last frame), and 'rest' (every "
         "frame no other calibration names); one calibration with ['rest'] reads every "
-        "frame. Use occupied for loading-rate plots, camera overlays or Frame Survival; "
-        "the processor follows the source and resumes when compatible data returns."
+        "frame. A calibration with frames [] is kept but not read, "
+        "and its file is not checked against the others. Use occupied for loading-rate "
+        "plots, camera overlays or Frame Survival; the processor follows the source and "
+        "resumes when compatible data returns."
     ),
     input_specs=(
         DatasetInputSpec("frames", None, "exact"),
