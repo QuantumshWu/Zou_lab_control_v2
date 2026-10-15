@@ -27,6 +27,7 @@ from types import MappingProxyType
 from typing import Any
 
 from zlc_runtime import NodeHost
+from zlc_ui.status import name_words
 
 from .device_use import DeviceClaim, DeviceLease, LogicReservation
 
@@ -248,11 +249,18 @@ def dataset_inputs(descriptor: Any, values: Mapping[str, Any] | None = None) -> 
 
 
 def source_label(spec: Any) -> str:
-    """The words a node's source chooser stands under on its Edit page --
-    the input's own name, and what a bundle input selects -- and so the
-    words a draft names it by."""
+    """The words a node's source chooser stands under on its Edit page,
+    and so the words a draft names it by.
 
-    return spec.name.replace("_", " ").title() + (" · Signal bundle" if spec.select_bundle else "")
+    A bundle input is what code reads its members through (``a.counts``),
+    so its name stands exactly as declared -- Python is case sensitive, and
+    an operator who copies "A" from the label writes a NameError.  Any
+    other input's name reads as words, like every form label beside it.
+    """
+
+    if spec.select_bundle:
+        return f"Signal bundle {spec.name}"
+    return name_words(spec.name)
 
 
 def artifact_input_specs(descriptor: Any) -> tuple[Any, ...]:

@@ -24,6 +24,7 @@ from zlc_workbench.logic import (
     device_key_options,
     finalize_logic_draft,
     make_host,
+    source_label,
 )
 
 from test_console_presenter import (  # noqa: F401 -- fixtures
@@ -55,6 +56,19 @@ def test_workbench_never_imports_a_concrete_logic_node_leaf() -> None:
                             (str(path.relative_to(root)), alias.name)
                         )
     assert not violations, violations
+
+
+def test_a_source_row_names_a_bundle_as_code_reads_it_and_an_input_as_words() -> None:
+    """A bundle input is the name code reads its members through
+    (``a.counts``): Python is case sensitive, so the label keeps it exactly
+    as declared.  Any other input reads like the form labels beside it:
+    sentence case, the lab's acronyms in capitals -- never str.title()."""
+
+    from zlc_atom.nodes import DatasetInputSpec
+
+    assert source_label(DatasetInputSpec("a", None, "exact", select_bundle=True)) == "Signal bundle a"
+    assert source_label(DatasetInputSpec("frames", None, "exact")) == "Frames"
+    assert source_label(DatasetInputSpec("roi_frame", None, "exact")) == "ROI frame"
 
 
 #: Cameras, so they answer what a camera answers: a draft's units are decided
@@ -1273,6 +1287,7 @@ def test_a_processor_adds_with_an_unresolved_source_and_no_modal(
     derived_id = presenter.add_logic("derive")
     projection = presenter.logic_editor_projection(derived_id)
     assert projection["source_bundle"] is True
+    assert projection["source_label"] == "Signal bundle a"
     bundle_members = [
         name for name in projection["source_options"]
         if name.startswith(f"@logic/{node_id}/")

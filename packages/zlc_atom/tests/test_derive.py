@@ -331,7 +331,7 @@ def test_structured_outputs_type_exactly_as_they_evaluate() -> None:
         ({"name": "x", "value": "counts", "at": "1"}, "value",
          "no frame '1'; frame labels: frame 0, frame 1, frame 2"),
         ({"name": "x", "value": "counts", "at": "frame 1", "where": "occupied"}, "where",
-         "frame is only on the mask"),
+         "frame is only on the mask; pin the mask at one frame"),
         ({"name": "x", "value": "counts", "at": "frame 1", "op": "==", "with": "occupied", "with_at": "frame 1"},
          "combine", "do not mix with numbers"),
         ({"name": "x", "value": "counts", "at": "frame 1", "statistic": "mean", "over": "Site"},
@@ -346,6 +346,35 @@ def test_structured_outputs_type_exactly_as_they_evaluate() -> None:
         (answer, *_rest) = typed_outputs((row, {"name": "later", "value": "counts"}), schemas)
         error = answer["error"]
         assert (error.output, error.stage) == (row["name"], stage) and message in error.detail, error
+
+
+def test_a_mask_that_does_not_fit_is_told_in_the_words_of_where_it_was_written() -> None:
+    """A where line has a mask and its ``at``, no ``.sel``: its misfit names
+    the line's own control -- pin the mask at one frame -- when the mask's
+    frames are what the value lacks, and the mask itself otherwise.  Typed
+    and evaluated, the line says the same.  Code selects the mask down in
+    code, so only code is told about .sel."""
+    values = np.arange(24.0).reshape(2, 3, 4)
+    outputs = {"counts": _operand(values), "occupied": _operand(values % 3 != 0, "1")}
+    schemas = {name: value.schema for name, value in outputs.items()}
+    misfit = "the mask does not fit the value: "
+    unpinned = {"name": "bright", "value": "counts", "at": "frame 1", "where": "occupied"}
+    total = {"name": "total", "value": "counts", "at": "frame 1", "statistic": "sum", "over": "site"}
+    per_site = {"name": "kept", "value": "total", "where": "occupied", "where_at": "frame 1"}
+    for rows, detail in (
+        ((unpinned,), misfit + "frame is only on the mask; pin the mask at one frame"),
+        # Pinned, the mask still has sites the per-shot total has not.
+        ((total, per_site), misfit + "site is only on the mask; choose another mask"),
+    ):
+        error = typed_outputs(rows, schemas)[-1]["error"]
+        assert (error.stage, error.detail) == ("where", detail)
+        with pytest.raises(DeriveError) as evaluated:
+            execute(compiled(rows), outputs)
+        assert (evaluated.value.stage, evaluated.value.detail) == ("where", detail)
+    with pytest.raises(DeriveError) as coded:
+        _one("a.counts.isel(frame=1).where(a.occupied)", outputs)
+    assert coded.value.detail.endswith(
+        "frame is only on the mask; select the mask down with .sel or .isel first")
 
 
 def test_processor_publishes_current_estimates_and_the_exact_program_provenance() -> None:
@@ -549,6 +578,58 @@ def test_a_line_names_only_what_has_a_choice_after_it_and_code_notes_start_at_th
         # The example and the error, shown in turn, stand at the same x.
         assert {note.contentsMargins().left() for note in (code.example, status, code.error)} == {
             status.contentsMargins().left()}
+    finally:
+        editor.close()
+        editor.deleteLater()
+        app.processEvents()
+
+
+def test_the_inputs_and_every_operand_read_down_the_editors_control_column() -> None:
+    """One reading column: the editor's label column ends where a card's
+    operands begin, so the bundle combo -- a control a row gap past the
+    column, as the Edit page lays its rows -- the Inputs' names and every
+    operand and result under them stand on one x.  The column the editor
+    asks for is the same with no card as with some, and a wider one (a
+    longer label elsewhere on the page) widens the names, not the gap."""
+    from PyQt5 import QtCore
+
+    from zlc_ui.fluent import field_text_inset, row_gap
+    from zlc_ui.qt import ensure_qt_app
+
+    app = ensure_qt_app(["zlc-derive-editor-test"])
+    editor = LOGIC_NODE.ui_contributions[0]()
+    bundle = (("counts", _schema(2, 3, 4, np.dtype(float), "count"), None),
+              ("occupied", _schema(2, 3, 4, np.dtype(bool), "1"), None))
+    rows = ({"name": "bright", "value": "counts", "at": "frame 1"}, {"name": "c", "code": "result = a.counts"})
+
+    def project(shown):
+        editor.update_projection({"form_values": {"outputs": shown}, "input_bundle": bundle})
+        for _ in range(3):
+            app.processEvents()
+        return editor._cards
+
+    def x(widget):
+        return widget.mapTo(editor, QtCore.QPoint()).x()
+
+    editor.resize(1200, 600)
+    editor.show()
+    try:
+        project(())
+        floor = editor.label_width_floor()
+        project(rows)
+        assert editor.label_width_floor() == floor, "the column stays put as cards come"
+        names = []
+        for width in (floor, floor + 40):
+            editor.set_label_width(width)
+            card, _code = project(rows)
+            control = width + row_gap()
+            assert x(card.value) == control
+            assert x(editor.inputs_title) + editor.inputs_title.width() + row_gap() == control
+            member = editor._input_rows[0][0]
+            assert x(member) == control + field_text_inset()
+            assert x(card.preview) + card.preview.contentsMargins().left() == control + field_text_inset()
+            names.append(card.name.width())
+        assert names[1] - names[0] == 40
     finally:
         editor.close()
         editor.deleteLater()
