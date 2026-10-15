@@ -1,4 +1,4 @@
-"""One current Dataset estimate per output, evaluated over Runtime-owned inputs."""
+"""One current Dataset estimate per published variable, evaluated over Runtime-owned inputs."""
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
@@ -7,37 +7,38 @@ from dataclasses import replace
 from zlc_data import owned_snapshot_from_arrays
 from zlc_runtime import DatasetOutputDeclaration, LiveDatasetOutput, MonitorCoverage, SignalValue
 
-from .expression import Operand, compact_row, compiled, execute, output_rows
+from .expression import Operand, compact_variable, evaluate, published
 
 
 def declared_outputs(rows: Sequence[Mapping[str, object]]) -> tuple[DatasetOutputDeclaration, ...]:
-    return tuple(DatasetOutputDeclaration(row["name"], f"derive.{row['name']}",
-                                          index_by_source=True)
-                 for row in output_rows(rows))
+    """One signal per published variable, in card order; raises a name problem."""
+
+    return tuple(DatasetOutputDeclaration(name, f"derive.{name}", index_by_source=True)
+                 for name in published(rows))
 
 
 class DeriveProcessor:
     """Numerical code owns no input history, placement table or parallel schema.
 
-    Each publication of the bound bundle is one shot: every output is
-    evaluated over that publication's members, in row order.
+    Each publication of the bound bundle is evaluated once: the LIVE
+    variables over that publication's members, in dependency order, and
+    each published variable is a complete current estimate.
     """
 
-    def __init__(self, *, outputs, primary_output: str, input_outputs: Sequence[str]):
-        self._programs = compiled(outputs)
-        self.outputs = tuple(compact_row(row) for row, _program in self._programs)
+    def __init__(self, *, variables, primary_output: str, input_outputs: Sequence[str]):
+        self._variables = tuple(variables)
         self.primary_output = str(primary_output)
         names = tuple(input_outputs)
         if self.primary_output not in names:
             raise ValueError("the subscription anchor must belong to the input bundle")
         self.dataset_input_siblings = tuple(name for name in names if name != self.primary_output)
-        self.dataset_output_declarations = declared_outputs(self.outputs)
+        self.dataset_output_declarations = declared_outputs(self._variables)
 
     def evaluate(self, source: SignalValue):
-        return self.evaluate_inputs({"a": source})
+        return self.evaluate_inputs({"bundle": source})
 
     def evaluate_inputs(self, inputs: Mapping[str, SignalValue]):
-        primary = inputs.get("a")
+        primary = inputs.get("bundle")
         if not isinstance(primary, SignalValue):
             raise TypeError("derive needs its bound input bundle")
         by_output = {self.primary_output: primary}
@@ -46,7 +47,7 @@ class DeriveProcessor:
             if not isinstance(value, SignalValue):
                 raise RuntimeError(f"input publication lost {name!r}")
             by_output[name] = value
-        results = execute(self._programs, {
+        results = evaluate(self._variables, {
             name: Operand(value.schema, value.snapshot.materialize().block.values, value.snapshot.expanded_validity())
             for name, value in by_output.items()
         })
@@ -71,13 +72,16 @@ class DeriveProcessor:
         return outputs
 
     def describe_run(self, inputs: Mapping[str, SignalValue]) -> dict[str, object]:
-        primary = inputs["a"]
+        """Every variable as written -- internal and parked ones too -- and
+        which signal fed each input name."""
+
+        primary = inputs["bundle"]
         return {
             "parameters": {
-                "outputs": self.outputs,
+                "variables": tuple(compact_variable(row) for row in self._variables),
                 "source_signal": primary.name,
                 "inputs": {
-                    self.primary_output if name == "a" else name: value.name
+                    self.primary_output if name == "bundle" else name: value.name
                     for name, value in inputs.items()
                 },
             },

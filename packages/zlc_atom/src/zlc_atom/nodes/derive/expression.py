@@ -1,94 +1,125 @@
-"""Derive's one engine: outputs over existing three-domain Dataset values.
+"""Derive's one engine: variables over existing three-domain Dataset values.
 
-An output row is either STRUCTURED -- a value pinned at one readout event,
-then optionally masked, combined and reduced, always in that order -- or
-CODE, ordinary Python over ``a.<member>``.  Both run the same
-:class:`Operand` operations.  Every rule an operation applies to a
-Dataset's axes, dtype, unit and validity is a plan function that reads
-schemas only: ``Operand`` applies a plan to arrays, and
-:func:`typed_outputs` applies the same plans to the source schemas alone,
-so the editor's preview and Start's admission are the evaluation's own
-answer before any data exists.  NumPy does the math.
+A draft is a list of VARIABLES.  Each is a formula -- its terms, one per
+line: an input member or another variable, optionally picked at labels of
+one of its axes, or a number, or true/false -- joined by operators of four
+kinds (arithmetic, comparison, logic, where) under one precedence, then
+optionally reduced by a statistic over named axes.  A variable with
+``publish`` on is a signal; one with it off is an internal helper that
+other variables read.  Only the published variables and what they read
+(the LIVE closure) are evaluated; a helper nothing published reads is
+PARKED -- typed for the editor, never evaluated, never blocking Start.
+
+Every rule an operation applies to a Dataset's axes, dtype, unit and
+validity is a plan that reads schemas only.  Evaluation applies each plan
+to arrays (:class:`Operand`) and :func:`typed_variables` applies the same
+plans to the source's schemas alone, so the editor's preview and Start's
+admission are the evaluation's own answer before any data exists.  NumPy
+does the math; nothing here runs operator-written code.
 """
 from __future__ import annotations
 
-import ast
 import keyword
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from types import SimpleNamespace
 
 import numpy as np
-from numpy.lib.mixins import NDArrayOperatorsMixin
-from zlc_data import (
-    AxisId, DatasetSchema, DomainSpec, READOUT_EVENT, SCALAR_DOMAIN, SCAN_POINT, ValidityContract,
-    ValueSchema,
-)
+from zlc_data import DatasetSchema, DomainSpec, SCALAR_DOMAIN, ValidityContract, ValueSchema
 from zlc_data.axis import SCALAR
-from zlc_data.selection import take_indices, EmptySelection
+from zlc_data.selection import EmptySelection, take_indices
 from zlc_data.snapshot_projection import _subset_axis, _subset_mapped_domain
-from zlc_data.units import DEFAULT_UNITS
+from zlc_data.units import DEFAULT_UNITS, UnitError
 
 from zlc_atom.authoring import AuthoringChoice, AuthoringField
 
 
 class DeriveError(ValueError):
-    """One output that cannot be read, typed or evaluated: its name and stage."""
+    """One variable that cannot be read, typed or evaluated, at one stage:
+    ``name``, ``term k`` (1-based) or ``statistic``."""
 
-    def __init__(self, output: str, stage: str, detail: str):
-        super().__init__(f"{output} · {stage}: {detail}")
-        self.output, self.stage, self.detail = output, stage, detail
+    def __init__(self, variable: str, stage: str, detail: str):
+        super().__init__(f"{variable} · {stage}: {detail}")
+        self.variable, self.stage, self.detail = variable, stage, detail
 
 
-#: What a structured output does to its value, in this order.  A code output
-#: has the one stage ``code``; ``name`` is the output's own name.
-STAGES = ("name", "value", "where", "combine", "statistic", "code")
-
-#: Combine operations: the value, then this, then ``with``.
-OPERATIONS = {
-    "+": np.add, "-": np.subtract, "*": np.multiply, "/": np.true_divide,
-    "==": np.equal, "!=": np.not_equal, ">": np.greater, "<": np.less,
-    ">=": np.greater_equal, "<=": np.less_equal, "&": np.bitwise_and, "|": np.bitwise_or,
+#: spelling -> (category, precedence, label).  Precedence 1 binds loosest;
+#: every level is left-associative and there are no parentheses: a group
+#: is an internal variable.
+OPERATORS = {
+    "where": ("where", 1, "where"), "where not": ("where", 1, "where not"),
+    "or": ("logic", 2, "or"),
+    "and": ("logic", 3, "and"), "and not": ("logic", 3, "and not"),
+    "==": ("comparison", 4, "="), "!=": ("comparison", 4, "≠"), ">": ("comparison", 4, ">"),
+    "<": ("comparison", 4, "<"), ">=": ("comparison", 4, "≥"), "<=": ("comparison", 4, "≤"),
+    "+": ("arithmetic", 5, "+"), "-": ("arithmetic", 5, "−"),
+    "*": ("arithmetic", 6, "×"), "/": ("arithmetic", 6, "÷"),
 }
-_OPERATION_LABELS = {"+": "+", "-": "−", "*": "×", "/": "÷", "==": "=", "!=": "≠", ">": ">", "<": "<",
-                     ">=": "≥", "<=": "≤", "&": "and", "|": "or"}
-#: Within-shot statistics.  On booleans, as in a plot: ``sum`` is the number
-#: true, ``mean`` the fraction true; ``count`` is the number of valid
-#: samples of any dtype.
+#: The four operator kinds, each a fixed set the editor shows as one strip.
+CATEGORIES = (
+    ("arithmetic", ("+", "-", "*", "/")),
+    ("comparison", ("==", "!=", ">", "<", ">=", "<=")),
+    ("logic", ("and", "or", "and not")),
+    ("where", ("where", "where not")),
+)
+#: On booleans, as in a plot: ``sum`` is the number true, ``mean`` the
+#: fraction true; ``count`` is the number of valid samples of any dtype.
 STATISTICS = ("sum", "mean", "count", "min", "max", "std", "any", "all")
+#: The one draft-level problem that belongs to no variable.
+NO_PUBLISHED = "switch Publish on for at least one variable"
 
-#: One output, flat: the structured columns, or ``code`` alone.
-OUTPUT_COLUMNS = (
-    AuthoringField("name", "text", "Name", "", required=True, description="the published signal's name"),
-    AuthoringField("value", "text", "Value", "", description="an input member or an earlier output"),
-    AuthoringField("at", "text", "At", "",
-                   description="a label of the value's readout-event axis, e.g. 1; empty keeps every event"),
-    AuthoringField("where", "text", "Where", "",
-                   description="a boolean member or earlier output; invalidates samples where it is not where_is"),
-    AuthoringField("where_at", "text", "Where at", "", description="the mask's readout-event label"),
-    AuthoringField("where_is", "bool", "Where is", True, description="keep the samples where the mask is this"),
-    AuthoringField("op", "choice", "Combine", "", choices=(
+#: One line of a variable's formula.
+TERM_COLUMNS = (
+    AuthoringField("op", "choice", "Operator", "", choices=(
         AuthoringChoice("", "None"),
-        *(AuthoringChoice(op, label) for op, label in _OPERATION_LABELS.items()),
-    )),
-    AuthoringField("with", "text", "With", "",
-                   description="a member, an earlier output, or a number in the value's unit"),
-    AuthoringField("with_at", "text", "With at", "", description="the readout-event label of with"),
+        *(AuthoringChoice(spelling, label) for spelling, (_kind, _level, label) in OPERATORS.items()),
+    ), description="joins this term to the formula above it; the first term has none"),
+    AuthoringField("of", "text", "Of", "", description="an input member or another variable (no cycles)"),
+    AuthoringField("number", "float", "Number", None, description="a number instead of of"),
+    AuthoringField("boolean", "choice", "Boolean", "", choices=(
+        AuthoringChoice("", "None"), AuthoringChoice("true", "true"), AuthoringChoice("false", "false"),
+    ), description="true or false instead of of; only after == or !="),
+    AuthoringField("at", "text", "At", "",
+                   description="the name of one axis of of, in any domain; empty picks nothing"),
+    AuthoringField("labels", "text_tuple", "Labels", None,
+                   description="labels of that axis, as the catalog lists them: one drops the axis, "
+                               "several keep those coordinates in axis order"),
+)
+#: One variable.
+VARIABLE_COLUMNS = (
+    AuthoringField("name", "text", "Name", "", required=True,
+                   description="letters, digits and _; a published variable is the signal @logic/<node>/<name>"),
+    AuthoringField("publish", "bool", "Publish", True,
+                   description="on: published as a signal; off: an internal helper other variables read"),
+    AuthoringField("terms", "rows", "Terms", (), required=True, columns=TERM_COLUMNS,
+                   description="the formula, one row per line, in order"),
     AuthoringField("statistic", "choice", "Statistic", "", choices=(
         AuthoringChoice("", "None"), *(AuthoringChoice(name, name) for name in STATISTICS),
-    )),
-    AuthoringField("over", "text", "Over", "",
-                   description="comma-separated within-shot axis names the statistic reduces"),
-    AuthoringField("code", "text", "Code", "",
-                   description="Python over a.<member>; assign result. A code output leaves every other column empty"),
+    ), description="reduces the formula's result over the axes named in over"),
+    AuthoringField("over", "text_tuple", "Over", None,
+                   description="names of the axes the statistic reduces, in any domain"),
 )
-ROW_DEFAULTS = {column.name: column.default for column in OUTPUT_COLUMNS}
-_TEXT_COLUMNS = ("name", "value", "at", "where", "where_at", "with", "with_at", "over", "code")
-_RESERVED = ("a", "np", "result", "Operand")
-_NUMBER = re.compile(r"[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?")
+_VARIABLE_DEFAULTS = {column.name: () if column.default is None else column.default for column in VARIABLE_COLUMNS}
+_TERM_DEFAULTS = {column.name: () if column.value_type == "text_tuple" else column.default
+                  for column in TERM_COLUMNS}
+_BOOLEANS_MIX = ("booleans do not mix with numbers; compare booleans with = or ≠, "
+                 "or count them with a statistic")
 _DOMAINS = ("repeat_domain", "point_domain", "cell_domain")
 
+
+def compact_variable(row: Mapping[str, object]) -> dict[str, object]:
+    """A complete variable row with only what says something: what the
+    editor emits, Layout saves and a run records.  ``name`` and ``terms``
+    always stand; every other column only when it is not its default."""
+
+    compact = {column: value for column, value in row.items()
+               if column in ("name", "terms") or value != _VARIABLE_DEFAULTS[column]}
+    compact["terms"] = tuple({column: value for column, value in term.items() if value != _TERM_DEFAULTS[column]}
+                             for term in row["terms"])
+    return compact
+
+
+# -- schemas -----------------------------------------------------------------
 
 def _domains(schema: DatasetSchema) -> tuple[DomainSpec, DomainSpec, DomainSpec]:
     return tuple(getattr(schema, name) for name in _DOMAINS)
@@ -98,11 +129,16 @@ def _unit(schema: DatasetSchema) -> str:
     return schema.value_schema.value_unit or "1"
 
 
-def _schema(domains, dtype, unit, name=None):
+def _schema(domains, dtype, unit, name=None) -> DatasetSchema:
     cell = domains[2]
     validity = (ValidityContract.value() if cell == SCALAR_DOMAIN
                 else ValidityContract.components(*(a.axis_id for a in cell.axes)))
     return DatasetSchema(*domains, ValueSchema(validity, np.dtype(dtype), unit or "1", name=name))
+
+
+def _normal(schema: DatasetSchema) -> DatasetSchema:
+    """A member's schema as an operand carries it, while typed as while evaluated."""
+    return _schema(_domains(schema), schema.value_schema.dtype, _unit(schema), schema.value_schema.name)
 
 
 def _unit_power(unit, exponent):
@@ -115,11 +151,17 @@ def _unit_power(unit, exponent):
                     for symbol, power in sorted(powers.items()) if power) or "1"
 
 
+def _named_axes(schema: DatasetSchema) -> list:
+    """(domain index, axis) of every primary named axis, in domain order.
+    The one-value placeholder axis is never one."""
+    return [(d, axis) for d, domain in enumerate(_domains(schema)) for axis in domain.axes
+            if axis.coordinate_of is None and axis.role != SCALAR]
+
+
 def axes_text(schema: DatasetSchema) -> str:
     """``repeat 1 × Site 35``: every named axis and its size, in domain order."""
 
-    return " × ".join(f"{a.name} {a.size}" for domain in _domains(schema) for a in domain.axes
-                      if a.coordinate_of is None and a.role != SCALAR) or "one value"
+    return " × ".join(f"{axis.name} {axis.size}" for _d, axis in _named_axes(schema)) or "one value"
 
 
 def describe_schema(schema: DatasetSchema) -> str:
@@ -128,72 +170,39 @@ def describe_schema(schema: DatasetSchema) -> str:
     return f"{axes_text(schema)} · {schema.value_schema.dtype} · unit {_unit(schema)}"
 
 
-def event_labels(axis) -> tuple[str, ...]:
-    """The labels an operator pins a readout event by: its coordinate labels,
-    or its coordinates written out (``0``, ``1``, ``2``)."""
-
-    if axis.coordinate_labels is not None:
-        return tuple(axis.coordinate_labels)
-    values = (axis.coordinate_at(index) for index in range(axis.size))
-    return tuple(value if isinstance(value, str) else str(value) if isinstance(value, (int, np.integer))
-                 else f"{value:g}" for value in values)
+def _listed(labels, limit: int = 12) -> str:
+    labels = tuple(labels)
+    return ", ".join(labels) if len(labels) <= limit else f"{labels[0]}, {labels[1]}, …, {labels[-1]}"
 
 
-def readout_axis(schema: DatasetSchema):
-    """The one readout-event axis ``at`` pins, None when there is none.
-
-    Two are ambiguous: a code output selects between them by name.
-    """
-
-    axes = [a for domain in _domains(schema) for a in domain.axes
-            if a.role == READOUT_EVENT and a.coordinate_of is None]
-    if len(axes) > 1:
-        raise ValueError(f"{len(axes)} readout-event axes ({', '.join(a.name for a in axes)}); use a code output")
-    return axes[0] if axes else None
-
-
-def within_shot_axes(schema: DatasetSchema) -> tuple:
-    """The axes a structured statistic may reduce: everything inside one shot.
-
-    Repeat axes and scan points count shots; statistics over them belong
-    to a plot panel, which keeps their error bars.
-    """
-
-    return tuple(a for d, domain in enumerate(_domains(schema)) if d > 0 for a in domain.axes
-                 if a.coordinate_of is None and a.role not in (SCAN_POINT, SCALAR))
+def _axis(schema, name, what, verb):
+    """(domain index, primary axis) named ``name`` in ``what``'s schema, any
+    domain and any role.  ``verb`` is what is done to it: pick or reduce."""
+    found = [(d, axis) for d, axis in _named_axes(schema) if axis.name == name]
+    if len(found) == 1:
+        return found[0]
+    if found:
+        done = {"pick": "picked", "reduce": "reduced"}[verb]
+        raise ValueError(f"two axes of {what} are named {name}; it cannot be {done} by name")
+    for domain in _domains(schema):
+        for axis in domain.axes:
+            if axis.coordinate_of is not None and axis.name == name:
+                primary = domain.coordinate_axis(axis.axis_id).name
+                raise ValueError(f"{name} is another coordinate of {primary}; {verb} {primary}")
+    names = ", ".join(axis.name for _d, axis in _named_axes(schema)) or "none"
+    raise ValueError(f"{what} has no axis {name!r}; its axes: {names}")
 
 
 # -- plans: what each operation does to a schema --------------------------
 
-def _axis_of(schema, name):
-    text = str(name)
-    domains = _domains(schema)
-    found = [(d, a) for d, domain in enumerate(domains) for a in domain.axes
-             if text in (a.name, a.axis_id.value, f"{_DOMAINS[d].removesuffix('_domain')}:{a.axis_id.value}")]
-    if not found:
-        names = ", ".join(a.name for domain in domains for a in domain.axes) or "none"
-        raise ValueError(f"no axis {text!r}; axes: {names}")
-    if len(found) > 1:
-        raise ValueError(f"axis {text!r} is ambiguous; use its full AxisId")
-    return found[0]
+def _isel_plan(schema, d, axis, indexes, scalar):
+    """(schema keeping ``indexes`` of one primary axis, how to take its storage).
 
-
-def _isel_plan(schema, name, choice):
-    """(schema after selecting ``choice`` on one axis, how to take its storage).
-
-    A scalar index removes the named axis, never its enclosing domain.
+    ``indexes`` ascend: several keep the axis, restricted to them in axis
+    order; one (``scalar``) removes the axis and its whole coordinate
+    group, never its domain.  A Repeat/Point pick keeps the rows carrying
+    those codes; a Cell pick takes that dense dimension.
     """
-    d, axis = _axis_of(schema, name)
-    scalar = isinstance(choice, (int, np.integer)) and not isinstance(choice, bool)
-    if isinstance(choice, slice):
-        indexes = tuple(range(axis.size)[choice])
-    else:
-        raw = (choice,) if scalar else tuple(choice)
-        if any(isinstance(i, bool) or not isinstance(i, (int, np.integer)) for i in raw):
-            raise TypeError("isel indexes must be integers")
-        indexes = tuple(int(i) if int(i) >= 0 else axis.size + int(i) for i in raw)
-    if not indexes or len(set(indexes)) != len(indexes) or any(i < 0 or i >= axis.size for i in indexes):
-        raise ValueError(f"isel({name!r}) needs unique indexes within 0..{axis.size-1}")
     domains = list(_domains(schema))
     domain = domains[d]
     if d < 2:
@@ -203,7 +212,7 @@ def _isel_plan(schema, name, choice):
         rank[list(indexes)] = np.arange(len(indexes))
         rows = np.flatnonzero(rank[codes] >= 0)
         if not rows.size:
-            raise EmptySelection(f"axis {name!r} selection contains no stored rows")
+            raise EmptySelection("no stored rows")
         rows = rows[np.argsort(rank[codes[rows]], kind="stable")]
         # Selection retains the existing row mapping; no dense logical grid.
         rows = (range(int(rows[0]), int(rows[-1]) + 1)
@@ -213,8 +222,6 @@ def _isel_plan(schema, name, choice):
             kept = tuple(a for a in domain.axes if a.axis_id not in family)
             domain = DomainSpec(domain.shape, kept, tuple(tuple(domain.codes(a.axis_id)) for a in kept))
         else:
-            # The general row subset preserves source coordinate order;
-            # isel's selected axis instead follows the requested order.
             kept = tuple(_subset_axis(family[a.axis_id], indexes) if a.axis_id in family else a
                          for a in domain.axes)
             domain = DomainSpec(domain.shape, kept, tuple(
@@ -237,15 +244,15 @@ def _take(array, take):
     return result[..., None] if expand else result
 
 
-def _alignment(target, other, what="one operand"):
+def _alignment(target, other):
     """How ``other``'s storage spreads over ``target``'s geometry.
 
     None when both carry the same axes.  Otherwise every axis of ``other``
-    must be an axis of ``target`` -- the same AxisId, name and coordinates
-    -- and ``other`` repeats along the axes it lacks: a per-shot level
-    beside every site, a frame-0 value beside every frame.  No axis is
-    matched by size, position or name alone, and no Cartesian product is
-    formed; anything else is refused.
+    must be an axis of ``target`` -- the same AxisId, name, coordinates and
+    labels -- and ``other`` repeats along the axes it lacks: a per-shot
+    level beside every site, a frame-pinned verdict beside every frame.  No
+    axis is matched by size, position or name alone, and no Cartesian
+    product is formed; anything else raises ValueError.
     """
     wanted_domains, given_domains = _domains(target), _domains(other)
     if wanted_domains == given_domains:
@@ -257,9 +264,8 @@ def _alignment(target, other, what="one operand"):
             continue
         # The one-value cell domain carries a placeholder axis, not a named one.
         given_axes = () if given == SCALAR_DOMAIN else given.axes
-        extra = [a.name for a in given_axes if a not in wanted.axes]
-        if extra:
-            raise ValueError(f"{', '.join(extra)} is only on {what}")
+        if any(a not in wanted.axes for a in given_axes):
+            raise ValueError("an axis of one side is not on the other")
         if d == 2:
             positions = [wanted.axes.index(a) for a in given_axes]
             if positions != sorted(positions):
@@ -280,7 +286,7 @@ def _alignment(target, other, what="one operand"):
         try:
             steps.append(np.array([rows[tuple(code)] for code in keys(wanted)], dtype=np.int64))
         except KeyError:
-            raise ValueError("it has no value for some coordinates of the other operand") from None
+            raise ValueError("one side has no value for some coordinates of the other") from None
     return tuple(steps)
 
 
@@ -297,118 +303,194 @@ def _aligned(array, steps, shape):
     return np.broadcast_to(array, shape)
 
 
-def _where_plan(schema, condition, remedy):
-    """(schema masked by ``condition``, how the mask spreads over it).
+def _differ(left, right):
+    """Why two operands do not fit, in the words of what to change."""
+    others = {axis.axis_id: axis for _d, axis in _named_axes(right)}
+    for _d, axis in _named_axes(left):
+        other = others.get(axis.axis_id)
+        if other is not None and other != axis:
+            return (f"{axis.name} differs between the two sides ({_listed(axis.labels())} vs "
+                    f"{_listed(other.labels())}); pick the same {axis.name} values on both sides, "
+                    "or one value on one side")
+    return (f"operand axes differ ({axes_text(left)} vs {axes_text(right)}); "
+            "one side's axes must all be on the other")
 
-    ``remedy(schema, condition)`` says what to change when the mask does
-    not fit, in the words of the place the mask was written: code selects
-    it down, a where line pins it with its ``at``.
+
+def _is_boolean(item) -> bool:
+    if isinstance(item, DatasetSchema):
+        return item.value_schema.dtype.kind == "b"
+    return isinstance(item, bool)
+
+
+_UFUNCS = {"+": np.add, "-": np.subtract, "*": np.multiply, "/": np.true_divide,
+           "==": np.equal, "!=": np.not_equal, ">": np.greater, "<": np.less,
+           ">=": np.greater_equal, "<=": np.less_equal, "and": np.bitwise_and, "or": np.bitwise_or}
+
+
+def _apply(op, left, right):
+    if op == "and not":
+        return np.bitwise_and(left, np.invert(right))
+    return _UFUNCS[op](left, right)
+
+
+def _schema_of(item):
+    return item.schema if isinstance(item, Operand) else item
+
+
+def _operator(op, left, right, texts):
+    """``left op right`` by one plan: Operands while evaluating, schemas
+    while typing; either side may be a number or true/false.
+
+    Returns the result, or raises one sentence about this operator.
     """
-    if condition.value_schema.dtype.kind != "b":
-        raise TypeError("where needs a boolean Dataset condition")
-    try:
-        steps = _alignment(schema, condition, "the mask")
-    except ValueError as error:
-        raise ValueError(f"the mask does not fit the value: {error}; {remedy(schema, condition)}") from None
-    return _schema(_domains(schema), schema.value_schema.dtype, _unit(schema), schema.value_schema.name), steps
-
-
-def _code_remedy(_schema, _condition):
-    """A mask written in code is selected down in code."""
-    return "select the mask down with .sel or .isel first"
-
-
-def _line_remedy(schema, condition):
-    """A where line's own controls: its ``at`` when the mask's readout
-    events are what the value lacks, otherwise the mask it names."""
-    axis = readout_axis(condition)
-    if axis is not None and all(axis not in domain.axes for domain in _domains(schema)):
-        return f"pin the mask at one {axis.name}"
-    return "choose another mask"
-
-
-_LOGICAL = frozenset(("bitwise_and", "bitwise_or", "bitwise_xor", "invert", "logical_not",
-                      "logical_and", "logical_or", "logical_xor"))
-_COMPARE = frozenset(("equal", "not_equal", "less", "less_equal", "greater", "greater_equal"))
-
-
-def _ufunc_plan(ufunc, inputs):
-    """What one elementwise operation publishes, from its operands' schemas.
-
-    ``inputs`` holds a DatasetSchema for each Dataset operand and the scalar
-    itself otherwise.  Returns the result schema, each input's alignment
-    onto it, and the unit conversion of the second Dataset operand, if any.
-    """
-    name = ufunc.__name__
-    datasets = [index for index, item in enumerate(inputs) if isinstance(item, DatasetSchema)]
-    schemas = [inputs[index] for index in datasets]
-    booleans = [schema.value_schema.dtype.kind == "b" for schema in schemas]
-    scalars = [item for item in inputs if not isinstance(item, DatasetSchema)]
-    if name in _LOGICAL:
-        if not all(booleans) or any(not isinstance(item, (bool, np.bool_)) for item in scalars):
-            raise TypeError("& | ^ ~ need boolean operands")
-    elif any(booleans) and not (name in ("equal", "not_equal") and not scalars and all(booleans)):
-        raise TypeError("booleans do not mix with numbers; compare or join booleans with booleans, "
-                        "or count them: sum is the number true, mean the fraction true")
-    alignments = base = None
-    for candidate in schemas:
+    kind, _level, label = OPERATORS[op]
+    left_text, right_text = texts
+    if kind == "where":
+        return _masked(left, right, op == "where not", texts)
+    schemas = (_schema_of(left), _schema_of(right))
+    data = tuple(isinstance(item, DatasetSchema) for item in schemas)
+    if not any(data):
+        raise ValueError("it joins two constants; write their result as one number")
+    booleans = tuple(_is_boolean(item) for item in schemas)
+    if kind == "logic":
+        for boolean, text in zip(booleans, texts):
+            if not boolean:
+                raise TypeError(f"{label} needs booleans; {text} is a number")
+    elif any(booleans):
+        if not all(booleans) or kind == "arithmetic":
+            raise TypeError(_BOOLEANS_MIX)
+        if op not in ("==", "!="):
+            raise TypeError("booleans compare only with = and ≠")
+    if all(data):
         try:
-            alignments = tuple(_alignment(candidate, item) if isinstance(item, DatasetSchema) else None
-                               for item in inputs)
+            base, steps = schemas[0], (None, _alignment(schemas[0], schemas[1]))
         except ValueError:
-            continue
-        base = candidate
-        break
-    if base is None:
-        raise ValueError(f"operand axes differ ({' vs '.join(axes_text(s) for s in schemas)}); one operand's axes "
-                         "must contain the other's, with the same AxisIds and coordinates")
-    unit, conversion = _unit(schemas[0]), None
-    if name in _LOGICAL:
+            try:
+                base, steps = schemas[1], (_alignment(schemas[1], schemas[0]), None)
+            except ValueError:
+                raise ValueError(_differ(*schemas)) from None
+    else:
+        base, steps = schemas[data.index(True)], (None, None)
+    units = tuple(_unit(item) if isinstance(item, DatasetSchema) else None for item in schemas)
+    conversion = None
+    if kind == "logic":
         unit = "1"
-    elif name in ("add", "subtract", "maximum", "minimum") or name in _COMPARE:
-        if len(schemas) == 2 and _unit(schemas[0]) != _unit(schemas[1]):
-            conversion = (datasets[1], _unit(schemas[1]), _unit(schemas[0]))
-        unit = "1" if name in _COMPARE else unit
-    elif name in ("multiply", "divide", "true_divide"):
-        left, right = (_unit(item) if isinstance(item, DatasetSchema) else "1" for item in inputs)
-        unit = _unit_power(left + "*" + (_unit_power(right, -1) if name != "multiply" else right), 1)
-    elif name in ("power", "square", "sqrt", "reciprocal"):
-        exponent = {"square": 2, "sqrt": .5, "reciprocal": -1}.get(name)
-        if name == "power":
-            if isinstance(inputs[1], DatasetSchema):
-                raise TypeError("unitful powers require a scalar exponent")
-            exponent = float(inputs[1])
-        unit = _unit_power(unit, exponent)
-    elif name not in ("negative", "positive", "absolute", "fabs"):
-        raise TypeError(f"{name} has no automatic unit rule; use .with_values(np.{name}(x.values), unit=...)")
+    elif op in ("*", "/"):
+        # A number is a plain factor.
+        left_unit, right_unit = (unit or "1" for unit in units)
+        unit = _unit_power(left_unit + "*" + (right_unit if op == "*" else _unit_power(right_unit, -1)), 1)
+    else:
+        # + − and comparisons: the second Dataset in the first's unit, and a
+        # number in the unit of the other side.
+        if all(data) and units[0] != units[1]:
+            conversion = (units[1], units[0])
+        unit = "1" if kind == "comparison" else units[0] or units[1]
     DEFAULT_UNITS.resolve(unit)
     # The result dtype is NumPy's own answer for these operand dtypes.
-    probes = [np.ones(1, item.value_schema.dtype) if isinstance(item, DatasetSchema) else item for item in inputs]
-    if conversion is not None:
-        index, source, target = conversion
-        probes[index] = DEFAULT_UNITS.convert(probes[index], source, target)
+    probes = [np.ones(1, item.value_schema.dtype) if isinstance(item, DatasetSchema) else item for item in schemas]
+    try:
+        if conversion is not None:
+            probes[1] = DEFAULT_UNITS.convert(probes[1], *conversion)
+    except UnitError:
+        raise ValueError(f"{left_text} is in {conversion[1]} and {right_text} in {conversion[0]}; "
+                         "these units do not convert") from None
     with np.errstate(all="ignore"):
-        dtype = np.asarray(ufunc(*probes)).dtype
-    return _schema(_domains(base), dtype, unit), alignments, conversion
+        dtype = np.asarray(_apply(op, *probes)).dtype
+    schema = _schema(_domains(base), dtype, unit)
+    if not isinstance(left, Operand) and not isinstance(right, Operand):
+        return schema
+    shape = schema.physical_shape
+    arrays, valid = [], np.ones(shape, bool)
+    for item, step in zip((left, right), steps):
+        if isinstance(item, Operand):
+            arrays.append(_aligned(item.values, step, shape))
+            valid &= _aligned(item.valid, step, shape)
+        else:
+            arrays.append(item)
+    if conversion is not None:
+        arrays[1] = DEFAULT_UNITS.convert(arrays[1], *conversion)
+    with np.errstate(all="ignore"):
+        values = np.asarray(_apply(op, *arrays))
+    return Operand(schema, values, valid)
 
 
-def _reduce_plan(schema, operation, axis):
-    """(schema after one statistic over named axes, the reduction plans)."""
-    if operation not in STATISTICS:
-        raise ValueError(f"statistic must be one of {', '.join(STATISTICS)}")
-    names = (axis,) if isinstance(axis, (str, AxisId)) else tuple(axis)
-    found = [_axis_of(schema, name) for name in names]
-    source = _domains(schema)
-    primaries = {source[d].coordinate_axis(a.axis_id).axis_id for d, a in found}
-    if not found or len(primaries) != len(found):
-        raise ValueError("reduction needs unique named axes")
-    ids = {member.axis_id for d, a in found for member in source[d].coordinate_axes(a.axis_id)}
-    boolean = schema.value_schema.dtype.kind == "b"
+def _masked(value, mask, negate, texts):
+    """``value where mask``: the value's samples, valid only where the mask
+    is valid and true (false for ``where not``); geometry, values, dtype
+    and unit are the value's own.  The mask's axes must all be on the value;
+    it repeats along the ones it lacks."""
+    left, right = _schema_of(value), _schema_of(mask)
+    value_text, mask_text = texts
+    if not isinstance(left, DatasetSchema):
+        raise ValueError(f"where keeps samples of a value with axes; {value_text} is a number")
+    if not isinstance(right, DatasetSchema) or not _is_boolean(right):
+        raise TypeError(f"where needs a boolean mask; {mask_text} is a number")
+    try:
+        steps = _alignment(left, right)
+    except ValueError:
+        held = {axis.axis_id for domain in _domains(left) for axis in domain.axes}
+        extra = next((axis for _d, axis in _named_axes(right) if axis.axis_id not in held), None)
+        if extra is None:
+            raise ValueError(_differ(left, right)) from None
+        raise ValueError(f"the mask has {extra.name}, which {value_text} does not; "
+                         f"pick one {extra.name} value of the mask") from None
+    schema = _schema(_domains(left), left.value_schema.dtype, _unit(left), left.value_schema.name)
+    if not isinstance(value, Operand):
+        return schema
+    keep = _aligned(mask.values, steps, value.shape)
+    keep = (~keep if negate else keep) & _aligned(mask.valid, steps, value.shape)
+    return Operand(schema, value.values, value.valid & keep)
+
+
+def _pick(item, term, evaluating):
+    """``item`` at the term's labels of its axis ``at``: one label removes
+    the axis, several keep it restricted to them, in axis order."""
+    schema = _schema_of(item)
+    what = term["of"]
+    d, axis = _axis(schema, term["at"], what, "pick")
+    known = axis.labels()
+    positions = {label: index for index, label in enumerate(known)}
+    if len(positions) != len(known):
+        raise ValueError(f"{axis.name} labels repeat; it cannot be picked by label")
+    labels = term["labels"]
+    twice = next((label for index, label in enumerate(labels) if label in labels[:index]), None)
+    if twice is not None:
+        raise ValueError(f"{axis.name} {twice!r} is chosen twice")
+    missing = next((label for label in labels if label not in positions), None)
+    if missing is not None:
+        if evaluating and d < 2:
+            # Typing read the whole run's geometry; this one event of it
+            # does not carry every scan point or shot.
+            raise ValueError(f"this publication carries no {axis.name} {missing!r}; "
+                             f"{axis.name} labels here: {_listed(known)}")
+        raise ValueError(f"{what} has no {axis.name} {missing!r}; {axis.name} labels: {_listed(known)}")
+    try:
+        picked, take = _isel_plan(schema, d, axis, tuple(sorted(positions[label] for label in labels)),
+                                  len(labels) == 1)
+    except EmptySelection:
+        where = "this publication carries" if evaluating else f"{what} stores"
+        raise ValueError(f"{where} no row at {axis.name} {labels[0]!r}") from None
+    if not isinstance(item, Operand):
+        return picked
+    return Operand(picked, _take(item.values, take), _take(item.valid, take))
+
+
+def _reduce_plan(schema, operation, names):
+    """(schema after one statistic over named primary axes, the reduction plans)."""
+    found = []
+    for name in names:
+        d, axis = _axis(schema, name, "the value", "reduce")
+        if any(axis.axis_id == other.axis_id for _d, other in found):
+            raise ValueError(f"{axis.name} is chosen twice")
+        found.append((d, axis))
+    boolean = _is_boolean(schema)
     if operation in ("all", "any") and not boolean:
-        raise TypeError(f"{operation} needs boolean data")
+        raise TypeError(f"{operation} needs booleans")
     if operation in ("min", "max", "std") and boolean:
-        raise TypeError(f"{operation} needs numbers; for booleans use sum (number true), "
-                        "mean (fraction true), any or all")
+        raise TypeError(f"{operation} needs numbers; for booleans use sum, mean, count, any or all")
+    source = _domains(schema)
+    # Alternate coordinates reduce with their primary.
+    ids = {member.axis_id for d, axis in found for member in source[d].coordinate_axes(axis.axis_id)}
     domains = list(source)
     # Sums/counts pass through all domains before division: averaging group
     # averages would weight partially valid groups incorrectly.
@@ -445,24 +527,66 @@ def _reduce_plan(schema, operation, axis):
     return _schema(domains, dtype, unit), tuple(plans)
 
 
+def _statistic(item, operation, names):
+    """``item`` reduced by one statistic over named axes, in any domain.  A
+    group is valid when it has at least one valid sample."""
+    schema, plans = _reduce_plan(_schema_of(item), operation, names)
+    if not isinstance(item, Operand):
+        return schema
+    count = _apply_reduction_plans(item.valid, plans, "count")
+    valid = count > 0
+    if operation == "count":
+        values = count
+    elif operation in ("all", "any"):
+        values = _apply_reduction_plans(np.where(item.valid, item.values, operation == "all"), plans, operation)
+    elif operation == "std":
+        # Anchor every output bucket to one of its own stored samples.
+        # Both passes then operate on small local deltas, so constant data
+        # stays exactly constant and real sub-baseline spread survives.
+        flat_indexes = np.arange(item.values.size, dtype=np.int64).reshape(item.shape)
+        flat_indexes = np.where(item.valid, flat_indexes, item.values.size)
+        first = _apply_reduction_plans(flat_indexes, plans, "min")
+        anchors = np.zeros(count.shape, dtype=np.float64)
+        anchors[valid] = item.values.reshape(-1)[first[valid]]
+        centered = np.zeros(item.shape, dtype=np.float64)
+        np.subtract(item.values, _expand_reduction_plans(anchors, plans), out=centered,
+                    where=item.valid, dtype=np.float64)
+        local_mean = np.divide(_apply_reduction_plans(centered, plans, "sum"), count,
+                               out=np.zeros(count.shape, dtype=np.float64), where=valid)
+        centered -= _expand_reduction_plans(local_mean, plans)
+        np.copyto(centered, 0.0, where=~item.valid)
+        spread = _apply_reduction_plans(np.square(centered), plans, "sum")
+        values = np.sqrt(np.divide(spread, count, out=np.full(count.shape, np.nan, dtype=np.float64),
+                                   where=valid))
+    elif item.values.dtype.kind == "b":
+        # The number true, or the fraction true of the valid samples.
+        true = _apply_reduction_plans(item.valid & item.values, plans, "count")
+        values = true if operation == "sum" else np.divide(
+            true, count, out=np.full(count.shape, np.nan), where=valid)
+    else:
+        fill = {"min": np.inf, "max": -np.inf}.get(operation, 0.0)
+        total = np.full(item.shape, fill, dtype=np.float64)
+        np.copyto(total, item.values, where=item.valid)
+        values = _apply_reduction_plans(total, plans, "sum" if operation == "mean" else operation)
+        if operation == "mean":
+            values = np.divide(values, count, out=np.full(values.shape, np.nan), where=valid)
+    return Operand(schema, np.asarray(values).astype(schema.value_schema.dtype, copy=False), valid)
+
+
 @dataclass(frozen=True, eq=False)
-class Operand(NDArrayOperatorsMixin):
-    """Read-only numeric views with the complete, authoritative Dataset schema."""
+class Operand:
+    """One Dataset value while evaluating: its complete schema, read-only
+    values and validity.  A non-finite float is invalid."""
 
     schema: DatasetSchema
     values: np.ndarray
     valid: np.ndarray | None = None
 
     def __post_init__(self):
-        if not isinstance(self.schema, DatasetSchema):
-            raise TypeError("an operand needs a complete DatasetSchema")
         values = np.asarray(self.values)
         if values.shape != self.schema.physical_shape or values.dtype.kind not in "biuf":
             raise ValueError("numeric values must match the three-domain physical shape")
-        valid = np.asarray(True if self.valid is None else self.valid)
-        if valid.dtype != np.dtype(bool):
-            raise TypeError("validity must be boolean")
-        valid = np.broadcast_to(valid, values.shape)
+        valid = np.broadcast_to(np.asarray(True if self.valid is None else self.valid, dtype=bool), values.shape)
         # Only a float can hold a value that is not a number; an integer
         # frame or a boolean mask is not scanned pixel by pixel to learn so.
         if values.dtype.kind == "f":
@@ -473,149 +597,12 @@ class Operand(NDArrayOperatorsMixin):
         object.__setattr__(self, "values", values)
         object.__setattr__(self, "valid", valid)
         object.__setattr__(self, "schema", _schema(
-            self.domains, values.dtype, self.unit, self.schema.value_schema.name,
+            _domains(self.schema), values.dtype, _unit(self.schema), self.schema.value_schema.name,
         ))
 
     @property
-    def domains(self): return _domains(self.schema)
-    @property
-    def unit(self): return _unit(self.schema)
-    @property
-    def shape(self): return self.values.shape
-    @property
-    def dtype(self): return self.values.dtype
-    @property
-    def masked(self): return np.ma.array(self.values, mask=~self.valid, copy=False)
-
-    def __bool__(self):
-        raise ValueError("a Dataset is not one bool; use &, |, ~ or named any/all")
-
-    def with_values(self, values, *, valid=None, unit=None):
-        """Wrap same-shape NumPy results, preserving axes rather than guessing."""
-        if isinstance(values, np.ma.MaskedArray):
-            mask = ~np.ma.getmaskarray(values)
-            valid = self.valid & mask if valid is None else valid & mask
-            values = values.data
-        return Operand(_schema(self.domains, np.asarray(values).dtype, self.unit if unit is None else unit,
-                               self.schema.value_schema.name),
-                       values, self.valid if valid is None else valid)
-
-    def isel(self, indexers=None, **kwargs):
-        """Scalar indexes remove the named axis, never its enclosing domain."""
-        selected = dict(indexers or {})
-        selected.update(kwargs)
-        result = self
-        for name, choice in selected.items():
-            schema, take = _isel_plan(result.schema, name, choice)
-            result = Operand(schema, _take(result.values, take), _take(result.valid, take))
-        return result
-
-    def sel(self, coordinates=None, **kwargs):
-        """Select exact coordinate values; no implicit nearest-neighbour choice."""
-        selected = dict(coordinates or {})
-        selected.update(kwargs)
-        indexes = {}
-        for name, chosen in selected.items():
-            _, axis = _axis_of(self.schema, name)
-            scalar = not isinstance(chosen, (tuple, list, np.ndarray))
-            domain = tuple(axis.coordinate_at(i) for i in range(axis.size))
-            missing = [v for v in ((chosen,) if scalar else chosen) if v not in domain]
-            if missing:
-                raise ValueError(f"sel({name!r}): no coordinate {missing[0]!r}")
-            positions = tuple(domain.index(v) for v in ((chosen,) if scalar else chosen))
-            indexes[name] = positions[0] if scalar else positions
-        return self.isel(indexes)
-
-    def where(self, condition):
-        """Invalidate the samples where a boolean Dataset is not True.
-
-        The condition's axes must be among this value's; it repeats along
-        the ones it lacks.
-        """
-        return self._masked(condition, _code_remedy)
-
-    def _masked(self, condition, remedy):
-        """:meth:`where`, with ``remedy`` naming what to change when the
-        mask does not fit (see :func:`_where_plan`)."""
-        if not isinstance(condition, Operand):
-            raise TypeError("where needs a boolean Dataset condition")
-        schema, steps = _where_plan(self.schema, condition.schema, remedy)
-        keep = _aligned(condition.values, steps, self.shape) & _aligned(condition.valid, steps, self.shape)
-        return Operand(schema, self.values, self.valid & keep)
-
-    def _reduce(self, operation, axis, *, where=None):
-        source = self if where is None else self.where(where)
-        schema, plans = _reduce_plan(source.schema, operation, axis)
-        count = _apply_reduction_plans(source.valid, plans, "count")
-        valid = count > 0
-        if operation == "count":
-            values = count
-        elif operation in ("all", "any"):
-            values = _apply_reduction_plans(np.where(source.valid, source.values, operation == "all"),
-                                            plans, operation)
-        elif operation == "std":
-            # Anchor every output bucket to one of its own stored samples.
-            # Both passes then operate on small local deltas, so constant data
-            # stays exactly constant and real sub-baseline spread survives.
-            flat_indexes = np.arange(source.values.size, dtype=np.int64).reshape(source.shape)
-            flat_indexes = np.where(source.valid, flat_indexes, source.values.size)
-            first = _apply_reduction_plans(flat_indexes, plans, "min")
-            anchors = np.zeros(count.shape, dtype=np.float64)
-            anchors[valid] = source.values.reshape(-1)[first[valid]]
-            centered = np.zeros(source.shape, dtype=np.float64)
-            np.subtract(source.values, _expand_reduction_plans(anchors, plans), out=centered,
-                        where=source.valid, dtype=np.float64)
-            local_mean = np.divide(_apply_reduction_plans(centered, plans, "sum"), count,
-                                   out=np.zeros(count.shape, dtype=np.float64), where=valid)
-            centered -= _expand_reduction_plans(local_mean, plans)
-            np.copyto(centered, 0.0, where=~source.valid)
-            spread = _apply_reduction_plans(np.square(centered), plans, "sum")
-            values = np.sqrt(np.divide(spread, count, out=np.full(count.shape, np.nan, dtype=np.float64),
-                                       where=valid))
-        elif source.dtype.kind == "b":
-            # The number true, or the fraction true of the valid samples.
-            true = _apply_reduction_plans(source.valid & source.values, plans, "count")
-            values = true if operation == "sum" else np.divide(
-                true, count, out=np.full(count.shape, np.nan), where=valid)
-        else:
-            fill = {"min": np.inf, "max": -np.inf}.get(operation, 0.0)
-            total = np.full(source.shape, fill, dtype=np.float64)
-            np.copyto(total, source.values, where=source.valid)
-            values = _apply_reduction_plans(total, plans, "sum" if operation == "mean" else operation)
-            if operation == "mean":
-                values = np.divide(values, count, out=np.full(values.shape, np.nan), where=valid)
-        return Operand(schema, np.asarray(values).astype(schema.value_schema.dtype, copy=False), valid)
-
-    def mean(self, axis, *, where=None): return self._reduce("mean", axis, where=where)
-    def sum(self, axis, *, where=None): return self._reduce("sum", axis, where=where)
-    def count(self, axis, *, where=None): return self._reduce("count", axis, where=where)
-    def any(self, axis, *, where=None): return self._reduce("any", axis, where=where)
-    def all(self, axis, *, where=None): return self._reduce("all", axis, where=where)
-    def min(self, axis, *, where=None): return self._reduce("min", axis, where=where)
-    def max(self, axis, *, where=None): return self._reduce("max", axis, where=where)
-    def std(self, axis, *, where=None): return self._reduce("std", axis, where=where)
-
-    def __array_ufunc__(self, ufunc, method, *inputs, **kwargs):
-        if method != "__call__" or kwargs:
-            raise TypeError("use named reductions or wrap a NumPy result with with_values")
-        if any(not isinstance(x, Operand) and np.ndim(x) != 0 for x in inputs):
-            raise TypeError("array arithmetic needs a Dataset; use with_values to state its geometry")
-        schema, alignments, conversion = _ufunc_plan(
-            ufunc, tuple(x.schema if isinstance(x, Operand) else x for x in inputs))
-        shape = schema.physical_shape
-        arrays, valid = [], np.ones(shape, bool)
-        for item, steps in zip(inputs, alignments):
-            if isinstance(item, Operand):
-                arrays.append(_aligned(item.values, steps, shape))
-                valid &= _aligned(item.valid, steps, shape)
-            else:
-                arrays.append(item)
-        if conversion is not None:
-            index, source, target = conversion
-            arrays[index] = DEFAULT_UNITS.convert(arrays[index], source, target)
-        with np.errstate(all="ignore"):
-            values = np.asarray(ufunc(*arrays))
-        return Operand(schema, values, valid)
+    def shape(self):
+        return self.values.shape
 
 
 def _group_reduce(values, codes, count, axis, operation):
@@ -677,340 +664,397 @@ def _expand_reduction_plans(values, plans):
     return result
 
 
-# -- one structured output: select -> mask -> combine -> reduce ------------
-#
-# Each step takes an Operand while evaluating and a DatasetSchema while
-# typing, and both go through the same plan.
+# -- one variable: terms -> precedence tree -> fold -> statistic -------------
 
-def _schema_of(item):
-    return item.schema if isinstance(item, Operand) else item
+def _number_text(number: float) -> str:
+    text = repr(float(number))
+    return text[:-2] if text.endswith(".0") else text
 
 
-def _select(item, axis_id, index):
-    return item.isel({axis_id: index}) if isinstance(item, Operand) else _isel_plan(item, axis_id, index)[0]
+def term_text(term: Mapping[str, object]) -> str:
+    """A term as notes and messages write it: ``counts[frame 1]``,
+    ``counts[frame 1, 2]``, ``Site 1, 2, 3, 7, … (6)`` past four labels,
+    ``30`` or ``true``."""
+
+    if term["number"] is not None:
+        return _number_text(term["number"])
+    if term["boolean"]:
+        return str(term["boolean"])
+    if not term["at"]:
+        return str(term["of"])
+    labels = tuple(term["labels"])
+    shown = ", ".join(labels) if len(labels) <= 4 else f"{', '.join(labels[:4])}, … ({len(labels)})"
+    return f"{term['of']}[{term['at']} {shown}]"
 
 
-def _where(item, mask):
-    """A where line's mask: a misfit is told in the line's words."""
-    if isinstance(item, Operand):
-        return item._masked(mask, _line_remedy)
-    return _where_plan(item, mask, _line_remedy)[0]
+def _tree(terms):
+    """The terms as a tree by operator precedence, left-associative at every
+    level: an int is term k (0-based), ``(k, op, left, right)`` the operator
+    term k introduced.  Pure; needs every later term's ``op``."""
+
+    def build(low, high):
+        split = None
+        for k in range(low + 1, high):
+            if split is None or OPERATORS[terms[k]["op"]][1] <= OPERATORS[terms[split]["op"]][1]:
+                split = k
+        if split is None:
+            return low
+        return (split, terms[split]["op"], build(low, split), build(split, high))
+
+    return build(0, len(terms))
 
 
-def _invert(mask):
-    return ~mask if isinstance(mask, Operand) else _ufunc_plan(np.invert, (mask,))[0]
+def _nodes(node):
+    if isinstance(node, tuple):
+        yield node
+        yield from _nodes(node[2])
+        yield from _nodes(node[3])
 
 
-def _combine(op, item, other):
-    if op not in OPERATIONS:
-        raise ValueError(f"op must be one of {' '.join(OPERATIONS)}")
-    ufunc = OPERATIONS[op]
-    if isinstance(item, Operand):
-        return ufunc(item, other)
-    return _ufunc_plan(ufunc, (item, _schema_of(other)))[0]
+def _text(node, terms) -> str:
+    """The formula under ``node`` as read with its grouping: an operator
+    child is parenthesized unless it is a left child of the same level."""
+    if isinstance(node, int):
+        return term_text(terms[node])
+    _k, op, left, right = node
+    level = OPERATORS[op][1]
+    left_text, right_text = _text(left, terms), _text(right, terms)
+    if isinstance(left, tuple) and OPERATORS[left[1]][1] != level:
+        left_text = f"({left_text})"
+    if isinstance(right, tuple):
+        right_text = f"({right_text})"
+    return f"{left_text} {OPERATORS[op][2]} {right_text}"
 
 
-def _statistic(item, operation, over):
-    schema = _schema_of(item)
-    if not over:
-        raise ValueError("choose the axes it reduces over")
-    inside = within_shot_axes(schema)
-    for name in over:
-        d, axis = _axis_of(schema, name)
-        if _domains(schema)[d].coordinate_axis(axis.axis_id) not in inside:
-            raise ValueError(f"{axis.name} counts shots; statistics over shots belong in a plot panel")
-    return item._reduce(operation, over) if isinstance(item, Operand) else _reduce_plan(schema, operation, over)[0]
+def _grouping(terms) -> str | None:
+    """``reads …`` when the precedence groups the formula otherwise than
+    reading it left to right: exactly when an operator is a right child."""
+    tree = _tree(terms)
+    if any(isinstance(node[3], tuple) for node in _nodes(tree)):
+        return f"reads {_text(tree, terms)}"
+    return None
 
 
-def _pin(item, label, what):
-    """``item`` at one label of its readout-event axis, which then drops."""
-    if not label:
-        return item
-    axis = readout_axis(_schema_of(item))
-    if axis is None:
-        raise ValueError(f"{what} has no readout-event axis to pin at {label!r}")
-    labels = event_labels(axis)
-    if label not in labels:
-        raise ValueError(f"{what} has no {axis.name} {label!r}; {axis.name} labels: {', '.join(labels)}")
-    return _select(item, axis.axis_id.value, labels.index(label))
+def _formula_problem(row, closing) -> DeriveError | None:
+    """The first problem of a variable's formula and statistic that needs no
+    data, or None.  ``closing`` maps a term index to the cycle it closes."""
+    name, terms = row["name"], row["terms"]
+    if not terms:
+        return DeriveError(name, "term 1", "choose what it reads")
+    for k, term in enumerate(terms):
+        given = [column for column in ("of", "number", "boolean") if term[column] not in ("", None)]
+        if not given:
+            problem = "choose what it reads"
+        elif len(given) > 1:
+            problem = "a term reads one thing: an input or a variable, a number, or true or false"
+        elif not k and term["op"]:
+            problem = "the first term takes no operator"
+        elif k and not term["op"]:
+            problem = "choose an operator"
+        elif term["boolean"] and term["op"] not in ("==", "!="):
+            problem = "true and false follow = or ≠ only"
+        elif (term["at"] or term["labels"]) and not term["of"]:
+            problem = "a number or true/false has no axis to pick"
+        elif term["at"] and not term["labels"]:
+            problem = f"choose {term['at']} values"
+        elif term["labels"] and not term["at"]:
+            problem = "choose the axis of these labels"
+        elif term["of"] == name:
+            problem = f"{name} reads itself"
+        elif k in closing:
+            problem = closing[k]
+        else:
+            continue
+        return DeriveError(name, f"term {k + 1}", problem)
+    if not any(term["of"] for term in terms):
+        return DeriveError(name, "term 1",
+                           "a formula needs an input or a variable; numbers and true/false alone have no axes")
+    for k, _op, left, _right in _nodes(_tree(terms)):
+        if (OPERATORS[terms[k]["op"]][0] == "comparison" and isinstance(left, tuple)
+                and OPERATORS[left[1]][0] == "comparison"):
+            return DeriveError(name, f"term {k + 1}",
+                               "compare once between and, or and where; join two comparisons with and")
+    if row["statistic"] and not row["over"]:
+        return DeriveError(name, "statistic", "choose the axes it reduces over")
+    if row["over"] and not row["statistic"]:
+        return DeriveError(name, "statistic", "choose the statistic")
+    return None
 
 
-def number(text: str):
-    """``with`` as a number (int when written as one), or None for a name."""
-    text = str(text).strip()
-    if not _NUMBER.fullmatch(text):
-        return None
-    return int(text) if re.fullmatch(r"[+-]?\d+", text) else float(text)
+def _value(row, read, evaluating, trace=None):
+    """One variable: its terms folded through the precedence tree, then its
+    statistic.  ``read(name)`` gives a member's or variable's value.  A
+    failure names the term of the operand or operator it came from, or the
+    statistic.  ``trace``, while typing, receives what the editor shows:
+    each term's operand and left side, the unit a number there takes, and
+    the value the statistic reduces."""
+    name, terms = row["name"], row["terms"]
 
+    def stage_error(k, error):
+        return DeriveError(name, f"term {k + 1}", str(error))
 
-def over_axes(text: str) -> tuple[str, ...]:
-    return tuple(part.strip() for part in str(text).split(",") if part.strip())
-
-
-def _structured(row, lookup, trace=None):
-    """One structured output, stage by stage; a failure names its stage."""
-    stage = "value"
-    try:
-        item = _pin(lookup(row["value"]), row["at"], row["value"])
-        stage = "where"
-        if row["where"]:
-            mask = _pin(lookup(row["where"]), row["where_at"], row["where"])
-            item = _where(item, mask if row["where_is"] else _invert(mask))
-        stage = "combine"
-        if row["op"]:
-            other = number(row["with"])
-            if other is None:
-                other = _pin(lookup(row["with"]), row["with_at"], row["with"])
-            item = _combine(row["op"], item, other)
-        stage = "statistic"
+    def fold(node):
+        if isinstance(node, int):
+            term = terms[node]
+            if term["number"] is not None:
+                return float(term["number"])
+            if term["boolean"]:
+                return term["boolean"] == "true"
+            try:
+                value = read(term["of"])
+                if trace is not None:
+                    trace["terms"][node]["operand"] = value
+                return _pick(value, term, evaluating) if term["at"] else value
+            except (ValueError, TypeError) as error:
+                raise stage_error(node, error) from None
+        k, op, left_node, right_node = node
+        left, right = fold(left_node), fold(right_node)
         if trace is not None:
-            trace["reducible"] = _schema_of(item)
-        if row["statistic"]:
-            item = _statistic(item, row["statistic"], over_axes(row["over"]))
-    except (ValueError, TypeError) as error:
-        raise DeriveError(row["name"], stage, str(error)) from None
-    return item
-
-
-def _lookup(name, members, outputs):
-    if name in outputs:
-        return outputs[name]
-    if name in members:
-        return members[name]
-    raise ValueError(f"no input or earlier output named {name!r}; inputs: {', '.join(members) or 'none'}")
-
-
-def references(row) -> tuple[tuple[str, str], ...]:
-    """(stage, name) of every member or earlier output a structured row reads."""
-    found = [("value", row["value"])]
-    if row["where"]:
-        found.append(("where", row["where"]))
-    if row["with"] and number(row["with"]) is None:
-        found.append(("combine", row["with"]))
-    return tuple((stage, name) for stage, name in found if name)
-
-
-# -- rows ------------------------------------------------------------------
-
-def complete_row(row: Mapping[str, object]) -> dict[str, object]:
-    """Every column, defaults filled and text stripped; unknown columns kept to be refused."""
-    full = {**ROW_DEFAULTS, **dict(row)}
-    for column in _TEXT_COLUMNS:
-        if isinstance(full[column], str):
-            full[column] = full[column].strip()
-    return full
-
-
-def compact_row(row: Mapping[str, object]) -> dict[str, object]:
-    """Only the columns that say something: what an editor stores and a run records."""
-    full = complete_row(row)
-    return {column: value for column, value in full.items()
-            if column == "name" or (value != ROW_DEFAULTS.get(column) and (column != "where_is" or full["where"]))}
-
-
-def _checked_row(row, earlier, later):
-    """One row as read without data: names, references and stage completeness."""
-    if not isinstance(row, Mapping):
-        raise DeriveError("output", "name", "an output is a mapping of its columns")
-    full = complete_row(row)
-    name = full["name"] if isinstance(full["name"], str) else ""
-    label = name or "output"
-    unknown = sorted(set(full) - set(ROW_DEFAULTS))
-    if unknown:
-        raise DeriveError(label, "name", f"unknown columns {unknown}")
-    if not name.isidentifier() or keyword.iskeyword(name):
-        raise DeriveError(label, "name", "a name uses letters, digits and _, and does not start with a digit")
-    if name in _RESERVED:
-        raise DeriveError(name, "name", f"{name} is reserved")
-    if name in earlier:
-        raise DeriveError(name, "name", f"another output is already named {name}")
-    if full["code"]:
-        extra = [column for column in ROW_DEFAULTS if column not in ("name", "code")
-                 and full[column] != ROW_DEFAULTS[column]]
-        if extra:
-            raise DeriveError(name, "code", f"a code output takes no {', '.join(extra)}")
+            trace["terms"][k]["left"] = left if isinstance(left, DatasetSchema) else None
+            kind = OPERATORS[op][0]
+            for child, other in ((left_node, right), (right_node, left)):
+                if isinstance(child, int) and terms[child]["number"] is not None:
+                    trace["terms"][child]["number_unit"] = (
+                        _unit(other) if kind in ("arithmetic", "comparison") and op not in ("*", "/")
+                        and isinstance(other, DatasetSchema) else None)
         try:
-            ast.parse(full["code"], mode="exec")
-        except SyntaxError as error:
-            raise DeriveError(name, "code", f"line {error.lineno}: {error.msg}") from None
-        return full
-    if not full["value"]:
-        raise DeriveError(name, "value", "choose a value, or write a code output")
-    for stage, reference in references(full):
-        if reference == name:
-            raise DeriveError(name, stage, f"{name} cannot read itself")
-        if reference in later:
-            raise DeriveError(name, stage, f"{reference} is defined below; an output reads inputs and earlier outputs")
-    if full["where_at"] and not full["where"]:
-        raise DeriveError(name, "where", "choose the mask before its at")
-    if full["op"] and not full["with"]:
-        raise DeriveError(name, "combine", "choose what to combine with")
-    if full["with"] and not full["op"]:
-        raise DeriveError(name, "combine", "choose an operation")
-    if full["op"] and full["op"] not in OPERATIONS:
-        raise DeriveError(name, "combine", f"op must be one of {' '.join(OPERATIONS)}")
-    if full["with_at"] and (not full["with"] or number(full["with"]) is not None):
-        raise DeriveError(name, "combine", "with_at pins a Dataset, not a number")
-    if full["statistic"] and full["statistic"] not in STATISTICS:
-        raise DeriveError(name, "statistic", f"statistic must be one of {', '.join(STATISTICS)}")
-    if full["statistic"] and not over_axes(full["over"]):
-        raise DeriveError(name, "statistic", "choose the axes it reduces over")
-    if full["over"] and not full["statistic"]:
-        raise DeriveError(name, "statistic", "choose a statistic")
-    return full
+            return _operator(op, left, right, (_text(left_node, terms), _text(right_node, terms)))
+        except (ValueError, TypeError) as error:
+            raise stage_error(k, error) from None
+
+    value = fold(_tree(terms))
+    if trace is not None:
+        trace["reducible"] = _schema_of(value)
+    if row["statistic"]:
+        try:
+            value = _statistic(value, row["statistic"], row["over"])
+        except (ValueError, TypeError) as error:
+            raise DeriveError(name, "statistic", str(error)) from None
+    return value
 
 
-def _row_names(rows):
-    return [str(row.get("name", "")).strip() if isinstance(row, Mapping) else "" for row in rows]
+# -- variables: names, references, liveness, order ---------------------------
+
+def _name_problems(rows, members=()) -> dict[int, DeriveError]:
+    """Every variable's name problem, published or not: a name is an identity."""
+    problems, seen = {}, set()
+    for index, row in enumerate(rows):
+        name = row["name"]
+        if not name:
+            detail = "choose a name"
+        elif not name.isidentifier():
+            detail = "a name uses letters, digits and _, and does not start with a digit"
+        elif keyword.iskeyword(name):
+            detail = f"{name} is a Python word; choose another"
+        elif name in seen:
+            detail = f"another variable is already named {name}"
+        elif name in members:
+            detail = f"{name} is an input's name; choose another"
+        else:
+            seen.add(name)
+            continue
+        seen.add(name)
+        problems[index] = DeriveError(name or f"variable {index + 1}", "name", detail)
+    return problems
 
 
-def output_rows(rows) -> tuple[dict[str, object], ...]:
-    """Every row complete and readable without data, or the first that is not."""
-    if isinstance(rows, (str, bytes, Mapping)) or not isinstance(rows, Sequence) or not rows:
-        raise DeriveError("outputs", "name", "add an output")
-    names = _row_names(rows)
-    return tuple(_checked_row(row, names[:index], names[index + 1:]) for index, row in enumerate(rows))
+def _structure(rows, members=()):
+    """What the variables' references make of them, without data.
 
-
-def typed_outputs(rows, inputs: Mapping[str, DatasetSchema] | None) -> tuple[dict[str, object], ...]:
-    """Every row's answer before Start, by the evaluation's own plans.
-
-    ``inputs`` maps member names to the schemas the next evaluation reads,
-    or is None before the source has published.  One answer per row:
-    ``schema`` (None for a code output, for anything that reads one, and
-    without inputs), ``error`` (a :class:`DeriveError` or None) and
-    ``reducible`` (what a statistic of this row would reduce).
+    ``(edges, order, closing, live)``: for each variable the (term, variable)
+    of every variable it reads (a name reads the first variable so named,
+    never a member's namesake); the dependency order, by depth-first search
+    in card order; for each variable the cycle each term of it closes; and
+    the LIVE set -- the published variables and everything they read.
     """
-    names = _row_names(rows)
-    answers, typed = [], {}
+    index = {}
+    for position, row in enumerate(rows):
+        if row["name"] not in members:
+            index.setdefault(row["name"], position)
+    edges = [tuple((k, index[term["of"]]) for k, term in enumerate(row["terms"]) if term["of"] in index)
+             for row in rows]
+    state, stack, order = [0] * len(rows), [], []
+    closing = [{} for _ in rows]
 
-    def typeable(row):
-        reads = references(row) if not row["code"] else ()
-        return inputs is not None and not row["code"] and not any(
-            name in typed and typed[name] is None for _, name in reads)
+    def visit(position):
+        state[position] = 1
+        stack.append(position)
+        for k, other in edges[position]:
+            if other == position:
+                continue
+            if state[other] == 1:
+                path = stack[stack.index(other):]
+                closing[position][k] = (f"{rows[position]['name']} reads "
+                                        + ", which reads ".join(rows[item]["name"] for item in path))
+            elif not state[other]:
+                visit(other)
+        stack.pop()
+        state[position] = 2
+        order.append(position)
 
-    for index, raw in enumerate(rows):
-        answer = {"schema": None, "error": None, "reducible": None}
-        answers.append(answer)
+    for position in range(len(rows)):
+        if not state[position]:
+            visit(position)
+    live, frontier = set(), [position for position, row in enumerate(rows) if row["publish"]]
+    while frontier:
+        position = frontier.pop()
+        if position not in live:
+            live.add(position)
+            frontier.extend(other for _k, other in edges[position])
+    return edges, order, closing, live
+
+
+def _unknown(name, members, rows) -> str:
+    variables = ", ".join(row["name"] for row in rows if row["name"]) or "none"
+    return f"no input or variable named {name!r}; inputs: {', '.join(members) or 'none'}; variables: {variables}"
+
+
+def checked_variables(rows: Sequence[Mapping[str, object]]) -> tuple[Mapping[str, object], ...]:
+    """The complete rows as read without data, or the first BLOCKING problem.
+
+    Names are checked on every variable; at least one variable must be
+    published; formulas and statistics are checked on the LIVE variables
+    only, so a parked helper's problems never block Start.
+    """
+    rows = tuple(rows)
+    for problem in _name_problems(rows).values():
+        raise problem
+    if not any(row["publish"] for row in rows):
+        raise ValueError(NO_PUBLISHED)
+    _edges, _order, closing, live = _structure(rows)
+    for position, row in enumerate(rows):
+        if position in live:
+            problem = _formula_problem(row, closing[position])
+            if problem is not None:
+                raise problem
+    return rows
+
+
+def published(rows: Sequence[Mapping[str, object]]) -> tuple[str, ...]:
+    """The names of the published variables in card order, or the first name problem."""
+    rows = tuple(rows)
+    for problem in _name_problems(rows).values():
+        raise problem
+    return tuple(row["name"] for row in rows if row["publish"])
+
+
+def typed_variables(rows: Sequence[Mapping[str, object]],
+                    inputs: Mapping[str, DatasetSchema] | None) -> tuple[dict[str, object], ...]:
+    """Every variable's answer before Start, by the evaluation's own plans.
+
+    ``inputs`` maps member names to the schemas the evaluation reads
+    (``value.canonical_schema or value.snapshot.block.schema``), or is None
+    before the source publishes.  One dict per variable, in card order:
+    ``schema`` and ``error`` (a :class:`DeriveError`), ``live``,
+    ``waits_for`` (the variable with a problem it reads), ``reads`` and
+    ``read_by`` (variable names), ``grouping`` (``reads …`` when precedence
+    groups the formula otherwise than left to right), ``reducible`` (what
+    a statistic reduces) and per term ``operand`` (schema before its pick),
+    ``left`` (schema left of its operator) and ``number_unit`` (the unit a
+    number there takes, None beside × ÷).  Typing stops at a variable's
+    first problem; a variable reading one with a problem waits.
+    """
+    rows = tuple(rows)
+    members = () if inputs is None else tuple(inputs)
+    edges, order, closing, live = _structure(rows, members)
+    names = _name_problems(rows, members)
+    answers = []
+    for position, row in enumerate(rows):
+        error = names.get(position) or _formula_problem(row, closing[position])
+        answers.append({
+            "schema": None, "error": error, "live": position in live, "waits_for": None,
+            "reads": tuple(dict.fromkeys(rows[other]["name"] for _k, other in edges[position])),
+            "read_by": tuple(reader["name"] for reader, reads in zip(rows, edges)
+                             if any(other == position for _k, other in reads)),
+            "grouping": None if error is not None else _grouping(row["terms"]),
+            "reducible": None,
+            "terms": tuple({"operand": None, "left": None, "number_unit": None} for _term in row["terms"]),
+        })
+    if inputs is None:
+        return tuple(answers)
+    schemas = {name: _normal(schema) for name, schema in inputs.items()}
+    typed = {}
+    first = {}
+    for position, row in enumerate(rows):
+        first.setdefault(row["name"], position)
+
+    def read(name):
+        if name in schemas:
+            return schemas[name]
+        if name in first:
+            return typed[first[name]]
+        raise ValueError(_unknown(name, members, rows))
+
+    for position in order:
+        answer = answers[position]
+        if answer["error"] is not None:
+            continue
+        waits = next((rows[other]["name"] for _k, other in edges[position]
+                      if answers[other]["error"] is not None or answers[other]["waits_for"] is not None), None)
+        if waits is not None:
+            answer["waits_for"] = waits
+            continue
         try:
-            row = _checked_row(raw, names[:index], names[index + 1:])
-            if inputs is not None and row["name"] in inputs:
-                raise DeriveError(row["name"], "name", f"{row['name']} is an input's name; choose another")
+            answer["schema"] = typed[position] = _value(rows[position], read, False, answer)
         except DeriveError as error:
             answer["error"] = error
-            if names[index]:
-                typed.setdefault(names[index], None)
-            if error.stage == "statistic" and isinstance(raw, Mapping):
-                # What an unfinished statistic would reduce is known without it.
-                prefix = {**complete_row(raw), "statistic": "", "over": ""}
-                if typeable(prefix):
-                    trace = {}
-                    try:
-                        _structured(prefix, lambda name: _lookup(name, inputs, typed), trace)
-                    except DeriveError:
-                        pass
-                    answer["reducible"] = trace.get("reducible")
-            continue
-        if not typeable(row):
-            typed[row["name"]] = None
-            continue
-        trace = {}
-        try:
-            answer["schema"] = _structured(row, lambda name: _lookup(name, inputs, typed), trace)
-        except DeriveError as error:
-            answer["error"] = error
-        answer["reducible"] = trace.get("reducible")
-        typed[row["name"]] = answer["schema"]
     return tuple(answers)
 
 
-def compiled(rows):
-    """(row, code program or None) for every output; code compiled once."""
-    programs = []
-    for row in output_rows(rows):
-        program = None
-        if row["code"]:
-            tree = ast.parse(row["code"], mode="exec")
-            mode = "eval" if len(tree.body) == 1 and isinstance(tree.body[0], ast.Expr) else "exec"
-            program = (compile(row["code"], f"Derive:{row['name']}", mode), mode)
-        programs.append((row, program))
-    return tuple(programs)
+def input_members(rows: Sequence[Mapping[str, object]], available: Sequence[str]) -> tuple[str, ...]:
+    """The members the LIVE variables read, in bundle order.
 
-
-def input_members(rows, available):
-    """The members the outputs read: named ones, or every one for dynamic code.
-
-    A structured output names its members; code's direct ``a.<name>``
-    reads are planned by AST, and any other use of ``a`` keeps the whole
-    bundle.  This does not interpret or restrict execution.
+    Refuses, by variable and stage, a variable named like a member and a
+    name that is neither a member nor a variable.
     """
-    requested, outputs = set(), set()
-    for row in output_rows(rows):
-        name = row["name"]
-        if name in available:
-            raise DeriveError(name, "name", f"{name} is an input's name; choose another")
-        if row["code"]:
-            tree = ast.parse(row["code"], mode="exec")
-            direct = {id(node.value) for node in ast.walk(tree)
-                      if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == "a"}
-            if any(isinstance(node, ast.Name) and node.id == "a" and id(node) not in direct for node in ast.walk(tree)):
-                return tuple(available)
-            reads = {node.attr for node in ast.walk(tree)
-                     if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == "a"}
-            missing = sorted(reads - set(available))
-            if missing:
-                raise DeriveError(name, "code", f"the bundle has no {', '.join(missing)}; it has {', '.join(available)}")
-            requested.update(reads)
-        else:
-            for stage, reference in references(row):
-                if reference in outputs:
-                    continue
-                if reference not in available:
-                    raise DeriveError(name, stage, f"no input or earlier output named {reference!r}; "
-                                                   f"inputs: {', '.join(available)}")
-                requested.add(reference)
-        outputs.add(name)
+    rows, available = tuple(rows), tuple(available)
+    for problem in _name_problems(rows, available).values():
+        raise problem
+    _edges, _order, _closing, live = _structure(rows, available)
+    variables = {row["name"] for row in rows}
+    requested = set()
+    for position in sorted(live):
+        for k, term in enumerate(rows[position]["terms"]):
+            name = term["of"]
+            if not name or name in variables:
+                continue
+            if name not in available:
+                raise DeriveError(rows[position]["name"], f"term {k + 1}", _unknown(name, available, rows))
+            requested.add(name)
     return tuple(name for name in available if name in requested)
 
 
-def execute(programs, members):
-    """Every output over one publication's members, in order."""
+def evaluate(rows: Sequence[Mapping[str, object]], members: Mapping[str, Operand]) -> dict[str, Operand]:
+    """Every LIVE variable over one publication's members, in dependency order.
+
+    The rows are a checked draft (:func:`checked_variables`) whose names
+    and reads were planned against the bundle (:func:`input_members`).
+    """
+    rows = tuple(rows)
+    _edges, order, _closing, live = _structure(rows, tuple(members))
     results = {}
-    for row, program in programs:
-        name = row["name"]
-        if name in members:
-            raise DeriveError(name, "name", f"{name} is an input's name; choose another")
-        if program is None:
-            results[name] = _structured(row, lambda reference: _lookup(reference, members, results))
-            continue
-        code, mode = program
-        environment = {"np": np, "a": SimpleNamespace(**members), "Operand": Operand, **results}
-        try:
-            if mode == "eval":
-                result = eval(code, environment)
-            else:
-                exec(code, environment)
-                result = environment.get("result")
-            if not isinstance(result, Operand):
-                raise TypeError("result needs its Dataset schema; use with_values or Operand(schema, values, valid)")
-        except (Exception, SystemExit, KeyboardInterrupt) as error:
-            raise DeriveError(name, "code", f"{type(error).__name__}: {error}") from error
-        results[name] = result
+
+    def read(name):
+        return members[name] if name in members else results[name]
+
+    for position in order:
+        if position in live:
+            row = rows[position]
+            results[row["name"]] = _value(row, read, True)
     return results
 
 
-_ERROR_TEXT = re.compile(rf"(?:^|: )([A-Za-z_][A-Za-z0-9_]*) · ({'|'.join(STAGES)}): (.*)\Z", re.S)
+_ERROR_TEXT = re.compile(r"(?:^|: )([A-Za-z_][A-Za-z0-9_]*) · (name|term [1-9][0-9]*|statistic): (.*)\Z", re.S)
 
 
 def error_stage(text: str) -> tuple[str, str, str] | None:
-    """(output, stage, detail) of a DeriveError's text inside a status line."""
+    """(variable, stage, detail) of a DeriveError's text inside a status line."""
     match = _ERROR_TEXT.search(str(text or ""))
     return None if match is None else match.groups()
 
 
 __all__ = [
-    "DeriveError", "OPERATIONS", "OUTPUT_COLUMNS", "Operand", "ROW_DEFAULTS", "STAGES", "STATISTICS",
-    "axes_text", "compact_row", "compiled", "complete_row", "describe_schema", "error_stage",
-    "event_labels", "execute", "input_members", "number", "output_rows", "over_axes", "readout_axis",
-    "references", "typed_outputs", "within_shot_axes",
+    "CATEGORIES", "DeriveError", "NO_PUBLISHED", "OPERATORS", "Operand", "STATISTICS", "TERM_COLUMNS",
+    "VARIABLE_COLUMNS", "axes_text", "checked_variables", "compact_variable", "describe_schema",
+    "error_stage", "evaluate", "input_members", "published", "term_text", "typed_variables",
 ]
