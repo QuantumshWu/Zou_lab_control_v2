@@ -769,11 +769,11 @@ def _formula_problem(row, closing) -> DeriveError | None:
     if not any(term["of"] for term in terms):
         return DeriveError(name, "term 1",
                            "a formula needs an input or a variable; numbers and true/false alone have no axes")
-    for k, _op, left, _right in _nodes(_tree(terms)):
-        if (OPERATORS[terms[k]["op"]][0] == "comparison" and isinstance(left, tuple)
-                and OPERATORS[left[1]][0] == "comparison"):
-            return DeriveError(name, f"term {k + 1}",
-                               "compare once between and, or and where; join two comparisons with and")
+    chained = [k for k, op, left, _right in _nodes(_tree(terms)) if OPERATORS[op][0] == "comparison"
+               and isinstance(left, tuple) and OPERATORS[left[1]][0] == "comparison"]
+    if chained:
+        return DeriveError(name, f"term {min(chained) + 1}",
+                           "compare once between and, or and where; join two comparisons with and")
     if row["statistic"] and not row["over"]:
         return DeriveError(name, "statistic", "choose the axes it reduces over")
     if row["over"] and not row["statistic"]:
