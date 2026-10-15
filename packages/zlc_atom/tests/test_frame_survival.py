@@ -215,6 +215,11 @@ def test_pair_overrides_keep_the_rule_and_last_identity() -> None:
     FRAME_SURVIVAL_SCHEMA.project_values({"selection": "custom", "pairs": rows})
     with pytest.raises(ValueError, match="at least one pair"):
         FRAME_SURVIVAL_SCHEMA.project_values({"selection": "custom", "pairs": ()})
+    # The value a Layout sends is named beside the label the editor shows.
+    with pytest.raises(ValueError, match=r"^Selected \(custom\) lists only the pairs it includes; "
+                                         r"remove rows marked not selected\.$"):
+        FRAME_SURVIVAL_SCHEMA.project_values({"selection": "custom", "pairs": (
+            *rows, {"start": "0", "end": "1", "selected": False})})
     FRAME_SURVIVAL_SCHEMA.project_values({"selection": "consecutive", "pairs": rows})
     built = LOGIC_NODE.build(source_signal="@logic/occupancy/occupied", selection="custom", pairs=rows)
     assert built.pairs == ((0, "last"),)

@@ -34,7 +34,7 @@ def _validate(values):
     if values["selection"] == "custom":
         _checked_pairs(tuple((start, end) for start, end, selected in overrides if selected))
         if any(not selected for _start, _end, selected in overrides):
-            raise ValueError("Selected lists only included pairs")
+            raise ValueError("Selected (custom) lists only the pairs it includes; remove rows marked not selected.")
 
 FRAME_SURVIVAL_SCHEMA = AuthoringSchema((
     AuthoringField("selection", "choice", "Published pairs", "all", required=True, choices=_SELECTIONS,
