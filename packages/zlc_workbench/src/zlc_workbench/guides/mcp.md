@@ -169,7 +169,8 @@ number true, `mean` the fraction true, `count` the valid samples.
 
 Each row also carries its `name`. Once the producer has published, a row that
 does not type against it is a draft issue `<name> · <stage>: <reason>`
-(`lab_state` logic[].issues, `logic.validate`) and Start waits for it; a member
+(`lab_state` logic[].issues, `logic.validate`) and `logic.start` is refused
+with it until the row is fixed; a member
 the producer never publishes is refused at Start in the same words, and a code
 row's failure names its row too. Do not export arrays to reconstruct Occupancy
 or Frame Survival.
@@ -447,7 +448,10 @@ generation and a genuinely failed run. Device operation pending: wait rather
 than starting a second session. Failed/unknown Start, Fire or Send: inspect the
 same generation/receipt; do not replay a partially completed batch.
 `logic.start` on a running, following or queued node is the GUI Restart: it
-retires the current generation; take the new generation from the reply.
+stops the current run and queues the replacement. The reply reads
+`status='queued'` and still carries the old `generation` (`pending.generation`
+is null); once `logic[].pending` is null, read the new `generation` from
+`lab_state(node_id=...)` before waiting on it.
 
 Draft issues name a field the way its Edit page does, not by its draft key.
 "X must be selected", where X is `lab_catalog(node_id).node.source_label`,

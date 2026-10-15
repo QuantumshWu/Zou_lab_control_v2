@@ -1504,7 +1504,14 @@ try:
     else:
         raise AssertionError('invalid programmatic exposure was accepted')
     assert flow._device_control_models['camera']['desired'] == previous_desired
-    assert flow.control_device('inspect', 'camera')['fields']['exposure']['severity'] == 'error'
+    inspected = flow.control_device('inspect', 'camera')
+    assert inspected['fields']['exposure']['severity'] == 'error'
+    # The schema an AI reads holds values, not the GUI's presentation hints.
+    schema_fields = inspected['schema']
+    assert schema_fields
+    for field in schema_fields:
+        for entry in (field, *field.get('columns', ())):
+            assert not {'segmented', 'step'} & set(entry), entry
     assert len(calls) == 2, 'invalid Desired reached the device'
     control.close(); application.processEvents()
     assert not control.is_visible()
@@ -2597,7 +2604,7 @@ async def client():
                     ("lab_screenshot", {"device_id":"camera"}, "Device Control 'camera' is not open"),
                     ("lab_close", {"scope":"editor", "device_id":"camera"}, "Device Control 'camera' is not open"),
                     ("lab_wait", {"node_id":"missing", "generation":"x", "timeout_seconds":0},
-                     "lab_wait: unknown name 'missing'; lab_state and lab_catalog list the valid names"),
+                     "unknown logic node 'missing'"),
                     ("lab_action", {"action":"panel.save", "arguments":{"panel_id":panel_id}},
                      "panel.save needs selected"),
                     ("lab_wait_for", {"tool_name":"lab_screenshot", "arguments":{}, "path":["image"],

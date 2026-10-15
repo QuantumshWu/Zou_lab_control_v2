@@ -295,7 +295,9 @@ def start_server(flow, *, host="127.0.0.1", port: int, token: str, allow_control
         if not 0 <= timeout_seconds <= 1800:
             raise ValueError("timeout_seconds must be between 0 and 1800")
         def current():
-            binding = presenter().logic[node_id]
+            binding = presenter().logic.get(node_id)
+            if binding is None:
+                raise KeyError(f"unknown logic node {node_id!r}")
             host = binding.host
             if host is None or host.generation is None or host.generation.value != generation:
                 raise ValueError("The requested generation is no longer this node's current run")
@@ -897,8 +899,9 @@ def start_server(flow, *, host="127.0.0.1", port: int, token: str, allow_control
             source_signal, device_keys, artifact_inputs. Node edits: node_id plus values,
             source_signal, device_keys, artifact_inputs (a path per input; a frame_claims input such as
             Occupancy's calibrations takes [{path, frames}] rows). Start/Stop: node_id. logic.start on a running,
-            following or queued node is the GUI Restart: it retires the current generation; take the new
-            generation from the reply. Draft issues name fields by their on-screen labels; map them back through
+            following or queued node is the GUI Restart: it stops the current run and queues the replacement; the reply
+            still carries the old generation (pending.generation null), so read the new one from lab_state once
+            pending is null. Draft issues name fields by their on-screen labels; map them back through
             lab_catalog(node_id).node.source_label and form_spec. Panel add: kind; update: panel_id,patch.
             view.monitor/view.logic take empty arguments and navigate directly, without pixel clicks.
             layout.save/load take path (workspace JSON); load restores stopped drafts. Loading over active Logic
