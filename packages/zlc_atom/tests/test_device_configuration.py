@@ -373,7 +373,7 @@ def test_a_draft_projects_without_completeness_and_init_still_refuses() -> None:
     resource = next(f for f in RIGOL_DG4000_SCHEMA.fields if f.name == "resource")
     with pytest.raises(ValueError, match=f"{resource.label} must be filled in"):
         RIGOL_DG4000_SCHEMA.project_values({})
-    with pytest.raises(ValueError, match="below its minimum"):
+    with pytest.raises(ValueError, match="must be at least 0.1 s"):
         RIGOL_DG4000_SCHEMA.draft_values({"timeout_seconds": 0.0})
     with pytest.raises(ValueError, match="frequency low must be below"):
         RIGOL_DG4000_SCHEMA.project_values(

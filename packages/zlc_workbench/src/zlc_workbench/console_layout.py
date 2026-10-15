@@ -33,6 +33,7 @@ from .logic import (
     dataset_inputs,
     device_key_options,
     draft_devices,
+    logic_draft_value,
 )
 from .panel_catalog import task_console_panel_kind
 from .panel_state import PanelState
@@ -330,8 +331,8 @@ class LoadedLayout:
     panels: tuple[PanelState, ...]
     panel_ids: tuple[str, ...]
     #: One sentence per connection or fate the document had and this board
-    #: cannot carry, and per kept row whose device or source no longer fits,
-    #: for the status strip: nothing is dropped or kept silently.
+    #: cannot carry, and per kept row whose device, source or value no longer
+    #: fits, for the status strip: nothing is dropped or kept silently.
     notes: tuple[str, ...]
 
 
@@ -352,8 +353,9 @@ def resolve_layout(
     is not using today, and the apparatus or an upstream row may have
     changed under one.  Its device and source are kept as written, said in
     ``notes``, and the row's own finalization refuses its Start until they
-    are chosen again.  Only a document that cannot name today's nodes or
-    frames is refused whole.
+    are chosen again.  A saved value its field refuses is left at the
+    field's default, said in ``notes`` too.  Only a document that cannot
+    name today's nodes or frames is refused whole.
 
     ``panel_ids`` are the identities the console minted for this load, in
     saved order.  Every ``@logic/<saved panel id>/<output>`` in the document
@@ -387,11 +389,20 @@ def resolve_layout(
             raise LayoutError(f"no logic node named {entry.api_name!r}")
         try:
             schema = descriptor.authoring_schema
-            # A Layout restores editable fields, not a runnable task. Field
-            # types/bounds still apply; cross-field completion belongs to Start.
-            values = replace(schema, validator=None).draft_values(
-                _current_authoring_values(schema.fields, entry.values)
-            )
+            saved = _current_authoring_values(schema.fields, entry.values)
+            for field in (field for field in schema.fields if field.name in saved):
+                try:
+                    logic_draft_value(field, saved[field.name])
+                except (TypeError, ValueError) as refusal:
+                    del saved[field.name]
+                    notes.append(
+                        f"logic {entry.name}: {refusal}; the row is kept with "
+                        "that field at its default"
+                    )
+            # A Layout restores editable fields, not a runnable task: no draft
+            # holds a value its field refuses, but cross-field completion
+            # belongs to Start.
+            values = replace(schema, validator=None).draft_values(saved)
             options = device_key_options(descriptor, installation=installation, values=values)
         except Exception as error:
             raise LayoutError(f"{entry.name}: {error}") from error

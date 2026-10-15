@@ -26,6 +26,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
+from zlc_atom.authoring import AuthoringField, project_field
 from zlc_runtime import NodeHost
 from zlc_ui.status import name_words
 
@@ -303,6 +304,24 @@ def artifact_input_specs(descriptor: Any) -> tuple[Any, ...]:
         for spec in getattr(descriptor, "input_specs", ())
         if isinstance(spec, ArtifactInputSpec)
     )
+
+
+def logic_draft_value(field: AuthoringField, value: object) -> object:
+    """What a logic draft keeps for ``value``, or one sentence naming ``field``, raised.
+
+    ``project_field`` refuses what the field refuses; a number, switch or
+    choice with a default is edited in a box that cannot be left blank
+    (``FormFieldProps.blank_allowed``), so it refuses None too.  A number or
+    switch is kept as its field reads it -- "5" is the 5 its box shows -- and
+    any other value as given, so a number list keeps the spelling it was
+    typed in.
+    """
+
+    projected = project_field(field, value)
+    kind = str(field.value_type)
+    if kind in ("int", "float", "bool", "choice") and projected is None and field.default is not None:
+        raise ValueError(f"{field.label} must have a value")
+    return projected if kind in ("int", "float", "bool") else value
 
 
 def device_key_options(
