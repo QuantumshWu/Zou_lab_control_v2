@@ -553,3 +553,55 @@ def test_a_line_names_only_what_has_a_choice_after_it_and_code_notes_start_at_th
         editor.close()
         editor.deleteLater()
         app.processEvents()
+
+
+def test_the_inputs_and_every_operand_read_down_the_editors_control_column() -> None:
+    """One reading column: the editor's label column ends where a card's
+    operands begin, so the bundle combo -- a control a row gap past the
+    column, as the Edit page lays its rows -- the Inputs' names and every
+    operand and result under them stand on one x.  The column the editor
+    asks for is the same with no card as with some, and a wider one (a
+    longer label elsewhere on the page) widens the names, not the gap."""
+    from PyQt5 import QtCore
+
+    from zlc_ui.fluent import field_text_inset, row_gap
+    from zlc_ui.qt import ensure_qt_app
+
+    app = ensure_qt_app(["zlc-derive-editor-test"])
+    editor = LOGIC_NODE.ui_contributions[0]()
+    bundle = (("counts", _schema(2, 3, 4, np.dtype(float), "count"), None),
+              ("occupied", _schema(2, 3, 4, np.dtype(bool), "1"), None))
+    rows = ({"name": "bright", "value": "counts", "at": "frame 1"}, {"name": "c", "code": "result = a.counts"})
+
+    def project(shown):
+        editor.update_projection({"form_values": {"outputs": shown}, "input_bundle": bundle})
+        for _ in range(3):
+            app.processEvents()
+        return editor._cards
+
+    def x(widget):
+        return widget.mapTo(editor, QtCore.QPoint()).x()
+
+    editor.resize(1200, 600)
+    editor.show()
+    try:
+        project(())
+        floor = editor.label_width_floor()
+        project(rows)
+        assert editor.label_width_floor() == floor, "the column stays put as cards come"
+        names = []
+        for width in (floor, floor + 40):
+            editor.set_label_width(width)
+            card, _code = project(rows)
+            control = width + row_gap()
+            assert x(card.value) == control
+            assert x(editor.inputs_title) + editor.inputs_title.width() + row_gap() == control
+            member = editor._input_rows[0][0]
+            assert x(member) == control + field_text_inset()
+            assert x(card.preview) + card.preview.contentsMargins().left() == control + field_text_inset()
+            names.append(card.name.width())
+        assert names[1] - names[0] == 40
+    finally:
+        editor.close()
+        editor.deleteLater()
+        app.processEvents()

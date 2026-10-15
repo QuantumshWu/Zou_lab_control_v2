@@ -9,9 +9,12 @@ Every line of every output card is a line of ONE column set: the name (or a
 stage's word) in the lead column, the operand under the operand, ``at`` under
 ``at``, the card's add commands in fixed slots and every × on one x, so a
 card reads as a row of a table rather than a sentence packed from its own
-left edge.  A problem or a result stands under its line, from the operand's
-text; a code card's example, status and error stand under its code box,
-from the code's text.  A problem reads as one sentence (``show_problem``).
+left edge.  The operand column is the editor's control column: the bundle
+combo's text, the Inputs' names and every operand stand on one x, so the
+page has one reading column.  A problem or a result stands under its line,
+from the operand's text; a code card's example, status and error stand
+under its code box, from the code's text.  A problem reads as one sentence
+(``show_problem``).
 """
 
 from __future__ import annotations
@@ -43,8 +46,9 @@ _NUMBER = "#number"
 #: takes instead of a signal, and "every frame" at an ``at``.
 _SHOWN = {_NUMBER: "number", "": "All"}
 _FOOTER = "Averages over shots, per-site probabilities and fits belong in a plot panel."
-#: The width of an output's name (design px), and so of the lead column the
-#: stage words under it share.
+#: The room an output's name gets (design px): the least the lead column --
+#: the names and the stage words under them -- is.  It is wider when the
+#: editor's label column is (:meth:`DeriveEditor.set_label_width`).
 _NAME_WIDTH = 150
 #: The columns of every card line: the name or stage word, the "=" gutter,
 #: the operand, the ``at`` pin (or a combine's number), the rest of the line,
@@ -71,6 +75,12 @@ def _labels_of(schema) -> tuple[str, ...] | None:
     except ValueError:
         return None
     return None if axis is None else event_labels(axis)
+
+
+def _equals() -> QtWidgets.QLabel:
+    """The "=" between an output's name and what it is."""
+
+    return FluentLabel("=")
 
 
 def _remove_button(parent, tooltip: str) -> FluentButton:
@@ -146,7 +156,7 @@ class _OutputCard(FluentFrame):
         self.name.setPlaceholderText("name")
         self.name.textEdited.connect(lambda text: self._edit(name=text))
         line.place("lead", self.name, fill=True)
-        line.place("gutter", FluentLabel("="))
+        line.place("gutter", _equals())
         self.value = FluentComboBox()
         self.value.activated.connect(lambda _index: self._edit(value=self.value.currentData()))
         line.place("operand", self.value, fill=True)
@@ -441,7 +451,7 @@ class _CodeCard(FluentFrame):
         self.name.setPlaceholderText("name")
         self.name.textEdited.connect(lambda text: self._edit(name=text))
         line.place("lead", self.name, fill=True)
-        line.place("gutter", FluentLabel("="))
+        line.place("gutter", _equals())
         line.place("operand", _text_word("code"))
         # A command whose list is the data's -- every member and axis name --
         # so the names wait behind it in a menu instead of lining the card.
@@ -557,8 +567,12 @@ class DeriveEditor(QtWidgets.QWidget):
         self._contexts: dict[int, Mapping[str, object]] = {}
         self._members: tuple[str, ...] = ()
         self._schemas: dict[str, object] = {}
-        #: The columns every line of every card shares.
+        #: The columns every line of every card shares.  The "=" is pinned
+        #: like the name, so where the operands stand is known before the
+        #: first card is built: the label column above is fitted to it.
         self.columns = FluentColumnSet(_COLUMNS, self)
+        self._gutter = _equals().sizeHint().width()
+        self.columns.set_width("gutter", self._gutter)
         self.columns.set_width("lead", scaled_px(_NAME_WIDTH))
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -605,10 +619,31 @@ class DeriveEditor(QtWidgets.QWidget):
 
         return (self.inputs_title.text(),)
 
+    def label_width_floor(self) -> int:
+        """The label column that leaves an output's name its room: the
+        cards' operands stand on the column's controls
+        (:meth:`set_label_width`), so the column is at least as wide as a
+        card line's name, "=" and their gaps reach."""
+
+        return self._label_width_for(scaled_px(_NAME_WIDTH))
+
     def set_label_width(self, width: int) -> None:
-        """The editor's label column, shared with the bundle row above."""
+        """The editor's label column, shared with the bundle row above.
+
+        The cards' name column takes what the label column leaves before
+        its controls, so the bundle's text, the Inputs' names and every
+        operand, result and problem under them read down one x."""
 
         self.inputs_title.setFixedWidth(int(width))
+        self.columns.set_width("lead", int(width) - self._label_width_for(0))
+
+    def _label_width_for(self, lead: int) -> int:
+        """The label column whose controls stand where the operands do when
+        the name column is ``lead`` wide: a card line runs from the card's
+        pad through the name, the "=" and their gaps to its operand, and a
+        control stands a row gap past the label column."""
+
+        return card_pad() + lead + 2 * self.columns.gap + self._gutter - row_gap()
 
     def shown_problems(self) -> dict[str, str]:
         """The draft's problems this editor states in red under the lines
