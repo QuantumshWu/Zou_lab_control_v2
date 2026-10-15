@@ -60,7 +60,9 @@ without it they return the confirmation text without opening a GUI dialog.
 ## acquisition
 
 Camera Measurement publishes complete cycles with all authored frames, pixel
-coordinates, units and validity. It does not own the experiment Pulse. Collect
+coordinates, units and validity. It does not own the experiment Pulse. A blank
+exposure or ROI field keeps the camera's current value for that field alone:
+set only the ROI fields you mean to change. Collect
 all triggers in each Pulse cycle even when interested in just one frame. For
 manual finite capture, prepare the Pulse first; Camera Start → that generation
 ready → Fire belongs in one already-decided batch, not separate model decisions.
