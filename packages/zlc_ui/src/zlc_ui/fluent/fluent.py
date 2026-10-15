@@ -7495,6 +7495,11 @@ class FluentCheckBox(QtWidgets.QCheckBox):
     -- and the ticked fill stays 2.1:1 darker than it (3.5:1 on white), so
     a read-only card still says which boxes are on.  The tick is centred on
     the box's device-pixel centre.
+
+    A label wider than the room its layout gives the box ends in an
+    ellipsis, the whole label in the tooltip, as every elided name does: a
+    port name in a narrow Period card was cut mid-letter at the card's edge.
+    The box may be laid out narrower than its words for that reason.
     """
 
     def __init__(self, text: str = "", parent=None):
@@ -7533,12 +7538,43 @@ class FluentCheckBox(QtWidgets.QCheckBox):
         self.initStyleOption(option)
         return self.style().subElementRect(QtWidgets.QStyle.SE_CheckBoxIndicator, option, self)
 
+    def minimumSizeHint(self) -> QtCore.QSize:  # noqa: N802 - Qt naming
+        """As narrow as the box and the label's first letter with an
+        ellipsis: the rest of the label elides rather than overflowing."""
+
+        hint = super().minimumSizeHint()
+        text = self.text()
+        if not text:
+            return hint
+        metrics = self.fontMetrics()
+        spare = metrics.horizontalAdvance(text) - metrics.horizontalAdvance(text[:1] + "…")
+        return QtCore.QSize(max(0, hint.width() - max(0, spare)), hint.height())
+
+    def _shown_option(self) -> QtWidgets.QStyleOptionButton:
+        """The style option as painted: the label elided to the room the box
+        leaves it, with the whole label in the tooltip while it is cut."""
+
+        option = QtWidgets.QStyleOptionButton()
+        self.initStyleOption(option)
+        text = option.text
+        if text:
+            room = self.style().subElementRect(QtWidgets.QStyle.SE_CheckBoxContents, option, self).width()
+            option.text = self.fontMetrics().elidedText(text, QtCore.Qt.ElideRight, max(0, room))
+            tip = text if option.text != text else ""
+            if self.toolTip() in ("", getattr(self, "_elision_tip", "")) and self.toolTip() != tip:
+                self.setToolTip(tip)
+            self._elision_tip = tip
+        return option
+
     def paintEvent(self, event) -> None:  # noqa: N802 - Qt naming
         # The sheet draws the box; the tick is drawn here, because a sheet
         # can only fill it.  Its shape is laid out about the box's centre
         # on a device pixel, so the tick sits in the middle of the box at
         # any ratio instead of half a pixel low.
-        super().paintEvent(event)
+        del event
+        painter = QtWidgets.QStylePainter(self)
+        painter.drawControl(QtWidgets.QStyle.CE_CheckBox, self._shown_option())
+        painter.end()
         if not self.isChecked():
             return
         box = QtCore.QRectF(self._indicator_rect())

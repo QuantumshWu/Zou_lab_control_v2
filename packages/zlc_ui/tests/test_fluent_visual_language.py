@@ -751,3 +751,30 @@ def test_parts_inside_a_field_are_centred_on_its_ink_and_frame(app, host) -> Non
                 if top <= y <= bottom]
         assert rows[0] - top == bottom - rows[-1], (height, rows[0] - top, bottom - rows[-1])
         spin.hide()
+
+
+def test_a_checkbox_label_too_wide_for_its_room_ends_in_an_ellipsis(host) -> None:
+    """A port name in a narrow card ends in '…' with the whole name in the
+    tooltip; it is never cut mid-letter at the card's edge, and a label
+    that fits keeps no tooltip."""
+
+    from PyQt5 import QtWidgets
+    from zlc_ui.fluent import FluentCheckBox
+
+    layout = QtWidgets.QVBoxLayout(host)
+    layout.setContentsMargins(0, 0, 0, 0)
+    long_box = FluentCheckBox("pgc_1D_freq_switch", host)
+    short_box = FluentCheckBox("cooling", host)
+    layout.addWidget(long_box)
+    layout.addWidget(short_box)
+    host.setFixedWidth(long_box.sizeHint().width() - 20)
+    host.show()
+    QtWidgets.QApplication.processEvents()
+    long_box.grab()
+    short_box.grab()
+    assert long_box.width() < long_box.sizeHint().width()
+    assert long_box.minimumSizeHint().width() < long_box.width()
+    assert long_box._shown_option().text.endswith("…")
+    assert long_box.toolTip() == "pgc_1D_freq_switch"
+    assert long_box.text() == "pgc_1D_freq_switch"
+    assert short_box._shown_option().text == "cooling" and short_box.toolTip() == ""
