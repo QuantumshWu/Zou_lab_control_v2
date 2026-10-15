@@ -803,7 +803,7 @@ def _delete_axis(draft: dict[str, object], axis_id: str) -> None:
     visible = _visible_axes(draft)
     draft["selected_axis"] = "" if not visible else str(visible[0].axis_id)
     draft["message"] = (
-        f"Deleted {axis.name}; kept coordinate {axis.coordinate_at(kept_index)!r}"
+        f"Removed {axis.name}; kept coordinate {axis.coordinate_at(kept_index)!r}"
     )
     _normalize_table_axes(draft)
 
@@ -3108,7 +3108,7 @@ class FigureViewerPresenter:
                 if current
                 else f"Saved older preview to {archive.name}; current data is not saved"
             )
-            draft["message_severity"] = "idle"
+            draft["message_severity"] = "idle" if current else "warning"
             self.view.set_status(
                 f"saved {archive.name} and {image.name}"
             )

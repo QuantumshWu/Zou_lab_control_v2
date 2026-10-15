@@ -814,7 +814,11 @@ def perform_action(bench, action, beat, output):
             if action.get("expect_running") and not bench.presenter.logic[identity].host.running:
                 raise AssertionError("the intended in-flight action was too late: node is already terminal")
             report_start = len(bench.reports)
-            click(getattr(editor, kind.removeprefix("logic_") + "_button"), bench.app)
+            button = getattr(editor, kind.removeprefix("logic_") + "_button")
+            click(button, bench.app)
+            if kind == "logic_remove":
+                # Removing a node takes two clicks: the first only arms.
+                click(button, bench.app)
             if "expect_report" in action:
                 wanted = str(action["expect_report"])
                 if not beat.run_until(lambda: any(wanted in text for _severity, text

@@ -138,6 +138,8 @@ class TaskConsoleView(QtWidgets.QWidget):
         # presenter (set_paused), never set by the click.  It emits the state
         # it is asking FOR, which is what makes the command reversible.
         self.pause_button = FluentButton("Pause")
+        # Its slot fits both words, so Resume moves nothing beside it.
+        fit_button_words(self.pause_button, ("Pause", "Resume"))
         self._paused = False
         # An on/off setting is a switch, even in a row of commands: a
         # checkable button there read as one more command.

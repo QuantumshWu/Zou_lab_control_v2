@@ -328,7 +328,8 @@ set_summary(text: str) -> None
 
 Pause is a toggle command: `set_paused(True)` turns its label to Resume and
 holds it down (the active face) until the presenter says the console runs
-again; the click only asks.  The header dot is the console's state, which
+again; the click only asks.  Its slot fits both words, so the flip moves
+nothing beside it.  The header dot is the console's state, which
 the handle keeps as the worst of its logic nodes': `error` while one has
 failed, `running` while one runs, `idle` otherwise.
 

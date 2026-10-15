@@ -749,6 +749,7 @@ def test_editor_files_send_busy_and_close_have_exact_phase_lifecycle(
         assert control.send() is True
         _pump(app, lambda: not control.command_active)
         assert control.status_text == "adapter write failed"
+        assert control._status.property("status_word") == "error"
         session.device_use.assert_idle()
         monkeypatch.setattr(device, "apply_phase", original_apply)
 
@@ -1742,6 +1743,7 @@ def test_the_status_poll_never_waits_behind_a_remote_apply(
             timeout=5.0,
         )
         assert "changed externally" in control._device_status.text()
+        assert control._device_status.property("status_word") == "warning"
 
         # Adopt takes the external command as the draft; with the poll
         # stopped, the reads after Send are exactly the question Send
@@ -1771,6 +1773,7 @@ def test_the_status_poll_never_waits_behind_a_remote_apply(
         assert not held.is_set()
         assert "command r2" in control._device_status.text()
         assert "changed externally" not in control._device_status.text()
+        assert control._device_status.property("status_word") == "idle"
         assert not control._device_diverged
         assert control._send.isEnabled()
         held.set()
