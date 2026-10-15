@@ -1251,9 +1251,11 @@ def frames_kept(rows: Sequence[Mapping[str, object]], axis: str | None, frames: 
     the axis keeps the picked labels in axis order -- ``first`` and ``last``
     its ends as long as the value carries it, so Last follows a frame count
     -- and one removes it; a pick of the Point domain keeps the labels its
-    rows use, one row removes it (which frames its first and last rows
-    carry is its row order, which only the schemas say: several cannot be
-    told); any other pick leaves it; an operator's sides carry the same labels
+    rows use, one row removes it (its ``first`` or ``last`` row cannot be
+    told: which frames they carry is its row order, and whether Point has
+    an axis besides the frame axis, which typing requires, its schema --
+    only the schemas say either); any other pick leaves it; an operator's
+    sides carry the same labels
     or one carries none, a where's mask none or the value's, and the result
     carries them; a statistic over the axis removes it.  None for whatever
     typing refuses on that axis -- a label it lacks, two sides that differ
@@ -1288,12 +1290,11 @@ def frames_kept(rows: Sequence[Mapping[str, object]], axis: str | None, frames: 
             raise ValueError(f"{at} is chosen twice")
         if at == DOMAINS[1] and value:
             if any(label in (FIRST, LAST) for label in labels):
-                # Which frame the Point domain's first or last row carries
-                # is the domain's row order, which only the schemas say;
-                # one row removes the frame axis whichever row it is.
-                if len(labels) > 1:
-                    raise ValueError(f"the frames of {at}'s ends")
-                return ()
+                # Which frames the Point domain's first and last rows carry
+                # is its row order, and whether it has a second axis at all
+                # -- a lone frame axis is picked by its own name, never as
+                # Point -- only the schemas say.
+                raise ValueError(f"the frames of {at}'s ends")
             # A Point row is its axes' "name label" parts joined: two or
             # more of them, the axis named in exactly one.
             rows_picked = [label.split(" · ") for label in labels]

@@ -1656,7 +1656,8 @@ class FluentGroupBox(QtWidgets.QGroupBox):
 #: every other command (the light-blue tint); ``quiet`` a one-glyph command
 #: that closes a view and takes nothing away (a frame's ×: a ghost, never
 #: red); ``destructive`` a command that takes something away or stops or
-#: shuts something down -- Remove, Clear, Unload, Discard, Ungroup, Exclude
+#: shuts something down -- Remove, Clear, Unload, Discard, Revert (a Logic Edit
+#: page's edits), Ungroup, Exclude
 #: selected, Reset (a review's exclusions), Reset wavefront, a device's Close,
 #: Shut down devices, every Stop (a labelled one sits on the RED_TINT face; a
 #: one-glyph remover repeated down rows is a ghost in quiet ink that turns red

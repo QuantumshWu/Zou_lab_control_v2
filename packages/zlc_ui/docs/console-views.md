@@ -273,7 +273,7 @@ remove_requested = pyqtSignal()
 auto_preview_changed = pyqtSignal(bool)
 
 set_name(text: str, details: tuple[str, ...] = ()) -> None
-set_state(state: str, status_text: str = "") -> None  # idle|draft|running|error
+set_state(state: str, status_text: str = "") -> None  # idle|draft|running|warning|error
 set_commands(*, can_start: bool, can_stop: bool, pending: bool = False) -> None
 set_preview_offered(offered: bool) -> None
 set_auto_preview(enabled: bool) -> None
@@ -339,7 +339,9 @@ the edited configuration".  A Restart of an unedited run is a standard
 command; Start, with nothing running, is the page's primary.  The presenter
 also ends the row's and the header's status with `· edited`, and a Restart
 it refused while the run goes on adds `; Restart refused: <why>` there until
-the next edit.  Only Restart or Revert ends an edit: a following processor
+the next edit, and draws the row in the `warning` state (amber dot and
+words, the header dot amber too unless a node has failed): the run goes on,
+but not as the operator asked.  Only Restart or Revert ends an edit: a following processor
 whose source restarts, or a Measurement a Task restarts to acquire from,
 rebuilds the configuration it was started with, so the cue stays, and while it
 follows its status names that configuration's source even when the edit has

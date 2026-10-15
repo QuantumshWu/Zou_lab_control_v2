@@ -81,9 +81,12 @@ def _describe_output_frames(values: Mapping[str, object], output_name: str,
     the variable keeps none; None when the source or the draft cannot say.
 
     The console answers one axis for the whole bundle, and only when every
-    member carries the same.  A single label is one frame or no axis at
-    all, so the members are read as carrying none: a pick or statistic on
-    that axis cannot be told, and every other formula keeps one frame.
+    member carries the same.  The source names the axis, so one frame is
+    told apart from none: ``("frame", ("0",))`` is a frame axis of one
+    label every member carries, ``(None, ("0",))`` members without one, so
+    every variable keeps one frame -- whether they have an axis a pick or
+    statistic names is then their schemas' to say, as for any axis but the
+    source's.
 
     A name no variable has is read as a member's, so a name nothing has, or
     a variable named like a member, is refused by typing once the members
@@ -99,7 +102,7 @@ def _describe_output_frames(values: Mapping[str, object], output_name: str,
     if output_name not in published(rows):
         return None
     name, labels = source
-    carried = tuple(labels) if len(labels) > 1 else ()
+    carried = tuple(labels) if name is not None else ()
     kept = frames_kept(rows, name, carried, None)
     frames = next(kept[position] for position, row in enumerate(rows) if row["name"] == output_name)
     return None if frames is None else (name, frames) if frames else (None, ("0",))

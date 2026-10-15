@@ -49,11 +49,13 @@ STATUS_DOT = 12
 #: drawn as calmly as a stopped node: what keeps it from starting is
 #: something still to fill in, not a fault, and amber is what reads as
 #: "something is wrong".  A run wears the plain ink of something under way,
-#: and only a failure is red.
+#: a run that is not what the operator asked for -- its Restart refused --
+#: wears amber, and only a failure is red.
 STATE_WORDS = {
     "idle": "idle",
     "draft": "idle",
     "running": "running",
+    "warning": "warning",
     "error": "error",
 }
 

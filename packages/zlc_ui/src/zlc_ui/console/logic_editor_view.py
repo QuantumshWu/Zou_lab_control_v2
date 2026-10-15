@@ -393,9 +393,12 @@ class LogicEditorView(QtWidgets.QWidget):
         # below are excluded from the comparison precisely because the
         # cheap half further down is what applies them.  ``error`` is not
         # among them: it changes only when a run fails or recovers, and a
-        # contribution shows a failure beside the row that caused it.
+        # contribution shows a failure beside the row that caused it.  Nor
+        # is ``name``: a rename is one commit, not a beat, and a
+        # contribution may say the node's name (Derive's "Published as
+        # <name>/<variable>").
         volatile = ("running", "pending", "issues", "status", "state",
-                    "auto_preview", "can_start", "can_stop", "edited", "name", "name_problem")
+                    "auto_preview", "can_start", "can_stop", "edited", "name_problem")
         structure = {
             key: value for key, value in incoming.items() if key not in volatile
         }

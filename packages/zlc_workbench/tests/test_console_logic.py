@@ -537,13 +537,15 @@ def test_editing_a_running_row_changes_only_its_shared_draft(presenter, session)
     # A refused Restart left the run -- and the configuration it uses -- alone,
     # and says why where it was pressed: on the row, not only in the log.
     assert presenter.view.logic_editors[node_id]["edited"] is True
-    assert row.state[0] == "running" and " · edited; Restart refused: " in row.state[1], row.state
+    # Amber: the run goes on, but not as the operator asked.
+    assert row.state[0] == "warning" and " · edited; Restart refused: " in row.state[1], row.state
     reverted = presenter.control_action("logic.revert", {"node_id": node_id})
     assert reverted["accepted"], reverted
     assert presenter.logic[node_id].draft == started
     assert presenter.view.logic_editors[node_id]["form_values"]["repeat"] == 0
     assert edited() == (False, False, False)
     assert "Restart refused" not in row.state[1], "Revert is an edit: the refusal was the old draft's"
+    assert row.state[0] == "running", row.state
     assert presenter.logic[node_id].host is current_host and current_host.running
     # The run keeps declaring what IT shows.  A half-typed draft is not even a
     # valid request -- asking it what to plot raised out of the console's poll.
@@ -1807,10 +1809,12 @@ def test_a_processor_adds_with_an_unresolved_source_and_no_modal(
         if name.startswith(f"@logic/{node_id}/")
     ]
     assert bundle_members == [stable_signal_key(node_id, "counts")]
-    # A bundle reads as its first signal, spelled as a status spells it,
-    # then its producer's other outputs.
+    # A bundle reads as its members in the order Derive's Inputs list
+    # them -- the producer's declared outputs -- the first spelled as a
+    # status spells it.
+    declared = ("counts", "occupied", "frame_judged")
     assert projection["source_labels"][bundle_members[0]] == (
-        f"{presenter.logic[node_id].name}/counts, frame_judged, occupied"
+        f"{presenter.logic[node_id].name}/counts, occupied, frame_judged"
     )
     presenter.view.logic_draft_changed.emit(
         derived_id, {"source_signal": stable_signal_key(node_id, "occupied")}
@@ -1818,6 +1822,12 @@ def test_a_processor_adds_with_an_unresolved_source_and_no_modal(
     projection = presenter.logic_editor_projection(derived_id)
     assert stable_signal_key(node_id, "occupied") in projection["source_options"]
     assert stable_signal_key(node_id, "counts") not in projection["source_options"]
+    # Whichever member the draft names keys the choice; the words keep
+    # the Inputs' order.
+    assert projection["source_labels"][stable_signal_key(node_id, "occupied")] == (
+        f"{presenter.logic[node_id].name}/counts, occupied, frame_judged"
+    )
+    assert tuple(name for name, _schema, _snapshot in projection["input_bundle"]) == declared
 
 
 def test_an_occupancys_frame_claims_survive_its_camera_changing_frame_count(presenter) -> None:
@@ -1849,14 +1859,14 @@ def test_an_occupancys_frame_claims_survive_its_camera_changing_frame_count(pres
     editor = presenter.view.logic_editors[node_id]["artifact_claims"]["calibrations"]
     assert editor["problems"] == ()
     assert editor["notes"] == (
-        "load's middle frame 2 is not in this source (frames 0-2); it is kept for a cycle that has it",)
+        "load's middle frame 2 is not in this source (frames 0–2); it is kept for a cycle that has it",)
     assert editor["reads"] == ((), (2,), (0, 1))
     presenter.view.logic_draft_changed.emit(camera_id, {"values": {"frames_per_cycle": 2}})
     assert presenter.view.logic_editors[survival_id]["source_frames"] == ("0", "1")
     editor = presenter.view.logic_editors[node_id]["artifact_claims"]["calibrations"]
     assert editor["problems"] == ()
     assert editor["notes"] == (
-        "load's middle frame 2 is not in this source (frames 0-1); it is kept for a cycle that has it",)
+        "load's middle frame 2 is not in this source (frames 0–1); it is kept for a cycle that has it",)
     assert editor["reads"] == ((), (1,), (0,))
     assert presenter.logic[node_id].draft.artifact_inputs == {"calibrations": claims}, (
         "a frame count never edits the draft"
@@ -1935,7 +1945,7 @@ def test_a_frame_survival_after_derive_is_edited_before_anything_starts(presente
         head = derive_editor._cards[1].head
         assert texts(head["operand"])[:4] == ["Inputs", "    counts", "    occupied", "    frame_judged"]
         assert texts(head["axis"]) == ["All", "Point", "    frame"]
-        assert texts(derive_editor._cards[0].head["labels"]) == ["All", "First", "Last", "frame", "0", "1", "2"]
+        assert texts(derive_editor._cards[0].head["labels"]) == ["All", "first", "last", "frame", "0", "1", "2"]
         assert not derive_editor._cards[1].terms_ui[1]["axis"].isVisibleTo(derive_editor), "same keeps no frame"
 
         # Frame Survival's pairs, marked by a click before anything runs.
@@ -2106,6 +2116,35 @@ def test_a_derive_over_a_derive_says_frames_only_when_its_whole_bundle_agrees(pr
     assert presenter.logic_editor_projection(second)["source_frames"] is None
     assert presenter.logic_editor_projection(on_x)["source_frames"] == ("0",)
     assert presenter.logic_editor_projection(on_y)["source_frames"] == ("0", "1", "2")
+
+
+def test_a_one_frame_cameras_frame_axis_passes_through_derive_by_name(presenter) -> None:
+    """A one-frame camera publishes a frame axis of one label, and its
+    draft says so by name -- ``("frame", ("0",))``, never read as no axis.
+    A Derive over it passes that axis on, as the camera will publish it,
+    for every variable that keeps it, so a Derive reading its bundle is
+    told one answer; a variable that picks the frame keeps one frame no
+    axis carries."""
+
+    camera_id = presenter.add_logic(
+        "camera_measurement", values={"repeat": 1, "frames_per_cycle": 1, "exposure_seconds": 0.005})
+    occupancy_id = presenter.add_logic("occupancy", source_signal=stable_signal_key(camera_id, "frames"))
+    whole = {"name": "whole", "terms": ({"of": "counts"},)}
+    sites = {"name": "sites", "terms": ({"of": "counts"},), "statistic": "mean", "over": ("Site",)}
+    picked = {"name": "picked", "terms": ({"of": "counts", "at": "frame", "labels": ("0",)},)}
+    derive_id = presenter.add_logic(
+        "derive", source_signal=stable_signal_key(occupancy_id, "counts"), values={"variables": (whole, sites)})
+    projection = presenter.logic_editor_projection(derive_id)
+    assert (projection["source_frame_axis"], projection["source_frames"]) == ("frame", ("0",))
+    again = {"name": "again", "terms": ({"of": "whole"},)}
+    reader = presenter.add_logic(
+        "derive", source_signal=stable_signal_key(derive_id, "whole"), values={"variables": (again,)})
+    projection = presenter.logic_editor_projection(reader)
+    assert (projection["source_frame_axis"], projection["source_frames"]) == ("frame", ("0",))
+    presenter.view.logic_draft_changed.emit(derive_id, {"values": {"variables": (picked,)}})
+    presenter.view.logic_draft_changed.emit(reader, {"source_signal": stable_signal_key(derive_id, "picked")})
+    projection = presenter.logic_editor_projection(reader)
+    assert (projection["source_frame_axis"], projection["source_frames"]) == (None, ("0",))
 
 
 def test_a_producers_new_output_reaches_every_open_editors_sources(presenter) -> None:

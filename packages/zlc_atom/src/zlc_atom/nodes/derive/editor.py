@@ -16,8 +16,9 @@ combo's text, the Inputs' names, every operand, result and problem read
 down one x.  Fixed sets (an operator kind, the statistics) are segmented
 strips; whatever comes from the data (members, variables, axes and
 domains, labels, ``over``) is a combo, several values a checkable one --
-a pick's values led by All (no pick), First and Last (its ends, whatever
-its length).  A
+a pick's values led by All (no pick), ``first`` and ``last`` (its ends,
+whatever its length, spelled as the draft, the collapsed box and its
+tooltip spell them).  A
 problem stands under the line it is about, as one sentence
 (``show_problem``); a parked helper's in muted ink, because it blocks
 nothing.  A line's two wide commands -- the statistic strip with its
@@ -67,8 +68,10 @@ _NUMBER, _TRUE, _FALSE = "#number", "#true", "#false"
 #: "No pick": the axis combo's first row, and a pick's first value.
 _ALL = ""
 #: What a pick's values list starts with: All, then the axis' ends, written
-#: in the draft as Occupancy's frame claims write a cycle's.
-_ENDS = (("All", _ALL), ("First", FIRST), ("Last", LAST))
+#: in the draft as Occupancy's frame claims write a cycle's -- and in the
+#: list as in the draft: the collapsed box and its tooltip read the ticked
+#: keys, so one pick is spelled one way in one control.
+_ENDS = (("All", _ALL), (FIRST, FIRST), (LAST, LAST))
 _CONSTANTS = {_NUMBER: "Number", _TRUE: "true", _FALSE: "false"}
 _COLOURS = dict(zip(DOMAINS, AXIS_GROUP_COLORS))
 #: The most labels one labels list offers; a longer axis says how many it has.
@@ -170,7 +173,7 @@ def _fill(combo: FluentComboBox, items, current=None) -> None:
 
 @functools.lru_cache(maxsize=64)
 def _label_items(at: str, keys: tuple | None, alternates: tuple) -> tuple:
-    """A pick's choices as list rows: All, First and Last, then under the
+    """A pick's choices as list rows: All, first and last, then under the
     axis' (domain's) name -- which keeps the collapsed text from reading a
     run across the ends -- its values, each with its alternate
     coordinates' (``1 · time 0.1 s``), at most ``_LABEL_LIMIT`` of them;

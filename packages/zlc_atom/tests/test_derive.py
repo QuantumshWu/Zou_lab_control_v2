@@ -702,10 +702,11 @@ def test_the_frames_a_draft_says_are_the_frames_typing_keeps() -> None:
     (``frames_kept``, read by ``describe_output_frames``).  On real member
     schemas, for every formula typing types, they are the readout-event
     labels of the typed schema; where they cannot be told, typing refuses
-    too.  One frame ("0") stands for a variable that keeps no frame axis,
-    and a source of one label is read as carrying none.  What only the
-    members' names decide, ``frames_kept`` is told as typing is; the
-    descriptor is not, and leaves it to typing."""
+    too, except for a Point domain's first or last row, which only the
+    schemas tell.  One frame ("0") stands for a variable that keeps no
+    frame axis; the source says whether a one-label axis is an axis.  What
+    only the members' names decide, ``frames_kept`` is told as typing is;
+    the descriptor is not, and leaves it to typing."""
 
     occupancy = {name: value.schema for name, value in _occupancy().items()}
     # Point carries frame x detuning (a mapped domain, detuning-major), Cell y x.
@@ -771,6 +772,7 @@ def test_the_frames_a_draft_says_are_the_frames_typing_keeps() -> None:
             level, published("norm", {"of": "counts"}, {"op": "/", "of": "level"}),
             published("sites", at("counts", "Site", "3", "1")),
             published("per_frame", {"of": "counts"}, statistic="mean", over=["Site"]),
+            published("point_first", at("counts", "Point", "first")),
         ]),
         (scanned, [
             published("point", at("counts", "Point", "frame 1 · detuning 2")),
@@ -784,7 +786,12 @@ def test_the_frames_a_draft_says_are_the_frames_typing_keeps() -> None:
             published("point_absent", at("counts", "Point", "frame 3 · detuning 1")),
         ]),
     )
-    told = {}
+    # A Point domain's first or last row: typing refuses it where Point has
+    # the frame axis alone (pick frame) and picks the row where it has more,
+    # and either way which frames the row carries is the schemas' to say.
+    # The draft, which has no schema, cannot tell.
+    untold = {"point_first": False, "point_last": True}
+    told, typed = {}, {}
     for members, own in by_source:
         draft = {"variables": [*shared, *own]}
         rows = _rows(*draft["variables"])
@@ -792,10 +799,13 @@ def test_the_frames_a_draft_says_are_the_frames_typing_keeps() -> None:
         kept = frames_kept(rows, FRAME_AXIS_NAME, ("0", "1", "2"), tuple(members))
         assert kept == frames_kept(rows, FRAME_AXIS_NAME, ("0", "1", "2"), None), "names alone decide nothing here"
         for row, answer, frames in zip(rows, answers, kept):
-            if answer["schema"] is not None:
+            if row["name"] in untold:
+                assert frames is None, row["name"]
+                typed[row["name"]] = answer["schema"] is not None
+            elif answer["schema"] is not None:
                 axes = [axis for axis in answer["schema"].point_domain.axes if axis.role == READOUT_EVENT]
                 assert frames == (axes[0].labels() if axes else ()), row["name"]
-            if frames is None:
+            if frames is None and row["name"] not in untold:
                 assert answer["error"] is not None or answer["waits_for"] is not None, row["name"]
             if row["publish"]:
                 answer = LOGIC_NODE.describe_output_frames(draft, row["name"], (FRAME_AXIS_NAME, ("0", "1", "2")))
@@ -810,9 +820,10 @@ def test_the_frames_a_draft_says_are_the_frames_typing_keeps() -> None:
         "reduced": None, "cycle_a": None, "cycle_b": None, "and_number": None, "number_or": None,
         "not_number": None, "norm": ("0", "1", "2"), "sites": ("0", "1", "2"),
         "per_frame": ("0", "1", "2"), "point": ("0",), "points": ("0", "2"), "points_one": ("1",),
-        "pixel": ("0", "1", "2"), "corner": ("0", "1", "2"), "tuned": ("0", "1", "2"), "point_last": ("0",),
-        "point_absent": None,
+        "pixel": ("0", "1", "2"), "corner": ("0", "1", "2"), "tuned": ("0", "1", "2"), "point_first": None,
+        "point_last": None, "point_absent": None,
     }
+    assert typed == untold
     # First and Last are tokens of the draft, never labels fixed when it was
     # written: the frames passed on follow the source's frame count.
     ends = {"variables": [published("ends", at("counts", "frame", "first", "last"))]}
@@ -842,10 +853,13 @@ def test_the_frames_a_draft_says_are_the_frames_typing_keeps() -> None:
     assert frames_kept(named, FRAME_AXIS_NAME, ("0", "1", "2"), tuple(occupancy)) == (None, ("0", "1", "2"), None)
     assert frames_kept(named, FRAME_AXIS_NAME, ("0", "1", "2"), None) == ((), (), ("0", "1", "2"))
 
-    # One label is one frame or no frame axis, and the source does not say
-    # which: the descriptor reads it as no frame axis.  A pick or statistic
-    # on the frame axis cannot be told; everything else keeps one frame.
-    # Against members that carry no frame axis, typing agrees.
+    # One frame is the source's to name.  A one-frame camera publishes a
+    # frame axis of one label, ("frame", ("0",)): every member carries it,
+    # as typing types them.  A source without the axis, (None, ("0",)), has
+    # members that carry none, so every variable keeps one frame; whether
+    # they have an axis called "frame" to pick or reduce is, like any axis
+    # but the source's, their schemas' to say -- typing's, once they publish.
+    one_frame = {"counts": _schema(5, 1, 6, np.float32, "count"), "occupied": _schema(5, 1, 6, bool, "1")}
     reducing = _rows(published("counts_mean", {"of": "counts"}, statistic="mean", over=["frame"]),
                      published("occupied_any", {"of": "occupied"}, statistic="any", over=["frame"]))
     reduced = {name: answer["schema"] for name, answer in zip(occupancy, typed_variables(reducing, occupancy))}
@@ -855,12 +869,24 @@ def test_the_frames_a_draft_says_are_the_frames_typing_keeps() -> None:
               published("summed", {"of": "counts"}, statistic="sum", over=["frame"]),
               published("sites", {"of": "counts"}, statistic="mean", over=["Site"]),
               published("kept", {"of": "occupied"}, {"op": "where", "of": "occupied"})]
-    told = {row["name"]: LOGIC_NODE.describe_output_frames({"variables": single}, row["name"], (FRAME_AXIS_NAME, ("0",)))
-            for row in _rows(*single)}
-    assert told == {"whole": (None, ("0",)), "picked": None, "summed": None, "sites": (None, ("0",)),
-                    "kept": (None, ("0",))}
-    for row, answer in zip(_rows(*single), typed_variables(_rows(*single), reduced)):
-        assert (answer["error"] is None) == (told[row["name"]] is not None), row["name"]
+    rows = _rows(*single)
+    one = (None, ("0",))
+    framed = (FRAME_AXIS_NAME, ("0",))
+    for source, members, expected in (
+        (framed, one_frame, {"whole": framed, "picked": one, "summed": one, "sites": framed, "kept": framed}),
+        (one, reduced, {"whole": one, "picked": one, "summed": one, "sites": one, "kept": one}),
+    ):
+        told = {row["name"]: LOGIC_NODE.describe_output_frames({"variables": single}, row["name"], source)
+                for row in rows}
+        assert told == expected, source
+        refused = set()
+        for row, answer in zip(rows, typed_variables(rows, members)):
+            if answer["schema"] is None:
+                refused.add(row["name"])
+                continue
+            axes = [axis for axis in answer["schema"].point_domain.axes if axis.role == READOUT_EVENT]
+            assert told[row["name"]] == ((axes[0].name, axes[0].labels()) if axes else one), (source, row["name"])
+        assert refused == (set() if source == framed else {"picked", "summed"}), (source, refused)
 
     # Over Frame Survival the readout-event axis is "pair": the source says
     # its name with its labels, and a pick or statistic naming it is told
@@ -902,9 +928,9 @@ def _editor_session(rows=(), bundle=None):
         for _ in range(3):
             app.processEvents()
 
-    def project(shown, inputs=bundle, error=""):
+    def project(shown, inputs=bundle, error="", name="Derive 1"):
         editor.update_projection({"form_values": {"variables": shown}, "input_bundle": inputs,
-                                  "node_id": "derive", "name": "Derive 1", "error": error})
+                                  "node_id": "derive", "name": name, "error": error})
         settle()
         return editor._cards
 
@@ -977,7 +1003,7 @@ def test_the_editor_builds_the_users_example_by_clicks() -> None:
         written, preview = len(drafts), same.preview.text()
         s.pick(head["axis"], "frame")
         labels = head["labels"]
-        assert s.texts(labels) == ["All", "First", "Last", "frame", "0", "1", "2"], "the ends, then the labels"
+        assert s.texts(labels) == ["All", "first", "last", "frame", "0", "1", "2"], "the ends, then the labels"
         assert labels.view().window().isVisible(), "its labels list opens"
         assert head["error"].isHidden(), "no problem while its labels are being picked"
         assert (len(drafts), same.preview.text()) == (written, preview), "nothing changes until a label is picked"
@@ -998,14 +1024,16 @@ def test_the_editor_builds_the_users_example_by_clicks() -> None:
         assert drafts[-1][0]["terms"][0] == {"of": "occupied", "at": "frame", "labels": ("0",)}
         s.pick(head["axis"], "frame")
         assert labels.view().window().isVisible(), "the axis already picked opens its labels again"
-        # First and Last are the frame axis' ends whatever its length: the
-        # draft keeps them as written, and the box reads them so.
+        # first and last are the frame axis' ends whatever its length: the
+        # draft keeps them as written, and the list's rows, the closed box
+        # and its tooltip read them so -- one spelling in one control.
         s.row_at(labels, 1, box=True)
         s.row_at(labels, 2, box=True)
         s.row_at(labels, 4, box=True)
         s.key(labels.view(), QtCore.Qt.Key_Escape)
         assert drafts[-1][0]["terms"][0] == {"of": "occupied", "at": "frame", "labels": ("first", "last")}
         assert labels.toolTip() == "first, last" and same.preview.text().startswith("→ repeat 1 × frame 2 × Site 6")
+        assert labels._display_text() == ", ".join(s.texts(labels)[1:3]) == "first, last"
         # All is no pick, as the axis list's All is.
         s.pick(head["axis"], "frame")
         s.row_at(labels, 0)
@@ -1015,6 +1043,10 @@ def test_the_editor_builds_the_users_example_by_clicks() -> None:
         s.row_at(labels, 4)
         # The signal it publishes, as every status and picker calls it.
         assert head["publish"].toolTip() == "Published as Derive 1/same"
+        # Renamed, the node's signal is spelled by its new name at once.
+        s.project(drafts[-1], name="Ends")
+        assert head["publish"].toolTip() == "Published as Ends/same"
+        s.project(drafts[-1])
         s.click(head["publish"])
         assert head["publish"].toolTip() == "Internal: other variables read it; nothing publishes it"
         assert drafts[-1] == ({"name": "same", "publish": False, "terms": (
@@ -1164,7 +1196,7 @@ def test_the_editor_offers_what_each_publication_shares_and_domains_by_their_hea
         assert "changes with each publication" in editor._input_rows[0][0].toolTip()
         s.pick(axis, "Cell")
         labels = card.head["labels"]
-        assert s.texts(labels) == ["All", "First", "Last", "Cell", "y 0 · x 0", "y 0 · x 1", "y 1 · x 0", "y 1 · x 1",
+        assert s.texts(labels) == ["All", "first", "last", "Cell", "y 0 · x 0", "y 0 · x 1", "y 1 · x 0", "y 1 · x 1",
                                    "y 2 · x 0", "y 2 · x 1"]
         s.row_at(labels, 7)
         assert drafts[-1] == ({"name": "px", "terms": ({"of": "frames", "at": "Cell", "labels": ("y 1 · x 1",)},)},)
@@ -1332,7 +1364,7 @@ def test_the_editor_reads_down_one_control_column_and_says_problems_under_their_
         cards = s.project(rows[:3], inputs=(("counts", None, None), ("occupied", None, None)))
         head = cards[2].head
         assert s.texts(head["axis"]) == ["All", "frame"]
-        assert s.texts(head["labels"]) == ["All", "First", "Last", "frame", "2"]
+        assert s.texts(head["labels"]) == ["All", "first", "last", "frame", "2"]
         assert s.texts(cards[2].statistic["over"]) == ["Site"]
         assert s.texts(cards[2].terms_ui[1]["operand"]) == [
             "Inputs", "    counts", "    occupied", "Variables", "    same", "    kept", "Constants", "    Number"]

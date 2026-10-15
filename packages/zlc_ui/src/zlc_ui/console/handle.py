@@ -649,11 +649,12 @@ class TaskConsoleHandle(QtCore.QObject):
         self._show_console_state()
 
     def _show_console_state(self) -> None:
-        # The worst of the nodes': a failure anywhere, else a run anywhere.
+        # The worst of the nodes': a failure anywhere, else something that
+        # needs attention, else a run anywhere.
         words = {row.state_word for row in self._rows.values()}
-        self._view.set_console_state(
-            "error" if "error" in words else "running" if "running" in words else "idle"
-        )
+        self._view.set_console_state(next(
+            (word for word in ("error", "warning", "running") if word in words), "idle"
+        ))
 
     def set_logic_commands(
         self, node_id: str, *, can_start: bool, can_stop: bool, pending: bool = False

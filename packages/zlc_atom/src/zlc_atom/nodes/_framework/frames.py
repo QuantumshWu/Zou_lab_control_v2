@@ -339,7 +339,9 @@ def absent_notes(
     """Each claimed middle number a ``count``-frame cycle does not have between
     its ends: kept as written and reading nothing now, so it is said, not refused."""
 
-    span = "only frame 0" if count == 1 else f"frames 0-{count - 1}"
+    # A range is written with an en dash, as a run of ticked labels reads
+    # in a closed list (``0–2``); a pair's arrow (``0→2``) never reads alike.
+    span = "only frame 0" if count == 1 else f"frames 0–{count - 1}"
     return tuple(
         f"{names[entry]}'s middle frame {number} is not in this source ({span}); "
         "it is kept for a cycle that has it"

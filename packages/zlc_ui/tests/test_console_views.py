@@ -882,6 +882,11 @@ from zlc_ui.fluent import STATUS_CUES
 row.set_state('draft', 'Draft: select a compatible source')
 dot, ink = STATUS_CUES['idle']
 assert dot in row.dot.styleSheet() and ink in row.status_label.styleSheet()
+# A run whose Restart was refused goes on, not as asked: amber, dot and words.
+row.set_state('warning', "running · edited; Restart refused: 'repeat' is below its minimum")
+dot, ink = STATUS_CUES['warning']
+assert row.state_word == 'warning'
+assert dot in row.dot.styleSheet() and ink in row.status_label.styleSheet()
 row.set_state('idle', 'stopped')
 row.set_commands(can_start=True, can_stop=False)
 app.processEvents()
@@ -1176,6 +1181,19 @@ assert editor.status_label.text() == 'Draft: 3 problems in Variables'
 handle.update_logic_editor('camera-1', dict(
     projection, ui_contributions=(typed_editor,), issues=('Frames must be selected', *typed)))
 assert editor.status_label.text() == 'Draft: Frames must be selected'
+# A rename alone reaches every contribution: what one says of the node --
+# Derive's "Published as <name>/<variable>" -- follows the name, with
+# nothing else in the projection changed.
+named = []
+class Named(QtWidgets.QWidget):
+    draft_changed = QtCore.pyqtSignal(object)
+    def update_projection(self, projection):
+        named.append(projection.get('name'))
+def named_editor(parent):
+    return Named(parent)
+handle.update_logic_editor('camera-1', dict(projection, ui_contributions=(named_editor,), name='Camera A'))
+handle.update_logic_editor('camera-1', dict(projection, ui_contributions=(named_editor,), name='Camera B'))
+assert named[-1] == 'Camera B', named
 
 patches.clear()
 running = dict(
@@ -2366,8 +2384,9 @@ assert camera_row.stop_button.isEnabled()
 assert camera_row.edit_button.isEnabled()
 assert camera_row.remove_button.isEnabled()
 
-# The header dot is the worst of the nodes': a failure anywhere, else a run
-# anywhere, else grey -- from the one status table.
+# The header dot is the worst of the nodes': a failure anywhere, else
+# something needing attention, else a run anywhere, else grey -- from the
+# one status table.
 from zlc_ui.fluent import STATUS_CUES
 def header_is(word):
     return f"background:{STATUS_CUES[word][0]};" in view.status_dot.styleSheet()
@@ -2376,6 +2395,11 @@ handle.set_logic_state('camera', 'running')
 assert header_is('running')
 handle.set_logic_state('calibration', 'error', 'broke')
 assert header_is('error')
+handle.set_logic_state('calibration', 'warning', 'running; Restart refused: broke')
+assert header_is('warning')
+handle.set_logic_state('camera', 'error', 'broke')
+assert header_is('error')
+handle.set_logic_state('camera', 'running')
 handle.set_logic_state('calibration', 'idle')
 assert header_is('running')
 handle.remove_logic_row('camera')

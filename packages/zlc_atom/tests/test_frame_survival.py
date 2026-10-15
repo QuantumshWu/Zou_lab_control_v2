@@ -142,6 +142,24 @@ def test_pair_axis_carries_one_label_per_pair() -> None:
     assert labelled.block.schema.point_domain.axes[0].coordinate_labels == (
         "before→after",
     )
+    # An axis that declares its own labels -- another Frame Survival's
+    # pairs, read through a Derive -- names each frame by them, as the
+    # editor's grid and every pick read that axis, not by its coordinate.
+    paired = replace(
+        source,
+        point_domain=DomainSpec(
+            (2,),
+            (replace(source.point_domain.axes[0], coordinate_labels=("0→1", "0→2")),),
+            ((0, 1),),
+        ),
+    )
+    assert paired.point_domain.axes[0].labels() == ("0→1", "0→2")
+    chained = FrameSurvivalProcessor(producer="fs")._pair(
+        owned_snapshot_from_arrays(paired, np.zeros((1, 2, 2), dtype=bool), 0)
+    )
+    assert chained.block.schema.point_domain.axes[0].coordinate_labels == (
+        "0→1→0→2",
+    )
     from zlc_atom.nodes.scan.dataset import scan_dataset_schema
 
     value_schema = labelled.block.schema.value_schema

@@ -8802,13 +8802,10 @@ class ConsolePresenter:
                     for name, value in publication.signals.items()
                 )
             elif selected_source:
-                parts = split_signal_key(selected_source)
-                producer = None if parts is None else self.logic.get(parts[0])
-                names = (
-                    tuple(output.name for output in self._logic_outputs(producer))
-                    if producer is not None else (signal_output_name(selected_source),)
+                input_bundle = tuple(
+                    (signal_output_name(key), None, None)
+                    for key in self._bundle_order(selected_source) or (selected_source,)
                 )
-                input_bundle = tuple((name, None, None) for name in names)
         return {
             "node_id": binding.node_id,
             # What the operator calls the node, and why their last rename was
@@ -9500,10 +9497,13 @@ class ConsolePresenter:
         finalization of this row in the same turn, when it has one.
 
         The state is a word of the row's vocabulary -- idle, draft, running,
-        error -- and a draft whose issues refuse a Start is ``draft``, never
-        ``idle``.  The node's Edit page is told the same word, so the row
-        and the page draw one status one way: a draft drawn grey on one and
-        amber on the other was two looks for one status.
+        warning, error -- and a draft whose issues refuse a Start is
+        ``draft``, never ``idle``.  A run whose Restart was refused is
+        ``warning``: it goes on, but not with what the operator asked for,
+        which needs their attention and is not a failure.  The node's Edit
+        page is told the same word, so the row and the page draw one status
+        one way: a draft drawn grey on one and amber on the other was two
+        looks for one status.
         """
 
         def draft_issues() -> tuple[str, ...]:
@@ -9568,9 +9568,6 @@ class ConsolePresenter:
                     state, status = "draft", f"Draft: {issues[0]}"
                 else:
                     state, status = "idle", self._observation_status(observed)
-            warnings = tuple(getattr(observed, "warnings", ()))
-            if warnings:
-                status = f"{status}; warning: {'; '.join(warnings)}"
         if binding.pending is not None:
             waiting = ", ".join(
                 sorted(self.logic_name(label) for label in binding.pending.waiting_for)
@@ -9603,7 +9600,7 @@ class ConsolePresenter:
             # draft on the page is for the next one.
             status = f"{status} · edited"
         if refused:
-            status = f"{status}; Restart refused: {refused}"
+            state, status = "warning", f"{status}; Restart refused: {refused}"
         return state, str(status)
 
     def _show_logic(
@@ -9759,6 +9756,22 @@ class ConsolePresenter:
                         compatible.discard(key)
         return tuple(sorted(compatible))
 
+    def _bundle_order(self, signal: str) -> tuple[str, ...]:
+        """The keys of the bundle ``signal`` belongs to, in the order a
+        node reading the whole bundle lists its members: its latest
+        publication's, else its producer's declared outputs; () while
+        neither says (a producer that is no Logic node and has not
+        published)."""
+
+        publication = self.session.signal_plane.latest_publication(signal)
+        if publication is not None:
+            return tuple(publication.signals)
+        parts = split_signal_key(signal)
+        producer = None if parts is None else self.logic.get(parts[0])
+        if producer is None:
+            return ()
+        return tuple(stable_signal_key(producer.node_id, output.name) for output in self._logic_outputs(producer))
+
     def _source_choices(
         self,
         descriptor: Any,
@@ -9775,9 +9788,9 @@ class ConsolePresenter:
         output name, the same words before and after it publishes; the
         closed combo reads it as every status, caption and row reads the
         same signal (:func:`signal_text`, ``Occupancy 1/occupied``), whether
-        or not a shape is known yet.  A bundle reads as its first signal,
-        then its producer's other outputs (``Occupancy 1/occupied,
-        counts``).  The shape is the editor's to show where it matters
+        or not a shape is known yet.  A bundle reads as its members in the
+        order Derive's Inputs list them, the first spelled as a status
+        spells it (``Occupancy 1/counts, occupied, frame_judged``).  The shape is the editor's to show where it matters
         (Derive's inputs, Occupancy's frame count, Frame Survival's grid).
         """
 
@@ -9814,9 +9827,13 @@ class ConsolePresenter:
             bundled: dict[str, str] = {}
             for members in bundles.values():
                 anchor = selected if selected in members else members[0]
+                # Keyed by the member the draft names, written in the order
+                # Derive's Inputs list the members under it.
+                order = self._bundle_order(anchor)
+                listed = sorted(members, key=lambda key: order.index(key) if key in order else len(order))
                 bundled[anchor] = ", ".join((
-                    signal_text(anchor, node_names),
-                    *(signal_output_name(key) for key in members if key != anchor),
+                    signal_text(listed[0], node_names),
+                    *(signal_output_name(key) for key in listed[1:]),
                 ))
             return tuple(bundled), bundled, {}, {}
         # The draft's own source when nothing offers it any more (its node
