@@ -616,6 +616,9 @@ class ScanPlanEditor(QtWidgets.QWidget):
         self._plan_text = ""
         self._values_text = ""
         self._authored: dict[str, tuple[float, str]] = {}
+        #: Each API parameter's row label ('short.duration' for the field
+        #: 'duration:short'): the words every sentence about it uses.
+        self._api_labels: dict[str, str] = {}
         self._sequence: object = None
         self._values_broken = False
         self._run_device_read = None
@@ -919,10 +922,12 @@ class ScanPlanEditor(QtWidgets.QWidget):
                 column.name: column
                 for column in (api_parameter_columns_for(sequence) if parameters else ())
             }
+            self._api_labels = {name: column.label for name, column in columns.items()}
         except ValueError as error:
             # A pulse saved with a binding whose field was later cleared.  Say
             # so, rather than leaving a Qt slot on a raise.
             self._authored = {}
+            self._api_labels = {}
             broken = str(error)
         offered = (
             ()
@@ -1107,7 +1112,8 @@ class ScanPlanEditor(QtWidgets.QWidget):
             )
         swept = (self._scanned_parameters() | walked) & set(self._authored)
         if swept:
-            parts.append(f"Swept by the plan: {', '.join(sorted(swept))}.")
+            named = sorted(self._api_labels.get(name, name) for name in swept)
+            parts.append(f"Swept by the plan: {', '.join(named)}.")
         self.values_note.setText(" ".join(parts))
 
     def set_mutation_enabled(self, enabled: bool) -> None:
