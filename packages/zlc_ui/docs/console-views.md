@@ -87,13 +87,13 @@ show_panel_editor(panel_id, host); focus_panel_editor(panel_id) -> bool
 close_panel_editor(panel_id) -> bool
 set_panel_snapshot_status(panel_id, status); set_panel_producer_projection(panel_id, projection)
 # panel-owned signals (ROI/fit outputs), shown beside the logic rows
-set_panel_publishers(publishers)       # ((panel_id, ((name, shape, description), ...)), ...)
+set_panel_publishers(publishers)       # ((panel_id, panel name, ((name, shape, description), ...)), ...)
 open_panel_publisher_editor(panel_id, projection); update_panel_publisher_editor(...) -> bool
 has_panel_publisher_editor(panel_id); focus_panel_publisher_editor(panel_id)
 close_panel_publisher_editor(panel_id)
 # logic rows, by id
 add_logic_row(node_id, kind, offers_preview=True); remove_logic_row(node_id)
-set_logic_name(node_id, name)                            # what the node is called
+set_logic_name(node_id, name, api_name="")               # what the node is called, and its type
 set_logic_state(node_id, state, status_text="")          # idle|running|error
 set_logic_commands(node_id, *, can_start, can_stop, pending=False)
 set_logic_auto_preview(node_id, enabled)
@@ -267,7 +267,7 @@ edit_requested = pyqtSignal()
 remove_requested = pyqtSignal()
 auto_preview_changed = pyqtSignal(bool)
 
-set_name(text: str) -> None
+set_name(text: str, details: tuple[str, ...] = ()) -> None
 set_state(state: str, status_text: str = "") -> None  # idle|draft|running|error
 set_commands(*, can_start: bool, can_stop: bool, pending: bool = False) -> None
 set_preview_offered(offered: bool) -> None
@@ -277,8 +277,11 @@ set_publishes(rows: tuple[tuple[str, str, str], ...]) -> None
 ```
 
 Each publish row is `(name, shape_text, description)`.  The row shows the
-node's Name; the name arrives only by `set_logic_name`, and the row is not
-where it is renamed -- its Edit page is.
+node's Name, elided in the middle in its fixed column so names that differ at
+their end still read apart; its tooltip is the whole name, then the node's
+type and `internal ID <node_id>` (`details`).  The name arrives only by
+`set_logic_name`, and the row is not where it is renamed -- its Edit page is.
+A panel publisher's row shows the panel's name, its panel id in the tooltip.
 
 Start and Stop are two fixed slots on the row and on the node's Edit page,
 both always shown.  Start reads `Starting…` while `pending`, `Restart` while
@@ -286,7 +289,8 @@ both always shown.  Start reads `Starting…` while `pending`, `Restart` while
 at the width of its widest word, so nothing beside it moves; Stop follows
 `can_stop`, not the row's state.  While a Task owns the console every
 command is disabled except the owning Task's own Stop (`owns_task`), which
-raises the same `stop_requested` as the status strip's "Stop task".
+raises the same `stop_requested` as the status strip's "Stop task", and Edit,
+which opens a page that is read-only but for its Name.
 
 A state is drawn as its status word (`STATE_WORDS`): a draft as `idle`, a
 run as `running`, a failure as `error`, the dot and the status line from the
@@ -297,16 +301,22 @@ its Edit page alike: the first arms the white-on-red confirm, and
 console over) or hidden, an armed remover returns to rest.
 
 A node's Edit page is three bands and only the middle one scrolls: the
-header (the Name, then `(api_name · kind)` in grey, and the status line)
-above, the rows, and the action bar (Remove | Revert, Plot, Start, Stop) as
-the page's foot, on the rows' left and right edges.  A newly opened page
-starts at its first row; after that its bar is the operator's, across tab
-switches.  The first row is the Name, in the page's one label column; its
-box's tooltip is the node's internal ID.  It commits (`name_committed`) on
-Return or when the focus leaves the box, once, and only when it says
-something new; a refused name is one sentence under the line, in the control
-column, until the next commit.  It stays editable while a Task holds the
-console.  The tab reads `Edit · <name>` and is retitled when the node is
+header (the Name, then `(api_name · kind)` in grey -- just `(kind)` while
+the name is the type's own -- and the status line) above, the rows, and the
+action bar (Remove | Revert, Plot, Start, Stop) as the page's foot, on the
+rows' left and right edges.  A long name gives up its middle in the header;
+it never widens the window.  A newly opened page starts at its first row;
+after that its bar is the operator's, across tab switches.  The first row is
+the Name, in the page's one label column, and the first stop of Tab; its
+box's tooltip and empty-box hint are the node's internal ID.  It sends
+(`name_committed`) what the operator TYPED, once, on Return or when the focus
+leaves the box -- a box nobody typed in sends nothing, so it never sends back
+a name an agent has since replaced; an emptied box is sent as "", which the
+presenter takes as the internal ID.  Escape takes the typing back.  A refused
+name is one sentence under the line, in the control column, while the
+refused text is in the box; leaving the box puts the node's name back and
+sends it, which withdraws the refusal.  It stays editable while a Task holds
+the console.  The tab reads `Edit · <name>` and is retitled when the node is
 renamed.  A rename is not an edit: it is not part of the draft, so it never
 marks a running node `· edited` and Revert leaves it alone.
 

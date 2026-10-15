@@ -12,11 +12,14 @@ A Logic node has a stable `node_id` and an operator `name`. Every action,
 `node_id`, which never changes. `name` is what the operator sees everywhere; they may
 change it at any time, even while the node runs. Address nodes only by `node_id`;
 when the operator names a node, find its `node_id` in
-`lab_state().console.logic[].name`. Reports and draft issues name a node by its
-`name` and a signal as `<name>/<output>`.
-`lab_action('logic.rename', {'node_id': ..., 'name': ...})` changes only the name; a
-name is one line, without `/`, not `panel-<n>`, and differs (ignoring case) from every
-other node's name and ID.
+`lab_state().console.logic[].name`. Reports name a node by its `name` and a signal
+as `<name>/<output>`. Draft issues and run errors name no other node ("the selected
+acquisition", "Source ..."): read the node's own values for which one.
+`lab_action('logic.rename', {'node_id': ..., 'name': ...})` changes only the name.
+A name is text on one line (runs of spaces become one; an empty name is the
+`node_id`), without `/`, not `panel-<n>`, not the heading of another signal
+producer (`signals`, a notebook's node), and differs from every other node's name
+and ID as a person reads them -- ignoring case, full-width letters and spaces.
 
 Read `lab_guide('setup')` and this workspace's `EXPERIMENT_CONTEXT.md` before
 operating hardware. Use `lab_recipes()` to discover reusable native Layouts.
@@ -515,7 +518,7 @@ sufficient precision or significant differences between sites.
 ## errors
 
 Use the original owner reason and state. Unknown fields: query that node/panel's
-catalog. A refused rename returns the reason as `error`; the name is unchanged. No data: distinguish following/waiting, incompatible source, stale
+catalog. A refused rename returns the reason as `error`, after the node's name; the name is unchanged. No data: distinguish following/waiting, incompatible source, stale
 generation and a genuinely failed run. Device operation pending: wait rather
 than starting a second session. Failed/unknown Start, Fire or Send: inspect the
 same generation/receipt; do not replay a partially completed batch.
