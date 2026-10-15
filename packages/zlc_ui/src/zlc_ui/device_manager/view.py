@@ -59,6 +59,7 @@ from zlc_ui.form.qt_form import (
     being_edited,
 )
 from zlc_ui.console.status_strip import StatusStrip
+from zlc_ui.status import name_words
 
 
 def _name_room() -> int:
@@ -1387,7 +1388,9 @@ class DeviceManagerView(QtWidgets.QWidget):
         # The card lays out its own title row so Add device sits beside the
         # domain's name.  At the foot of a long list it was the last thing
         # in the scrolled column and was usually cut in half by its edge.
-        title = domain.replace("_", " ").title()
+        # Read out as words the one way every window does: RF and SLM in
+        # capitals, the rest in sentence case.
+        title = name_words(domain)
         group = FluentGroupBox(title, self.left_body, title_strip_px=0)
         group_layout = QtWidgets.QVBoxLayout(group)
         pad = scaled_px(CARD_PAD)

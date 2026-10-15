@@ -32,6 +32,7 @@ from typing import Any
 
 from zlc_atom.authoring import is_tunable
 from zlc_ui import counted
+from zlc_ui.status import name_words
 from zlc_atom.install.configuration import (
     DeviceInstanceConfig,
     InstallationConfig,
@@ -314,7 +315,7 @@ class DeviceManagerPresenter:
         )
         self.view.set_templates(
             tuple(
-                (name.replace("_", " ").title(), name)
+                (name_words(name), name)
                 for name in installation_template_names()
             )
         )
