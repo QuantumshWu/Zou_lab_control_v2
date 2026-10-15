@@ -1,18 +1,8 @@
 """The whole of what a pulse editor offers the outside: one object, no widgets.
 
-A window used to be handed over as its own widget tree, so a host could reach
-`view.schedule_view.channel_panel` and push a value straight into one panel.
-Nothing stopped it, so it happened, and "which rows exist" quietly became two
-facts kept in two places -- the delay column went on showing rows that Hide off
-had already taken out of the cards.  Whatever the outside can hold, the outside
-will assemble, and then there are two owners of the same picture.
-
-So the outside holds this instead: signals to hear and methods to call, and no
-way to reach a QWidget at all.  The port is flat on purpose.  Grouping it back
-into pages would have kept the sub-view shape under a new name, and flattening
-it is what surfaced two collisions that had been hiding behind that shape --
-the schedule and the scan page both called their trigger `run_requested`, and
-the schedule and the preview both called their button `save_requested`.
+The outside holds signals to hear and methods to call, and no way to reach a
+QWidget at all, so no picture has a second owner.  The port is flat: one name
+per signal across every page.
 
 A drawn panel arrives as its HOST, never as a widget: this package may not
 import zlc_plot (a canvas would drag matplotlib into the GUI layer), and the

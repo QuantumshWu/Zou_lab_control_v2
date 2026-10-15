@@ -3,9 +3,7 @@
 A section made of lines -- Derive's variable cards, the scan plan's axis rows --
 reads as one table only when every line puts the same kind of cell at the
 same x: every operand under every operand, every ``at`` under every ``at``,
-every × on one x.  Packed line by line, each line laid its cells out from its
-own left edge, so the same control stood at a different x on every line, and
-a command slid sideways whenever the one beside it was hidden.
+every × on one x, and no command slides when the one beside it is hidden.
 
 :class:`FluentColumnSet` names the columns once; a :class:`FluentColumnLine`
 is one line of them.  A line holds one cell per column, in the set's order,

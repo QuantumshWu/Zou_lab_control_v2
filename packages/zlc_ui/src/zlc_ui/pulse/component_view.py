@@ -37,13 +37,10 @@ class PulseComponentView(QtWidgets.QWidget):
         self.schedule_view: PulseScheduleView | None = None
         # The choice of Subpulse and the schedule's commands stand still at
         # the top; under them the page scrolls as one, with one vertical
-        # bar: the schedule as tall as its rows, then the references.  A
-        # schedule scrolling inside the scrolling page would stand two bars
-        # side by side, the wheel moving whichever the pointer is over.
+        # bar: the schedule as tall as its rows, then the references.
         # The gap under the commands is above the scrolling body, so
-        # scrolled content clips one gap below them.  The cards end on every
-        # tab's right edge: the bar's gutter, kept at all times, stands
-        # inside the right inset.
+        # scrolled content clips one gap below them.  The bar's gutter
+        # stands inside the right inset (set_width_bounded_widget).
         outer = QtWidgets.QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
@@ -119,8 +116,7 @@ class PulseComponentView(QtWidgets.QWidget):
         self.path_label.setFixedHeight(row_height())
         head.addWidget(self.path_label)
         # What Save does here from the card's left edge, and the source's
-        # state at its right -- not squeezed in after Browse, where it ended
-        # the file row short of the commands above it.
+        # state at its right.
         hint = QtWidgets.QHBoxLayout()
         hint.setSpacing(row_gap())
         self.scope_label = ElidedLabel("")

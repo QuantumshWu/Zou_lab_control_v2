@@ -161,12 +161,7 @@ class PulseEditorView(QtWidgets.QWidget):
         return fluent_save_path(self, caption, suggested, filter)
 
     def confirm(self, title: str, text: str, ok: str = "OK", cancel: str = "Cancel") -> bool:
-        """Ask a yes-or-no, in the same dialog every other message uses.
-
-        It was a bare QMessageBox: system-styled, differently sized, and
-        arriving in the middle of a window that had spent a lot of effort
-        looking like one thing.  Nothing here is worth a second dialog family.
-        """
+        """Ask a yes-or-no, in the same dialog every other message uses."""
 
         return fluent_confirm(
             self, str(title), str(text),
@@ -180,11 +175,8 @@ class PulseEditorView(QtWidgets.QWidget):
         self.done_requested.emit(sentence(text))
 
     def show_warning(self, text: str) -> None:
-        """Say what was refused, where it stays until something else happens.
-
-        It used to also overwrite the summary -- a derived line about the pulse
-        -- so the message survived only until the next redraw, and the summary
-        then lied about the pulse until something recomputed it.
+        """Say what was refused, where it stays until something else happens;
+        the summary is left alone.
 
         Written as a sentence, ending in a full stop, as every message the
         dialog shows; the words are the sender's, a name at the start kept

@@ -44,8 +44,7 @@ START_LABELS = ("Start", "Restart", "Starting…")
 STATUS_DOT = 12
 
 #: Each node state as the status word it is drawn with (``STATUS_CUES``).
-#: ONE table for the row and the node's Edit page: a draft that was grey on
-#: its row and orange on its page was one status drawn two ways.  A draft is
+#: ONE table for the row and the node's Edit page.  A draft is
 #: drawn as calmly as a stopped node: what keeps it from starting is
 #: something still to fill in, not a fault, and amber is what reads as
 #: "something is wrong".  A run wears the plain ink of something under way,
@@ -71,10 +70,8 @@ def mount_logic_page(
 
     Every page has ONE content edge on each side, a window pad inside the tab
     pane, so nothing moves when the operator switches between the list and
-    an Edit tab.  The vertical bar's gutter is held whether or not the bar
-    shows (a width-bounded mount), and the right margin is the pad less that
-    gutter: the content ends at the same x with or without a bar, instead of
-    every stretching control jumping left the moment a page outgrew its tab.
+    an Edit tab; the right margin holds the bar's gutter
+    (:meth:`FluentScrollArea.set_width_bounded_widget`).
 
     ``top`` and ``bottom`` say whether the body's own edge is the page's: an
     Edit page pins its header above the scroll and its action bar below it,

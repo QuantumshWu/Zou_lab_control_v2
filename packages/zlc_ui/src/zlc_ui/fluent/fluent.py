@@ -218,9 +218,8 @@ def card_pad() -> int:
 # THE ONE GEOMETRY RULE for a frame with parts inside it (a spin box's
 # stepper, a combo's drop column, a table's rules, a card's title band):
 # every inner part is placed FROM THE FRAME, snapped to device pixels --
-# never from a sub-control rectangle nudged by a magic offset.  Offsets tuned
-# at one display scale broke at the next: the spin divider stopped half a
-# pixel under the top edge and ran into the bottom one at every DPR.
+# never from a sub-control rectangle nudged by a magic offset, which holds
+# at one display scale only.
 #
 #   * A divider is a FRAME SEGMENT: a filled rectangle, a whole number of
 #     device pixels wide, in the frame's current edge colour, antialiasing
@@ -433,10 +432,8 @@ def centred_line_top(top: float, height: float, font: QtGui.QFont) -> int:
 
     Qt centres the line BOX, by two rules: a label or a button on the
     box's fractional height, a QLineEdit on its integer height with the odd
-    pixel above.  A field's text sat two device pixels under the label
-    beside it, and both sat low, because Segoe UI's ascent holds the room
-    for accents: the capitals of a field were 1.3 px under its middle.  The
-    capitals -- and the digits, which are as tall -- are what the eye
+    pixel above; and Segoe UI's ascent holds room for accents, so Qt's line
+    sits low.  The capitals -- and the digits, which are as tall -- are what the eye
     centres.  Whole pixels, because a QLineEdit can put its line only on
     one: everything that paints its line on the same integer top, over the
     same ascent, lands on the same device row at every ratio."""
@@ -452,10 +449,7 @@ def _available_geometry_at(
     """The usable area of the screen a point falls on, or None if there is none.
 
     "Where may a floating surface land" is ONE question -- a combo popup, a
-    modal card -- and it had grown two separate walks from a point to a
-    screen to its available geometry.  A third was about to be written for
-    the modal that opens off the edge of the monitor; that is what the
-    copies cost.
+    modal card -- answered here only.
 
     ``widget`` is asked only when the point is on no screen at all: a
     window dragged past every edge still belongs to one.
@@ -505,9 +499,7 @@ def _placed_on_screen(
 def screen_fit_window_size(window_ratio: float) -> QtCore.QSize:
     """Initial window size for a top-level GUI, fit to the primary screen.
 
-    Every hosted view shares this ONE rule (it was duplicated
-    verbatim in callers, so a change in one silently diverged
-    the other, the same failure class as the scale rule).  ``window_ratio`` is the
+    Every hosted view shares this ONE rule.  ``window_ratio`` is the
     fraction of the screen the window aims for; the result is clamped to a usable
     minimum and to what the screen can actually show."""
 
@@ -555,10 +547,8 @@ def frameless_content_top_margin(
 def center_window_on_primary_screen(window: QtWidgets.QWidget, app: QtWidgets.QApplication | None = None) -> None:
     """Centre a top-level GUI window on the primary screen's available area.
 
-    Every hosted view shares this ONE rule -- it used to live in individual
-    launchers, so windows opened inconsistently.  Single-sourced here next to
-    ``screen_fit_window_size`` (which
-    sizes the same windows) so the open POSITION cannot silently diverge from the open SIZE."""
+    Every hosted view shares this ONE rule, next to ``screen_fit_window_size``
+    (which sizes the same windows) so the open POSITION cannot diverge from the open SIZE."""
     app = app or QtWidgets.QApplication.instance()
     screen = app.primaryScreen() if app is not None else None
     if screen is None:
@@ -593,12 +583,10 @@ def release_window(window: QtWidgets.QWidget) -> None:
 def retain_window(window: QtWidgets.QWidget, *extras) -> None:
     """Keep a launched top-level GUI ``window`` alive until its committed close.
 
-    The ``show_*`` launchers must hold a Python
-    reference to the window they open -- a notebook cell often drops the return value, and with
-    no reference the window would be garbage-collected mid-display.  Each launcher used to
-    append to its OWN app-level list and never remove anything, so every reopened standalone
-    window was retained forever.  This is the ONE registry
-    (``app._zlc_retained_windows``) with the ONE pruning rule:
+    The ``show_*`` launchers must hold a Python reference to the window they open -- a notebook
+    cell often drops the return value, and with no reference the window would be
+    garbage-collected mid-display.  This is the ONE registry (``app._zlc_retained_windows``)
+    with the ONE pruning rule:
 
     * ``window.destroyed`` always removes the entry;
     * a genuine close (the ``closed`` signal, when the window has one) also removes it -- but
@@ -675,11 +663,8 @@ def fluent_widget_stylesheet(root: str) -> str:
     window itself alone.
 
     ``root`` is the object name of the widget the sheet is set on.  The face
-    belongs to that widget only: one background rule for every QWidget
-    painted each plain container inside a white card -- the cell holding an
-    Auto row's switch and field, the Save figure name row, a mirrored
-    producer's row -- as a grey block.  A container shows what it stands on,
-    the card's white or the window's BG.
+    belongs to that widget only, so a plain container inside a white card
+    shows what it stands on, the card's white or the window's BG.
     """
 
     return (
@@ -693,8 +678,7 @@ def fluent_scrollbar_thickness() -> int:
 
     The ONE source for that dimension: ``fluent_scrollbar_stylesheet`` paints the bar this thick,
     AND any layout that must RESERVE the bar's gutter (so word-wrapped content never slides UNDER a
-    vertical scrollbar -- the classic "text past the right edge" bug) reserves exactly this many px.
-    Whenever the two disagreed, content underlapped the bar; keeping them on one constant closes it."""
+    vertical scrollbar) reserves exactly this many px."""
 
     return scaled_px(12, minimum=10)
 
@@ -753,13 +737,12 @@ def status_dot_stylesheet(color: str, *, radius: int = 8) -> str:
 
 
 # Fluent cards are delineated by a flat 1 px ``DIVIDER`` border, NOT a drop shadow.  A
-# ``QGraphicsDropShadowEffect`` re-rasterised the whole widget subtree + re-ran a Gaussian blur on EVERY
-# paint (~250 ms of a 35-site grid card's cold load at 3x dpr); a 1 px border costs nothing and reads the
-# same "raised card" boundary.  Each card owns its edge: ``FluentGroupBox`` paints a CONTINUOUS border
-# UNDER its title pill (so the pill never notches it); ``FluentTabWidget`` has NO border at all -- a plain
-# white rounded card (any border read as boxing the pivot tabs, or as a line between the tabs and the
-# content below); ``FluentFrame`` paints its edge via this one helper (a ``QFrame`` stylesheet border
-# would cascade onto child QFrames -- painting does not), exactly like ``FluentPopup`` strokes its own edge.
+# ``QGraphicsDropShadowEffect`` re-rasterises the whole widget subtree + re-runs a Gaussian blur on EVERY
+# paint; a 1 px border costs nothing and reads the same "raised card" boundary.  Each card owns its
+# edge: ``FluentGroupBox`` paints a CONTINUOUS border under its title; ``FluentTabWidget`` has NO border
+# at all -- a plain white rounded card; ``FluentFrame`` paints its edge via this one helper (a ``QFrame``
+# stylesheet border would cascade onto child QFrames -- painting does not), exactly like ``FluentPopup``
+# strokes its own edge.
 def stroke_card_border(widget: QtWidgets.QWidget, *, radius: int | None = None) -> None:
     """Stroke a 1 px antialiased ``DIVIDER`` rounded border hugging ``widget``'s edge, in a paintEvent.
 
@@ -890,8 +873,7 @@ def set_status_ink(label: QtWidgets.QWidget, word: str) -> None:
 
 class FluentStatusDot(QtWidgets.QLabel):
     """A round severity or state mark.  One size by default, the status
-    strip's: a header's larger dot beside a strip's smaller one, each with
-    its own gap, started their words 2.7 px apart.
+    strip's, so the words after stacked dots start on one x.
 
     A status is shown with :meth:`set_state` (one word of
     :data:`STATUS_CUES`); :meth:`set_color` is for an identity colour that
@@ -930,9 +912,8 @@ class FluentStatusDot(QtWidgets.QLabel):
 
 #: THE weight of every heading -- a card's title, a section title, a column's
 #: name -- spelled for a sheet: Segoe UI Semibold (``QFont.DemiBold``, 63).
-#: Qt 5 reads a sheet's CSS weight divided by 8, so the CSS 600 the sheets
-#: wrote was Qt's Bold (75) and every heading set in a sheet stood a stroke
-#: heavier than the card title painted with ``QFont.DemiBold``.
+#: Qt 5 reads a sheet's CSS weight divided by 8, so CSS 600 would be Qt's
+#: Bold (75), a stroke heavier than a title painted ``QFont.DemiBold``.
 HEADING_CSS_WEIGHT = int(QtGui.QFont.DemiBold) * 8
 
 
@@ -1036,8 +1017,7 @@ def column_header_label(text: str) -> "FluentLabel":
     :class:`FluentSectionLabel`: the same Semibold (:data:`HEADING_CSS_WEIGHT`)
     in MUTED_INK, the look of a FluentTableView's column names, on the line
     of the row it heads.  ``setBold`` on a FluentLabel changes nothing (its
-    sheet's ``font`` shorthand wins over a QFont), and headings made that
-    way read as one more row of data."""
+    sheet's ``font`` shorthand wins over a QFont)."""
 
     label = FluentLabel(text)
     label.setStyleSheet(
@@ -1090,8 +1070,7 @@ class FluentFrame(QtWidgets.QFrame):
         if self._bordered:
             stroke_card_border(self)
         elif self._rule:
-            # The bottom edge-width of the item, whole device pixels: an
-            # integer pen at h-1 sat a device pixel above the edge at 2x/3x.
+            # The bottom edge-width of the item, whole device pixels.
             edge = frame_border_px(self)
             top = device_snap(self, self.height(), axis="y") - edge
             painter = QtGui.QPainter(self)
@@ -1220,15 +1199,11 @@ class FluentOverlayFrame(QtWidgets.QWidget):
     """An auxiliary frame that lives INSIDE the page it serves.
 
     Same painted card as :class:`FluentPopup`, no relationship with the
-    desktop at all.  The Setting frame was a ``Qt.Tool`` top-level window
-    once -- "the operator carries it anywhere" -- and that ability was the
-    product defect: a top-level survives its page being hidden, so
-    switching the console to another tab left the frame floating over the
-    wrong page, and nothing bounded a drag to the panel area.  As an
-    ordinary child of the panel page the desktop questions dissolve
-    instead of needing answers: it is clipped by the page, hides and
-    returns with the tab, travels with the window, minimises with it,
-    closes with it, and there is no Z order for anything to cut into.
+    desktop at all: a top-level would survive its page being hidden and
+    float over the wrong tab.  As an ordinary child of the panel page it is
+    clipped by the page, hides and returns with the tab, travels with the
+    window, minimises with it, closes with it, and there is no Z order for
+    anything to cut into.
     """
 
     def __init__(self, parent, *, radius: float | None = None,
@@ -1317,13 +1292,9 @@ def show_fluent_popup_for_anchor(
     content stay a width CONSUMER -- no manual minimum pinned onto the widget
     that would clip when the screen clamps the popup narrower.
 
-    This runs ONCE, when a popup opens.  It used to run again whenever the
-    mounted content's required size changed, and an ``origin`` argument
-    existed to keep a dragged popup from being thrown back beside its
-    button by that second run.  Re-placing an open frame is what was wrong:
-    it resized the operator's window under them and moved everything in it.
-    The caller now measures content without re-placing, so there is one
-    placement per open and nothing to preserve across it.
+    This runs ONCE, when a popup opens: re-placing an open frame would
+    resize the operator's window under them.  The caller measures content
+    without re-placing, so there is one placement per open.
     """
 
     if not isinstance(popup, (FluentPopup, FluentOverlayFrame)):
@@ -1351,20 +1322,12 @@ def show_fluent_popup_for_anchor(
     ):
         raise ValueError("content_width must be a positive integer or None")
 
-    # MEASURE WITHOUT MOVING ANYTHING.  This used to call popup.adjustSize(),
-    # which is not a measurement at all: it RESIZES the popup to its unbounded
-    # size hint before the cap below is applied.  For the one instant that
-    # oversized popup existed, the scroll viewport grew, its vertical range
-    # collapsed to fit, and Qt clamped the operator's scroll VALUE into the
-    # smaller range.  Restoring the real size restored the range but not the
-    # value, so a form that merely grew one row -- picking a fit model adds
-    # one -- scrolled itself, and every row the operator was reading moved.
-    #
-    # Nothing below needs a resized popup: the chrome walk reads only layout
-    # margins, spacing, frame widths and size hints, and the content's own
-    # hint is layout-derived.  Polish is what adjustSize was really
-    # contributing (style metrics for the reserved scrollbar), and polishing
-    # has no geometry side effect.
+    # MEASURE WITHOUT MOVING ANYTHING -- never popup.adjustSize(), which
+    # RESIZES the popup to its unbounded hint for an instant, and Qt clamps
+    # the operator's scroll VALUE into that instant's smaller range.  The
+    # chrome walk reads only layout margins, spacing, frame widths and size
+    # hints; polish supplies the style metrics for the reserved scrollbar
+    # and has no geometry side effect.
     popup.ensurePolished()
     hint = content.sizeHint()
     # ONE algorithm, two coordinate spaces.  A window popup is placed in
@@ -1532,9 +1495,7 @@ class FluentGroupBox(QtWidgets.QGroupBox):
         # NOT Qt's own ``QGroupBox`` frame, which cuts a NOTCH in the top border where the title sits.
         # The title is a semibold heading INSIDE the card, inset like its content and centred in the
         # strip ``padding-top`` reserves -- painted by paintEvent, because a sheet cannot set the
-        # weight of a group box title.  It was a grey pill on the card's corner, which read as the
-        # stub of a tab, and section titles came in two styles: the pill and the bold section label.
-        # The ::title rule only keeps Qt's own title text out of sight.
+        # weight of a group box title.  The ::title rule only keeps Qt's own title text out of sight.
         self.setStyleSheet(
             f"""
             QGroupBox {{
@@ -1572,16 +1533,10 @@ class FluentGroupBox(QtWidgets.QGroupBox):
         """Mark this card as the one the next edit acts on, or unmark it.
 
         Selection is a FILL, not a frame: the body takes the ACCENT_TINT
-        wash and the edge stays the card's own (a spacer's dashes, a
-        bracket's colour, the divider grey).  A 2 px accent border was tried
-        first and read as an outline drawn around the card rather than as
-        the card being picked; a softer accent edge was still a second line.
-        The wash, not SELECTED: a card holds fields, muted names and
-        disabled ports, which SELECTED would sink to 3.3:1 and 2.1:1; and a
-        card takes no hover wash, so on a card the wash means only
-        selected.  Painted in paintEvent, never via stylesheet -- an
-        unscoped ``border:`` cascades to every CHILD widget, so each inner
-        checkbox/lineedit grew its own box.
+        wash (why not SELECTED: see :data:`ACCENT_TINT`) and the edge stays
+        the card's own (a spacer's dashes, a bracket's colour, the divider
+        grey).  Painted in paintEvent, never via stylesheet -- an unscoped
+        ``border:`` cascades to every CHILD widget.
         """
 
         value = bool(selected)
@@ -1648,23 +1603,21 @@ class FluentGroupBox(QtWidgets.QGroupBox):
         painter.end()
 
 
-#: What a button DOES, which is all its look may say.  A colour chosen per
-#: call gave one verb a different hue in every window -- Remove orange here,
-#: grey there, blue in the editor -- with white text at 1.65-2.55:1 on top.
-#: ``primary`` is a surface's ONE run or commit action (the deep
-#: ACCENT_STRONG fill, white ink) -- at most one per surface; ``standard``
-#: every other command (the light-blue tint); ``quiet`` a one-glyph command
-#: that closes a view and takes nothing away (a frame's ×: a ghost, never
-#: red); ``destructive`` a command that takes something away or stops or
-#: shuts something down -- Remove, Clear, Unload, Discard, Revert (a Logic Edit
-#: page's edits), Ungroup, Exclude
-#: selected, Reset (a review's exclusions), Reset wavefront, a device's Close,
-#: Shut down devices, every Stop (a labelled one sits on the RED_TINT face; a
-#: one-glyph remover repeated down rows is a ghost in quiet ink that turns red
-#: only under the pointer, since red at rest marks problems), and it acts on
-#: ONE click;
-#: and ``destructive_primary`` the confirm of a destructive question -- the
-#: one white-on-red fill.
+#: What a button DOES, which is all its look may say, so one verb looks the
+#: same in every window.  ``primary`` is a surface's ONE run or commit action
+#: (the deep ACCENT_STRONG fill, white ink 5.2:1) -- at most one per surface;
+#: ``standard`` every other command (the light-blue BUTTON_TINT, HOVER ink);
+#: ``quiet`` a one-glyph command that closes a view and takes nothing away
+#: (a frame's ×: a MUTED_INK ghost with the quiet faces, never red);
+#: ``destructive`` a command that takes something away or stops or shuts
+#: something down -- Remove, Clear, Unload, Discard, Revert (a Logic Edit
+#: page's edits), Ungroup, Exclude selected, Reset (a review's exclusions),
+#: Reset wavefront, a device's Close, Shut down devices, every Stop -- one
+#: look for every labelled one, the RED_TINT face with RED_DARK ink; a
+#: one-glyph remover repeated down rows is a ghost in quiet ink that turns
+#: red only under the pointer, since red at rest marks problems; and
+#: ``destructive_primary`` the confirm of a destructive question -- the one
+#: white-on-red fill.  A command acts on ONE click unless it is armed.
 #: Active (:meth:`FluentButton.set_active`) is not a role but a state: the
 #: SELECTED face a toggle command keeps while what it turned on stands.
 #: Armed (``confirm_twice``) is the destructive_primary face a two-click
@@ -1705,34 +1658,19 @@ def arm_interval_ms() -> int:
 
 
 def _button_stylesheet() -> str:
-    """The one sheet every FluentButton wears; role and state pick the rules.
+    """The one sheet every FluentButton wears; role (:data:`BUTTON_ROLES`)
+    and state pick the rules.
 
     The layers are told apart by FILL, never by an edge: every face's
     border is its own fill, kept one edge-width wide so a state change
-    never moves a label.  Standard is the light-blue BUTTON_TINT with HOVER
-    ink (7.7:1), and held down it is SELECTED, the one colour that means
-    "picked"; primary the deep ACCENT_STRONG with white ink (5.2:1), the one
-    dark face on its surface.  Destructive has ONE look for every labelled
-    command -- Remove, Clear, Close, Stop: the RED_TINT face,
-    RED_DARK ink (5.4:1), as far from white as the light-blue face is -- so
-    a Remove reads the same in a toolbar, a button grid or alone; a
-    one-glyph remover repeated down a list of rows (x) stays a ghost with
-    the red wash only under the pointer, because a column of red faces
-    shouted louder than the rows it removed.  destructive_primary is the
-    RED_DARK fill with white ink.  Quiet is the one-glyph command that
-    takes nothing away -- closing a frame: the look of a tab's close x, no
-    face and MUTED_INK at rest, TEXT on the ACCENT_TINT wash under the
-    pointer and SELECTED held down; never the red of a remover.  A command ON A TINTED CARD (``on_tint``,
-    the green config Subpulse) is a white face with HOVER ink (9.9:1): no
-    blue is laid on green, and the white face against the card is the
-    command's whole boundary.  Pointer and press each step the face a
-    shade.  Dirty (something new to save) is ONE rule for every save or
-    commit: clean it is the role it was given, unsaved it is the primary
-    with a trailing star.  Active is the held-down SELECTED face kept while
-    a toggle is on (SELECTED_HOVER under the pointer); it outranks on_tint,
-    because an engaged toggle is state the operator must see even on a
-    green card.  Disabled is a flat DIVIDER face with DISABLED_INK and no
-    frame; a disabled ghost stays a ghost.
+    never moves a label.  Pointer and press each step the face a shade;
+    held down a standard command is SELECTED.  A command ON A TINTED CARD
+    (``on_tint``, the green config Subpulse) is a white face with HOVER ink
+    (9.9:1), so no blue is laid on green.  Active is the held-down SELECTED
+    face kept while a toggle is on (SELECTED_HOVER under the pointer); it
+    outranks on_tint, because an engaged toggle is state the operator must
+    see even on a green card.  Disabled is a flat DIVIDER face with
+    DISABLED_INK and no frame; a disabled ghost stays a ghost.
     """
 
     global _BUTTON_STYLE_CACHE
@@ -1854,9 +1792,7 @@ class FluentButton(QtWidgets.QPushButton):
     :func:`arm_interval_ms` emits :attr:`confirmed`; a double-click is two
     clicks.  Left alone, hidden or disabled it returns to rest.  Such a
     button words its own tooltip ("Click twice to ...", "Click again to
-    ..."), and its owner acts on ``confirmed``, never on ``clicked``.  Only
-    removing a logic node or a plot panel is armed; every other command
-    acts on one click.
+    ..."), and its owner acts on ``confirmed``, never on ``clicked``.
     """
 
     #: The second click of an armed button: the one signal to act on.
@@ -1970,12 +1906,11 @@ class FluentButton(QtWidgets.QPushButton):
         """Disabling a button that holds the focus lets the focus go first.
 
         Qt hands the focus of a widget being disabled to the next one in the
-        tab chain: a clicked On Pulse disabled while it runs passed it to
-        Stop Pulse, and the next Space stopped the pulse the operator had
-        just started.  Cleared here, the focus goes nowhere.  (A button is
-        still focused by a click: a field commits what was typed into it
-        when the focus leaves, so a command that took no focus would act on
-        the number from before the typing.)"""
+        tab chain, where the next Space would press that neighbour (a Stop
+        beside the Start just pressed).  Cleared here, the focus goes
+        nowhere.  (A button is still focused by a click: a field commits
+        what was typed into it when the focus leaves, so a command that took
+        no focus would act on the number from before the typing.)"""
 
         if not enabled and self.hasFocus():
             self.clearFocus()
@@ -2024,9 +1959,8 @@ class FluentButton(QtWidgets.QPushButton):
     def _mark_glyph(self) -> None:
         """A one-symbol label (×, ⋯, ▾) is drawn larger, with little padding.
 
-        At body size such a symbol was a speck in the middle of a button
-        padded for a word.  An icon with no words is a glyph too: it takes
-        the same faces, and its engine paints in :meth:`glyph_ink`.
+        An icon with no words is a glyph too: it takes the same faces, and
+        its engine paints in :meth:`glyph_ink`.
         """
 
         glyph = (len(self._label) == 1 and not self._label.isalnum()) or (
@@ -2044,9 +1978,8 @@ class FluentButton(QtWidgets.QPushButton):
         """Whether the button sits on a TINTED card body (a Config
         Subpulse's green, a selected card's wash).
 
-        There a light-blue face laid a second hue on the card's; it wears a
-        plain white face instead, whose contrast with the card is its whole
-        boundary, so no blue is brought onto green.
+        There it wears a plain white face, whose contrast with the card is
+        its whole boundary, so no blue is brought onto green.
         """
 
         value = bool(on_tint)
@@ -2141,10 +2074,8 @@ class FluentButton(QtWidgets.QPushButton):
         One rule for every save or commit: clean, the button wears the role
         it was given (a Save is a standard command); unsaved, it is drawn
         primary with a trailing ``*`` -- the one thing on its surface to
-        press.  A Save that was primary while there was nothing to save
-        shouted for no reason, and an orange tint on one tab beside a
-        primary on the next made one verb two looks.  Idempotent and
-        width-stable: the label never accumulates stars.
+        press.  Idempotent and width-stable: the label never accumulates
+        stars.
         """
 
         dirty = bool(dirty)
@@ -2190,9 +2121,8 @@ def _apply_fluent_context_menu(widget, event, *, extra=()) -> None:
 
     The menu is a ONE-SHOT object: built for this click, gone after it.  It is
     parented to the widget so it inherits the widget's screen and stacking,
-    and a parented QObject outlives the Python name that made it -- every
-    right-click used to leave one more menu, and its actions, on the widget
-    until the window died.
+    and a parented QObject outlives the Python name that made it, so the
+    menu is retired once the click is done.
 
     ``extra`` is ``(text, callable)`` commands a control adds below the
     standard ones -- a numeric box's "Edit step…".  Each runs after the menu
@@ -2368,9 +2298,8 @@ class FluentLineEdit(QtWidgets.QLineEdit):
         """Elide what does not fit (``QtCore.Qt.ElideMiddle``, ...) while the
         field is not being edited; ``None`` scrolls as a line edit does.
 
-        A path shown from its head hid the very file name it was there to
-        name.  Only the PAINTING elides: ``text()`` stays whole, and the
-        field shows all of it again the moment it takes focus.
+        Only the PAINTING elides: ``text()`` stays whole, and the field
+        shows all of it again the moment it takes focus.
         """
 
         self._display_elide = mode
@@ -2808,17 +2737,14 @@ class FluentReadoutEdit(FluentLineEdit):
         readout value).  A value too long for its row is elided in the MIDDLE -- a path
         keeps its head and its file name -- and the tooltip carries all of it.
 
-    It wore a grey box with a faint edge, which is the disabled button's chrome: a path
-    the operator was meant to read looked like a control that was switched off.
     A readout that reports a status takes its ink from :func:`set_status_ink`.
 
     Inherits FluentLineEdit's sizing / API (``setText`` / ``text``) so it drops into the same
     rows.  A value stands in a column of fields -- a card's Total under its Name, a result
     path under the parameters it came from, a status under the address it reports on -- so
     its text starts where a field's text starts (:func:`field_text_inset`), not at the edge
-    of the boxes: flush, the values sat six pixels left of the typed text above them, out of
-    the column the eye reads down.  ``flush=True`` is for a value that continues a line of
-    text or sits under a column header's words: it starts at its widget's own edge."""
+    of the boxes.  ``flush=True`` is for a value that continues a line of text or sits
+    under a column header's words: it starts at its widget's own edge."""
 
     def __init__(self, text: str = "", parent=None, *, flush: bool = False):
         super().__init__(text, parent)
@@ -2947,7 +2873,7 @@ class FluentReadoutMultiline(QtWidgets.QPlainTextEdit):
             """
         else:
             # The SAME readout look as FluentReadoutEdit: plain TEXT-ink text on the surface, no
-            # box (a grey box was the disabled button's chrome); the viewport margin insets it.
+            # box; the viewport margin insets it.
             base = f"""
             QPlainTextEdit {{
                 background: transparent;
@@ -3044,11 +2970,8 @@ class FluentPathEdit(QtWidgets.QWidget):
     ``base_dir`` (:meth:`named_path`); the tooltip names the whole path.
 
     ``refreshable=True`` adds a Refresh button that emits ``refresh_requested``
-    without changing the path.  A file field points at something that is edited
-    elsewhere -- a pulse in the Pulse Editor, a calibration a run has just
-    written -- and the only way to re-read it was to pick the same file again
-    through the dialog, or to touch some other field so the whole draft
-    re-finalized.  Both worked by accident; this says it."""
+    without changing the path, to re-read a file edited elsewhere -- a pulse in
+    the Pulse Editor, a calibration a run has just written."""
 
     changed = QtCore.pyqtSignal(str)
     selected = QtCore.pyqtSignal(str)
@@ -3165,10 +3088,9 @@ class FluentSectionLabel(FluentLabel):
     FluentGroupBox's title, so a card's title and a section's read alike;
     a heading inside a card is one step quieter
     (:func:`column_header_label`) -- as tall as a control, its line on the
-    line a field of that height puts its text on.  It kept a top margin
-    for an own-line header, and as the title of a row of fields that
-    margin put it two pixels under their text; the space above a section
-    is the section gap of the layout it stands in."""
+    line a field of that height puts its text on.  It has no top margin:
+    the space above a section is the section gap of the layout it stands
+    in."""
 
     def __init__(self, text: str = "", parent=None):
         super().__init__(text, parent)
@@ -3193,10 +3115,9 @@ def card_title_row(
 
     The Device Manager's and the Figure Viewer's cards lay their titles out
     with this, so cards that stand side by side have their names on one
-    baseline -- a painted title strip beside a laid-out row put Camera four
-    pixels below Discovered hardware -- and a card's command sits on its
-    title line, never alone on a row of its own under it.  The title is a
-    :class:`FluentSectionLabel`, the one section title style."""
+    baseline and a card's command sits on its title line, never alone on a
+    row of its own under it.  The title is a :class:`FluentSectionLabel`,
+    the one section title style."""
 
     row = QtWidgets.QHBoxLayout()
     row.setContentsMargins(0, 0, 0, 0)
@@ -3246,12 +3167,11 @@ class FluentSettingRow(QtWidgets.QWidget):
 
     THE design system (one logic everywhere): a form is built from exactly two primitives --
     :class:`FluentSectionLabel` (semibold, dark) for a GROUP header, and this row (regular
-    weight, fixed-width column) for each control.  The section/row hierarchy is shown by
-    weight ONLY -- never by indentation.  Labels are TEXT: grey read as disabled beside a
-    required field, and grey is what a HINT wears.  Share ONE column width
-    per form via :func:`setting_label_width` so the rows align.  Do NOT use a ``QFormLayout`` (its
-    labels render dark + auto-width = a different style), and do NOT build a row by hand from a
-    label and a control.
+    weight, fixed-width column) for each control.  The section/row hierarchy is shown by weight
+    ONLY -- never by indentation.  Labels are TEXT ink; grey is what a HINT wears.  Share ONE
+    column width per form via :func:`setting_label_width` so the rows align.  Do NOT use a
+    ``QFormLayout`` (its labels render dark + auto-width = a different style), and do NOT build
+    a row by hand from a label and a control.
 
     ``label`` is the row's words, or the label widget a host keeps to change or annotate later.
     THE row-label widget is :class:`FluentLabel` (or :class:`ElidedLabel` for words that may not
@@ -3622,13 +3542,12 @@ def stamped_file_name(stem: str, extension: str, *, stamp: str | None = None) ->
 
     A name the operator recognises plus the moment it was written, because two
     saves of the same board are two files and the second must not silently be
-    the first.  ONE rule: the Edit tab's Save figure and the console's own
-    Save… (layout) and Save image… had begun to grow their own.
+    the first.  ONE rule for the Edit tab's Save figure and the console's
+    Save… (layout) and Save image….
 
     The name is often one an operator gave (a node's, a panel's), so every
-    character a Windows file name cannot hold becomes ``_``: a ``:`` in it
-    wrote the figure into a hidden stream of another file, and ``?``, ``*``
-    or ``|`` refused the save.
+    character a Windows file name cannot hold becomes ``_`` (a ``:`` would
+    write into a hidden stream of another file).
     """
 
     from datetime import datetime  # noqa: PLC0415 -- only a save needs the clock
@@ -3907,9 +3826,8 @@ class FluentComboBox(QtWidgets.QAbstractButton):
                 f'QLineEdit:disabled {{ color: {DISABLED_INK}; }}'
             )
             # The combo draws the field; its editor takes exactly the text
-            # room inside it.  A field's own minimum height made the editor
-            # taller than that room, so the typed text sat below the
-            # collapsed text's line and below every label beside the box.
+            # room inside it, not a field's own minimum height, so typed text
+            # sits on the collapsed text's line.
             self._line_edit.setMinimumHeight(0)
             self._line_edit.textChanged.connect(self.currentTextChanged)
             self._line_edit.installEventFilter(self)
@@ -4552,12 +4470,9 @@ class FluentComboBox(QtWidgets.QAbstractButton):
 
     def _collapsed_content_width(self) -> int:
         if self._cached_content_width is None:
-            # CEILED, from the fractional advance.  The painter elides with
-            # the text engine's fractional width, and the integer metric
-            # rounds it -- so a box sized to exactly its widest item, which
-            # is what a Fixed-width combo is, was a fraction of a pixel too
-            # narrow for that item and painted it with an ellipsis: a power
-            # picker sized to "dBm" showed "dB...".
+            # CEILED, from the fractional advance: the painter elides with
+            # the text engine's fractional width, so a Fixed-width combo sized
+            # to the rounded metric would elide its own widest item.
             metrics = QtGui.QFontMetricsF(self._collapsed_font())
             self._cached_content_width = max(
                 (
@@ -4608,12 +4523,10 @@ class FluentComboBox(QtWidgets.QAbstractButton):
     def paintEvent(self, event):
         """A field like a line edit beside it, with a chevron and no block.
 
-        The solid accent block every combo carried repeated down a whole
-        form, and an open combo filled with tint.  The field says its states
-        the way an edit does -- the accent edge under the pointer or while it
-        is open -- and only a cycle choice whose wheel is ACTIVE takes the
-        SELECTED fill, because that is a state it holds; its edge stays the
-        field's own.
+        The field says its states the way an edit does -- the accent edge
+        under the pointer or while it is open -- and only a cycle choice
+        whose wheel is ACTIVE takes the SELECTED fill, because that is a
+        state it holds; its edge stays the field's own.
         """
 
         del event
@@ -4805,15 +4718,10 @@ class FluentComboBox(QtWidgets.QAbstractButton):
         The rows revealed, the delegate's row height, the content's column
         width, the collapsed field's width, the space below it and the
         screen's width: everything the geometry follows from is known before
-        the popup is shown, and nothing is read back from the scroll area.
-        It used to be -- ``view.width - viewport.width`` stood in for the
-        frame-and-scrollbar chrome -- and a scroll area lays itself out
-        lazily: hidden, a resize is only pended; visible, the vertical bar
-        shows or hides on a queued slot.  So the read was the PREVIOUS
-        opening's chrome, each opening left the opposite residue, and the
-        same picker alternated between a clean card and one with two
-        scrollbars cutting its rows.  Which bars there are is decided here,
-        from the numbers, and the view is told.
+        the popup is shown, and nothing is read back from the scroll area,
+        which lays itself out lazily (a read would see the PREVIOUS opening's
+        chrome).  Which bars there are is decided here, from the numbers,
+        and the view is told.
         """
 
         view = self._popup_view
@@ -4824,10 +4732,9 @@ class FluentComboBox(QtWidgets.QAbstractButton):
         view.ensurePolished()
         column = self.modelColumn()
         rows = self._visible_popup_row_count()
-        # A list's rows each as tall as it is: a header without a box is
-        # shorter than a row with one, and a list as tall as its first row
-        # times the count cut its last row off.  A tree's revealed rows are
-        # not its model's top rows, and are all one height.
+        # A list's rows each as tall as it is (a header without a box is
+        # shorter than a row with one).  A tree's revealed rows are not its
+        # model's top rows, and are all one height.
         if isinstance(view, QtWidgets.QListView):
             heights = [int(view.sizeHintForRow(row)) for row in range(rows)]
         else:
@@ -5668,16 +5575,13 @@ class FluentUnitPicker(FluentTreeComboBox):
     def __init__(self, unit: str, parent=None) -> None:
         super().__init__(parent)
         self._unit = ""
-        #: Every spelling this picker can show collapsed.  The base combo
-        #: measures its width over its TOP-LEVEL rows, which in a tree are
-        #: the trunks -- "W", one letter -- so the box was sized for "W" and
-        #: showed "dBm" as "dB...".  The leaves are what it shows.
+        #: Every spelling this picker can show collapsed: the leaves, not
+        #: the TOP-LEVEL rows the base combo measures (in a tree, the trunks).
         self._spellings: tuple[str, ...] = ()
         self.set_unit(unit)
         # As wide as its widest spelling and no wider; as tall as every other
         # control in the row.  Only the horizontal policy is this widget's to
-        # say -- a Preferred height let the row's tallest neighbour stretch
-        # it, so the picker stood taller than the box it belongs to.
+        # say; the height stays the box's.
         policy = self.sizePolicy()
         policy.setHorizontalPolicy(QtWidgets.QSizePolicy.Fixed)
         self.setSizePolicy(policy)
@@ -5815,13 +5719,11 @@ class _FluentTabCloseButton(QtWidgets.QToolButton):
 
     The button paints itself: the disk on whole device pixels, an even
     number of them across, and the x centred on its INK on the disk's
-    centre (:func:`paint_centred_ink`).  Drawn as a QToolButton's text, the
-    x was centred on its line box and sat a pixel below the middle of its
-    disk.  It stays a ``QToolButton``: a ``QAbstractButton`` subclass does not
-    composite as a ``QTabBar`` tab button (it rendered blank).  The glyph's
-    font is the button's own, never ``self.font()``: a window-level
-    ``QWidget { font }`` sheet overrode setFont and drew a larger x in one
-    window than another.  Frontend-owned, reused via
+    centre (:func:`paint_centred_ink`).  It stays a ``QToolButton``: a
+    ``QAbstractButton`` subclass does not composite as a ``QTabBar`` tab
+    button (it renders blank).  The glyph's font is the button's own, never
+    ``self.font()``, which a window-level ``QWidget { font }`` sheet
+    overrides.  Frontend-owned, reused via
     :meth:`FluentTabWidget.add_closable_tab`.
 
     The x has to end as far before its underline's end as the label's ink
@@ -5835,9 +5737,7 @@ class _FluentTabCloseButton(QtWidgets.QToolButton):
     the middle of the label's capitals (:func:`_tab_cap_centre`).  The
     button is as tall as the whole tab, underline included, so the style
     seats it on the tab's top and every relayout -- a current tab changed,
-    a tab added -- puts it back there.  Centred by the style on the tab
-    with its underline, a disk-high button stood under the words, which
-    the style centres on the band above the underline.
+    a tab added -- puts it back there.
     """
 
     def __init__(self, parent=None):
@@ -5916,13 +5816,11 @@ class _FluentTabBar(QtWidgets.QTabBar):
     When the natural tab widths overflow the bar, the WIDEST tabs are capped to a shared
     width (water-filling) and ``ElideRight`` trims only their labels: ``Monitor`` / ``Logic``
     stay full, long Edit titles trim with a trailing ``...``, and every tab's close ``x``
-    stays painted because the cap reserves the right-side button slot.  This is the
-    squeeze-free replacement for the old ``width//count`` layout that crammed EVERY tab
-    (short ones included) to an equal sliver.  ``sizeHint`` still reports the NATURAL total
-    so the QTabWidget grants the bar its full window-capped width (``tabSizeHint`` caps to
-    that ACTUAL width); reporting the capped sum instead would loop back and collapse the
-    bar.  No tab scrolls off, so no scroll arrows appear; the corner ``...`` overflow menu
-    lists every FULL title.  Reusable, frontend-owned."""
+    stays painted because the cap reserves the right-side button slot.  ``sizeHint`` reports
+    the NATURAL total so the QTabWidget grants the bar its full window-capped width
+    (``tabSizeHint`` caps to that ACTUAL width); reporting the capped sum instead would loop
+    back and collapse the bar.  No tab scrolls off, so no scroll arrows appear; the corner
+    ``...`` overflow menu lists every FULL title.  Reusable, frontend-owned."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -6047,7 +5945,7 @@ class FluentTabWidget(QtWidgets.QTabWidget):
         # and read as browser chrome, not Fluent).  With scroll buttons OFF and ElideRight,
         # Qt shrinks the OVERFLOWING tabs by eliding their labels so ALL tabs fit side by
         # side -- short tabs (Monitor / Logic) stay full, long Edit titles trim with "..."
-        # and every tab's close "x" stays fully painted (the reported "x cut off" is gone).
+        # and every tab's close "x" stays fully painted.
         # The corner ``...`` overflow button lists every FULL title for navigation.
         self.setUsesScrollButtons(False)
         self.tabBar().setElideMode(QtCore.Qt.ElideRight)
@@ -6058,9 +5956,8 @@ class FluentTabWidget(QtWidgets.QTabWidget):
         # (a soft grey "x" that highlights on hover -- not the harsh native X).
         self._apply_sheet()
         self._overflow_btn = self._build_overflow_button()
-        # The corner widget sits FLUSH at the widget's right edge, so the button's rounded hover
-        # background used to be CLIPPED on the right.  Wrap it in a transparent holder whose right
-        # margin reserves the clearance, so the full hover pill is visible.
+        # The corner widget sits FLUSH at the widget's right edge and would clip the button's
+        # rounded hover background: a transparent holder's right margin reserves the clearance.
         corner = QtWidgets.QWidget(self)
         corner.setStyleSheet("background: transparent;")
         corner_lay = QtWidgets.QHBoxLayout(corner)
@@ -6143,8 +6040,7 @@ class FluentTabWidget(QtWidgets.QTabWidget):
     def paintEvent(self, event) -> None:  # noqa: N802 - Qt naming
         # The tab widget is a plain WHITE rounded card with NO border line ANYWHERE -- the pivot tabs sit
         # on the white top, the content flows straight below, and the card is delineated only by its white
-        # body against the grey window.  (Any border here read as boxing the tabs at the top, or as a line
-        # between the tabs and the content below -- neither is wanted; the tabs + content are ONE surface.)
+        # body against the grey window: the tabs + content are ONE surface.
         painter = QtGui.QPainter(self)
         painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
         painter.setPen(QtCore.Qt.NoPen)
@@ -6326,9 +6222,7 @@ def fluent_switch_width(text: str) -> int:
 
     The ONE switch-width authority.  A layout that must reserve a column for a
     switch (a form's Auto label column) asks THIS instead of predicting the
-    geometry with its own padding constant -- two independent guesses is how a
-    switch's painted track ended up wider than the cell it was given and drew
-    underneath its neighbour.
+    geometry with its own padding constant.
     """
 
     track_w, _track_h = _switch_track_size()
@@ -6349,15 +6243,11 @@ class FluentSwitch(QtWidgets.QAbstractButton):
     """An on/off setting: a small track with its label BESIDE it, in TEXT ink.
 
     Every boolean SETTING is one of these -- Selectors, Plot, Show off rows,
-    Remote -- including one that sits in a row of commands: a checkable
-    button there read as one more command, and on was told from off by a
-    shade.  The label used to be painted across the track, under the thumb,
-    which covered a letter of every word it carried.  The track is a solid
-    fill with a white thumb and no outline anywhere: off is the neutral
-    PLACEHOLDER grey, on the ACCENT; under the pointer the track steps one
-    shade deeper; disabled it is the DIVIDER grey with a BG thumb.  Rings
-    round the track and rims round the thumb were lines laid round a shape
-    its fill already drew.  The widget is a control's height (30 design px)
+    Remote -- including one that sits in a row of commands.  The track is a
+    solid fill with a white thumb and no outline anywhere: off is the
+    neutral PLACEHOLDER grey, on the ACCENT; under the pointer the track
+    steps one shade deeper; disabled it is the DIVIDER grey with a BG
+    thumb.  The widget is a control's height (30 design px)
     with the track centred in it, so a switch lines up with the buttons of
     its row.  The whole width, label included, takes the click.  In a row
     of commands a switch and its label are their own group:
@@ -6537,11 +6427,10 @@ def add_row_switch(
 ) -> None:
     """Add ``switch`` to a row of commands as a group of its own.
 
-    At the row's own spacing a switch's label ran into the next command --
-    "Remote Log", "Plot Start" -- and read as one more word on a button.  A
-    second gap on each side that has a neighbour (``lead`` before the
+    A second gap on each side that has a neighbour (``lead`` before the
     track, ``trail`` after the label) keeps the setting and its label apart
-    from the commands, whatever the row's spacing is.
+    from the commands, whatever the row's spacing is, so the label never
+    reads as one more word on a button.
     """
 
     gap = layout.spacing()
@@ -6656,13 +6545,11 @@ def _paint_fluent_spin_buttons(widget: QtWidgets.QAbstractSpinBox) -> None:
 
     The field is a two-cell frame, the classic numeric up-down, shown by its
     chevrons and the tint under the pointer -- no line divides it from the
-    digits: a divider was one more line in a field already edged.  The tint
-    fills exactly the hovered cell to the frame's inner edge, concentric at
-    the corner.  The two chevrons are mirror images about the centre of
-    the frame's inner rect, each in the middle of its half: placed on the
-    cells' own centres, an odd number of rows inside the frame gave one
-    cell a row more and put one chevron a pixel further from the middle
-    than the other.  Under the pointer the cell is the hover wash, held
+    digits.  The tint fills exactly the hovered cell to the frame's inner
+    edge, concentric at the corner.  The two chevrons are mirror images
+    about the centre of the frame's inner rect, each in the middle of its
+    half, not on its cell's centre (with an odd number of rows one cell is
+    a row taller).  Under the pointer the cell is the hover wash, held
     down it is SELECTED -- the faces of every quiet thing that acts
     (:func:`_quiet_faces`).  A direction the box cannot move in
     (``stepEnabled``: a bound, or no grid point left inside it) has its
@@ -6991,9 +6878,7 @@ class _PythonHighlighter(QtGui.QSyntaxHighlighter):
     """Python colouring for the code editors this package hands out.
 
     One highlighter, because there is one code editor: the scan generator, the
-    table view and the source popups are all FluentCodeEdit, and a page whose
-    whole job is to be read was rendering comments in the same colour as the
-    code that they explain.
+    table view and the source popups are all FluentCodeEdit.
 
     Comments first and unconditionally: a generated program leads with the
     sentence that says what its columns MEAN, and that sentence is the part a
@@ -7002,10 +6887,8 @@ class _PythonHighlighter(QtGui.QSyntaxHighlighter):
 
     Every colour is an ink at reading strength on the white field: keywords
     the dark accent of a command's label (9.9:1), numbers and strings the
-    deep orange (6.8:1), comments the deep config green (6.2:1).  The accent
-    (2.6:1), the light orange (2.4:1) and the light green are marker
-    colours, and the words drawn in them were the hardest on the page to
-    read.
+    deep orange (6.8:1), comments the deep config green (6.2:1) -- never
+    the marker colours (the accent 2.6:1, the light orange 2.4:1).
     """
 
     KEYWORDS = (
@@ -7066,17 +6949,14 @@ class FluentCodeEdit(QtWidgets.QPlainTextEdit):
     identically; changing the recipe here changes them all.
 
     Its text starts where a field's text starts (:func:`field_text_inset`), so code under a
-    name field reads in that field's column -- the document's own 4 px margin on top of the
-    padding put it 2.3 px further in -- and the first line sits as far below the top edge.
-    Only code being WRITTEN is coloured: a read-only view shows what a program produced, a
-    table or the sentence that says there is none yet, and Python colouring painted the
-    "and" of that sentence as a keyword.
+    name field reads in that field's column, and the first line sits as far below the top
+    edge.  Only code being WRITTEN is coloured: a read-only view shows what a program
+    produced, a table or the sentence that says there is none yet.
 
     An empty editor shows its placeholder as a note: in MUTED_INK and the body font, wrapped,
     where its text would start.  The editor paints it itself -- Qt 5.15 decides whether to
-    show a QPlainTextEdit's placeholder only when the TEXT changes, so a note given to an
-    editor that was already empty (an empty scan table, a fresh expression box) was never
-    drawn and the pane stood blank."""
+    show a QPlainTextEdit's placeholder only when the TEXT changes, so it would never draw
+    a note given to an editor that is already empty."""
 
     #: The placeholder note, and whether the viewport shows it; class
     #: attributes so they exist before __init__ runs.
@@ -7150,18 +7030,13 @@ class _StepChip(QtWidgets.QAbstractButton):
 
     The chip paints and measures with ONE font it builds itself
     (``_STEP_CHIP_FONT_RATIO`` of the field's size), never ``self.font()``:
-    a window-level ``QWidget { font }`` sheet overrides ``setFont``, and
-    there the step came out the digits' size on their baseline -- ``0.001
-    ±1`` read as a value and its uncertainty.
+    a window-level ``QWidget { font }`` sheet overrides ``setFont``.
 
     THE CHIP IS CENTRED ON THE FRAME, like every part inside a field (a
     chevron, a badge).  The pill is centred on the box's inner rect, its
     height of that rect's device-pixel parity, so it stands exactly as far
     from the top edge as from the bottom; the text is centred on its own
-    ink inside the pill, at rest and under the pointer alike.  It used to
-    stand on the digits' baseline, which put the pill two pixels below the
-    middle of the field -- the one thing in a row of centred parts that
-    was not.
+    ink inside the pill, at rest and under the pointer alike.
     """
 
     def __init__(self, box: "FluentDoubleSpinBox"):
@@ -7296,11 +7171,8 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
     _step = Decimal(1)
     #: The owner's bounds, None on a side nobody declared.  Qt cannot say
     #: "no bound": with none declared its double range is the whole double
-    #: line, and that placeholder is not a number anyone asked for.  Read
-    #: back as one it did no harm as a clamp, but converted into a shown
-    #: unit it did: the top of a dBm box read in milliwatts is 10**(DBL_MAX
-    #: / 10), which is not finite, and a step that converted both ends before
-    #: moving refused to move at all.
+    #: line, which is not a number anyone asked for and does not convert into
+    #: a shown unit (the top of a dBm box in milliwatts is not finite).
     _low: Decimal | None = None
     _high: Decimal | None = None
 
@@ -7310,8 +7182,7 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
         Measured the way the box measures a number it is asked to show --
         its frame, buttons, padding and focus inset at this style and
         scale, plus the two pixels the fit rule keeps -- rather than a
-        nominal sum rounded once, which at a fractional scale came out
-        four pixels short and refused the very number it was sized for.
+        nominal sum rounded once, which falls short at a fractional scale.
         The edit is placed by the box's resize, so a box never shown is
         resized in place first; the chrome does not depend on the width.
         """
@@ -7694,9 +7565,7 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
                 return self._display_text
             number = self._quantized(number)
             # DIGITS ONLY.  A box is for the number; which unit that number
-            # is read in is said once, beside it, by the row that owns it --
-            # printing the symbol in here as well put the same fact in two
-            # places and left no room to type in the box it was crowding.
+            # is read in is said once, beside it, by the row that owns it.
             return format_quantity(self._shown_from_value(number), "1")
         except (UnitError, ValueError, ArithmeticError):
             return str(number)
@@ -7841,9 +7710,8 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
     # A decimal box shows the step one notch moves it by, inside the field
     # just left of the stepper: ``±0.1`` in a quiet ghost that turns into a
     # light-blue pill under the pointer and asks for a new step when
-    # clicked.  The step used to be reachable only through a right-click
-    # menu -- or a six-pixel "." strip before that -- and an operator who
-    # cannot see the step cannot know what the arrows will do.
+    # clicked: an operator who cannot see the step cannot know what the
+    # arrows will do.
     #
     # THE CHIP YIELDS TO THE DIGITS.  The value is fitted to the field's
     # whole digit room (``_text_width``, the chip not counted), and the chip
@@ -7855,10 +7723,10 @@ class FluentDoubleSpinBox(_WheelFocusGuardMixin, QtWidgets.QDoubleSpinBox):
     #
     # ONE RESERVED ROOM.  Every width rule that sizes a box for a sample
     # (width_for, sizeHint, the form's number column) counts the room of a
-    # canonical chip, ``_STEP_CHIP_SAMPLE``, not the chip shown now: a
-    # column whose width followed the step text ended two forms of one card
-    # on two edges and jumped when a step was edited.  A wider step simply
-    # takes more of the digits' room while the number leaves it.
+    # canonical chip, ``_STEP_CHIP_SAMPLE``, not the chip shown now, so two
+    # forms of one card end on one edge and nothing jumps when a step is
+    # edited.  A wider step simply takes more of the digits' room while the
+    # number leaves it.
 
     def _step_chip_text(self) -> str:
         step = self._step
@@ -8193,8 +8061,7 @@ def fluent_count_box(
 class FluentCheckBox(QtWidgets.QCheckBox):
     """A square box with a painted tick.
 
-    It was a circle, and a round box reads as a radio button -- one choice
-    of several -- which an independent on/off is not.  The box is a solid
+    Square, because a round box reads as a radio button.  The box is a solid
     fill whose edge is that fill, never an outline: unticked it is
     NEUTRAL_FILL, dark enough to read on a white card and on the BG face of
     a Spacer card; ticked it is ACCENT with a white tick.  Under the pointer
@@ -8203,15 +8070,13 @@ class FluentCheckBox(QtWidgets.QCheckBox):
     DISABLED_INK with the same white tick.  The box has no edge to carry it,
     so its fill must read on every face a read-only box sits on -- 1.7:1 on
     a white card, 1.5:1 on BG and on the ACCENT_TINT body of a selected or
-    expanded block, where DIVIDER was 1.1:1 and the unticked boxes vanished
-    -- and the ticked fill stays 2.1:1 darker than it (3.5:1 on white), so
-    a read-only card still says which boxes are on.  The tick is centred on
-    the box's device-pixel centre.
+    expanded block -- and the ticked fill stays 2.1:1 darker than it (3.5:1
+    on white), so a read-only card still says which boxes are on.  The tick
+    is centred on the box's device-pixel centre.
 
     A label wider than the room its layout gives the box ends in an
-    ellipsis, the whole label in the tooltip, as every elided name does: a
-    port name in a narrow Period card was cut mid-letter at the card's edge.
-    The box may be laid out narrower than its words for that reason.
+    ellipsis, the whole label in the tooltip, as every elided name does, so
+    the box may be laid out narrower than its words.
     """
 
     def __init__(self, text: str = "", parent=None):
@@ -8302,8 +8167,7 @@ class FluentCheckBox(QtWidgets.QCheckBox):
 class FluentPageBody(QtWidgets.QWidget):
     """A scrolled page body that paints its pane's surface and tells Qt so.
 
-    The scrolled content used to be transparent, showing the same colour
-    through from the page.  A scrolled widget Qt can see through is
+    A scrolled widget Qt can see through is
     repainted whole on every step of the wheel -- an Edit page's plot
     surface, a 10 ms frame at three device pixels per point, forty times a
     scroll -- where one Qt knows to be opaque is moved by blitting the
@@ -8312,9 +8176,7 @@ class FluentPageBody(QtWidgets.QWidget):
     background, so this widget paints the colour itself.
 
     The colour is the SURFACE: a page body lives inside a tab pane, and a
-    pane is white like every other page in it.  It painted the window's
-    page grey once, and the one tab that scrolled was the one tab that was
-    grey.
+    pane is white like every other page in it.
     """
 
     _REASSERT = (
@@ -8378,6 +8240,10 @@ class FluentScrollArea(QtWidgets.QScrollArea):
         intentionally do *not* use this mode because a single authored panel may
         be wider than the viewport and must then expose the Fluent horizontal
         scrollbar.
+
+        The bar's gutter is held whether or not the bar shows, so a page whose
+        right margin is its inset less :func:`fluent_scrollbar_thickness`
+        ends its content on one x with or without a bar.
         """
 
         if not isinstance(widget, QtWidgets.QWidget):
@@ -8437,18 +8303,16 @@ class _TableHeader(QtWidgets.QHeaderView):
     """A FluentTableView's header, either way.
 
     Every label is drawn as a CELL, by the table's own item painter: a
-    column's name centred on its band the way a value is centred in its
-    row, a row's number on the line of the values beside it.  The header's
-    section painter centred its line box another way and put every label
-    a pixel under the cells'.  Labels are MUTED_INK, aligned as the model
-    says (``TextAlignmentRole``) or else as the header's default; a column's
-    name is a heading (Semibold, :data:`HEADING_CSS_WEIGHT`), and a row of
-    the selection names itself in bold, as Qt's own row header did.
+    column's name centred on its band the way a value is centred in its row,
+    a row's number on the line of the values beside it.  Labels are
+    MUTED_INK, aligned as the model says (``TextAlignmentRole``) or else as
+    the header's default; a column's name is a heading (Semibold,
+    :data:`HEADING_CSS_WEIGHT`), and a row of the selection names itself in
+    bold, as Qt's own row header did.
 
     The row header's rules continue the viewport's own, one edge-width at
     each row's bottom, and the rule that would lie on the frame's bottom
-    edge is not drawn -- as a section border it doubled the edge and
-    squared the rounded corner beside it."""
+    edge is not drawn: it would double the edge."""
 
     def __init__(self, orientation, parent=None):
         super().__init__(orientation, parent)
@@ -8518,11 +8382,8 @@ class _TableRules(QtWidgets.QWidget):
     """A table's two header rules, painted together over its headers.
 
     The column header's bottom rule and the row header's right rule cross
-    at the corner; drawn as the header widgets' and the corner button's
-    own style-sheet borders they were three strokes from three widgets,
-    and inside a FluentFrame (whose ``QFrame`` rule a QHeaderView inherits)
-    they ended in rounded hooks that left ground at the cross.  Here each
-    is ONE filled rectangle placed from the table's frame: the header rule
+    at the corner.  Each is ONE filled rectangle placed from the table's
+    frame, not three widgets' style-sheet borders: the header rule
     runs from the frame's left edge to the end of the viewport (into the
     right edge when nothing stands between), the row-header rule from the
     frame's top edge to the bottom of the viewport, both snapped to device
@@ -8647,8 +8508,7 @@ class FluentTableView(QtWidgets.QTableView):
         self.setCornerButtonEnabled(False)
         self.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
         # A data table's unit is the ROW: the pointer and a selection light
-        # the whole of it.  A single-cell hover band slid along under the
-        # pointer and read as the cell being picked.
+        # the whole of it.
         self.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
         self._hover_row = -1
         self.setMouseTracking(True)
@@ -8734,8 +8594,7 @@ class FluentTableView(QtWidgets.QTableView):
         apply_fluent_scrollbars(self)
         # The vertical bar scrolls the rows, so it stands beside them: a
         # blank the column header's height stands over it, in the header's
-        # row.  Spanning the header too, its resting handle sat beside the
-        # column names at the table's top and read as a stray grey bar.
+        # row.
         self._header_room = QtWidgets.QWidget()
         self.addScrollBarWidget(self._header_room, QtCore.Qt.AlignTop)
         self._rules = _TableRules(self)
@@ -8754,8 +8613,7 @@ class FluentTableView(QtWidgets.QTableView):
     def set_value_columns(self) -> None:
         """Size the columns to the widest value in view, and never elide one.
 
-        A number cut to "2.6749…" hid the digits the operator opened the table
-        to read.  Every column takes the width of the widest cell in the rows
+        Every column takes the width of the widest cell in the rows
         at the top of the view -- visible cells only, the way the table
         paints them -- and widens, never narrows, while the same data is
         shown, so scrolling does not make the columns breathe.  The tooltip
@@ -8764,8 +8622,8 @@ class FluentTableView(QtWidgets.QTableView):
         A value is never shown in part.  The table scrolls sideways by whole
         columns, so none is cut on the left, and the column the viewport's
         right edge cuts shows neither its values nor its name until it is
-        scrolled in: cut there, a right-aligned value showed its leading
-        digits -- a different number -- under no column name at all.
+        scrolled in: cut, a right-aligned value would read as a different
+        number.
         """
 
         self._fits_values = True
@@ -8857,10 +8715,8 @@ class FluentTableView(QtWidgets.QTableView):
 
         A longer table is a viewport at least ``viewport_rows`` tall that grows
         into whatever room its page has, with its own scrollbar -- so its
-        column header stays in view.  Expanding every table of up to two
-        thousand rows into the page scrolled the header away with the first
-        screenful and gave the page and the table a scrollbar each.  Only
-        section geometry is read, never scientific cells.
+        column header stays in view.  Only section geometry is read, never
+        scientific cells.
         """
         if limit < 1 or viewport_rows < 1:
             raise ValueError("row limits must be positive")
@@ -8980,12 +8836,11 @@ class FluentTableView(QtWidgets.QTableView):
 
         The hovered row is an ACCENT_TINT band; a selected run of rows is ONE
         rounded SELECTED block -- the row under the pointer inside it in
-        SELECTED_HOVER -- with no outline: a fill says "picked", and a box
-        drawn round it was one more line.  A row's rule is one hairline
-        across the WHOLE viewport, frame to frame -- drawn as a cell border
-        it stopped where the last column did -- except inside a selected
-        run, which it would cut into stripes; a block ends on the rule
-        under its last row, so the rules either side stay whole.
+        SELECTED_HOVER -- with no outline: a fill says "picked".  A row's
+        rule is one hairline across the WHOLE viewport, frame to frame,
+        except inside a selected run, which it would cut into stripes; a
+        block ends on the rule under its last row, so the rules either side
+        stay whole.
         """
 
         model = self.model()
@@ -9388,9 +9243,7 @@ def _paint_grid_label(
 ) -> None:
     """A grid label on the one line of its row: :func:`centred_line_top` of
     the cards' band.  Every card of a row and its row label share that
-    baseline whatever their letters; centred on its own ink each name sat
-    as high as its letters were tall, and the row label beside them, on
-    its line box, a pixel lower than all of them."""
+    baseline whatever their letters."""
 
     top = centred_line_top(band[0], band[1] - band[0], font)
     line = QtCore.QRectF(rect.left(), top, rect.width(), max(0.0, band[1] - top))
@@ -9437,8 +9290,8 @@ def _paint_grid_card(
     if edge is None:
         return outer
     pen = QtGui.QPen(QtGui.QColor(edge), stroke)
-    # Flat caps, 3 on and 3 off: Qt's square cap grew every dash by a pen
-    # width into the gap and the edge read as a solid line at 1x.
+    # Flat caps, 3 on and 3 off: Qt's square cap grows every dash by a pen
+    # width into the gap.
     pen.setCapStyle(QtCore.Qt.FlatCap)
     pen.setDashPattern([3.0, 3.0])
     painter.setPen(pen)
@@ -9529,8 +9382,7 @@ class _SelectionGridDelegate(QtWidgets.QStyledItemDelegate):
         deeper -- red at rest belongs to problems.  A quiet one takes the
         hover wash and the SELECTED press of every quiet thing, in TEXT ink.
         Its face is a square as tall as a control, on its row's band like
-        the cards beside it: the whole cell of a two-line row made it a
-        tall bar.  The glyph is centred on its ink."""
+        the cards beside it.  The glyph is centred on its ink."""
 
         grid = self.parent()
         cell = (index.row(), index.column())
@@ -10031,8 +9883,7 @@ class FluentSegmentedButtons(QtWidgets.QWidget):
     as the others, and no outline: the fill alone says which is chosen.
     Every face is rounded at the field radius and the track at that radius
     plus its rim, so the current face is concentric with the track rather
-    than a near-square block in a rounded one.  A row of separate tinted buttons read as a row of
-    commands, which these are not.
+    than a near-square block in a rounded one.
 
     A choice the owner WITHHOLDS (``button(value).setEnabled(False)``) keeps
     its place in DISABLED_INK and takes neither the pointer nor Tab.  The
@@ -10062,9 +9913,7 @@ class FluentSegmentedButtons(QtWidgets.QWidget):
             button = QtWidgets.QPushButton(label, self)
             button.setCursor(QtCore.Qt.PointingHandCursor)
             button.setFocusPolicy(QtCore.Qt.TabFocus)
-            # A control high at every scale: a face's own hint (its font's
-            # line) made the track taller than the fields beside it at the
-            # smallest scale.
+            # A control high at every scale, not a face's own hint.
             button.setFixedHeight(control_height() - 2 * rim)
             button.setMinimumWidth(fluent_text_width(metrics, str(label)) + 2 * pad + 2)
             button.setProperty("current", False)
@@ -10558,12 +10407,9 @@ class FluentDialogWindow(FluentWindow):
         if not 0 < ratio <= 1:
             raise ValueError("window_ratio must be between 0 and 1")
         super().__init__(widget=widget, title=str(title))
-        # Its own top-level FROM CONSTRUCTION, on purpose.  This dialog used
-        # to be Qt-parented to the window it was opened from and then given
-        # the Window flag afterwards -- and a frameless window realizes its
-        # native handle inside __init__, so the late flag re-created the
-        # handle under it, the construct that froze and cascaded closes on
-        # the bench twice.  ``anchor`` is only WHERE to appear: the dialog
+        # Its own top-level FROM CONSTRUCTION (see :func:`launch_fluent_window`):
+        # a late Window flag re-creates a frameless window's native handle.
+        # ``anchor`` is only WHERE to appear: the dialog
         # centres on it, and application modality does the blocking without
         # any native ownership between windows.
         self.setWindowModality(QtCore.Qt.ApplicationModal)
@@ -10657,14 +10503,10 @@ def launch_fluent_window(
 ) -> FluentWindow:
     """The ONE top-level-GUI launcher sequence.
 
-    Every window from here is a PLAIN top-level that belongs to nobody.
-    There used to be an ``owner`` parameter that Qt-parented a new window
-    to the one it was opened from and applied the Window flag afterwards
-    -- but a frameless window realizes its native handle inside __init__,
-    so the late flag re-created the handle underneath it, and on the
-    bench that construct twice cascaded closes the wrong way (one closed
-    log window froze its siblings; one closed device control reached the
-    console, whose close guard shut the running installation).  A surface
+    Every window from here is a PLAIN top-level that belongs to nobody: a
+    frameless window realizes its native handle inside __init__, so a
+    Window flag applied after Qt-parenting it would re-create the handle
+    underneath it and cascade closes between windows.  A surface
     that genuinely belongs to a page -- the panel Setting frame -- is a
     :class:`FluentOverlayFrame`: an ordinary child widget of that page, so
     stacking, tab visibility, shared minimise and shared close all follow
@@ -10676,8 +10518,7 @@ def launch_fluent_window(
     it calls :func:`ensure_qt_app` *before* constructing the body, then wraps
     and shows it through one shared lifecycle.  With the default
     ``fixed_size=False`` the initial window is always the shared human-screen
-    size from ``window_ratio``; a caller no longer has to remember a per-demo
-    ``fixed_size=False`` switch.
+    size from ``window_ratio``.
 
     The fixed-content mode remains available explicitly with
     ``fixed_size=True`` for small embedded/test shells.  It is intentionally
@@ -10836,16 +10677,11 @@ class FluentStatusStrip(FluentFrame):
     One severity-coloured dot + one eliding message line (full text in the tooltip -- strip
     text can carry paths/errors, so it must elide, never clip) + an optional right-side action
     button (e.g. the console's "Stop task").  The strip is ALWAYS visible: content switches by
-    priority instead of rows appearing/disappearing (the old transient task banner shifted the
-    whole layout under the pointer every time a task started/finished).
+    priority instead of rows appearing/disappearing, so nothing shifts under the pointer.
 
     Severity is a DATA input mapped to the one palette here, in the one status vocabulary
     (``zlc_ui.status.STATUS_SEVERITIES``): ``idle`` (grey), ``task`` (accent dot, plain ink --
-    what just happened or is under way), ``warning`` (amber advisory), ``error`` (red).  Task
-    and warning shared the amber, so "added occupancy" read as something wrong.
-    The shared precedent is the always-visible last-message-wins Log strip; this deviates
-    consciously by adding severity colour + the action slot, which its separate popup/timer
-    channels carried instead."""
+    what just happened or is under way), ``warning`` (amber advisory), ``error`` (red)."""
 
     #: severity -> (dot colour, text colour): the strip's words of the ONE status table.
     SEVERITIES = {word: STATUS_CUES[word] for word in STATUS_SEVERITIES}

@@ -1,9 +1,5 @@
-"""Pure Qt projection for the pulse schedule page.
-
-The original schedule page was a useful visual reference, but its public
-entry point accepted a domain document and performed projection in the
-widget.  This version keeps the extracted interaction shape while accepting
-only :mod:`zlc_ui.pulse.models` records.
+"""Pure Qt projection for the pulse schedule page; it accepts only
+:mod:`zlc_ui.pulse.models` records, never a domain document.
 """
 
 from __future__ import annotations
@@ -80,14 +76,11 @@ def _apply_field(widget: FluentScanLineEdit, field: FieldVM) -> None:
 
 class _PortToggleIcon(QtGui.QIconEngine):
     """A Delay row's every-period on/off command: one ring, with a dot in
-    it for "on".  Two characters (a disc and a ring) never matched -- the
-    small disc read as a dot beside a circle, the large one as a dark blot
-    heavier than every word on the page -- so both are drawn: the same
-    ring, the same stroke, in the command's own ink -- its button's
-    :meth:`FluentButton.glyph_ink`, so the ring follows the button's state
-    exactly as a one-glyph label does.  The button is held weakly (it owns
-    its icon); a copy Qt paints after the button is gone takes the
-    standard command's ink."""
+    it for "on", both drawn: the same ring, the same stroke, in the
+    command's own ink -- its button's :meth:`FluentButton.glyph_ink`, so
+    the ring follows the button's state exactly as a one-glyph label does.
+    The button is held weakly (it owns its icon); a copy Qt paints after
+    the button is gone takes the standard command's ink."""
 
     def __init__(self, on: bool, button: "weakref.ref[FluentButton]") -> None:
         super().__init__()
@@ -140,7 +133,7 @@ def _port_toggle_button(on: bool, tooltip: str) -> FluentButton:
     _show_port_ring(button, on)
     side = row_height()
     # About half the face, of the face's parity: an odd ring in an even
-    # face has no centred place, and stood half a pixel off on every row.
+    # face has no centred place.
     glyph = side // 2
     glyph = max(8 + side % 2, glyph - (side - glyph) % 2)
     button.setIconSize(QtCore.QSize(glyph, glyph))
@@ -167,10 +160,8 @@ _UNBOUNDED = 1 << 20
 def _place_rows_in_order(layout: QtWidgets.QVBoxLayout, holders) -> None:
     """Stack a column's row holders under its top block, in port order.
 
-    The columns are read across, so row N of each is the same output.  A row
-    kept keeps its slot and a new one is added above the stretch, so without
-    this a port shown again, or one inserted between two others, sat at the
-    bottom of its column while the cards showed it in its place.
+    The columns are read across, so row N of each is the same output, even
+    for a port shown again or inserted between two others.
     """
 
     for index, holder in enumerate(holders, start=1):
@@ -314,8 +305,7 @@ class PeriodCard(FluentGroupBox):
         self.unit_combo.setEnabled(not period.readonly and not period.duration.config_active)
         self.name_edit.setText(period.name)
         # One look for what cannot be edited here: switched off, like the
-        # unit combo and the checkboxes beside it.  A read-only name stood
-        # in a white editable-looking box among greyed controls.
+        # unit combo and the checkboxes beside it.
         self.name_edit.setEnabled(self.kind != PERIOD_KIND_SPACER and not period.readonly)
         self._analog_mode_choices = tuple(analog_mode_choices)
         self._reconcile_ports(tuple(ports), period)
@@ -364,9 +354,7 @@ class PeriodCard(FluentGroupBox):
             if known is not None and known.kind != port.kind:
                 # The same key with another KIND is another row: a digital
                 # checkbox cannot become a DAC mode-and-value editor by
-                # being told a new value.  Kept, a document that turned an
-                # output into a bus left the old checkbox in the card and
-                # no analog editor at all.
+                # being told a new value.
                 widget = self.port_rows.pop(port.key)
                 self._column.removeWidget(widget)
                 retire_widget(widget)
@@ -548,9 +536,7 @@ class ChannelNamesPanel(FluentGroupBox):
     ONE label column (its widest shown label and the air after it, the
     names and the codes alike) and ONE field column: the Name field and
     every port's label field share both edges, and a total read beside them
-    starts where their typed text starts.  The labels were centred in a
-    fixed 85 px box, so no two started on one x, and the port fields were a
-    second, narrower column two pixels in from the Name field.
+    starts where their typed text starts.
 
     The Name is where the schedule is renamed, on every page: the Pulse on
     Edit, the Subpulse on its own page.  The port labels are the board's,
@@ -622,8 +608,7 @@ class ChannelNamesPanel(FluentGroupBox):
                 else:
                     field = FluentReadoutEdit(port.label)
                 # A name longer than the column reads from its head, cut
-                # with an ellipsis like the delay column's labels, rather
-                # than scrolled to its tail where the cursor was left.
+                # with an ellipsis like the delay column's labels.
                 field.set_display_elide(QtCore.Qt.ElideRight)
                 holder = QtWidgets.QWidget()
                 holder.setStyleSheet("background: transparent;")
@@ -665,10 +650,7 @@ class ChannelPanel(FluentGroupBox):
     The rows are a form: ONE label column (its widest shown label, a port's
     or "Repeats", and the air after it) and ONE control column, where the
     clock and scan readouts start their text, the repeat box and the Config
-    switch start, and every delay field starts.  The delay rows had a
-    second column of their own ten pixels to the left, under labels
-    centred in a fixed box that a longer port name ran out of and into the
-    field.
+    switch start, and every delay field starts.
     """
 
     feedback_requested = QtCore.pyqtSignal(str)
@@ -829,8 +811,7 @@ class ChannelPanel(FluentGroupBox):
             fill.setEnabled(digital)
             # On an analog row there is no "off" to turn it to: the button
             # takes the output's steps away, so it is the row remover every
-            # row has -- the ghost x, red under the pointer, one click --
-            # not a ring that read as a radio button beside the disabled fill.
+            # row has -- the ghost x, red under the pointer, one click.
             if digital and clear.text():
                 clear.setText("")
                 _show_port_ring(clear, False)
@@ -898,9 +879,8 @@ class ChannelPanel(FluentGroupBox):
 def _reading_ink(stroke: str) -> str:
     """A bracket's stroke colour as words: mixed toward TEXT, a twentieth
     at a time, until it reads 4.5:1 on the ACCENT_TINT body of a selected
-    post, the paler of a post's two faces.  The stroke edges the post and
-    draws the preview's loop; as a title it read 3.1:1 there (2.9:1 for the
-    green), under every other card title."""
+    post, the paler of a post's two faces.  The stroke itself edges the
+    post and draws the preview's loop; as a title it is too pale (3.1:1)."""
 
     def luminance(color: QtGui.QColor) -> float:
         channels = [value / 12.92 if value <= 0.04045 else ((value + 0.055) / 1.055) ** 2.4
@@ -1094,7 +1074,7 @@ class ComponentCard(FluentGroupBox):
     row, one per row.  The total reads like a field's value -- text at the
     field's inset, its badge where a field seats its badge -- with no box.
     A Subpulse wears its own blue (DERIVED_INK title, SELECTION_EDGE edge):
-    ACCENT is for small indicators, and as title ink it read 2.6:1.
+    ACCENT is for small indicators.
     """
 
     action_requested = QtCore.pyqtSignal(str, object)
@@ -1244,9 +1224,8 @@ class ComponentCard(FluentGroupBox):
 
     def _show_command_faces(self) -> None:
         """The commands' face for the body under them.  On a tinted body --
-        the green of a Config Subpulse, the selection wash -- a light-blue
-        face lays a second hue on the card (on the wash it read 1.09:1 and
-        nearly vanished): there the commands wear a white face, no edge.
+        the green of a Config Subpulse, the selection wash -- the commands
+        wear a white face, no edge (:meth:`FluentButton.set_on_tint`).
         Ungroup keeps its red face on any body, and an expanded Subpulse's
         Collapse its active face."""
 
@@ -1271,8 +1250,7 @@ class ComponentCard(FluentGroupBox):
         controls = (self.expand_button, self.edit_button, self.ungroup_button)
         if self.mode != "closed":
             # As wide as its widest command or its whole total, whichever
-            # needs more: sized by its commands alone, a six-character total
-            # was cut to "312 ...".
+            # needs more.
             line = self.total_label.parentWidget().layout()
             margins = line.contentsMargins()
             total = (margins.left() + self.total_label.fontMetrics().horizontalAdvance(component.total_text)
@@ -1429,15 +1407,11 @@ class PulseDragContainer(QtWidgets.QWidget):
 
         A card is almost entirely covered by its own children -- checkboxes,
         value boxes, a name field -- so a filter installed on the card alone
-        saw a press only in the few pixels of padding around them.  Clicking a
-        period therefore selected nothing at all, or fell through to the strip
-        underneath and selected a GAP instead.
+        would see a press only in the few pixels of padding around them.
 
         Only what is drawn IN the card: a card's popups (a slot's binding
         popup, the Subpulse source popup) are its children but separate
-        windows, and a press this filter took from one never reached the
-        popup's own outside-press handling, so it could not be closed again
-        once the card had been re-watched.
+        windows, whose own outside-press handling must see their presses.
         """
 
         item.installEventFilter(self)
@@ -1541,12 +1515,7 @@ class PulseDragContainer(QtWidgets.QWidget):
         return len(items)
 
     def _show_indicator_at_gap(self, position: int) -> None:
-        """Centre the caret in the gap and give it the cards' own height.
-
-        It used to start at the next item's left edge and run the strip's
-        full height, so it hugged a card instead of standing between two,
-        and hung into the gutters above and below them.
-        """
+        """Centre the caret in the gap and give it the cards' own height."""
 
         items = self.items()
         if not items:
@@ -1583,11 +1552,8 @@ class PulseDragContainer(QtWidgets.QWidget):
         self._indicator.show()
 
     def mouseReleaseEvent(self, event):  # noqa: N802 - Qt name
-        """A click on empty strip selects the gap it fell in.
-
-        Without this the signal existed and could never fire, so Add period
-        could only ever append: the operator had no way to say "here".
-        """
+        """A click on empty strip selects the gap it fell in, so Add period
+        can insert there."""
 
         if event.button() == QtCore.Qt.LeftButton and not event.modifiers() & QtCore.Qt.ShiftModifier and not any(
             widget.geometry().contains(event.pos())
@@ -1595,9 +1561,7 @@ class PulseDragContainer(QtWidgets.QWidget):
         ):
             # A release inside something this row HOLDS belongs to that thing,
             # even when it let the release through; only the strip between
-            # them is a gap.  Cards were excluded and posts were not, so
-            # clicking a post picked the gap underneath it -- the click landed
-            # somewhere the operator had not clicked.
+            # them is a gap.
             gap = self._gap_at(event.pos().x())
             self.show_selection(gap=None if self.selected_gap == gap else gap)
         super().mouseReleaseEvent(event)
@@ -1854,8 +1818,7 @@ class PulseScheduleView(QtWidgets.QWidget):
         # Each side panel stands at the page's left edge or one card gap
         # after its neighbour, and is as tall as its rows: it ends a card
         # pad below its last row, where every card of the strip ends, so
-        # side by side they share the top AND the bottom.  Stretched to the
-        # pane, the panels ran on below cards that had stopped.
+        # side by side they share the top AND the bottom.
         def hold(panel: QtWidgets.QWidget) -> QtWidgets.QWidget:
             holder = QtWidgets.QWidget()
             holder_layout = QtWidgets.QVBoxLayout(holder)
@@ -1882,8 +1845,7 @@ class PulseScheduleView(QtWidgets.QWidget):
         stub_layout.addWidget(stub_label)
         self.stub_show_button = FluentButton("Show")
         self.stub_show_button.setFixedHeight(row_height())
-        # As wide as the stub's column: a button narrower than its column
-        # sat against the left edge under a centred label.
+        # As wide as the stub's column, under its centred label.
         self.stub_show_button.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
         self.stub_show_button.clicked.connect(self._show_left_panels)
         stub_layout.addWidget(self.stub_show_button)
@@ -1909,8 +1871,7 @@ class PulseScheduleView(QtWidgets.QWidget):
         # THE PAGE OWNS ITS SURFACE: a white region of its own behind the
         # panes, not Qt's private stacked widget painted white by one CSS
         # rule aimed at its internal object name.  Edgeless: the tab pane is
-        # already the white page, and a bordered frame inside it put a second
-        # edge eight pixels outside every card's own.
+        # already the white page.
         self.dataset_surface = FluentFrame(bordered=False)
         surface_layout = QtWidgets.QVBoxLayout(self.dataset_surface)
         surface_layout.setContentsMargins(0, 0, 0, 0)
@@ -1934,10 +1895,9 @@ class PulseScheduleView(QtWidgets.QWidget):
         # The bar is ONE table of rows read across three cards: row 2 of
         # Control sits beside row 2 of Connection and row 2 of Ports.  So the
         # row height, the gap between rows and the top inset are single
-        # numbers here rather than three cards' private choices -- they were
-        # three, and by the fourth row Control had drifted six pixels below
-        # the boxes it is read against.  Each card keeps every card's rhythm:
-        # the title band, the card pad, then the first row.
+        # numbers here rather than three cards' private choices.  Each card
+        # keeps every card's rhythm: the title band, the card pad, then the
+        # first row.
         control_height = row_height()
         card_margins = (pad, pad, pad, pad)
         control_area = FluentGroupBox("Control")
@@ -2205,12 +2165,11 @@ class PulseScheduleView(QtWidgets.QWidget):
     def _visible_delay_rows(vm: ScheduleVM) -> tuple[DelayRowVM, ...]:
         """The delay column shows exactly the rows the cards show.
 
-        Which ports have rows is ONE fact, and it was written down twice: the
-        names column and every period card filter on ``port.visible``, while
-        the delay rows arrive as "every output the board can delay" and were
-        handed over whole.  So Hide off dropped a row from the cards and left
-        its delay sitting there, lined up with nothing -- the columns are read
-        across, and a delay beside the wrong channel is worse than no delay.
+        Which ports have rows is ONE fact: the names column and every period
+        card filter on ``port.visible``, and the delay rows arrive as "every
+        output the board can delay", so they are filtered the same way -- the
+        columns are read across, and a delay beside the wrong channel is worse
+        than no delay.
 
         Taken here, once, because both paths that fill the column pass through
         it: the full rebuild and the single-row push.
@@ -2424,8 +2383,7 @@ class PulseScheduleView(QtWidgets.QWidget):
 
     def set_port_label(self, key: str, label: str) -> None:
         """Rename one output everywhere it is shown, and in the model the
-        next rebuild reads: a label changed on the controls alone came back
-        as the old one at the next Hide/Show, which rebuilds from the model."""
+        next rebuild (a Hide/Show) reads."""
 
         if self._schedule is None:
             return
@@ -2526,25 +2484,18 @@ class PulseScheduleView(QtWidgets.QWidget):
     ) -> None:
         """What is happening, and which controls that leaves possible.
 
-        Neither flag has a default on purpose.  Enablement used to follow only
-        from ``running``, so an editor with no pulse open and no board attached
-        still offered On Pulse -- a control that looks available and cannot be
-        is the failure this shell keeps being audited for, and a default would
-        let the next caller reintroduce it silently.
+        Neither flag has a default on purpose: a control that looks available
+        and cannot be is the failure a default would let a caller reintroduce.
 
-        On Pulse is NOT gated on running, and the correction matters: On Pulse
-        means "put this on the board and play it", which is off-then-on.  It is
-        how an operator applies an edit to a pulse that is already running --
-        the single most frequent thing done at the bench -- and disabling it
-        while running removed exactly that.
+        On Pulse is NOT gated on running: On Pulse means "put this on the
+        board and play it", which is off-then-on, and it is how an operator
+        applies an edit to a pulse that is already running.
 
         Its star means what every star means (Save*, Run*): pressing it now
         would put something new in place, and it is the one command to
         press.  So it wears one only while it can run, the board is not
         playing what is on screen, and the file is saved (otherwise Save
-        Pulse is the one).  It used to star whenever the board differed --
-        disabled, or beside a starred Save -- a second meaning for the same
-        mark; the difference itself is said in its tooltip.
+        Pulse is the one); the difference itself is said in its tooltip.
 
         Stop is gated on a board alone.  Going safe must work from any state,
         including one this window has misread, so it does not additionally
@@ -2566,11 +2517,8 @@ class PulseScheduleView(QtWidgets.QWidget):
 
         Sync is the one command here it gates; hold and step are the Scan
         page's, which the shell gates beside this call.  Sync's availability
-        has this ONE writer.  :meth:`set_control_state` also disabled it
-        whenever On Pulse could not run, and the presenter's refresh calls
-        both, so every refresh disabled Sync and enabled it again a moment
-        later -- and disabling a focused button hands Qt's focus to the next
-        one in the chain, so clicking Sync landed focus on Add period.
+        has this ONE writer, so a refresh never toggles it (and its focus)
+        off and on again.
         """
 
         # Its own answer, not Run's.  Sync READS the board, so what it needs
@@ -2749,9 +2697,7 @@ class PulseScheduleView(QtWidgets.QWidget):
         A QScrollArea does NOT shrink-wrap.  ``AdjustToContents`` computes the
         area's size hint once and caches it, and neither hiding the widget's
         children, nor a LayoutRequest, nor re-setting ``widgetResizable``
-        clears that cache -- so hiding the two 380 px side panels left the
-        pane 466 px wide, the freed space blank between an 82 px stub and
-        period cards that never moved.
+        clears that cache.
 
         The width is not the scroll area's to remember: it is the width of the
         panels inside it, set here whenever it may have changed.  Set, not

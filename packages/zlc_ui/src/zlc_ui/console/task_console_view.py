@@ -112,10 +112,8 @@ class TaskConsoleView(QtWidgets.QWidget):
 
         # The console's state: the worst of its logic nodes' (set_console_state).
         self.status_dot = FluentStatusDot(size=STATUS_DOT)
-        # The window's identity, as a word: nothing reads a name typed here,
-        # so an edit box in its place was an input that changed nothing.  At
-        # its own width, so the summary follows the word instead of a blank
-        # column a hundred pixels wide.
+        # The window's identity, as a word (nothing reads a name typed
+        # here), at its own width so the summary follows the word.
         self.name_label = FluentLabel("task")
         self.summary_label = ElidedLabel("")
         self.summary_label.setStyleSheet(MUTED_LABEL_STYLE)
@@ -142,8 +140,7 @@ class TaskConsoleView(QtWidgets.QWidget):
         # Its slot fits both words, so Resume moves nothing beside it.
         fit_button_words(self.pause_button, ("Pause", "Resume"))
         self._paused = False
-        # An on/off setting is a switch, even in a row of commands: a
-        # checkable button there read as one more command.
+        # An on/off setting is a switch, even in a row of commands.
         self.selectors_switch = FluentSwitch("Selectors")
         # The file commands ask where before they act, so each carries the
         # ellipsis; reading one is Open, as in every window of the suite.

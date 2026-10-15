@@ -15,9 +15,7 @@ class PublishedItemsLegend(QtWidgets.QWidget):
 
     Each item is a chip on the BG grey with no edge, in the body font -- its
     name, then its shape in MUTED_INK -- and the chips wrap to the width they
-    are given.  It was a monospace ``items:`` block that read like debug
-    output, then a white chip in a hairline, one more outline on a white
-    row.  The descriptions are the tooltip; :meth:`text` is the same
+    are given.  The descriptions are the tooltip; :meth:`text` is the same
     inventory as plain words.  With no items it is one chip's height with
     its note where a chip's name starts, so a row without outputs is as
     tall as its neighbours and its words stand in their column.

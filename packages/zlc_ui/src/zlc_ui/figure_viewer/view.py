@@ -83,18 +83,14 @@ _EDITOR_PAGES = (("dataset", "Dataset and axes"), ("data", "Data"))
 def _surface_right_inset() -> int:
     """How far in from the right surface's right edge its rows end.
 
-    One card pad, as on its left -- or the bar gutter a scrolled page keeps,
-    where that is the wider: the data editor's bar lies in the surface's
-    padding, so its cards and its action bar end where the data bar over the
-    tabs and the board's commands end."""
+    One card pad, as on its left -- or the bar gutter a scrolled page keeps
+    in that padding, where that is the wider."""
 
     return max(card_pad(), fluent_scrollbar_thickness())
 
 
 def _two_column_grid() -> QtWidgets.QGridLayout:
-    """Two equal columns of setting rows, a section gap apart: at a row's
-    gap the second column's label read as a word trailing the first
-    column's field."""
+    """Two equal columns of setting rows, a section gap apart."""
 
     grid = QtWidgets.QGridLayout()
     grid.setContentsMargins(0, 0, 0, 0)
@@ -336,11 +332,9 @@ class _DataEditorView(QtWidgets.QWidget):
     the selected axis's values, and the Data card, with the value table.
     Each page holds one value table and the table is what scrolls: it is
     sized to the room its page leaves (_fit_table_to_page), so the page
-    itself has nothing to scroll -- a page and its table each scrolling
-    stood two vertical bars side by side, the wheel moving the one under
-    the pointer.  Only a window too short for a page's controls and the
-    fewest table rows scrolls the page as well.  The working copy's own
-    commands and their messages stand under both pages.
+    itself has nothing to scroll.  Only a window too short for a page's
+    controls and the fewest table rows scrolls the page as well.  The
+    working copy's own commands and their messages stand under both pages.
     """
 
     intent_requested = QtCore.pyqtSignal(object)
@@ -374,10 +368,8 @@ class _DataEditorView(QtWidgets.QWidget):
         gutter = fluent_scrollbar_thickness()
         pad = card_pad()
         outer = QtWidgets.QVBoxLayout(self)
-        # The page is as wide as the surface; its rows stand one card pad in
-        # on the left, and on the right the surface's inset less the gutter
-        # the scroll area keeps for its bar, so the bar lies in the surface's
-        # padding and the cards end where the data bar over the tabs ends.
+        # Rows stand one card pad in on the left; on the right the scroll
+        # gutter lies in the surface's padding (_surface_right_inset).
         # One card pad under the tab strip, as every tab page of the window.
         outer.setContentsMargins(pad, pad, _surface_right_inset() - gutter, 0)
         outer.setSpacing(0)
@@ -391,14 +383,11 @@ class _DataEditorView(QtWidgets.QWidget):
         self.editor_scroll = FluentScrollArea(self)
         self.editor_scroll.setMinimumSize(0, 0)
         # The same opaque, surface-white page body the console's Edit page
-        # scrolls: transparent content showed the viewport's own grey.
+        # scrolls.
         content = FluentPageBody()
         root = QtWidgets.QVBoxLayout(content)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(row_gap())
-        # The gutter is held whether or not the bar shows: the cards and the
-        # action bar end on one edge whichever page is shown, and a window
-        # short enough to scroll a page does not narrow every card.
         self.editor_scroll.set_width_bounded_widget(content)
         outer.addWidget(self.editor_scroll, 1)
 
@@ -524,8 +513,7 @@ class _DataEditorView(QtWidgets.QWidget):
         data_layout.addWidget(self._axis_view_holder)
         # One sentence, one row: what the table below is showing, and the
         # switch that decides whether the Dataset stores a sigma at all --
-        # named by that, not by the component it offers: a segment and a
-        # switch both called Sigma on one row were one word for two things.
+        # named by that, not by the component it offers.
         # A setting row is a width CONSUMER, so the pair travels inside its
         # control slot rather than beside it in a box that would collapse it.
         self.component_choice = FluentSegmentedButtons(
@@ -1164,16 +1152,13 @@ class FigureViewerView(QtWidgets.QWidget):
         monitor = QtWidgets.QWidget()
         monitor.setStyleSheet("background: white;")
         monitor_layout = QtWidgets.QVBoxLayout(monitor)
-        # One card pad under the tab strip, as every tab page of the window.
         # The board runs from side to side and keeps its own card-pad gap at
         # its edges, so its first card stands one pad under the commands and
         # starts on their edge.
         monitor_layout.setContentsMargins(0, side, 0, 0)
         monitor_layout.setSpacing(0)
         # Adding a panel and saving the board's picture act on the board
-        # alone, so they head the board's own tab; in a second bar above
-        # every tab they pushed this pane's tab strip a row below the
-        # left pane's.
+        # alone, so they head the board's own tab.
         self.kind_combo = FluentComboBox()
         self.kind_combo.setMinimumContentsLength(12)
         self.add_panel_button = FluentButton("Add panel")

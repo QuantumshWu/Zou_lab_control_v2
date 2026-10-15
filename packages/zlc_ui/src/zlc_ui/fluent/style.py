@@ -6,34 +6,29 @@ custom host surfaces.
 
 from __future__ import annotations
 
-#: The accent at full strength, kept for SMALL INDICATORS THAT CARRY NO
-#: TEXT: the track of an on switch, the fill of a ticked box, the underline
-#: of the current tab, the edge of a field taking input, a scroll handle
-#: under the pointer.  Nothing with words on it is filled with it -- a chosen
-#: item is SELECTED -- and it never outlines a selection.
+#: The accent at full strength, only for small indicators that carry no
+#: text: an on switch's track, a ticked box, the current tab's underline, a
+#: field taking input, a scroll handle under the pointer.  It never fills
+#: anything with words on it and never outlines a selection.
 ACCENT = "#77AADD"
 #: ACCENT a step deeper: an on switch or a ticked box under the pointer.
 ACCENT_HOVER = "#6DA2D5"
-#: The hover wash, EVERYWHERE the pointer can act: a list or table row, a
+#: The hover wash wherever the pointer can act: a list or table row, a
 #: popup item, a stepper cell, an empty grid card, a segmented choice, a
 #: clickable row label.  Also the face of a grid card a rule reached rather
-#: than a click, and the body of a selected CARD (a FluentGroupBox: a Period,
-#: a Subpulse).  A card takes no hover wash, so on a card this wash says
-#: only "selected"; and a card holds words of its own -- muted names (4.8:1
-#: here), disabled ports (3.0:1) -- that SELECTED would sink to 3.3:1 and
-#: 2.1:1 and the accent title of a Subpulse to 1.4:1.
+#: than a click, and the body of a selected card (a FluentGroupBox: a Period,
+#: a Subpulse).  A card takes no hover wash, so on a card this wash says only
+#: "selected"; and a card holds words of its own -- muted names (4.8:1 here),
+#: disabled ports (3.0:1), a Subpulse's accent title -- that SELECTED would
+#: sink to 3.3:1, 2.1:1 and 1.4:1.
 ACCENT_TINT = "#E4EFF9"
 #: What is chosen, and what is being pressed: a chosen grid card, the
 #: current segmented choice, the picked row of a popup list, a table, a tree
-#: or the Add panel list, an active cycle combo -- and the face of a
-#: standard command while it is held down, because a press IS choosing it.
-#: Each is an item whose content is its own name; a selected card, which
-#: holds controls and words of its own, is the ACCENT_TINT body instead.
-#: The mid-point of ACCENT_TINT and ACCENT (TEXT ink 7.6:1), CIEDE2000 12.3
-#: from the hover wash and 8.8 from a resting BUTTON_TINT command, so hover,
-#: rest and chosen are three different things.  A selection is this fill
-#: and nothing else: no outline, no second cue, rounded like everything it
-#: sits among.
+#: or the Add panel list, an active cycle combo, and a standard command held
+#: down.  The mid-point of ACCENT_TINT and ACCENT (TEXT ink 7.6:1), CIEDE2000
+#: 12.3 from the hover wash and 8.8 from a resting BUTTON_TINT command, so
+#: hover, rest and chosen are three different things.  A selection is this
+#: fill and nothing else: no outline, no second cue.
 SELECTED = "#AACAEA"
 #: A chosen item under the pointer: SELECTED a quarter of the way to ACCENT
 #: (TEXT ink 7.0:1).
@@ -45,11 +40,9 @@ SELECTED_HOVER = "#9DC2E7"
 SELECTION_EDGE = "#ACC4DD"
 #: The face of a standard command: the accent a step past ACCENT_TINT, far
 #: enough from a white field (CIEDE2000 10.3) that a button beside an edit
-#: is a different object, not a second field.  ACCENT_TINT is the hover wash
-#: and sat 1.17:1 on a white card -- a button there read as a selected cell,
-#: not a thing to press.  Dark-blue (HOVER) ink on it reads 7.7:1; under the
-#: pointer it steps a quarter of the way to ACCENT (#BDD6EF), and held down
-#: it is SELECTED (5.8:1).
+#: is a different object, not a second field.  HOVER ink on it reads 7.7:1;
+#: under the pointer it steps a quarter of the way to ACCENT (#BDD6EF), and
+#: held down it is SELECTED (5.8:1).
 BUTTON_TINT = "#D4E5F5"
 #: The face of a surface's ONE run or commit command (Start, Init devices,
 #: Save Pulse): the accent's own hue, deep enough to carry white ink at 5.2:1.
@@ -67,7 +60,7 @@ TEXT = "#323130"
 #: white.  As text it is a prompt only -- see MUTED_INK.
 PLACEHOLDER = "#A19F9D"
 #: The label of a command, and the text of a field, that cannot be used
-#: now: still readable (3.2:1 on the BG face) where PLACEHOLDER read 2.4:1.
+#: now: still readable, 3.2:1 on the BG face.
 DISABLED_INK = "#8A8886"
 #: Quiet text that still CARRIES information -- a status line, a kind
 #: "(processor)", a summary, a hint, a table or grid header, a grid row's
@@ -79,23 +72,20 @@ MUTED_INK = "#6A6866"
 DIVIDER = "#E1DFDD"
 #: The solid neutral of a control part that has no colour of its own and no
 #: edge either: an unticked box, a resting scroll handle.  Dark enough to
-#: read on a white card AND on the BG face of a Spacer card, where the
-#: DIVIDER grey was 1.1:1 and vanished.
+#: read on a white card and on the BG face of a Spacer card.
 NEUTRAL_FILL = "#C8C6C4"
 GREEN = "#7FC2AD"
 RED = "#CD7380"
 #: Red at reading strength: the ink of a destructive command (6.6:1 on
-#: white) and of an error line.  RED itself is a dot and a fill colour; as
-#: text on white it was 3.3:1, too pale to read as the warning it is.
+#: white) and of an error line.  RED itself is a dot and a fill colour, too
+#: pale as text (3.3:1 on white).
 RED_DARK = "#9E3B4A"
-#: RED as a wash: the face of every LABELLED destructive command -- Remove,
-#: Clear, Unload, Close, Shut down, Stop -- no edge, RED_DARK
-#: ink 5.4:1.  It sits CIEDE2000 10.1 from white, the weight of BUTTON_TINT
-#: (10.3), so a Remove among light-blue commands is a command too; a fainter
-#: seat (#FBF0F1, 5.9 from white) sat nearer the disabled face (2.4) and
-#: read as a hole in a grid of buttons.  Under the pointer it steps toward
-#: RED (#EFCED3, 4.5:1), pressed further.  A destructive GLYPH (a row's ×)
-#: wears it only under the pointer.
+#: RED as a wash: the face of every labelled destructive command -- Remove,
+#: Clear, Unload, Close, Shut down, Stop -- no edge, RED_DARK ink 5.4:1.  It
+#: sits CIEDE2000 10.1 from white, the weight of BUTTON_TINT (10.3), so a
+#: Remove among light-blue commands is a command too.  Under the pointer it
+#: steps toward RED (#EFCED3, 4.5:1), pressed further.  A destructive glyph
+#: (a row's ×) wears it only under the pointer.
 RED_TINT = "#F7E3E6"
 ORANGE = "#D69A6E"
 ORANGE_TINT = "#F6E3D4"
@@ -108,8 +98,7 @@ API_VIOLET_DARK = "#5A4A8A"
 #: sweeps and the violet a caller writes.
 CONFIG_GREEN = "#7FC2AD"
 #: The config green at reading strength: a config title, a config-bound
-#: value's ink, and the face of the "C" badge under its white letter (6.2:1;
-#: white on CONFIG_GREEN itself was 2.0:1).
+#: value's ink, and the face of the "C" badge under its white letter (6.2:1).
 CONFIG_GREEN_DARK = "#2F6B58"
 CONFIG_GREEN_TINT = "#D1E8E1"
 GREY = "#A2A2A2"
@@ -133,17 +122,15 @@ FONT = "Segoe UI"
 FONT_SIZE = 12
 PADDING_V = 1
 EDIT_PADDING_H = 4
-#: Air either side of a button's label.  An edit's 4 px left a word almost
-#: touching the edge of a button around it.
+#: Air either side of a button's label.
 BUTTON_PADDING_H = 10
 WINDOW_PAD = 14
 TITLE_LEFT_INSET = WINDOW_PAD
 #: The product mark in a window's own title bar, and the air after it.  The
 #: MARK sits on the body's left column, so the title block still begins where
 #: the content below it does; the words follow the mark.  Its size is a
-#: FRACTION OF THE BAR rather than a scaled pixel count: the bar does not take
-#: the Fluent scale, so a scaled mark shrank inside a bar that had not, and a
-#: four-letter wordmark has nothing left to show at twelve pixels.
+#: fraction of the bar, not a scaled pixel count, because the bar does not
+#: take the Fluent scale.
 TITLE_ICON_RATIO = 0.625
 TITLE_ICON_GAP = 8
 COMBO_WIDTH = 16

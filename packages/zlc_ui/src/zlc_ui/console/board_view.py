@@ -34,46 +34,20 @@ class _DragFrame(NamedTuple):
 class ConsoleBoardView(QtWidgets.QWidget):
     """Cards carried by their grip and put down where they are seen.
 
-    One rule set places every card: every card has a place, a card let go
-    onto another changes places with it, a card let go on empty space goes
-    there, cards that overlap make way, and everything falls north-west.
-
-    A drop records where it left EVERY card, for the board's column count
-    (how many of the narrowest card fit side by side), and nothing else
-    writes those places.  A card no drop has placed yet -- one just added --
-    takes the first free slot after them, top row left to right, in board
-    order, at the width the board has NOW: that is how Add tiles the board,
-    and why panels added before the window's first layout do not stay in the
-    one column Qt's default width had room for.  A column count no drop was
-    made at shows the nearest wider count's arrangement packed narrower (with
-    none wider, the nearest narrower one), so narrowing packs without
-    destroying the arrangement and widening restores it.
-
-    What is on screen is those places settled under north-west gravity for a
-    board this wide (``pack``).  A card rises until a card above it stops it
-    and slides left until a card beside it stops it; a card stopped by a
-    card above it stays below it, rather than sliding out from under it to a
-    hole beside it, and no card ever passes another.
-
-    A drag shows the drop before it happens.  The slot is chosen in the
-    board as it stood when the card was picked up, which stands still while
-    the card is carried, so the choice cannot chase its own consequence: the
-    place under the pointer, on the line of the carried card's strip,
-    nearest where the card is drawn (``slot_under``) -- the column is where
-    the hand is and the row the one the card is seen in, whatever part of
-    it is held.  Let go there (``drop``), the card swaps with the card it is
-    let go onto -- that card takes the place the carried one left, the
-    carried one takes the slot -- or, let go on empty space, takes the slot;
-    where their new places overlap, the card further up and left keeps its
-    place, the other cards make way for both (right if the row has room and
-    the move crosses none of them, else down with the rest of their column),
-    and then everything falls.  Put back where it was
-    picked up, it leaves every card where it stood.  While it is carried the
-    other cards already stand where the drop will leave them -- preview and
-    drop are one computation -- and the slot is drawn under it as an
-    accent-tint card with a dashed edge.  Near the viewport's top or bottom
-    edge the board scrolls under the pointer, so a card can be carried to a
-    row off screen.
+    The placement rules -- a card let go onto another swaps with it, on
+    empty space goes there, overlapping cards make way, everything falls
+    north-west -- are :mod:`zlc_ui.board.board_layout`'s (``slot_under``,
+    ``drop``, ``pack``).  This view keeps, per column count, where the last
+    drop left EVERY card (nothing else writes those places); a card no drop
+    has placed takes the first free slot at the width the board has NOW,
+    and a column count no drop was made at shows the nearest wider count's
+    arrangement packed narrower, so narrowing never destroys it.  The slot
+    is chosen in the board as it stood at pickup, so the choice cannot
+    chase its own consequence.  While a card is carried the other cards
+    already stand where the drop will leave them (preview and drop are one
+    computation), the slot is an accent-tint card with a dashed edge, and
+    the board scrolls under a pointer held near the viewport's top or
+    bottom edge.
     """
 
     order_committed = QtCore.pyqtSignal(tuple)
@@ -252,10 +226,6 @@ class ConsoleBoardView(QtWidgets.QWidget):
         happens to be inside it at this instant.  Its layout's own hint is the
         latter, and lags by however long the renderer takes to deliver a
         picture of the new size.
-
-        The packer used to be handed a preset NAME and a formula restating the
-        same arithmetic: two answers kept in step by hand, and one of them
-        could not follow a card whose strip grew a line.
         """
 
         size = card.size()
@@ -265,10 +235,7 @@ class ConsoleBoardView(QtWidgets.QWidget):
         """How wide the board must be to hold these cards.
 
         Takes the PROXIES, not the order: every caller has already built
-        one per card, and rebuilding them here made a resize drag allocate
-        2N proxies and make 2N card.size() round trips per frame instead
-        of N.  min_board_width reads only .width, so any copies answer the
-        same question.
+        one per card, and a resize drag must not build them twice per frame.
         """
 
         proxies = tuple(proxies)

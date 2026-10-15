@@ -4,16 +4,9 @@ A card is a frame around a picture, so the card's size is the picture's size
 plus chrome.  Who knows the picture's size is the package that draws it, and
 this package may not import that one -- zlc_ui carries no domain dependency at
 all.  So the sizes are SUPPLIED: whoever composes a window owns both halves and
-tells this one what the drawing package said.
-
-They used to be copied.  Margins, cell units and a display scale were all
-restated here, with a test standing over the two copies checking they still
-agreed -- which is a guard admitting there are two of something.  It caught
-the drift the moment the margins were corrected against the instrument these
-figures descend from, and a guard that has to catch a class of bug is worse
-than that class of bug being impossible.  A card asks for the size; with
-nobody drawing -- a gallery, a demo -- it sizes itself as the empty frame it
-is, from a cell of its own that copies nothing.
+tells this one what the drawing package said.  Nothing of the figure
+geometry is copied here.  With nobody drawing -- a gallery, a demo -- a card
+sizes itself as the empty frame it is, from a cell of its own.
 """
 
 from __future__ import annotations
@@ -31,10 +24,6 @@ __all__ = [
 #: What an EMPTY card measures, in logical pixels per grid cell.  This is
 #: this package's own number and not a copy of anything: a frame with no
 #: picture in it still needs a size, and how big that is is a UI decision.
-#: What is deliberately NOT here is the figure geometry -- margins, the design
-#: cell and the display scale were all restated in this file, kept in step
-#: with the drawing package by a test, and they drifted the moment those
-#: margins were corrected.
 PLACEHOLDER_CELL_PX = (168, 126)  # width, height
 
 _measure: Callable[[str], tuple[int, int]] | None = None
