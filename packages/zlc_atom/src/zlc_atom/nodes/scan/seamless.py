@@ -685,7 +685,9 @@ class SeamlessScanMeasurement:
             self.sequencer.safe()
             check_cancelled(context)
             if self.acquisition_logic:
-                context.report_progress(f"Preparing {self.acquisition_logic}")
+                # Its own row says which node it is; a node's status never
+                # names another, whose name only the console knows.
+                context.report_progress("Preparing the acquisition")
                 self._restart_logic(self.acquisition_logic, context)
             if not self.outer_axes:
                 self._play_table(

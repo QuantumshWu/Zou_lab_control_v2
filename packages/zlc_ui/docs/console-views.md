@@ -45,6 +45,7 @@ logic_revert_requested = pyqtSignal(str)       # put the running configuration b
 logic_edit_requested = pyqtSignal(str)
 logic_remove_requested = pyqtSignal(str)
 logic_draft_changed = pyqtSignal(str, object)
+logic_name_committed = pyqtSignal(str, str)    # node_id, the finished Name text
 logic_refresh_requested = pyqtSignal(str)      # re-read that node's files
 ```
 
@@ -86,12 +87,13 @@ show_panel_editor(panel_id, host); focus_panel_editor(panel_id) -> bool
 close_panel_editor(panel_id) -> bool
 set_panel_snapshot_status(panel_id, status); set_panel_producer_projection(panel_id, projection)
 # panel-owned signals (ROI/fit outputs), shown beside the logic rows
-set_panel_publishers(publishers)       # ((panel_id, ((name, shape, description), ...)), ...)
+set_panel_publishers(publishers)       # ((panel_id, panel name, ((name, shape, description), ...)), ...)
 open_panel_publisher_editor(panel_id, projection); update_panel_publisher_editor(...) -> bool
 has_panel_publisher_editor(panel_id); focus_panel_publisher_editor(panel_id)
 close_panel_publisher_editor(panel_id)
 # logic rows, by id
 add_logic_row(node_id, kind, offers_preview=True); remove_logic_row(node_id)
+set_logic_name(node_id, name, api_name="")               # what the node is called, and its type
 set_logic_state(node_id, state, status_text="")          # idle|running|error
 set_logic_commands(node_id, *, can_start, can_stop, pending=False)
 set_logic_auto_preview(node_id, enabled)
@@ -101,7 +103,10 @@ has_logic_editor(node_id); focus_logic_editor(node_id); close_logic_editor(node_
 ```
 
 `groups` for signal choices is `(producer_label, ((display_label, key), ...))`;
-the key is an opaque string the window does not interpret.  A panel's widget
+the key is an opaque string the window does not interpret, and every heading
+and label is display text the presenter composed (a Logic node's producer
+heading is its Name).  An editor's tab follows what it edits: `Edit · <name>`
+and `Edit panel · <panel name>` are retitled on every update.  A panel's widget
 is chosen by the composition root's `plot_surface` policy (one widget per
 host), so a board can present a same-shot group atomically through
 `present_panel_front`.
@@ -136,9 +141,11 @@ card keeps no other control for them.
 
 The title strip names the panel by the surface's `caption`, exactly as the
 presenter composed it: a signal's name is read by the runtime that owns its
-grammar, never by the card.  The caption is display only -- the state's
-`title` stays the panel's editable name -- and a card no presenter has
-captioned is called by that name.
+grammar, never by the card.  Beside it the presenter projects `panel_name`,
+what the panel is called -- what the Setting form's "Panel name" and the Edit
+page show, a renamed node's `<name>/<output>` while the title is automatic.
+Both are display only -- the state's `title` stays the panel's record -- and
+a card no presenter has captioned is called by its title.
 
 A card is laid out the same with or without a picture.  Its strip always
 reads two lines -- the caption (and data sizes) above, the axis names below
@@ -260,6 +267,7 @@ edit_requested = pyqtSignal()
 remove_requested = pyqtSignal()
 auto_preview_changed = pyqtSignal(bool)
 
+set_name(text: str, details: tuple[str, ...] = ()) -> None
 set_state(state: str, status_text: str = "") -> None  # idle|draft|running|error
 set_commands(*, can_start: bool, can_stop: bool, pending: bool = False) -> None
 set_preview_offered(offered: bool) -> None
@@ -268,7 +276,12 @@ set_task_takeover(active: bool, *, owns_task: bool = False) -> None
 set_publishes(rows: tuple[tuple[str, str, str], ...]) -> None
 ```
 
-Each publish row is `(name, shape_text, description)`.
+Each publish row is `(name, shape_text, description)`.  The row shows the
+node's Name, elided in the middle in its fixed column so names that differ at
+their end still read apart; its tooltip is the whole name, then the node's
+type and `internal ID <node_id>` (`details`).  The name arrives only by
+`set_logic_name`, and the row is not where it is renamed -- its Edit page is.
+A panel publisher's row shows the panel's name, its panel id in the tooltip.
 
 Start and Stop are two fixed slots on the row and on the node's Edit page,
 both always shown.  Start reads `Starting…` while `pending`, `Restart` while
@@ -276,7 +289,8 @@ both always shown.  Start reads `Starting…` while `pending`, `Restart` while
 at the width of its widest word, so nothing beside it moves; Stop follows
 `can_stop`, not the row's state.  While a Task owns the console every
 command is disabled except the owning Task's own Stop (`owns_task`), which
-raises the same `stop_requested` as the status strip's "Stop task".
+raises the same `stop_requested` as the status strip's "Stop task", and Edit,
+which opens a page that is read-only but for its Name.
 
 A state is drawn as its status word (`STATE_WORDS`): a draft as `idle`, a
 run as `running`, a failure as `error`, the dot and the status line from the
@@ -287,10 +301,24 @@ its Edit page alike: the first arms the white-on-red confirm, and
 console over) or hidden, an armed remover returns to rest.
 
 A node's Edit page is three bands and only the middle one scrolls: the
-header (name, kind, status line) above, the rows, and the action bar
-(Remove | Revert, Plot, Start, Stop) as the page's foot, on the rows' left and
-right edges.  A newly opened page starts at its first row; after that its bar
-is the operator's, across tab switches.
+header (the Name, then `(api_name · kind)` in grey -- just `(kind)` while
+the name is the type's own -- and the status line) above, the rows, and the
+action bar (Remove | Revert, Plot, Start, Stop) as the page's foot, on the
+rows' left and right edges.  A long name gives up its middle in the header;
+it never widens the window.  A newly opened page starts at its first row;
+after that its bar is the operator's, across tab switches.  The first row is
+the Name, in the page's one label column, and the first stop of Tab; its
+box's tooltip and empty-box hint are the node's internal ID.  It sends
+(`name_committed`) what the operator TYPED, once, on Return or when the focus
+leaves the box -- a box nobody typed in sends nothing, so it never sends back
+a name an agent has since replaced; an emptied box is sent as "", which the
+presenter takes as the internal ID.  Escape takes the typing back.  A refused
+name is one sentence under the line, in the control column, while the
+refused text is in the box; leaving the box puts the node's name back and
+sends it, which withdraws the refusal.  It stays editable while a Task holds
+the console.  The tab reads `Edit · <name>` and is retitled when the node is
+renamed.  A rename is not an edit: it is not part of the draft, so it never
+marks a running node `· edited` and Revert leaves it alone.
 
 A running node's page stays editable, and the edits are the next run's.  The
 projection's `edited` says the draft differs from the configuration the
@@ -347,6 +375,7 @@ set_selectors(enabled: bool) -> None
 set_task_takeover(active: bool) -> None
 show_status(text: str, severity: str) -> None
 set_summary(text: str) -> None
+set_editor_tab_title(editor, title: str) -> None
 ```
 
 Pause is a toggle command: `set_paused(True)` turns its label to Resume and
@@ -358,8 +387,8 @@ failed, `running` while one runs, `idle` otherwise.
 
 The header names the window (`task`) as a label; it is not an input.  Its
 one chooser lists `Plot: <kind>` and `<Layer>: <api_name>` entries -- a node
-by the name its row and Edit tab call it, its layer in words
-(`zlc_ui.status.name_words`).  The command beside it names what it adds
+TYPE by its api_name, its layer in words (`zlc_ui.status.name_words`); a
+node itself is called by its Name.  The command beside it names what it adds
 for the chosen family, `Add panel` or `Add node`, in one slot wide enough
 for either.  The handle forwards the board signals and drives the rest;
 nothing outside the window calls these directly.

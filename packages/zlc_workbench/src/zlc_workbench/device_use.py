@@ -65,12 +65,23 @@ def _claims_keys(claims: Sequence[DeviceClaim]) -> frozenset[str]:
 
 
 class DeviceUseBusy(RuntimeError):
-    """A complete candidate was refused because another owner is driving."""
+    """A complete candidate was refused because another owner is driving.
 
-    def __init__(self, blockers: Sequence[str]) -> None:
+    ``blockers`` are the owners' labels -- addresses; the message calls each
+    one what ``spell`` calls it (a Logic node by the name the operator gave
+    it), as the coordinator that raises it was told to.
+    """
+
+    def __init__(
+        self,
+        blockers: Sequence[str],
+        spell: Callable[[str], str] = str,
+    ) -> None:
         labels = tuple(dict.fromkeys(str(value) for value in blockers))
         self.blockers = labels
-        super().__init__(f"device is in use by {', '.join(labels)}")
+        super().__init__(
+            f"device is in use by {', '.join(spell(label) for label in labels)}"
+        )
 
 
 class DeviceLease:
@@ -162,6 +173,16 @@ class DeviceUseCoordinator:
         self._reservations: dict[object, LogicReservation] = {}
         self._maintenance: dict[object, DeviceMaintenance] = {}
         self._device_owner_revisions: dict[str, int] = {}
+        #: What a sentence calls an owner label.  A label stays the address
+        #: (leases, tune records); the console that names Logic nodes says
+        #: how to call them, so every refusal and stop reason reads the
+        #: node's current name.
+        self.spell_owner: Callable[[str], str] = str
+
+    def set_owner_spelling(self, spell: Callable[[str], str] | None) -> None:
+        """Call owner labels by ``spell`` in sentences; None restores the label."""
+
+        self.spell_owner = str if spell is None else spell
 
     def owner_revision(self, device_key: str) -> int:
         """Current Logic-claim revision; no field-policy projection is needed."""
@@ -266,7 +287,7 @@ class DeviceUseCoordinator:
         with self._lock:
             maintenance = self._maintenance_blockers(frozen)
             if maintenance:
-                raise DeviceUseBusy(maintenance)
+                raise DeviceUseBusy(maintenance, self.spell_owner)
             active_logic = tuple(
                 lease
                 for lease in self._leases.values()
@@ -280,7 +301,7 @@ class DeviceUseCoordinator:
                 and (lease.owner is owner or _same_device(frozen, lease.claims))
             )
             if command_blockers:
-                raise DeviceUseBusy(tuple(lease.label for lease in command_blockers))
+                raise DeviceUseBusy(tuple(lease.label for lease in command_blockers), self.spell_owner)
             active_blockers = active_logic
 
             replaced = tuple(
@@ -306,7 +327,7 @@ class DeviceUseCoordinator:
                 previous.superseded()
             for lease in active_blockers:
                 if lease.stop is not None:
-                    lease.stop(f"{label} needs its exclusive device")
+                    lease.stop(f"{self.spell_owner(label)} needs its exclusive device")
         except BaseException:
             reservation.abort()
             raise
@@ -324,7 +345,7 @@ class DeviceUseCoordinator:
         with self._lock:
             existing = self._leases.get(owner)
             if existing is not None:
-                raise DeviceUseBusy((existing.label,))
+                raise DeviceUseBusy((existing.label,), self.spell_owner)
             blockers = self._maintenance_blockers(frozen) + tuple(
                 lease.label
                 for lease in self._leases.values()
@@ -335,7 +356,7 @@ class DeviceUseCoordinator:
                 if _same_device(frozen, reservation.claims)
             )
             if blockers:
-                raise DeviceUseBusy(blockers)
+                raise DeviceUseBusy(blockers, self.spell_owner)
             lease = DeviceLease(self, owner, label, "command", frozen, None)
             self._leases[owner] = lease
             return lease
@@ -361,21 +382,21 @@ class DeviceUseCoordinator:
         field = claim.protected_fields[0]
         with self._lock:
             if owner in self._leases:
-                raise DeviceUseBusy((self._leases[owner].label,))
+                raise DeviceUseBusy((self._leases[owner].label,), self.spell_owner)
             maintenance = self._maintenance_blockers((claim,))
             if maintenance:
-                raise DeviceUseBusy(maintenance)
+                raise DeviceUseBusy(maintenance, self.spell_owner)
             revision, owners, policy = self.field_policy(
                 claim.device_key,
                 (field,),
                 dependency_groups=dependency_groups,
             )
             if revision != expected_owner_revision:
-                raise DeviceUseBusy(("device owners changed; review access again",))
+                raise DeviceUseBusy(("device owners changed; review access again",), self.spell_owner)
             if policy[field]:
-                raise DeviceUseBusy(policy[field])
+                raise DeviceUseBusy(policy[field], self.spell_owner)
             if owners and not allow_while_logic:
-                raise DeviceUseBusy(owners)
+                raise DeviceUseBusy(owners, self.spell_owner)
             blockers = tuple(
                 lease.label
                 for lease in self._leases.values()
@@ -386,7 +407,7 @@ class DeviceUseCoordinator:
                 if _same_device((claim,), reservation.claims)
             )
             if blockers:
-                raise DeviceUseBusy(blockers)
+                raise DeviceUseBusy(blockers, self.spell_owner)
             lease = DeviceLease(
                 self,
                 owner,
@@ -426,7 +447,7 @@ class DeviceUseCoordinator:
                 )
             )
             if blockers:
-                raise DeviceUseBusy(blockers)
+                raise DeviceUseBusy(blockers, self.spell_owner)
             self._reservations.pop(reservation.owner)
             self._condition.notify_all()
             lease = DeviceLease(
@@ -478,14 +499,14 @@ class DeviceUseCoordinator:
             raise ValueError("device maintenance requires at least one device key")
         with self._lock:
             if owner in self._maintenance:
-                raise DeviceUseBusy((self._maintenance[owner].label,))
+                raise DeviceUseBusy((self._maintenance[owner].label,), self.spell_owner)
             overlapping = tuple(
                 barrier.label
                 for barrier in self._maintenance.values()
                 if keys & barrier.device_keys
             )
             if overlapping:
-                raise DeviceUseBusy(overlapping)
+                raise DeviceUseBusy(overlapping, self.spell_owner)
             command_blockers = tuple(
                 lease.label
                 for lease in self._leases.values()
@@ -493,7 +514,7 @@ class DeviceUseCoordinator:
                 and keys & _claims_keys(lease.claims)
             )
             if command_blockers:
-                raise DeviceUseBusy(command_blockers)
+                raise DeviceUseBusy(command_blockers, self.spell_owner)
             replaced = tuple(
                 reservation
                 for reservation in self._reservations.values()
@@ -514,7 +535,7 @@ class DeviceUseCoordinator:
                 reservation.superseded()
             for lease in active_logic:
                 if lease.stop is not None:
-                    lease.stop(f"{label} needs {', '.join(sorted(keys))}")
+                    lease.stop(f"{self.spell_owner(label)} needs {', '.join(sorted(keys))}")
         except BaseException:
             barrier.release()
             raise
@@ -547,7 +568,8 @@ class DeviceUseCoordinator:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0.0:
                     raise TimeoutError(
-                        "device maintenance still waits for " + ", ".join(waiting)
+                        "device maintenance still waits for "
+                        + ", ".join(self.spell_owner(label) for label in waiting)
                     )
                 self._condition.wait(remaining)
 
@@ -569,7 +591,10 @@ class DeviceUseCoordinator:
                 barrier.label for barrier in self._maintenance.values()
             )
         if labels:
-            raise RuntimeError(f"device use still active: {', '.join(labels)}")
+            raise RuntimeError(
+                "device use still active: "
+                + ", ".join(self.spell_owner(label) for label in labels)
+            )
 
 
 __all__ = [

@@ -230,7 +230,7 @@ control = open_device_control(
     title='qCMOS control',
     spec=spec,
     projection={
-        'owners': ('Camera Measurement',),
+        'owners': ('camera_measurement',), 'owner_names': ('Camera Measurement',),
         'reason': 'gain is unclaimed but requires operator risk acceptance',
         'risk_enabled': True,
         'risk_accepted': False,
@@ -291,7 +291,7 @@ assert not widget.isEnabled()
 assert control._view._field_rows['gain'][0].text() == '2'
 
 control.set_projection(spec, {
-    'owners': ('Camera Measurement',),
+    'owners': ('camera_measurement',), 'owner_names': ('Camera Measurement',),
     'reason': 'risk accepted for unclaimed fields',
     'risk_enabled': True,
     'risk_accepted': True,
@@ -323,7 +323,7 @@ assert live_events[-1] == ('gain', True)
 widget.setValue(5); widget.setValue(6)
 QtTest.QTest.qWait(30)
 control.set_projection(spec, {
-    'owners': ('Camera Measurement',),
+    'owners': ('camera_measurement',), 'owner_names': ('Camera Measurement',),
     'reason': 'unchanged policy projection',
     'risk_enabled': True,
     'risk_accepted': True,
@@ -341,7 +341,7 @@ assert apply_events.count(('gain', 5)) == 0
 assert control._view._field_rows['gain'][0].text() == '2'
 
 control.set_projection(spec, {
-    'owners': ('Camera Measurement',),
+    'owners': ('camera_measurement',), 'owner_names': ('Camera Measurement',),
     'reason': 'exposure working point is claimed',
     'risk_enabled': True,
     'risk_accepted': True,

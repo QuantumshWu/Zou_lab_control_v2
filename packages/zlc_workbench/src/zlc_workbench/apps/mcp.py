@@ -41,6 +41,8 @@ _OPERATOR_INSTRUCTIONS = (
     "Configure the native pipeline and fit before Start so results update during acquisition; distinguish "
     "the first usable result from completing the whole plan. Use lab_estimate for Scan's timing projection. "
     "Save through lab_save for matching image + scientific Figure NPZ, readable with lab_artifact. "
+    "Address Logic nodes by node_id; the operator calls them by lab_state logic[].name, which may change "
+    "at any time. "
     "Reuse returned state, exact generations and known signatures; batch already-decided steps without "
     "intervening reasoning. Ready/Fire belongs to the selected execution node when it already manages it. "
     "Acceptance is not completion: inspect the original owner error/ready/terminal facts. Never replay an "
@@ -236,6 +238,7 @@ def start_server(flow, *, host="127.0.0.1", port: int, token: str, allow_control
                          panel_id: str | None = None, details: bool = False) -> dict[str, object]:
         """One compact experiment overview; filter by node/panel for fast follow-ups. Details adds authored values.
         Current errors, exact generations, pending/ready/terminal and messages since after_sequence are authoritative.
+        Each logic row has node_id (the stable address) and name (what the operator sees; may change any time).
         """
         return await owner(lambda: state(after_sequence, node_id, panel_id, details))
 
@@ -890,13 +893,16 @@ def start_server(flow, *, host="127.0.0.1", port: int, token: str, allow_control
 
         @tool()
         async def lab_action(action: Literal["logic.add", "logic.update", "logic.validate", "logic.start",
-                                            "logic.stop", "logic.revert", "logic.remove", "panel.add", "panel.update",
+                                            "logic.stop", "logic.revert", "logic.remove", "logic.rename",
+                                            "panel.add", "panel.update",
                                             "panel.remove", "panel.edit", "panel.refresh", "panel.save",
                                             "view.monitor", "view.logic", "layout.save", "layout.load"],
                              arguments: dict[str, object], expected_draft_revision: int | None = None,
                              expected_generation: str | None = None) -> dict[str, object]:
             """Use the normal experiment action. Consult lab_catalog only for unknown fields. logic.add: api_name, optional values,
-            source_signal, device_keys, artifact_inputs. Node edits: node_id plus values,
+            source_signal, device_keys, artifact_inputs, name. logic.rename: node_id, name (text; "" is the
+            node_id) -- changes only what the operator sees; node_id, signal keys and every reference stay.
+            Node edits: node_id plus values,
             source_signal, device_keys, artifact_inputs (a path per input; a frame_claims input such as
             Occupancy's calibrations takes [{path, frames}] rows; a row with frames [] is kept on purpose and
             never needs deleting). Start/Stop: node_id. logic.start on a running,

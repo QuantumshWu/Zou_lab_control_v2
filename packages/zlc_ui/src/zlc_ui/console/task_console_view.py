@@ -288,8 +288,8 @@ class TaskConsoleView(QtWidgets.QWidget):
         self.kind_combo.clear()
         for key, label in self._panel_kind_choices:
             self.kind_combo.addItem(plot_choice_text(label), ("plot", key))
-        # A node is listed by its api_name, the name its row, its Edit tab
-        # and its Edit page call it by -- as a plot is by its kind key.
+        # A node TYPE is listed by its api_name -- as a plot is by its kind
+        # key; a node itself is called by the Name it is given.
         for api_name, kind, publishes in self._logic_kind_choices:
             layer = name_words(kind) or "Logic"
             self.kind_combo.addItem(f"{layer}: {api_name}", ("logic", api_name))
@@ -398,6 +398,13 @@ class TaskConsoleView(QtWidgets.QWidget):
 
     def add_editor_tab(self, editor: QtWidgets.QWidget, title: str) -> None:
         self.tabs.add_closable_tab(editor, str(title), focus=True)
+
+    def set_editor_tab_title(self, editor: QtWidgets.QWidget, title: str) -> None:
+        """Retitle an open editor's tab when what it edits is renamed."""
+
+        index = self.tabs.indexOf(editor)
+        if index >= 0 and self.tabs.tabText(index) != str(title):
+            self.tabs.setTabText(index, str(title))
 
     def focus_editor_tab(self, editor: QtWidgets.QWidget) -> bool:
         index = self.tabs.indexOf(editor)

@@ -88,6 +88,7 @@ def populate(view) -> None:
             spec=spec,
             projection={
                 "owners": (),
+                "owner_names": (),
                 "reason": "Offline fake device",
                 "risk_enabled": False,
                 "risk_accepted": False,

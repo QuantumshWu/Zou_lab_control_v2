@@ -99,6 +99,8 @@ class TaskConsoleHandle(QtCore.QObject):
     logic_edit_requested = QtCore.pyqtSignal(str)
     logic_remove_requested = QtCore.pyqtSignal(str)
     logic_draft_changed = QtCore.pyqtSignal(str, object)
+    #: (node id, the finished Name text): the operator renamed a node.
+    logic_name_committed = QtCore.pyqtSignal(str, str)
     #: One node's files should be re-read from disk.
     logic_refresh_requested = QtCore.pyqtSignal(str)
     panel_publisher_edit_requested = QtCore.pyqtSignal(str)
@@ -544,13 +546,7 @@ class TaskConsoleHandle(QtCore.QObject):
                 lambda node_id: self.logic_edit_requested.emit(str(node_id))
             )
             self._panel_editors[key] = editor
-            state = dict(projection).get("state") or {}
-            title = (
-                str(dict(state).get("title") or key)
-                if isinstance(state, Mapping)
-                else key
-            )
-            self._view.add_editor_tab(editor, f"Edit panel · {title}")
+            self._view.add_editor_tab(editor, _panel_editor_tab(key, projection))
         else:
             editor.update_projection(panel_editor_projection(self, projection))
             self._view.focus_editor_tab(editor)
@@ -561,6 +557,11 @@ class TaskConsoleHandle(QtCore.QObject):
         if editor is None:
             return False
         editor.update_projection(panel_editor_projection(self, projection))
+        # The tab says what the panel is called NOW: a rename of the panel,
+        # or of the node whose signal it shows, retitles it.
+        self._view.set_editor_tab_title(
+            editor, _panel_editor_tab(str(panel_id), projection)
+        )
         return True
 
     def set_panel_snapshot_status(self, panel_id: str, status: Mapping[str, object]) -> None:
@@ -603,7 +604,9 @@ class TaskConsoleHandle(QtCore.QObject):
         key = str(node_id)
         row = self._rows.get(key)
         if row is None:
-            row = LogicRowView(key, str(kind))
+            # Made blank: what the node is called arrives by set_logic_name,
+            # on the same turn, like its state.
+            row = LogicRowView("", str(kind))
             row.start_requested.connect(
                 lambda _=None, nid=key: self.logic_start_requested.emit(nid)
             )
@@ -635,6 +638,12 @@ class TaskConsoleHandle(QtCore.QObject):
         self._show_logic_rows()
         self._show_console_state()
 
+    def set_logic_name(self, node_id: str, name: str, api_name: str = "") -> None:
+        """What the node is called; its tooltip adds what it is (its type)
+        and the internal ID it is addressed by."""
+
+        self._rows[str(node_id)].set_name(name, (api_name, f"internal ID {node_id}"))
+
     def set_logic_state(self, node_id: str, state: str, status_text: str = "") -> None:
         self._rows[str(node_id)].set_state(state, status_text)
         self._show_console_state()
@@ -663,16 +672,21 @@ class TaskConsoleHandle(QtCore.QObject):
 
     def set_panel_publishers(
         self,
-        publishers: tuple[tuple[str, tuple[tuple[str, str, str], ...]], ...],
+        publishers: tuple[tuple[str, str, tuple[tuple[str, str, str], ...]], ...],
     ) -> None:
-        """Show panel-owned signals beside, not inside, LogicNode rows."""
+        """Show panel-owned signals beside, not inside, LogicNode rows.
+
+        Each is ``(panel id, what the panel is called, its outputs)``: the
+        row says the panel's name, as its card and Setting do, and its id in
+        the tooltip, as the card's caption does.
+        """
 
         incoming: dict[str, LogicRowView] = {}
-        for panel_id, published in publishers:
+        for panel_id, name, published in publishers:
             key = str(panel_id)
             row = self._panel_publisher_rows.get(key)
             if row is None:
-                row = LogicRowView(key, "panel publisher")
+                row = LogicRowView("", "panel publisher")
                 # No node behind this row, so nothing here can be started or
                 # removed and nothing decides what a Start would open.  Each
                 # keeps its place while hidden: the name and Edit then stand
@@ -692,6 +706,7 @@ class TaskConsoleHandle(QtCore.QObject):
                 row.edit_requested.connect(
                     lambda _=None, pid=key: self.panel_publisher_edit_requested.emit(pid)
                 )
+            row.set_name(str(name), (key,))
             row.set_publishes(published)
             row.edit_button.setEnabled(True)
             incoming[key] = row
@@ -714,8 +729,7 @@ class TaskConsoleHandle(QtCore.QObject):
                 lambda _=None, pid=key: self.logic_refresh_requested.emit(pid)
             )
             self._panel_publisher_editors[key] = editor
-            title = str(dict(projection).get("api_name") or key)
-            self._view.add_editor_tab(editor, f"Edit · {title}")
+            self._view.add_editor_tab(editor, _logic_editor_tab(key, projection))
         else:
             editor.update_projection(projection)
             self._view.focus_editor_tab(editor)
@@ -728,6 +742,9 @@ class TaskConsoleHandle(QtCore.QObject):
         if editor is None:
             return False
         editor.update_projection(projection)
+        self._view.set_editor_tab_title(
+            editor, _logic_editor_tab(str(panel_id), projection)
+        )
         editor.set_mutation_enabled(
             not bool(dict(projection).get("science_locked"))
         )
@@ -779,9 +796,11 @@ class TaskConsoleHandle(QtCore.QObject):
             editor.remove_requested.connect(
                 lambda _=None, nid=key: self.logic_remove_requested.emit(nid)
             )
+            editor.name_committed.connect(
+                lambda text, nid=key: self.logic_name_committed.emit(nid, str(text))
+            )
             self._logic_editors[key] = editor
-            title = str(dict(projection).get("api_name") or key)
-            self._view.add_editor_tab(editor, f"Edit · {title}")
+            self._view.add_editor_tab(editor, _logic_editor_tab(key, projection))
         else:
             editor.update_projection(projection)
             self._view.focus_editor_tab(editor)
@@ -791,6 +810,11 @@ class TaskConsoleHandle(QtCore.QObject):
         if editor is None:
             return False
         editor.update_projection(projection)
+        # Two Occupancy nodes had two identical tabs: the tab says the
+        # node's name, and follows a rename.
+        self._view.set_editor_tab_title(
+            editor, _logic_editor_tab(str(node_id), projection)
+        )
         return True
 
     def has_logic_editor(self, node_id: str) -> bool:
@@ -818,6 +842,24 @@ class TaskConsoleHandle(QtCore.QObject):
                 self.panel_editor_closed.emit(panel_id)
                 self.close_panel_editor(panel_id)
                 return
+
+
+def _logic_editor_tab(key: str, projection: Any) -> str:
+    """A node's Edit tab: its name; a panel publisher's page: its title."""
+
+    shown = dict(projection)
+    return f"Edit · {shown.get('name') or shown.get('api_name') or key}"
+
+
+def _panel_editor_tab(key: str, projection: Any) -> str:
+    """A panel's Edit tab: what the panel is called, as projected (its
+    record's title on a page nothing has named yet)."""
+
+    shown = dict(projection)
+    surface, state = shown.get("parameter_surface"), shown.get("state")
+    name = surface.get("panel_name") if isinstance(surface, Mapping) else None
+    title = state.get("title") if isinstance(state, Mapping) else None
+    return f"Edit panel · {name or title or key}"
 
 
 __all__ = ["TaskConsoleHandle"]

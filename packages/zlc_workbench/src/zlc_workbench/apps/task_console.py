@@ -818,6 +818,7 @@ class ExperimentGuiFlow:
                     projection=projection,
                 )
                 model["shown_owner_revision"] = projection["owner_revision"]
+                model["shown_owner_names"] = self._logic_names_key()
             except BaseException as error:
                 self._device_control_models.pop(key, None)
                 self._report_device(f"{key}: {error}", "error")
@@ -1073,6 +1074,9 @@ class ExperimentGuiFlow:
         revision, owners, blockers = session.device_use.field_policy(
             key, names, dependency_groups=groups
         )
+        # Owners stay addresses (admission, tune records); a person reads
+        # each by what the console calls it -- a Logic node by its name.
+        spell = session.device_use.spell_owner
         session_id = str(model.get("device_session_id", ""))
         accepted = model.get("risk") == (session_id, revision)
         if not owners or not accepted:
@@ -1101,7 +1105,7 @@ class ExperimentGuiFlow:
             protected = tuple(blockers[name])
             if protected:
                 editable = False
-                reason = "Protected by " + ", ".join(protected)
+                reason = "Protected by " + ", ".join(spell(label) for label in protected)
             elif owners and not tunable.live_write:
                 editable = False
                 reason = "Stop the active Logic; this field is not live-writable"
@@ -1163,6 +1167,7 @@ class ExperimentGuiFlow:
         model["unapplied"] = kept
         return {
             "owners": owners,
+            "owner_names": tuple(spell(label) for label in owners),
             "reason": (
                 "No active Logic uses this device"
                 if not owners else
@@ -1181,17 +1186,29 @@ class ExperimentGuiFlow:
         projection = self._device_control_projection(str(key))
         model["control"].set_projection(model["spec"], projection)
         model["shown_owner_revision"] = projection["owner_revision"]
+        model["shown_owner_names"] = self._logic_names_key()
+
+    def _logic_names_key(self) -> tuple[tuple[str, str], ...]:
+        """What the console calls each Logic node, for a window that names owners."""
+
+        presenter = self.console_presenter
+        return () if presenter is None else tuple(sorted(presenter.logic_names().items()))
 
     def _refresh_device_control_policies(self) -> None:
-        """Project changed claims; local edits and command results project directly."""
+        """Project changed claims and renamed owners; local edits and command
+        results project directly."""
 
         if self.session is None:
             return
+        names = self._logic_names_key()
         for key in tuple(self._device_control_models):
             model = self._device_control_models[key]
             if not model["control"].is_visible():
                 continue
-            if model.get("shown_owner_revision") == self.session.device_use.owner_revision(key):
+            if (
+                model.get("shown_owner_revision") == self.session.device_use.owner_revision(key)
+                and model.get("shown_owner_names") == names
+            ):
                 continue
             projection = self._device_control_projection(key)
             cancelled = False
@@ -1210,6 +1227,7 @@ class ExperimentGuiFlow:
                 projection = self._device_control_projection(key)
             model["control"].set_projection(model["spec"], projection)
             model["shown_owner_revision"] = projection["owner_revision"]
+            model["shown_owner_names"] = names
 
     def _set_device_control_risk(self, key: str, accepted: bool) -> None:
         model = self._device_control_models.get(str(key))

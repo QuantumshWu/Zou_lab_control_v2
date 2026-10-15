@@ -29,6 +29,7 @@ from zlc_ui.fluent import (
 )
 from zlc_ui.fluent import PublishedItemsLegend
 from zlc_ui.fluent import row_gap
+from zlc_ui.status import SUMMARY_SEPARATOR
 
 #: Every kind a row can carry, so the kind column is one width on every row
 #: and the status beside it starts at one x down the page.
@@ -118,7 +119,6 @@ class LogicRowView(FluentFrame):
 
     def __init__(self, title: str = "Logic", kind: str = "logic", parent=None) -> None:
         super().__init__(parent)
-        self.title = str(title)
         self.kind = str(kind)
         self._status_text = "idle"
         #: The status word the row shows now; the console's own dot is the
@@ -141,7 +141,9 @@ class LogicRowView(FluentFrame):
         top = QtWidgets.QHBoxLayout()
         top.setSpacing(row_gap())
         self.dot = FluentStatusDot(size=STATUS_DOT)
-        self.name_label = ElidedLabel(self.title)
+        # Elided in the MIDDLE: names that differ at their end ("... shot 1",
+        # "... shot 2") still read differently in the column.
+        self.name_label = ElidedLabel(str(title), mode=QtCore.Qt.ElideMiddle)
         # Name and kind are fixed columns: every row's kind and status start
         # at the same x, instead of floating with the length of the name.
         self.name_label.setFixedWidth(scaled_px(200, minimum=150))
@@ -197,6 +199,17 @@ class LogicRowView(FluentFrame):
         self.publishes_label = PublishedItemsLegend()
         outer.addWidget(self.publishes_label)
         self._project_commands()
+
+    def set_name(self, text: str, details: tuple[str, ...] = ()) -> None:
+        """Show what the node is called; elided in its column, whole in the
+        tooltip with ``details`` after it -- what the node is and its
+        internal ID, which a name the operator chose no longer says.  The
+        row is not where it is renamed: its Edit page is."""
+
+        self.name_label.setText(str(text))
+        self.name_label.setToolTip(
+            SUMMARY_SEPARATOR.join((str(text), *(str(item) for item in details if item)))
+        )
 
     def set_preview_offered(self, offered: bool) -> None:
         """Show the switch only for a node that declares something to open.
@@ -262,7 +275,8 @@ class LogicRowView(FluentFrame):
         # It says what the next Start will do, so a row that cannot Start
         # cannot re-aim Start either.
         self.preview_switch.setEnabled(enabled)
-        self.edit_button.setEnabled(enabled)
+        # Edit stays: a page opened under a Task is read-only but its Name,
+        # which is not part of what the Task runs.
         self.remove_button.setEnabled(enabled)
 
     def set_publishes(self, rows: tuple[tuple[str, str, str], ...]) -> None:
