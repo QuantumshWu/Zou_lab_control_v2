@@ -572,8 +572,12 @@ def preflight_installation(
     # A device whose type this machine cannot build is one device's failure,
     # as an incomplete device is: the operator keeps its card (a driver this
     # PC lacks, an apparatus written on another bench) and every other
-    # device still opens.  The reason is the family's import error, which
-    # names the missing driver; a type no family declares any more has none.
+    # device still opens.  The reason is the import error of the device
+    # folder that declares the type (``camera.dcam`` lives in
+    # ``camera/dcam/``), which names the missing driver.  A type no folder
+    # declares any more has none: a sibling's missing driver is not its
+    # reason, and naming one would send the operator to install the wrong
+    # thing.
     buildable: list[DeviceSpec] = []
     unbuildable: dict[str, BaseException] = {}
     for spec in normalized:
@@ -581,10 +585,11 @@ def preflight_installation(
             buildable.append(spec)
             continue
         family, _, name = spec.type_id.partition(".")
-        missing = tuple(item for item in snapshot.unavailable if item.family == family)
         reasons = tuple(
-            item.reason for item in missing if name.startswith(item.device)
-        ) or tuple(item.reason for item in missing)
+            item.reason
+            for item in snapshot.unavailable
+            if item.family == family and name.startswith(item.device)
+        )
         unbuildable[spec.key] = RuntimeError(
             f"device type {spec.type_id} is not available on this machine"
             + (f" ({'; '.join(reasons)})" if reasons else "")
