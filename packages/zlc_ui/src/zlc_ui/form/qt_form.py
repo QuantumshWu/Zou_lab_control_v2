@@ -78,6 +78,10 @@ class FormRuntimeContext:
     choice_metadata: Callable[[], object] | None = None
     choice_labels: Callable[[], object] | None = None
     choice_state_labels: tuple[str, str, str] | None = None
+    #: ``{key: what the closed picker reads}`` -- a signal as the presenter
+    #: calls it everywhere else; a choice without one reads its source and
+    #: label.
+    choice_texts: Callable[[], object] | None = None
 
     def names_for(self, key: str) -> tuple[str, ...]:
         if not callable(self.choice_names):
@@ -101,6 +105,9 @@ class FormRuntimeContext:
 
     def labels(self) -> Mapping[str, object]:
         return coerce_choice_labels(self.choice_labels)
+
+    def texts(self) -> Mapping[str, object]:
+        return coerce_choice_labels(self.choice_texts)
 
 
 
@@ -942,6 +949,7 @@ class _KeyedChoiceHandler(FormWidgetHandler):
             current=current,
             none_label="Off" if not field.required else None,
             empty_source_label="Unresolved",
+            texts=runtime.texts(),
         )
 
     def build(self, field, value, on_change, context=None):

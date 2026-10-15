@@ -882,6 +882,11 @@ from zlc_ui.fluent import STATUS_CUES
 row.set_state('draft', 'Draft: select a compatible source')
 dot, ink = STATUS_CUES['idle']
 assert dot in row.dot.styleSheet() and ink in row.status_label.styleSheet()
+# A run whose Restart was refused goes on, not as asked: amber, dot and words.
+row.set_state('warning', "running · edited; Restart refused: 'repeat' is below its minimum")
+dot, ink = STATUS_CUES['warning']
+assert row.state_word == 'warning'
+assert dot in row.dot.styleSheet() and ink in row.status_label.styleSheet()
 row.set_state('idle', 'stopped')
 row.set_commands(can_start=True, can_stop=False)
 app.processEvents()
@@ -1176,6 +1181,19 @@ assert editor.status_label.text() == 'Draft: 3 problems in Variables'
 handle.update_logic_editor('camera-1', dict(
     projection, ui_contributions=(typed_editor,), issues=('Frames must be selected', *typed)))
 assert editor.status_label.text() == 'Draft: Frames must be selected'
+# A rename alone reaches every contribution: what one says of the node --
+# Derive's "Published as <name>/<variable>" -- follows the name, with
+# nothing else in the projection changed.
+named = []
+class Named(QtWidgets.QWidget):
+    draft_changed = QtCore.pyqtSignal(object)
+    def update_projection(self, projection):
+        named.append(projection.get('name'))
+def named_editor(parent):
+    return Named(parent)
+handle.update_logic_editor('camera-1', dict(projection, ui_contributions=(named_editor,), name='Camera A'))
+handle.update_logic_editor('camera-1', dict(projection, ui_contributions=(named_editor,), name='Camera B'))
+assert named[-1] == 'Camera B', named
 
 patches.clear()
 running = dict(
@@ -1277,6 +1295,7 @@ projection = {
     'source_options': ('@logic/camera_measurement/frames',),
     'source_labels': {'@logic/camera_measurement/frames': 'frames'},
     'source_groups': {'@logic/camera_measurement/frames': 'Camera A'},
+    'source_texts': {'@logic/camera_measurement/frames': 'Camera A/frames'},
     'device_options': {}, 'device_keys': {},
     'preview_offered': False, 'auto_preview': False,
     'running': True, 'pending': False, 'can_start': False, 'can_stop': True,
@@ -1300,6 +1319,9 @@ tab = lambda: view.tabs.tabText(view.tabs.indexOf(editor))
 assert tab() == 'Edit · Loading'
 assert editor.title_label.text() == 'Loading'
 assert editor.kind_label.text() == '(occupancy · processor)'
+# The closed Source picker spells the signal as the status line does.
+assert editor.source_combo._display_text() == 'Camera A/frames'
+assert editor.status_label.text() == 'following Camera A/frames'
 # The Name is the first row, in the one label column and the one control
 # column, and the first stop of Tab on the page's rows.
 top = lambda widget: widget.mapTo(editor, QtCore.QPoint()).y()
@@ -1437,10 +1459,12 @@ handle.set_panel_intervals((100, 200, 400, 800), 400)
 handle.add_panel('panel-1', 'Camera')
 groups = (('camera', (('frames', '@logic/cm/frames'),)),)
 overlay_groups = (('occupancy', (('sites', '@logic/occ/site_overlay'),)),)
+signal_texts = {'@logic/cm/frames': 'camera/frames', '@logic/occ/site_overlay': 'occupancy/sites'}
 handle.set_panel_signal_choices(
     'panel-1', groups, current='@logic/cm/frames',
     overlay_groups=overlay_groups,
     overlay_current='@logic/occ/site_overlay',
+    texts=signal_texts,
 )
 state = {
     'signal': '@logic/cm/frames', 'kind': 'image', 'size': '2x2',
@@ -1666,8 +1690,8 @@ assert isinstance(card._settings_form.widget_for('signal'), FluentTreeComboBox)
 assert isinstance(card._settings_form.widget_for('overlay_signal'), FluentTreeComboBox)
 assert card._settings_form.widget_for('signal').current_choice_key() == '@logic/cm/frames'
 assert card._settings_form.widget_for('overlay_signal').current_choice_key() == '@logic/occ/site_overlay'
-assert card._settings_form.widget_for('signal')._display_text() == 'camera · frames'
-assert card._settings_form.widget_for('overlay_signal')._display_text() == 'occupancy · sites'
+assert card._settings_form.widget_for('signal')._display_text() == 'camera/frames'
+assert card._settings_form.widget_for('overlay_signal')._display_text() == 'occupancy/sites'
 assert card._settings_form.widget_for('overlay_signal').model().item(0).text() == 'Off'
 replacement_groups = (('camera', (('reference', '@logic/cm/reference'),)),)
 replacement_state = dict(state, signal='@logic/cm/reference')
@@ -1681,6 +1705,7 @@ handle.set_panel_signal_choices(
     'panel-1', groups, current='@logic/cm/frames',
     overlay_groups=overlay_groups,
     overlay_current='@logic/occ/site_overlay',
+    texts=signal_texts,
 )
 handle.set_panel_projection('panel-1', state, surface)
 assert 'kind' not in card._settings_form.read_all()
@@ -1730,7 +1755,7 @@ assert 'cell_kind' not in card._settings_form.spec.keys, (
 
 projection = {
     'panel_id': 'panel-1', 'state': state, 'signal_options': groups,
-    'overlay_signal_options': overlay_groups,
+    'overlay_signal_options': overlay_groups, 'signal_texts': signal_texts,
     'interval_choices': (100, 200, 400, 800),
     'parameter_surface': surface,
     'save_directory': save_directory,
@@ -1793,8 +1818,8 @@ assert isinstance(editor.panel_form.widget_for('signal'), FluentTreeComboBox)
 assert isinstance(editor.panel_form.widget_for('overlay_signal'), FluentTreeComboBox)
 assert editor.panel_form.widget_for('signal').current_choice_key() == '@logic/cm/frames'
 assert editor.panel_form.widget_for('overlay_signal').current_choice_key() == '@logic/occ/site_overlay'
-assert editor.panel_form.widget_for('signal')._display_text() == 'camera · frames'
-assert editor.panel_form.widget_for('overlay_signal')._display_text() == 'occupancy · sites'
+assert editor.panel_form.widget_for('signal')._display_text() == 'camera/frames'
+assert editor.panel_form.widget_for('overlay_signal')._display_text() == 'occupancy/sites'
 class _PlotHost:
     def __init__(self, text):
         self.widget = QtWidgets.QLabel(text)
@@ -2359,8 +2384,9 @@ assert camera_row.stop_button.isEnabled()
 assert camera_row.edit_button.isEnabled()
 assert camera_row.remove_button.isEnabled()
 
-# The header dot is the worst of the nodes': a failure anywhere, else a run
-# anywhere, else grey -- from the one status table.
+# The header dot is the worst of the nodes': a failure anywhere, else
+# something needing attention, else a run anywhere, else grey -- from the
+# one status table.
 from zlc_ui.fluent import STATUS_CUES
 def header_is(word):
     return f"background:{STATUS_CUES[word][0]};" in view.status_dot.styleSheet()
@@ -2369,6 +2395,11 @@ handle.set_logic_state('camera', 'running')
 assert header_is('running')
 handle.set_logic_state('calibration', 'error', 'broke')
 assert header_is('error')
+handle.set_logic_state('calibration', 'warning', 'running; Restart refused: broke')
+assert header_is('warning')
+handle.set_logic_state('camera', 'error', 'broke')
+assert header_is('error')
+handle.set_logic_state('camera', 'running')
 handle.set_logic_state('calibration', 'idle')
 assert header_is('running')
 handle.remove_logic_row('camera')
@@ -2791,10 +2822,14 @@ assert stop.isVisible() and not stop.isEnabled() and stop.role() == 'destructive
 assert abs(stop.y() - start.y()) <= 2 and start.x() + start.width() < stop.x()
 # Revert has its own fixed slot left of the Plot group, always there and
 # disabled while there is no running configuration the draft differs from.
+# It throws the edits away: red and one click, as Discard and Reset are.
 revert = editor.revert_button
-assert revert.isVisible() and not revert.isEnabled() and revert.role() == 'standard'
+assert revert.isVisible() and not revert.isEnabled() and revert.role() == 'destructive'
 assert abs(revert.y() - start.y()) <= 2 and revert.x() + revert.width() < switch.x()
-assert revert.toolTip() == 'Restore the configuration the running node uses'
+assert revert.toolTip() == (
+    "Discard this page's edits and put back the configuration the running node uses; "
+    "the edits do not come back"
+)
 slots = lambda: (revert.x(), revert.width(), switch.x(), start.x(), start.width(),
                  stop.x(), stop.width())
 idle = slots()

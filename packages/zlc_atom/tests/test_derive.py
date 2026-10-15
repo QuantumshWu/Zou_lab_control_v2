@@ -146,7 +146,9 @@ def test_the_users_example_keeps_the_counts_of_sites_whose_frames_0_and_2_agree(
 def test_operators_keep_their_precedence_and_repeat_within_one_variable() -> None:
     """Arithmetic binds tighter than one comparison, which binds tighter than
     and/and not, then or, then where; each level reads left to right.  The
-    note says the grouping only when it differs from reading left to right."""
+    note says the grouping only when it differs from reading left to right.
+    Two booleans take every comparison, false < true as NumPy orders them:
+    occupied at frame 0 > occupied at frame 2 is loaded at 0 and empty at 2."""
     members = _occupancy()
     c = members["counts"].values.astype(np.float64)
     o, judged = members["occupied"].values, members["occupied"].valid
@@ -173,6 +175,15 @@ def test_operators_keep_their_precedence_and_repeat_within_one_variable() -> Non
         {"name": "either", "terms": [at("counts", "0"), {"op": ">", "number": 1}, {"op": "and", **at("counts", "1")},
                                      {"op": "<", "number": 2}, {"op": "or", **at("occupied", "2")}]},
         {"name": "dark", "terms": [at("counts", "1"), {"op": "where not", **at("occupied", "1")}]},
+        {"name": "emptied", "terms": [at("occupied", "0"), {"op": ">", **at("occupied", "2")}],
+         "statistic": "sum", "over": ["Site"]},
+        {"name": "filled", "terms": [at("occupied", "0"), {"op": "<", **at("occupied", "2")}]},
+        {"name": "no_gain", "terms": [at("occupied", "0"), {"op": ">=", **at("occupied", "2")}]},
+        {"name": "no_loss", "terms": [at("occupied", "0"), {"op": "<=", **at("occupied", "2")}]},
+        {"name": "full1", "terms": [at("occupied", "1"), {"op": ">=", "boolean": "true"}]},
+        {"name": "empty1", "terms": [at("occupied", "1"), {"op": "<", "boolean": "true"}]},
+        {"name": "lost_bright", "terms": [at("occupied", "0"), {"op": ">", **at("occupied", "2")},
+                                          {"op": "and", **at("counts", "0")}, {"op": ">", "number": 30}]},
     )
     results = _evaluated(rows, members)
     answers = {row["name"]: answer for row, answer in zip(rows, typed_variables(
@@ -183,6 +194,7 @@ def test_operators_keep_their_precedence_and_repeat_within_one_variable() -> Non
         "kept_both": "reads counts where (occupied[frame 0] and occupied[frame 2])",
         "scaled": "reads counts[frame 0] + (counts[frame 1] × 2)",
         "either": "reads ((counts[frame 0] > 1) and (counts[frame 1] < 2)) or occupied[frame 2]",
+        "lost_bright": "reads (occupied[frame 0] > occupied[frame 2]) and (counts[frame 0] > 30)",
     }
     # A number takes the unit of the other side of + − and comparisons, and
     # is a plain factor beside × ÷.
@@ -210,13 +222,25 @@ def test_operators_keep_their_precedence_and_repeat_within_one_variable() -> Non
     np.testing.assert_array_equal(results["either"].values[:, 0], ((c[:, 0] > 1) & (c[:, 1] < 2)) | o[:, 2])
     np.testing.assert_array_equal(results["dark"].valid[:, 0],
                                   members["counts"].valid[:, 1] & judged[:, 1] & ~o[:, 1])
+    # Booleans in order: false < true.
+    emptied = results["emptied"]
+    assert emptied.schema == lost.schema, "> on booleans counts what and not counts"
+    np.testing.assert_array_equal(emptied.values, lost.values)
+    for name, expected in (("filled", ~o[:, 0] & o[:, 2]), ("no_gain", o[:, 0] | ~o[:, 2]),
+                           ("no_loss", ~o[:, 0] | o[:, 2]), ("full1", o[:, 1]), ("empty1", ~o[:, 1])):
+        assert describe_schema(results[name].schema) == "repeat 5 × Site 6 · bool · unit 1", name
+        np.testing.assert_array_equal(results[name].values[:, 0], expected, err_msg=name)
+    np.testing.assert_array_equal(results["filled"].valid[:, 0], joint)
+    np.testing.assert_array_equal(results["full1"].valid[:, 0], judged[:, 1])
+    np.testing.assert_array_equal(results["lost_bright"].values[:, 0], (o[:, 0] & ~o[:, 2]) & (c[:, 0] > 30))
 
 
 def test_a_pick_takes_labels_of_any_axis_in_any_domain() -> None:
     """``at`` names any primary axis -- Repeat, Point or Cell, any role --
-    and ``labels`` its exact labels: one drops the axis, several keep it in
-    axis order whatever order they are written in; alternate coordinates
-    follow their primary."""
+    and ``labels`` its exact labels, or ``first`` and ``last``, its ends as
+    long as it is: one drops the axis, several keep it in axis order
+    whatever order they are written in, a coordinate two of them name
+    once; alternate coordinates follow their primary."""
     members = _occupancy(repeats=4)
     c = members["counts"].values
     rows = _rows(
@@ -231,6 +255,27 @@ def test_a_pick_takes_labels_of_any_axis_in_any_domain() -> None:
     assert results["third"].schema.repeat_domain.axes == () and results["third"].shape == (1, 3, 6)
     np.testing.assert_array_equal(results["third"].values[0], c[2])
     assert results["one"].schema.cell_domain == SCALAR_DOMAIN and results["one"].shape == (4, 3, 1)
+    # How many labels are written, not how many coordinates they reach,
+    # decides whether the axis stays: on a one-long axis First and Last
+    # are one coordinate, kept once.
+    rows = _rows(
+        {"name": "ends", "terms": [{"of": "counts", "at": "frame", "labels": ["last", "first"]}]},
+        {"name": "final", "terms": [{"of": "counts", "at": "frame", "labels": ["last"]}]},
+        {"name": "edge", "terms": [{"of": "counts", "at": "Site", "labels": ["last", "2"]}]},
+        {"name": "zero", "terms": [{"of": "counts", "at": "frame", "labels": ["first", "0"]}]},
+        {"name": "lone", "terms": [{"of": "zero", "at": "frame", "labels": ["first", "last"]}]},
+    )
+    results = _evaluated(rows, members)
+    assert results["ends"].schema.point_domain.axes[0].labels() == ("0", "2")
+    np.testing.assert_array_equal(results["ends"].values, c[:, [0, 2], :])
+    assert results["final"].schema.point_domain.axes == ()
+    np.testing.assert_array_equal(results["final"].values, c[:, [2], :])
+    assert results["edge"].schema.cell_domain.axes[0].labels() == ("2", "6")
+    np.testing.assert_array_equal(results["edge"].values, c[:, :, [1, 5]])
+    for name in ("zero", "lone"):
+        assert results[name].schema.point_domain.axes[0].labels() == ("0",), name
+        np.testing.assert_array_equal(results[name].values, c[:, [0], :])
+    assert term_text(rows[0]["terms"][0]) == "counts[frame last, first]"
 
     # A sparse scan: Point rows mapped to (a, b), time an alternate of b,
     # and a detuning axis whose labels are its floats written exactly.
@@ -274,6 +319,15 @@ def test_a_pick_takes_labels_of_any_axis_in_any_domain() -> None:
     assert [axis.labels() for axis in points.axes] == [("10", "20"), ("3",), ("0.4",)]
     np.testing.assert_array_equal(results["rows"].values, values[:, [1, 4], :])
     assert term_text(rows[1]["terms"][0]) == "scan[a 20 · b 3, a 10 · b 3]"
+    # A domain's ends are its first and last rows.
+    results = _evaluated(_rows({"name": "ends", "terms": [{"of": "scan", "at": "Point", "labels": ["first", "last"]}]},
+                               {"name": "last", "terms": [{"of": "scan", "at": "Point", "labels": ["last"]}]}),
+                         {"scan": scan})
+    assert [axis.labels() for axis in results["ends"].schema.point_domain.axes] == [
+        ("10", "20"), ("1", "3"), ("0.1", "0.4")]
+    np.testing.assert_array_equal(results["ends"].values, values[:, [0, 4], :])
+    assert results["last"].schema.point_domain.axes == ()
+    np.testing.assert_array_equal(results["last"].values, values[:, [4], :])
     # A dense Cell domain keeps a grid: one cell, or rows that fill one.
     y = AxisSpec(AxisId("camera.y"), "y", SITE, 3, (0, 1, 2))
     x = AxisSpec(AxisId("camera.x"), "x", SITE, 2, (0, 1))
@@ -300,8 +354,11 @@ def test_a_pick_takes_labels_of_any_axis_in_any_domain() -> None:
         members["counts"].schema.point_domain.axes[0], coordinate_labels=("first", "rest", "rest")),), ((0, 1, 2),)))
     framed = replace(members["counts"].schema, point_domain=DomainSpec((3,), (replace(
         members["counts"].schema.point_domain.axes[0], name="Point"),), ((0, 1, 2),)))
+    ended = replace(members["counts"].schema, point_domain=DomainSpec((3,), (replace(
+        members["counts"].schema.point_domain.axes[0], coordinate_labels=("start", "first", "end")),), ((0, 1, 2),)))
     members.update(twin=Operand(twin, members["counts"].values), labelled=Operand(labelled, members["counts"].values),
-                   scan=scan, image=image, framed=Operand(framed, members["counts"].values))
+                   scan=scan, image=image, framed=Operand(framed, members["counts"].values),
+                   ended=Operand(ended, members["counts"].values))
     for term, detail in (
         ({"of": "occupied", "at": "frmae", "labels": ["0"]}, "occupied has no axis 'frmae'; its axes: repeat, frame, Site"),
         ({"of": "occupied", "at": "Site", "labels": ["7"]}, "occupied has no Site '7'; Site labels: 1, 2, 3, 4, 5, 6"),
@@ -314,6 +371,8 @@ def test_a_pick_takes_labels_of_any_axis_in_any_domain() -> None:
          "these Cell values do not fill a grid of y × x; pick one, or pick each axis in a variable of its own"),
         ({"of": "framed", "at": "Point", "labels": ["1"]},
          "Point names both a domain and an axis of framed; it cannot be picked by name"),
+        ({"of": "ended", "at": "frame", "labels": ["end", "first"]},
+         "frame has a label 'first' of its own; a pick cannot tell it from its first label"),
     ):
         rows = _rows({"name": "x", "terms": [term]})
         assert _problem(rows, members) == ("x", "term 1", detail)
@@ -434,7 +493,9 @@ def test_problems_are_said_by_variable_and_stage_without_and_with_data() -> None
         "x · term 2: a term reads one thing: an input or a variable, a number, or true or false")
     assert no_data({"name": "x", "terms": [counts, {"op": ">"}]}) == "x · term 2: choose what it reads"
     assert no_data({"name": "x", "terms": [counts, {"op": "+", "boolean": "true"}]}) == (
-        "x · term 2: true and false follow = or ≠ only")
+        "x · term 2: true and false follow a comparison only")
+    assert no_data({"name": "x", "terms": [counts, {"op": "and", "boolean": "true"}]}) == (
+        "x · term 2: true and false follow a comparison only")
     assert no_data({"name": "x", "terms": [{"of": "counts", "labels": ["1"]}]}) == (
         "x · term 1: choose the axis of these labels")
     assert no_data({"name": "x", "terms": [{"number": 2}, {"op": "*", "number": 3}]}) == (
@@ -501,21 +562,21 @@ def test_problems_are_said_by_variable_and_stage_without_and_with_data() -> None
     assert typed({"name": "x", "terms": [counts, {"op": "+", "of": "smae"}]}) == ("x", "term 2", (
         "no input or variable named 'smae'; inputs: counts, occupied; variables: x"))
     assert typed({"name": "counts", "terms": [occupied]}) == ("counts", "name", "counts is an input's name; choose another")
-    assert typed({"name": "x", "terms": [counts, {"op": "==", **occupied}]}) == ("x", "term 2", (
-        "booleans do not mix with numbers; compare booleans with = or ≠, or count them with a statistic"))
-    assert typed({"name": "x", "terms": [occupied, {"op": ">", **occupied}]}) == ("x", "term 2",
-                                                                                  "booleans compare only with = and ≠")
+    mix = "booleans do not mix with numbers; compare booleans with booleans, or count them with a statistic"
+    assert typed({"name": "x", "terms": [counts, {"op": "==", **occupied}]}) == ("x", "term 2", mix)
+    assert typed({"name": "x", "terms": [occupied, {"op": ">", "number": 0}]}) == ("x", "term 2", mix)
+    assert typed({"name": "x", "terms": [counts, {"op": "<=", "boolean": "true"}]}) == ("x", "term 2", mix)
     assert typed({"name": "x", "terms": [occupied, {"op": "and", **counts}]}) == ("x", "term 2",
                                                                                   "and needs booleans; counts is a number")
     assert typed({"name": "x", "terms": [at("occupied", "0"), {"op": "+", **at("occupied", "2")}]}) == (
         "x", "term 2", "+ needs numbers; occupied[frame 0] is a boolean; count booleans with a statistic, or "
-                       "compare them with = or ≠")
+                       "compare them")
     # Where precedence groups the formula otherwise than its lines read, an
     # operator's problem says how it reads: where binds last.
     assert typed({"name": "same", "publish": False, "terms": [at("occupied", "0")]},
                  {"name": "kept", "terms": [counts, {"op": "where", "of": "same"}, {"op": "+", "number": 1}]}) == (
-        "kept", "term 3", "+ needs numbers; same is a boolean; count booleans with a statistic, or compare them "
-                          "with = or ≠; this formula reads counts where (same + 1)")
+        "kept", "term 3", "+ needs numbers; same is a boolean; count booleans with a statistic, or compare them; "
+                          "this formula reads counts where (same + 1)")
     assert typed({"name": "x", "terms": [counts, {"op": "where", **counts}]}) == ("x", "term 2",
                                                                                   "where needs a boolean mask; counts is a number")
     assert typed({"name": "x", "terms": [at("counts", "1"), {"op": "where", **occupied}]}) == ("x", "term 2", (
@@ -641,10 +702,11 @@ def test_the_frames_a_draft_says_are_the_frames_typing_keeps() -> None:
     (``frames_kept``, read by ``describe_output_frames``).  On real member
     schemas, for every formula typing types, they are the readout-event
     labels of the typed schema; where they cannot be told, typing refuses
-    too.  One frame ("0") stands for a variable that keeps no frame axis,
-    and a source of one label is read as carrying none.  What only the
-    members' names decide, ``frames_kept`` is told as typing is; the
-    descriptor is not, and leaves it to typing."""
+    too, except for a Point domain's first or last row, which only the
+    schemas tell.  One frame ("0") stands for a variable that keeps no
+    frame axis; the source says whether a one-label axis is an axis.  What
+    only the members' names decide, ``frames_kept`` is told as typing is;
+    the descriptor is not, and leaves it to typing."""
 
     occupancy = {name: value.schema for name, value in _occupancy().items()}
     # Point carries frame x detuning (a mapped domain, detuning-major), Cell y x.
@@ -678,6 +740,9 @@ def test_the_frames_a_draft_says_are_the_frames_typing_keeps() -> None:
         published("one", at("counts", "frame", "1")),
         published("two", at("counts", "frame", "2", "0")),
         published("every", at("counts", "frame", "0", "1", "2")),
+        published("ends", at("counts", "frame", "first", "last")),
+        published("final", at("counts", "frame", "last")),
+        published("zero", at("counts", "frame", "first", "0")),
         published("rise", at("counts", "frame", "1", "2"), at("counts", "frame", "0", op="-")),
         published("pair", at("counts", "frame", "0", "1"), at("counts", "frame", "0", "1", op="/")),
         published("steady", {"of": "counts"}, {"op": ">", "number": 30}, {"op": "and", "of": "occupied"}),
@@ -707,6 +772,7 @@ def test_the_frames_a_draft_says_are_the_frames_typing_keeps() -> None:
             level, published("norm", {"of": "counts"}, {"op": "/", "of": "level"}),
             published("sites", at("counts", "Site", "3", "1")),
             published("per_frame", {"of": "counts"}, statistic="mean", over=["Site"]),
+            published("point_first", at("counts", "Point", "first")),
         ]),
         (scanned, [
             published("point", at("counts", "Point", "frame 1 · detuning 2")),
@@ -715,11 +781,17 @@ def test_the_frames_a_draft_says_are_the_frames_typing_keeps() -> None:
             published("pixel", at("counts", "Cell", "y 1 · x 0")),
             published("corner", at("counts", "Cell", "y 0 · x 0", "y 0 · x 1")),
             published("tuned", at("counts", "detuning", "2")),
+            published("point_last", at("counts", "Point", "last")),
             published("per_frame", {"of": "counts"}, statistic="mean", over=["detuning", "y"]),
             published("point_absent", at("counts", "Point", "frame 3 · detuning 1")),
         ]),
     )
-    told = {}
+    # A Point domain's first or last row: typing refuses it where Point has
+    # the frame axis alone (pick frame) and picks the row where it has more,
+    # and either way which frames the row carries is the schemas' to say.
+    # The draft, which has no schema, cannot tell.
+    untold = {"point_first": False, "point_last": True}
+    told, typed = {}, {}
     for members, own in by_source:
         draft = {"variables": [*shared, *own]}
         rows = _rows(*draft["variables"])
@@ -727,28 +799,42 @@ def test_the_frames_a_draft_says_are_the_frames_typing_keeps() -> None:
         kept = frames_kept(rows, FRAME_AXIS_NAME, ("0", "1", "2"), tuple(members))
         assert kept == frames_kept(rows, FRAME_AXIS_NAME, ("0", "1", "2"), None), "names alone decide nothing here"
         for row, answer, frames in zip(rows, answers, kept):
-            if answer["schema"] is not None:
+            if row["name"] in untold:
+                assert frames is None, row["name"]
+                typed[row["name"]] = answer["schema"] is not None
+            elif answer["schema"] is not None:
                 axes = [axis for axis in answer["schema"].point_domain.axes if axis.role == READOUT_EVENT]
                 assert frames == (axes[0].labels() if axes else ()), row["name"]
-            if frames is None:
+            if frames is None and row["name"] not in untold:
                 assert answer["error"] is not None or answer["waits_for"] is not None, row["name"]
             if row["publish"]:
-                told[row["name"]] = LOGIC_NODE.describe_output_frames(draft, row["name"], ("0", "1", "2"))
-                assert told[row["name"]] == (None if frames is None else frames or ("0",)), row["name"]
+                answer = LOGIC_NODE.describe_output_frames(draft, row["name"], (FRAME_AXIS_NAME, ("0", "1", "2")))
+                assert answer == (None if frames is None else (FRAME_AXIS_NAME, frames) if frames
+                                  else (None, ("0",))), row["name"]
+                told[row["name"]] = None if answer is None else answer[1]
     assert told == {
         "kept": ("0", "1", "2"), "whole": ("0", "1", "2"), "one": ("0",), "two": ("0", "2"),
-        "every": ("0", "1", "2"), "rise": ("1", "2"), "pair": ("0", "1"), "steady": ("0", "1", "2"),
+        "every": ("0", "1", "2"), "ends": ("0", "2"), "final": ("0",), "zero": ("0",), "rise": ("1", "2"), "pair": ("0", "1"), "steady": ("0", "1", "2"),
         "window": ("0",), "shot": ("0", "1", "2"), "over_frame": ("0",), "frame_mean": ("0",), "again": ("0",),
         "lost": None, "mixed": None, "masked": None, "absent": None, "twice": None, "gone": None,
         "reduced": None, "cycle_a": None, "cycle_b": None, "and_number": None, "number_or": None,
         "not_number": None, "norm": ("0", "1", "2"), "sites": ("0", "1", "2"),
         "per_frame": ("0", "1", "2"), "point": ("0",), "points": ("0", "2"), "points_one": ("1",),
-        "pixel": ("0", "1", "2"), "corner": ("0", "1", "2"), "tuned": ("0", "1", "2"), "point_absent": None,
+        "pixel": ("0", "1", "2"), "corner": ("0", "1", "2"), "tuned": ("0", "1", "2"), "point_first": None,
+        "point_last": None, "point_absent": None,
     }
+    assert typed == untold
+    # First and Last are tokens of the draft, never labels fixed when it was
+    # written: the frames passed on follow the source's frame count.
+    ends = {"variables": [published("ends", at("counts", "frame", "first", "last"))]}
+    assert [LOGIC_NODE.describe_output_frames(ends, "ends", (FRAME_AXIS_NAME, tuple(map(str, range(count)))))[1]
+            for count in (3, 4, 2)] == [("0", "2"), ("0", "3"), ("0", "1")]
     draft = {"variables": [same, published("kept", {"of": "counts"}, {"op": "where", "of": "same"})]}
     assert LOGIC_NODE.describe_output_frames(draft, "kept", None) is None, "an upstream that cannot say"
-    assert LOGIC_NODE.describe_output_frames(draft, "same", ("0", "1", "2")) is None, "an internal variable"
-    assert LOGIC_NODE.describe_output_frames({"variables": [{"name": "kept", "code": "x"}]}, "kept", ("0",)) is None
+    assert LOGIC_NODE.describe_output_frames(draft, "same", (FRAME_AXIS_NAME, ("0", "1", "2"))) is None, (
+        "an internal variable")
+    assert LOGIC_NODE.describe_output_frames({"variables": [{"name": "kept", "code": "x"}]}, "kept",
+                                             (FRAME_AXIS_NAME, ("0",))) is None
 
     # What the members' names decide.  frames_kept is told them as typing
     # is: a member's name is read before a variable's, a variable named like
@@ -767,10 +853,13 @@ def test_the_frames_a_draft_says_are_the_frames_typing_keeps() -> None:
     assert frames_kept(named, FRAME_AXIS_NAME, ("0", "1", "2"), tuple(occupancy)) == (None, ("0", "1", "2"), None)
     assert frames_kept(named, FRAME_AXIS_NAME, ("0", "1", "2"), None) == ((), (), ("0", "1", "2"))
 
-    # One label is one frame or no frame axis, and the source does not say
-    # which: the descriptor reads it as no frame axis.  A pick or statistic
-    # on the frame axis cannot be told; everything else keeps one frame.
-    # Against members that carry no frame axis, typing agrees.
+    # One frame is the source's to name.  A one-frame camera publishes a
+    # frame axis of one label, ("frame", ("0",)): every member carries it,
+    # as typing types them.  A source without the axis, (None, ("0",)), has
+    # members that carry none, so every variable keeps one frame; whether
+    # they have an axis called "frame" to pick or reduce is, like any axis
+    # but the source's, their schemas' to say -- typing's, once they publish.
+    one_frame = {"counts": _schema(5, 1, 6, np.float32, "count"), "occupied": _schema(5, 1, 6, bool, "1")}
     reducing = _rows(published("counts_mean", {"of": "counts"}, statistic="mean", over=["frame"]),
                      published("occupied_any", {"of": "occupied"}, statistic="any", over=["frame"]))
     reduced = {name: answer["schema"] for name, answer in zip(occupancy, typed_variables(reducing, occupancy))}
@@ -780,11 +869,43 @@ def test_the_frames_a_draft_says_are_the_frames_typing_keeps() -> None:
               published("summed", {"of": "counts"}, statistic="sum", over=["frame"]),
               published("sites", {"of": "counts"}, statistic="mean", over=["Site"]),
               published("kept", {"of": "occupied"}, {"op": "where", "of": "occupied"})]
-    told = {row["name"]: LOGIC_NODE.describe_output_frames({"variables": single}, row["name"], ("0",))
-            for row in _rows(*single)}
-    assert told == {"whole": ("0",), "picked": None, "summed": None, "sites": ("0",), "kept": ("0",)}
-    for row, answer in zip(_rows(*single), typed_variables(_rows(*single), reduced)):
-        assert (answer["error"] is None) == (told[row["name"]] is not None), row["name"]
+    rows = _rows(*single)
+    one = (None, ("0",))
+    framed = (FRAME_AXIS_NAME, ("0",))
+    for source, members, expected in (
+        (framed, one_frame, {"whole": framed, "picked": one, "summed": one, "sites": framed, "kept": framed}),
+        (one, reduced, {"whole": one, "picked": one, "summed": one, "sites": one, "kept": one}),
+    ):
+        told = {row["name"]: LOGIC_NODE.describe_output_frames({"variables": single}, row["name"], source)
+                for row in rows}
+        assert told == expected, source
+        refused = set()
+        for row, answer in zip(rows, typed_variables(rows, members)):
+            if answer["schema"] is None:
+                refused.add(row["name"])
+                continue
+            axes = [axis for axis in answer["schema"].point_domain.axes if axis.role == READOUT_EVENT]
+            assert told[row["name"]] == ((axes[0].name, axes[0].labels()) if axes else one), (source, row["name"])
+        assert refused == (set() if source == framed else {"picked", "summed"}), (source, refused)
+
+    # Over Frame Survival the readout-event axis is "pair": the source says
+    # its name with its labels, and a pick or statistic naming it is told
+    # as typing types it.
+    pair = AxisSpec(AxisId("survival.pair"), "pair", READOUT_EVENT, 3, (0, 1, 2),
+                    coordinate_labels=("0→1", "0→2", "1→2"))
+    survival = replace(occupancy["occupied"], point_domain=DomainSpec((3,), (pair,), ((0, 1, 2),)))
+    over_pairs = [published("ends", at("survival", "pair", "first", "last")),
+                  published("one", at("survival", "pair", "0→2")),
+                  published("rate", {"of": "survival"}, statistic="mean", over=["pair"]),
+                  published("sites", at("survival", "Site", "1", "2"))]
+    rows = _rows(*over_pairs)
+    told = {row["name"]: LOGIC_NODE.describe_output_frames({"variables": over_pairs}, row["name"],
+                                                           ("pair", pair.labels())) for row in rows}
+    assert told == {"ends": ("pair", ("0→1", "1→2")), "one": (None, ("0",)), "rate": (None, ("0",)),
+                    "sites": ("pair", ("0→1", "0→2", "1→2"))}
+    for row, answer in zip(rows, typed_variables(rows, {"survival": survival})):
+        axes = [axis for axis in answer["schema"].point_domain.axes if axis.role == READOUT_EVENT]
+        assert told[row["name"]] == (("pair", axes[0].labels()) if axes else (None, ("0",))), row["name"]
 
 
 def _editor_session(rows=(), bundle=None):
@@ -807,9 +928,9 @@ def _editor_session(rows=(), bundle=None):
         for _ in range(3):
             app.processEvents()
 
-    def project(shown, inputs=bundle, error=""):
+    def project(shown, inputs=bundle, error="", name="Derive 1"):
         editor.update_projection({"form_values": {"variables": shown}, "input_bundle": inputs,
-                                  "node_id": "derive", "error": error})
+                                  "node_id": "derive", "name": name, "error": error})
         settle()
         return editor._cards
 
@@ -882,28 +1003,52 @@ def test_the_editor_builds_the_users_example_by_clicks() -> None:
         written, preview = len(drafts), same.preview.text()
         s.pick(head["axis"], "frame")
         labels = head["labels"]
-        assert s.texts(labels) == ["0", "1", "2"] and labels.view().window().isVisible(), "its labels list opens"
+        assert s.texts(labels) == ["All", "first", "last", "frame", "0", "1", "2"], "the ends, then the labels"
+        assert labels.view().window().isVisible(), "its labels list opens"
         assert head["error"].isHidden(), "no problem while its labels are being picked"
         assert (len(drafts), same.preview.text()) == (written, preview), "nothing changes until a label is picked"
         s.key(labels.view(), QtCore.Qt.Key_Escape)
         assert head["axis"].currentText() == "All" and len(drafts) == written, "Escape leaves the pick as it was"
         s.pick(head["axis"], "frame")
-        s.row_at(labels, 1, box=True)
-        s.row_at(labels, 2, box=True)
+        s.row_at(labels, 5, box=True)
+        s.row_at(labels, 6, box=True)
         assert labels.view().window().isVisible() and labels.checked_data() == ("1", "2"), "a box ticks"
-        s.row_at(labels, 0, box=True)
-        s.row_at(labels, 2, box=True, modifier=QtCore.Qt.ShiftModifier)
+        s.row_at(labels, 4, box=True)
+        s.row_at(labels, 6, box=True, modifier=QtCore.Qt.ShiftModifier)
         assert labels.checked_data() == ("0", "1", "2"), "Shift ticks the run from the last box clicked"
-        s.row_at(labels, 1, box=True)
-        s.row_at(labels, 0, box=True, modifier=QtCore.Qt.ShiftModifier)
+        s.row_at(labels, 5, box=True)
+        s.row_at(labels, 4, box=True, modifier=QtCore.Qt.ShiftModifier)
         assert labels.checked_data() == ("2",), "... or clears it, as that box now is"
-        s.row_at(labels, 0)
+        s.row_at(labels, 4)
         assert not labels.view().window().isVisible() and labels.checked_data() == ("0",), "words: only this"
         assert drafts[-1][0]["terms"][0] == {"of": "occupied", "at": "frame", "labels": ("0",)}
         s.pick(head["axis"], "frame")
         assert labels.view().window().isVisible(), "the axis already picked opens its labels again"
+        # first and last are the frame axis' ends whatever its length: the
+        # draft keeps them as written, and the list's rows, the closed box
+        # and its tooltip read them so -- one spelling in one control.
+        s.row_at(labels, 1, box=True)
+        s.row_at(labels, 2, box=True)
+        s.row_at(labels, 4, box=True)
+        s.key(labels.view(), QtCore.Qt.Key_Escape)
+        assert drafts[-1][0]["terms"][0] == {"of": "occupied", "at": "frame", "labels": ("first", "last")}
+        assert labels.toolTip() == "first, last" and same.preview.text().startswith("→ repeat 1 × frame 2 × Site 6")
+        assert labels._display_text() == ", ".join(s.texts(labels)[1:3]) == "first, last"
+        # All is no pick, as the axis list's All is.
+        s.pick(head["axis"], "frame")
         s.row_at(labels, 0)
+        assert drafts[-1][0]["terms"][0] == {"of": "occupied"}
+        assert head["axis"].currentText() == "All" and labels.isHidden()
+        s.pick(head["axis"], "frame")
+        s.row_at(labels, 4)
+        # The signal it publishes, as every status and picker calls it.
+        assert head["publish"].toolTip() == "Published as Derive 1/same"
+        # Renamed, the node's signal is spelled by its new name at once.
+        s.project(drafts[-1], name="Ends")
+        assert head["publish"].toolTip() == "Published as Ends/same"
+        s.project(drafts[-1])
         s.click(head["publish"])
+        assert head["publish"].toolTip() == "Internal: other variables read it; nothing publishes it"
         assert drafts[-1] == ({"name": "same", "publish": False, "terms": (
             {"of": "occupied", "at": "frame", "labels": ("0",)},)},)
 
@@ -911,10 +1056,17 @@ def test_the_editor_builds_the_users_example_by_clicks() -> None:
         line = same.terms_ui[1]
         assert faces(line["strip"]) == ["=", "≠", ">", "<", "≥", "≤"]
         assert line["labels"].view().window().isVisible(), "the pick asks for its label at once"
-        s.row_at(line["labels"], 2)
+        s.row_at(line["labels"], 6)
         assert drafts[-1][0]["terms"][1] == {"op": "==", "of": "occupied", "at": "frame", "labels": ("2",)}
-        assert [line["strip"].button(op).isEnabled() for op in ("==", "!=", ">", "<", ">=", "<=")] == [
-            True, True, False, False, False, False], "booleans compare only with = and ≠"
+        assert all(line["strip"].button(op).isEnabled() for op in ("==", "!=", ">", "<", ">=", "<=")), (
+            "two booleans take every comparison")
+        assert s.texts(line["operand"]) == ["Inputs", "    occupied", "Constants", "    true", "    false"], (
+            "a boolean is compared with booleans only")
+        s.click(line["strip"].button(">"))
+        assert drafts[-1][0]["terms"][1]["op"] == ">" and line["error"].isHidden()
+        assert same.preview.text() == (
+            "→ repeat 1 × Site 6 · bool · unit 1 · internal · read by nothing, so not evaluated")
+        s.click(line["strip"].button("=="))
         assert same.preview.text() == (
             "→ repeat 1 × Site 6 · bool · unit 1 · internal · read by nothing, so not evaluated")
 
@@ -978,16 +1130,16 @@ def test_the_editor_builds_the_users_example_by_clicks() -> None:
 
 
 def test_the_editor_offers_the_frame_pick_before_data_only_where_the_frames_are_known() -> None:
-    """Before the source publishes, an operand offers the frame axis the
-    source's draft says every member carries, with the labels that operand
-    keeps: a member's are the source's, a variable's are told by
-    ``frames_kept`` with the members' names, as typing reads them -- a
-    variable reading a name nothing has keeps none, one reading a member
-    shadowed by a variable's name keeps the member's.  One frame is no pick
-    (it may as well be no frame axis); nothing is offered while the source
-    cannot say."""
+    """Before the source publishes, an operand offers the readout-event
+    axis the source's draft says every member carries, by the name the
+    source gives it, with the labels that operand keeps: a member's are the
+    source's, a variable's are told by ``frames_kept`` with the members'
+    names, as typing reads them -- a variable reading a name nothing has
+    keeps none, one reading a member shadowed by a variable's name keeps
+    the member's.  One frame is no pick (it may as well be no frame axis);
+    nothing is offered while the source cannot say."""
     s = _editor_session()
-    frame = ["All", "Point", "    frame"]
+    frame, pair = ["All", "Point", "    frame"], ["All", "Point", "    pair"]
     rows = [
         {"name": "kept", "terms": [{"of": "counts"}]},
         {"name": "v", "terms": [{"of": "kept"}]},
@@ -998,16 +1150,18 @@ def test_the_editor_offers_the_frame_pick_before_data_only_where_the_frames_are_
         {"name": "u", "terms": [{"of": "shadow"}]},
     ]
 
-    def offered(source_frames):
+    def offered(source_frames, axis="frame"):
         s.editor.update_projection({
             "form_values": {"variables": rows}, "node_id": "derive", "error": "",
-            "input_bundle": (("counts", None, None), ("occupied", None, None)), "source_frames": source_frames})
+            "input_bundle": (("counts", None, None), ("occupied", None, None)), "source_frames": source_frames,
+            "source_frame_axis": axis})
         s.settle()
         return [s.texts(card.head["axis"]) if card.head["axis"].isVisibleTo(s.editor) else None
                 for card in s.editor._cards]
 
     try:
         assert offered(("0", "1", "2")) == [frame, frame, None, None, frame, frame, frame]
+        assert offered(("0→1", "0→2", "1→2"), "pair") == [pair, pair, None, None, pair, pair, pair]
         assert offered(("0",)) == [None] * 7
         assert offered(None) == [None] * 7
     finally:
@@ -1042,8 +1196,9 @@ def test_the_editor_offers_what_each_publication_shares_and_domains_by_their_hea
         assert "changes with each publication" in editor._input_rows[0][0].toolTip()
         s.pick(axis, "Cell")
         labels = card.head["labels"]
-        assert s.texts(labels) == ["y 0 · x 0", "y 0 · x 1", "y 1 · x 0", "y 1 · x 1", "y 2 · x 0", "y 2 · x 1"]
-        s.row_at(labels, 3)
+        assert s.texts(labels) == ["All", "first", "last", "Cell", "y 0 · x 0", "y 0 · x 1", "y 1 · x 0", "y 1 · x 1",
+                                   "y 2 · x 0", "y 2 · x 1"]
+        s.row_at(labels, 7)
         assert drafts[-1] == ({"name": "px", "terms": ({"of": "frames", "at": "Cell", "labels": ("y 1 · x 1",)},)},)
         assert axis.currentText() == "Cell" and card.preview.text() == "→ repeat 1 × frame 3 · float32 · unit count"
         # A pick on the shots, written by an agent, is said under its line.
@@ -1087,7 +1242,7 @@ def test_the_editor_reads_down_one_control_column_and_says_problems_under_their_
     operand says "choose", and Tab walks the controls as they read."""
     from PyQt5 import QtCore, QtTest, QtWidgets
 
-    from zlc_ui.fluent import MUTED_INK, field_text_inset, row_gap
+    from zlc_ui.fluent import field_text_inset, row_gap
 
     def at(of, *labels, **extra):
         return {"of": of, "at": "frame", "labels": list(labels), **extra}
@@ -1186,6 +1341,8 @@ def test_the_editor_reads_down_one_control_column_and_says_problems_under_their_
         error = bright.terms_ui[1]["error"]
         assert error.text() == "the mask has frame, which counts[frame 1] does not; pick one frame value of the mask."
         assert error.isVisible() and not bright.preview.isVisible()
+        # In the one status table's words: a problem that blocks is an error.
+        assert error.property("status_word") == "error"
         assert (error.mapTo(bright, QtCore.QPoint()).y(), bright.height()) == (result_y, height)
         assert text_x(error) == control + field_text_inset()
         assert editor.shown_problems() == {
@@ -1198,7 +1355,7 @@ def test_the_editor_reads_down_one_control_column_and_says_problems_under_their_
         idea = {"name": "idea", "publish": False, "terms": [{"of": "counts"}, {"op": ">"}]}
         cards = s.project([*rows[:3], idea])
         parked = cards[3].terms_ui[1]["error"]
-        assert parked.text() == "choose what it reads." and parked.property("ink") == MUTED_INK
+        assert parked.text() == "choose what it reads." and parked.property("status_word") == "idle"
         assert cards[3].preview.text() == "→ internal · read by nothing, so not evaluated"
         assert editor.shown_problems() == {}
         assert not cards[3].statistic["block"].isVisible() and cards[2].statistic["block"].isVisible()
@@ -1206,7 +1363,8 @@ def test_the_editor_reads_down_one_control_column_and_says_problems_under_their_
         # Before the source publishes: every name, and only what is stored.
         cards = s.project(rows[:3], inputs=(("counts", None, None), ("occupied", None, None)))
         head = cards[2].head
-        assert s.texts(head["axis"]) == ["All", "frame"] and s.texts(head["labels"]) == ["2"]
+        assert s.texts(head["axis"]) == ["All", "frame"]
+        assert s.texts(head["labels"]) == ["All", "first", "last", "frame", "2"]
         assert s.texts(cards[2].statistic["over"]) == ["Site"]
         assert s.texts(cards[2].terms_ui[1]["operand"]) == [
             "Inputs", "    counts", "    occupied", "Variables", "    same", "    kept", "Constants", "    Number"]

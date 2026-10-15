@@ -80,7 +80,7 @@ SURVIVAL_OUTPUTS = (
 def pair_label(start: object, end: object) -> str:
     """How a pair of frames is written everywhere -- the editor's grid cells,
     its tooltips and notes, and the published pair axis: ``0→2``.  A dash is
-    kept for a range of frames (``0-2``), so the two never read alike."""
+    kept for a range of frames (``0–2``), so the two never read alike."""
 
     return f"{start}→{end}"
 
@@ -278,15 +278,12 @@ class FrameSurvivalProcessor:
         pairs: tuple[tuple[int, int], ...],
     ) -> DatasetSchema:
         frame_axis, site_axis = self._source_axes(source)
-        # Labels carry the SOURCE frame coordinates, whatever the frame axis
-        # declared -- numbers or names, since a typed coordinate may be either:
-        # the pair identity an operator reads is the one the frame axis already
-        # showed them.
-        frame_names = tuple(
-            "?" if value is None else value if isinstance(value, str) else f"{value:g}"
-            for code in range(frame_axis.size)
-            for value in (frame_axis.coordinate_at(code),)
-        )
+        # Each frame is named as every pick and the editor's grid read the
+        # source's axis (``AxisSpec.labels()``): its own labels when it
+        # declares some -- a pair axis' ``0→1`` -- else its coordinates
+        # written out, numbers or names.  The pair an operator reads is the
+        # one the frame axis already showed them.
+        frame_names = frame_axis.labels()
         pair_axis = AxisSpec(
             AxisId(f"{self.instance_id}.pair"),
             "pair",

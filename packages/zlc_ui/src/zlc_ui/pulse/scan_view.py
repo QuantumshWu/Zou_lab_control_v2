@@ -5,8 +5,8 @@ from __future__ import annotations
 from PyQt5 import QtCore, QtWidgets
 
 from zlc_ui.fluent import (
-    FONT, MUTED_LABEL_STYLE, ElidedLabel, FluentButton, FluentCodeEdit, FluentGroupBox, FluentLabel,
-    FluentSectionLabel, centred_line_top, fluent_count_box, fluent_font_size, retire_widget, signals_blocked,
+    ElidedLabel, FluentButton, FluentCodeEdit, FluentGroupBox, FluentLabel,
+    FluentSectionLabel, centred_line_top, fluent_count_box, retire_widget, set_muted, signals_blocked,
     set_status_ink,
 )
 from zlc_ui.form import being_edited
@@ -272,8 +272,8 @@ class PulseScanView(QtWidgets.QWidget):
                     (["Scan"] if record.scan else [])
                     + ([sources[record.source]] if record.source != "default" else []))
                     + (f" — {record.note}" if record.note else ""))
-                if record.note:
-                    line.setStyleSheet(f'QLabel {{ {MUTED_LABEL_STYLE} font: {fluent_font_size()}pt "{FONT}"; }}')
+                # A mark that plays nothing today reads as a kept one.
+                set_muted(line, bool(record.note))
                 line.setFixedHeight(row_height())
                 self._bindings_layout.addWidget(line)
         self.bindings_box.setVisible(bool(records))

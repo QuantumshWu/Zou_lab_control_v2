@@ -343,8 +343,9 @@ class TaskConsoleView(QtWidgets.QWidget):
         self.pause_button.set_active(self._paused)
 
     def set_console_state(self, word: str) -> None:
-        """The header dot: ``running`` while a node runs, ``error`` while
-        one has failed, ``idle`` otherwise (``STATUS_CUES``)."""
+        """The header dot: ``error`` while a node has failed, else
+        ``warning`` while one needs attention (a refused Restart), else
+        ``running`` while one runs, ``idle`` otherwise (``STATUS_CUES``)."""
 
         self.status_dot.set_state(word)
 

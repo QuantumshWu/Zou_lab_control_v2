@@ -2,7 +2,8 @@
 
 A draft is a list of VARIABLES.  Each is a formula -- its terms, one per
 line: an input member or another variable, optionally picked at labels of
-one of its axes, or a number, or true/false -- joined by operators of four
+one of its axes (or at its first or last, whatever the axis' length), or a
+number, or true/false -- joined by operators of four
 kinds (arithmetic, comparison, logic, where) under one precedence, then
 optionally reduced by a statistic over named axes.  A variable with
 ``publish`` on is a signal; one with it off is an internal helper that
@@ -34,6 +35,7 @@ from zlc_data.snapshot_projection import _subset_axis, _subset_mapped_domain
 from zlc_data.units import DEFAULT_UNITS, UnitError
 
 from zlc_atom.authoring import AuthoringChoice, AuthoringField
+from zlc_atom.nodes._framework.frames import FIRST, LAST
 
 
 class DeriveError(ValueError):
@@ -80,14 +82,16 @@ TERM_COLUMNS = (
     AuthoringField("number", "float", "Number", None, description="a number instead of of"),
     AuthoringField("boolean", "choice", "Boolean", "", choices=(
         AuthoringChoice("", "None"), AuthoringChoice("true", "true"), AuthoringChoice("false", "false"),
-    ), description="true or false instead of of; only after == or !="),
+    ), description="true or false instead of of; only after a comparison (false < true)"),
     AuthoringField("at", "text", "At", "",
                    description="what of is picked on: the name of one of its axes, in any domain, or a domain "
                                "(Repeat, Point or Cell) with two or more axes; empty picks nothing"),
     AuthoringField("labels", "text_tuple", "Labels", None,
                    description="a list of texts: labels of that axis as the catalog lists them, or rows of that "
-                               "domain written 'detuning 2 · power 1'; one drops the axis (the domain's axes), "
-                               "several keep those coordinates in axis (row) order"),
+                               "domain written 'detuning 2 · power 1', or 'first' and 'last' -- its first and "
+                               "last coordinate (row) whatever its length; one drops the axis (the domain's "
+                               "axes), several keep those coordinates in axis (row) order, a coordinate two of "
+                               "them name once"),
 )
 #: One variable.
 VARIABLE_COLUMNS = (
@@ -108,7 +112,7 @@ _VARIABLE_DEFAULTS = {column.name: () if column.default is None else column.defa
 #: A term with nothing written: every column at its default, as a draft projects it.
 TERM_DEFAULTS = MappingProxyType({column.name: () if column.value_type == "text_tuple" else column.default
                                   for column in TERM_COLUMNS})
-_BOOLEANS_MIX = ("booleans do not mix with numbers; compare booleans with = or ≠, "
+_BOOLEANS_MIX = ("booleans do not mix with numbers; compare booleans with booleans, "
                  "or count them with a statistic")
 _DOMAINS = ("repeat_domain", "point_domain", "cell_domain")
 #: The three domains as a pick names them, in domain order.
@@ -484,11 +488,11 @@ def _operator(op, left, right, texts):
     elif any(booleans):
         if kind == "arithmetic":
             raise TypeError(f"{label} needs numbers; {texts[booleans.index(True)]} is a boolean; count booleans "
-                            "with a statistic, or compare them with = or ≠")
+                            "with a statistic, or compare them")
+        # Two booleans take every comparison, ordered false < true as NumPy
+        # orders them: a > b is a and not b.
         if not all(booleans):
             raise TypeError(_BOOLEANS_MIX)
-        if op not in ("==", "!="):
-            raise TypeError("booleans compare only with = and ≠")
     if all(data):
         try:
             base, steps = schemas[0], (None, _alignment(schemas[0], schemas[1]))
@@ -600,7 +604,14 @@ def changing_axes(schema: DatasetSchema, event: DatasetSchema | None) -> dict:
 def _pick(item, term, evaluating, changing):
     """``item`` at the term's labels of its axis ``at`` -- or rows of its
     domain ``at`` -- one removing the axis (the domain's axes), several
-    keeping it restricted to them, in axis (row) order."""
+    keeping it restricted to them, in axis (row) order.
+
+    ``first`` and ``last`` are the axis' first and last coordinate (the
+    domain's first and last row) as long as it is now, never a label
+    fixed when the pick was written; a coordinate two of them name is
+    kept once.  How many labels are written, not how many coordinates
+    they reach, decides whether the axis stays, so a pick keeps its shape
+    when the axis changes length."""
     schema = _schema_of(item)
     what, at, labels = term["of"], term["at"], term["labels"]
     d, axes = _pick_target(schema, at, what)
@@ -618,7 +629,11 @@ def _pick(item, term, evaluating, changing):
     twice = next((label for index, label in enumerate(labels) if label in labels[:index]), None)
     if twice is not None:
         raise ValueError(f"{at} {twice!r} is chosen twice")
-    missing = next((label for label in labels if label not in positions), None)
+    own = next((label for label in labels if label in (FIRST, LAST) and label in positions), None)
+    if own is not None:
+        raise ValueError(f"{at} has a {word} {own!r} of its own; a pick cannot tell it from its {own} {word}")
+    ends = {FIRST: 0, LAST: len(known) - 1} if known else {}
+    missing = next((label for label in labels if label not in ends and label not in positions), None)
     if missing is not None:
         if evaluating and d < 2:
             # Typing read the whole run's geometry; this one event of it
@@ -626,7 +641,7 @@ def _pick(item, term, evaluating, changing):
             raise ValueError(f"this publication carries no {at} {missing!r}; "
                              f"{at} {word}s here: {_listed(known)}")
         raise ValueError(f"{what} has no {at} {missing!r}; {at} {word}s: {_listed(known)}")
-    chosen = tuple(sorted(positions[label] for label in labels))
+    chosen = tuple(sorted({ends[label] if label in ends else positions[label] for label in labels}))
     try:
         if domain_pick:
             picked, take = _domain_plan(schema, d, axes, chosen, len(labels) == 1)
@@ -838,7 +853,8 @@ def _number_text(number: float) -> str:
 
 def term_text(term: Mapping[str, object]) -> str:
     """A term as notes and messages write it: ``counts[frame 1]``,
-    ``counts[frame 1, 2]``, ``Site 1, 2, 3, 7, … (6)`` past four labels,
+    ``counts[frame 1, 2]``, ``counts[frame first, last]``, ``Site 1, 2, 3,
+    7, … (6)`` past four labels,
     a domain's rows as they read (``counts[detuning 2 · power 1]``),
     ``30`` or ``true``."""
 
@@ -934,8 +950,8 @@ def _formula_problem(row, closing=None) -> DeriveError | None:
             problem = "the first term takes no operator"
         elif k and not term["op"]:
             problem = "choose an operator"
-        elif term["boolean"] and term["op"] not in ("==", "!="):
-            problem = "true and false follow = or ≠ only"
+        elif term["boolean"] and OPERATORS.get(term["op"], ("",))[0] != "comparison":
+            problem = "true and false follow a comparison only"
         elif (term["at"] or term["labels"]) and not term["of"]:
             problem = "a number or true/false has no axis to pick"
         elif term["at"] and not term["labels"]:
@@ -1213,10 +1229,11 @@ def typed_variables(rows: Sequence[Mapping[str, object]],
     return tuple(answers)
 
 
-def frames_kept(rows: Sequence[Mapping[str, object]], axis: str, frames: tuple[str, ...],
+def frames_kept(rows: Sequence[Mapping[str, object]], axis: str | None, frames: tuple[str, ...],
                 members: Sequence[str] | None) -> tuple[tuple[str, ...] | None, ...]:
-    """Every variable's labels of the axis named ``axis`` when each input
-    member carries that axis with labels ``frames`` -- ``()`` when the
+    """Every variable's labels of the axis named ``axis`` -- the name the
+    source gives its readout-event axis, None when it has none -- when each
+    input member carries that axis with labels ``frames`` -- ``()`` when the
     members carry no such axis -- which is what a source's draft says before
     any data exists: one per variable, in card order, ``()`` when the value
     carries no such axis, None when it cannot be told.
@@ -1224,16 +1241,21 @@ def frames_kept(rows: Sequence[Mapping[str, object]], axis: str, frames: tuple[s
     ``members`` are the input members' names, read as typing reads them:
     a name is a member's before it is a variable's, a variable named like a
     member has a name problem, a name that is neither is refused.  None when
-    the names are not known (``describe_output_frames`` is told only the
-    frames): a name no variable has is then read as a member's, so a name
-    nothing has, or a variable named like a member, is typing's alone to
-    refuse once the members publish.
+    the names are not known (``describe_output_frames`` is told the
+    source's axis, not its members): a name no variable has is then read
+    as a member's, so a name nothing has, or a variable named like a
+    member, is typing's alone to refuse once the members publish.
 
     These are typing's rules on that one axis, over the same precedence
     tree: a member carries ``frames``, a variable its own answer; a pick on
-    the axis keeps the picked labels in axis order and one removes it; a
-    pick of the Point domain keeps the labels its rows use, one row removes
-    it; any other pick leaves it; an operator's sides carry the same labels
+    the axis keeps the picked labels in axis order -- ``first`` and ``last``
+    its ends as long as the value carries it, so Last follows a frame count
+    -- and one removes it; a pick of the Point domain keeps the labels its
+    rows use, one row removes it (its ``first`` or ``last`` row cannot be
+    told: which frames they carry is its row order, and whether Point has
+    an axis besides the frame axis, which typing requires, its schema --
+    only the schemas say either); any other pick leaves it; an operator's
+    sides carry the same labels
     or one carries none, a where's mask none or the value's, and the result
     carries them; a statistic over the axis removes it.  None for whatever
     typing refuses on that axis -- a label it lacks, two sides that differ
@@ -1267,6 +1289,12 @@ def frames_kept(rows: Sequence[Mapping[str, object]], axis: str, frames: tuple[s
         if len(set(labels)) != len(labels):
             raise ValueError(f"{at} is chosen twice")
         if at == DOMAINS[1] and value:
+            if any(label in (FIRST, LAST) for label in labels):
+                # Which frames the Point domain's first and last rows carry
+                # is its row order, and whether it has a second axis at all
+                # -- a lone frame axis is picked by its own name, never as
+                # Point -- only the schemas say.
+                raise ValueError(f"the frames of {at}'s ends")
             # A Point row is its axes' "name label" parts joined: two or
             # more of them, the axis named in exactly one.
             rows_picked = [label.split(" · ") for label in labels]
@@ -1275,7 +1303,10 @@ def frames_kept(rows: Sequence[Mapping[str, object]], axis: str, frames: tuple[s
                 raise ValueError(f"no such {at} row")
             chosen = [own[0] for own in named]
         elif at == axis:
-            chosen = labels
+            if any(label in (FIRST, LAST) and label in value for label in labels):
+                raise ValueError(f"{axis} has a label of an end's name")
+            ends = {FIRST: value[0], LAST: value[-1]} if value else {}
+            chosen = [ends.get(label, label) for label in labels]
         else:
             return value
         if any(label not in value for label in chosen):

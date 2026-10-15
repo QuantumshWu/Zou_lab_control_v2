@@ -103,7 +103,7 @@ def test_every_problem_is_named_and_none_is_settled_silently() -> None:
         "frames 0, 1, 2 have no entry: give them to one, or let one read the rest",
     )
     assert absent_notes(((5,),), 3, ("late",)) == (
-        "late's middle frame 5 is not in this source (frames 0-2); it is kept for a cycle that has it",
+        "late's middle frame 5 is not in this source (frames 0–2); it is kept for a cycle that has it",
     )
     assert absent_notes(((5,), ("rest",)), 1, ("late", "all")) == (
         "late's middle frame 5 is not in this source (only frame 0); it is kept for a cycle that has it",

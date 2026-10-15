@@ -22,7 +22,7 @@ for _name in (
     "fluent_scrollbar_thickness", "fluent_scrollbar_stylesheet", "status_dot_stylesheet",
     "stroke_card_border", "signals_blocked", "format_compact_number",
     "align_to_resolution", "FluentStatusDot", "STATUS_CUES", "status_cue", "set_status_ink",
-    "FluentLabel", "muted_note_label", "column_header_label",
+    "FluentLabel", "muted_note_label", "set_muted", "column_header_label",
     "HEADING_CSS_WEIGHT",
     "FluentFrame", "FluentOverlayFrame", "FluentPopup", "show_fluent_popup_for_anchor",
     "FluentSettingsPopupAnchor", "FluentGroupBox", "FluentButton", "arm_interval_ms",

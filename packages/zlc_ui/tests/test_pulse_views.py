@@ -1415,10 +1415,18 @@ assert all(widgets[1].currentText() == "bias" for widgets in config._binding_row
 handle.set_config_page(record)
 assert not config._binding_headers
 assert config._binding_rows["dac:p2:x"][1] is original_combos["dac:p2:x"]
+# A field that kept its Config name under Default reads muted -- its name
+# and its status -- and in TEXT again once Config applies it.
+muted = lambda field: [config._binding_rows[field][column].property("muted") for column in (0, 4)]
+handle.set_config_page(replace(record, parked=("dac:p1:x",)))
+assert muted("dac:p1:x") == [True, True] and muted("dac:p2:x") == [False, False]
+handle.set_config_page(record)
+assert muted("dac:p1:x") == [False, False]
 view.scan_view.set_page(ScanPageRecord(bindings=(
     BindingRecord("dac:p1:x", "Load · bias", scan=True, group_id="mot", group_label="MOT & cooling"),
     BindingRecord("dac:p2:x", "Cool · bias", source="api", group_id="pgc", group_label="PGC"),
     BindingRecord("delay:x", "Delay", source="api"),
+    BindingRecord("delay:y", "Hold", source="api", note="not in file"),
 )))
 from zlc_ui.fluent import FluentSectionLabel
 listed = view.scan_view._bindings_layout
@@ -1426,6 +1434,8 @@ shown = [listed.itemAt(index).widget() for index in range(listed.count())]
 assert [w.text() for w in shown if isinstance(w, FluentSectionLabel)] == ["Pulse", "MOT & cooling", "PGC"]
 scan_text = "\n".join(w.text() for w in shown)
 assert "Load · bias · Scan" in scan_text and "Cool · bias · API" in scan_text
+# A mark that plays nothing reads as a kept one; the others in TEXT.
+assert [w.text() for w in shown if w.property("muted")] == ["Hold · API — not in file"]
 assert not qt_errors, qt_errors
 view.finish_close()
 ''')

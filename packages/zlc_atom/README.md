@@ -343,11 +343,13 @@ of a finite run. Its draft is `variables`, one row per variable: a `name`,
 and nothing publishes), `terms` -- the formula, one row per line -- and an
 optional `statistic` over named axes. A term reads `of` (a member of the bound
 bundle or any other variable), a `number`, or `boolean` true/false (only
-after `==`/`!=`), and may pick on `of` by name: `at` is one of its axes, in
+after a comparison), and may pick on `of` by name: `at` is one of its axes, in
 any domain, and `labels` its exact labels as the catalog lists them -- or
 `at` is a domain with two or more axes (`Point`, `Cell`, `Repeat`) and
-`labels` its rows, written `"detuning 2 · power 1"`; one label drops the axis
-(the domain's axes), several keep those coordinates. A pick never names an
+`labels` its rows, written `"detuning 2 · power 1"`; `"first"` and `"last"`
+are its first and last coordinate (row) as long as it is, so a pick of the
+last frame follows a frame count. One label drops the axis (the domain's
+axes), several keep those coordinates. A pick never names an
 axis each publication carries its own part of (a finite run's shots and
 scan points, a monitor's shots): those are reduced, or plotted.
 Every later term has an operator of one of four kinds -- arithmetic
@@ -366,8 +368,10 @@ and the published `{"name": "kept", "terms": [{"of": "counts"}, {"op":
 [{"of": "occupied", "at": "frame", "labels": ["0"]}], "statistic": "sum",
 "over": ["Site"]}` counts the atoms loaded in each shot. On booleans `sum`
 is the number true, `mean` the fraction true and `count` the valid samples,
-as in a plot; booleans do not mix with numbers. An operand whose axes are a
-subset of the other's repeats along the rest, so a per-shot level
+as in a plot; booleans do not mix with numbers, and two booleans take every
+comparison, ordered `false < true` as NumPy orders them: occupied at frame 0
+`>` occupied at frame 11 is loaded at 0 and empty at 11. An operand whose
+axes are a subset of the other's repeats along the rest, so a per-shot level
 normalises every site. Only the published variables and what they read are
 evaluated; a helper nothing published reads never blocks Start. The editor
 types each variable against the source's own schemas -- the evaluation's
@@ -375,8 +379,10 @@ rules, no data -- and shows the result (`→ repeat 1 × Site 35 · float32 ·
 unit 1`) or the problem under the line it is about; Start refuses a
 published variable that does not type. Before anything publishes, the frames
 each published variable keeps are told from the source's draft frames by the
-same rules on the frame axis alone (`describe_output_frames`), so a Frame
-Survival downstream is edited at once, and the editor offers the frame pick.
+same rules on the readout-event axis alone (`describe_output_frames`), which
+the source names with its labels -- the camera's `frame`, Frame Survival's
+`pair` -- so a Frame Survival downstream is edited at once, and the editor
+offers the frame pick.
 The source's frames are an answer only when every member of the bundle
 carries the same ones -- a Derive reading a Derive whose variables keep
 different frames waits for data -- and one frame offers no pick. Statistics
