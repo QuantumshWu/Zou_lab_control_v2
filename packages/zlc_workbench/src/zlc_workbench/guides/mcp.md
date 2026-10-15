@@ -593,7 +593,10 @@ the edit. A queued Restart that is discarded before it runs (Stop, another
 node taking its device) leaves the old run's configuration as
 `running_draft`. `logic.add` and `logic.update` refuse value names the node's
 schema does not declare and name the valid fields
-(`lab_catalog(api_name).fields`).
+(`lab_catalog(api_name).fields`), and refuse a value its field does not take
+-- wrong type, not one of its choices, outside its bounds -- in one sentence
+such as "Repeat must be at least 0"; the draft is left as it was. A draft may
+still be incomplete or break a rule across fields: those are draft issues.
 
 Draft issues name a field the way its Edit page does, not by its draft key.
 "X must be selected", where X is `lab_catalog(node_id).node.source_label`,

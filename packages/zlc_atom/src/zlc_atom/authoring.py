@@ -450,17 +450,11 @@ class AuthoringSchema:
             if not condition_enabled(field.enabled_when, effective):
                 result[field.name] = effective[field.name]
                 continue
-            value = _project_value(
+            value = project_field(
                 field,
                 supplied.get(field.name, field.default),
                 require_complete=require_complete,
             )
-            if value is None and str(field.value_type) in ("str", "text", "folder"):
-                # One vacancy spelling per type family: an absent text is the
-                # empty string everywhere (form widgets hold "" natively).
-                value = ""
-            if value is None and str(field.value_type) in ("rows", "text_tuple"):
-                value = ()
             vacant = value is None or (
                 field.required
                 and (
@@ -476,21 +470,44 @@ class AuthoringSchema:
                         else f"{field.label} must be filled in"
                     )
                 complete = False
-            if field.choices and value is not None and not any(
-                _typed_equal(value, choice.value) for choice in field.choices
-            ):
-                offered = tuple(choice.value for choice in field.choices)
-                raise ValueError(f"{field.name!r} must be one of {offered!r}")
-            if isinstance(value, (int, float)) and not isinstance(value, bool):
-                if field.minimum is not None and value < field.minimum:
-                    raise ValueError(f"{field.name!r} is below its minimum")
-                if field.maximum is not None and value > field.maximum:
-                    raise ValueError(f"{field.name!r} is above its maximum")
             result[field.name] = value
             effective[field.name] = value
         if self.validator is not None and complete:
             self.validator(result)
         return result
+
+
+def project_field(
+    field: AuthoringField, value: object, *, require_complete: bool = False
+) -> object:
+    """``value`` as ``field`` keeps it: its type's coercion, its choices, its bounds.
+
+    One field's own rule, and nothing about completeness or across fields:
+    a draft may stand incomplete or fail the schema's validator, but never
+    holds a value its field refuses.  A refusal raises one sentence naming
+    the field by its label.  ``require_complete`` reaches only the rows of a
+    rows field.
+    """
+
+    value = _project_value(field, value, require_complete=require_complete)
+    if value is None and str(field.value_type) in ("str", "text", "folder"):
+        # One vacancy spelling per type family: an absent text is the
+        # empty string everywhere (form widgets hold "" natively).
+        value = ""
+    if value is None and str(field.value_type) in ("rows", "text_tuple"):
+        value = ()
+    if field.choices and value is not None and not any(
+        _typed_equal(value, choice.value) for choice in field.choices
+    ):
+        offered = tuple(choice.value for choice in field.choices)
+        raise ValueError(f"{field.label} must be one of {offered!r}")
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        unit = f" {field.unit}" if field.unit else ""
+        if field.minimum is not None and value < field.minimum:
+            raise ValueError(f"{field.label} must be at least {field.minimum}{unit}")
+        if field.maximum is not None and value > field.maximum:
+            raise ValueError(f"{field.label} must be at most {field.maximum}{unit}")
+    return value
 
 
 def _project_value(
@@ -608,4 +625,4 @@ def _project_integer(value: object, *, label: str) -> int:
 
 __all__ = ["AuthoringChoice", "AuthoringField", "AuthoringSchema", "TunableField",
            "TuneRefused", "is_tunable", "refresh_tunable_fields", "read_tunable_in_unit",
-           "tune_in_unit", "convert_tunable_value", "condition_enabled"]
+           "tune_in_unit", "convert_tunable_value", "condition_enabled", "project_field"]

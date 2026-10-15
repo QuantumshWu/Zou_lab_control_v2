@@ -2514,6 +2514,15 @@ async def client():
                     "arguments":{"node_id":node, "values":{"exposure":0.01}}})
                 assert not unknown["accepted"] and "no field 'exposure'" in unknown["error"], unknown
                 assert "exposure_seconds" in unknown["error"], unknown
+                # Nor does a value its field refuses, which no Edit page can
+                # show: the draft stays as it was and the page opens on it.
+                below = await call("lab_action", {"action":"logic.update",
+                    "arguments":{"node_id":node, "values":{"repeat":-1}}})
+                assert not below["accepted"] and below["error"] == "Repeat must be at least 0", below
+                assert not below["state"]["logic"][0]["edited_since_start"], below
+                reopened = await call("lab_call", {"handle":"console", "method":"edit_logic",
+                    "arguments":{"node_id":node}, "include_state":False})
+                assert reopened["result"] is True, reopened
                 edited = await call("lab_action", {"action":"logic.update",
                     "arguments":{"node_id":node, "values":{"repeat":3}}})
                 assert edited["accepted"], edited

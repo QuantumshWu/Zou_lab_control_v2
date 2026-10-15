@@ -530,7 +530,9 @@ def test_editing_a_running_row_changes_only_its_shared_draft(presenter, session)
     refused = presenter.control_action("logic.revert", {"node_id": node_id})
     assert not refused["accepted"] and "nothing to revert" in refused["error"], refused
 
-    presenter.update_logic_draft(node_id, values={"repeat": -1, "exposure_seconds": 0.02})
+    presenter.update_logic_draft(
+        node_id, values={"exposure_seconds": 0.02}, device_keys={"camera": ""}
+    )
     assert presenter.start_logic(node_id) is False
     assert presenter.logic[node_id].host is current_host
     assert current_host.running, "invalid Restart stopped the valid current run"
@@ -2663,19 +2665,19 @@ def test_reading_in_photoelectrons_is_offered_only_when_the_camera_can(
     assert projection["can_start"] is True
     assert presenter.logic[node_id].draft.values[PHOTOELECTRONS] is True
 
-    # Whether or not the rest of the draft projects: what the camera cannot
-    # do is a fact about the camera.  The switch stayed OFFERED on a draft
-    # with a bad field until every other field was right.
-    presenter.update_logic_draft(node_id, values={"exposure_seconds": -1.0})
-    projection = presenter.logic_editor_projection(node_id)
+    # Whether or not the rest of the draft projects -- a calibration with its
+    # required pulse still empty does not -- what the camera cannot do is a
+    # fact about the camera.
+    calibration = presenter.add_logic(
+        "calibration", device_keys={"camera": "mot_camera"}, open_editor=False
+    )
+    projection = presenter.logic_editor_projection(calibration)
     assert projection["can_start"] is False
     field = next(
         item for item in projection["form_spec"].fields if item.key == PHOTOELECTRONS
     )
     assert field.unavailable
     assert projection["form_values"][PHOTOELECTRONS] is False
-    presenter.update_logic_draft(node_id, values={"exposure_seconds": 0.1})
-    assert presenter.logic_editor_projection(node_id)["can_start"] is True
 
     presenter.update_logic_draft(node_id, device_keys={"camera": "camera"})
     projection = presenter.logic_editor_projection(node_id)

@@ -56,6 +56,7 @@ from zlc_runtime import (
     stable_signal_key,
 )
 from zlc_ui import FormFieldProps, FormSpec
+from zlc_atom.authoring import project_field
 
 from .board import LiveBoard, _guarded_slot
 from .console_layout import (
@@ -299,26 +300,33 @@ def _same_draft_value(previous: object, proposed: object) -> bool:
     return type(previous) is type(proposed) and previous == proposed
 
 
-def _unknown_fields_refusal(
+def _values_refusal(
     subject: str, descriptor: Any, values: Mapping[str, Any]
 ) -> str:
-    """The refusal of value names the node's schema does not declare, or "".
+    """Why ``values`` may not enter the node's draft, in one sentence, or "".
 
-    Such a name is no setting of the node: kept, it would ride along in
-    every later draft, Start and comparison with the running configuration,
-    and no edit could take it out again.  Adding a row and changing its
-    draft refuse it with this one sentence.
+    A name the schema does not declare is no setting of the node: kept, it
+    would ride along in every later draft, Start and comparison with the
+    running configuration, and no edit could take it out again.  A value
+    its field refuses (``project_field``) is one no Edit page can show.
+    Adding a row and changing its draft refuse both; an incomplete draft or
+    one a cross-field rule refuses stays a draft issue.
     """
 
-    fields = descriptor.authoring_schema.field_names
+    fields = {field.name: field for field in descriptor.authoring_schema.fields}
     unknown = sorted(str(name) for name in values if name not in fields)
-    if not unknown:
-        return ""
-    return (
-        f"{subject} has no field "
-        f"{', '.join(repr(name) for name in unknown)}; "
-        f"its fields are {', '.join(fields)}"
-    )
+    if unknown:
+        return (
+            f"{subject} has no field "
+            f"{', '.join(repr(name) for name in unknown)}; "
+            f"its fields are {', '.join(fields)}"
+        )
+    for name, value in values.items():
+        try:
+            project_field(fields[name], value)
+        except (TypeError, ValueError) as error:
+            return str(error)
+    return ""
 
 
 def _same_draft(draft: LogicDraft, other: LogicDraft) -> bool:
@@ -8553,7 +8561,7 @@ class ConsolePresenter:
             )
             if selected_name != selected_id
             else ""
-        ) or _unknown_fields_refusal(descriptor.api_name, descriptor, dict(values or {}))
+        ) or _values_refusal(descriptor.api_name, descriptor, dict(values or {}))
         if problem:
             self._report(problem, severity="error")
             return ""
@@ -8938,7 +8946,7 @@ class ConsolePresenter:
         if binding is None:
             return False
         if values is not None:
-            refusal = _unknown_fields_refusal(binding.name, binding.descriptor, values)
+            refusal = _values_refusal(binding.name, binding.descriptor, values)
             if refusal:
                 self._report(refusal, severity="error")
                 return False
