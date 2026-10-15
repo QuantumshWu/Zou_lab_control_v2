@@ -12,14 +12,17 @@ import numpy as np
 import pytest
 
 from zlc_atom.devices.camera.contract import CameraFrameRecord, CameraWorkingPoint
+from zlc_atom.devices.camera.photoelectrons import PHOTOELECTRONS
 from zlc_atom.nodes.calibration.outputs import (
     CAPTURE_PREVIEW_DECLARATION,
     SITE_REVIEW_DECLARATION,
 )
 from zlc_atom.nodes.calibration.logic_node import LOGIC_NODE as CALIBRATION_LOGIC_NODE
 from zlc_atom.nodes.calibration.task import (
+    FRAMES_FROM_CAMERA,
     FRAMES_FROM_FOLDER,
     SITE_REVIEW_REQUEST,
+    CalibrationRequest,
     CalibrationRunResult,
     SampleWriter,
     CalibrationTask,
@@ -33,11 +36,7 @@ from zlc_runtime.plane import SignalDataPlane
 from zlc_plot import ImageFrame, PointStatus, read_figure_plot
 
 from fakes import FakePlane
-from pulse_fixture import (
-    IMAGING_PULSE_RESOURCE,
-    calibration_request,
-    calibration_task,
-)
+from pulse_fixture import calibration_request, calibration_task
 
 
 def _sample_writer(folder: Path, *, run: str, generation: str) -> SampleWriter:
@@ -156,6 +155,14 @@ def test_saved_samples_are_written_as_they_arrive_and_calibrate_again(
 
     replayed = replay()
     assert replayed.calibration.site_map.n_sites == first.calibration.site_map.n_sites
+    # Its own run record names what it used: the analysis and the folder.
+    # The bench fields the request still carries are not part of it, nor
+    # is a units claim -- the units are the saved frames' own.
+    recorded = json.loads(
+        (replayed.artifact_path.parents[1] / "run.json").read_text(encoding="utf-8")
+    )["input"]
+    assert recorded["saved_frames_path"] == str(folder)
+    assert not {"camera_key", "pulse_template", "repeats", PHOTOELECTRONS} & set(recorded)
     np.testing.assert_allclose(
         replayed.calibration.site_map.centers_xy,
         first.calibration.site_map.centers_xy,
@@ -186,7 +193,18 @@ def test_a_replay_publishes_what_the_node_declares(tmp_path: Path) -> None:
     then died at the runtime -- "declared Dataset outputs but did not publish
     final outputs" -- which no test that called ``run()`` could see, because
     that failure lives in the host and ``run()`` has no host.
+
+    And from the draft an operator writes, on a bench with no devices and no
+    pulse: recalibrating saved frames is offline work.  It used to demand a
+    pulse file, the three API fields, a camera and a sequencer it never
+    used -- and Start then took the camera and the sequencer from whatever
+    run held them.  The bench settings it does not use stay in the draft,
+    a blank exposure among them, and refuse nothing.
     """
+
+    from types import SimpleNamespace
+
+    from zlc_workbench.logic import LogicDraft, build_arguments, finalize_logic_draft
 
     request = replace(calibration_request(repeats=6), save_frames=True)
     with calibration_task(request) as task:
@@ -195,54 +213,69 @@ def test_a_replay_publishes_what_the_node_declares(tmp_path: Path) -> None:
 
     plane = SignalDataPlane()
     host = None
-    with calibration_task(
-        replace(
-            request,
-            save_frames=False,
-            frame_source=FRAMES_FROM_FOLDER,
-            saved_frames_path=str(folder),
-        ),
-    ) as task:
-        try:
-            task.signal_plane = plane
-            host = NodeHost(
-                task,
-                plane,
-                Event().set,
-                instance_id="calibration-replay",
-                kind="task",
-                dataset_output_declarations=CALIBRATION_LOGIC_NODE.outputs,
-                required_artifacts={
-                    "artifact_path": CALIBRATION_LOGIC_NODE.artifact_outputs[0].contract_id
+    try:
+        finalization = finalize_logic_draft(
+            CALIBRATION_LOGIC_NODE,
+            LogicDraft(
+                {
+                    "frame_source": FRAMES_FROM_FOLDER,
+                    "saved_frames_path": str(folder),
+                    "pulse_template": "no-such-pulse.json",
+                    "reference_exposure_seconds": None,
                 },
-                task_name=CALIBRATION_LOGIC_NODE.api_name,
-            )
-            host.start(run_root=tmp_path, input_summary=request.to_dict())
-            deadline = time.monotonic() + 120.0
-            while time.monotonic() < deadline:
-                host.poll()
-                if host.observation.terminal:
-                    break
-                time.sleep(0.01)
-            observation = host.observation
-            assert observation.phase == "done", (
-                f"replay ended in {observation.phase}: {observation.error}"
-            )
-            key = host.signal_key(CAPTURE_PREVIEW_DECLARATION.name)
-            # A successful Task proves every declared output committed at
-            # least once.  The preview stays Monitor/latest-only: its
-            # retained last sample is the picture a panel keeps after the
-            # task ends, never the calibration's scientific final dataset --
-            # the saved report is that.  (It used to be withdrawn at
-            # terminal, which also made every derivation on a stopped
-            # preview answer "run no longer held".)
-            preview = plane.latest_publication(key)
-            assert preview is not None
-            assert not plane.is_generation_live(key)
-        finally:
-            if host is not None:
-                host.shutdown()
-            plane.close()
+                device_keys={"camera": "camera", "sequencer": "sequencer"},
+            ),
+            installation=SimpleNamespace(devices={}),
+            signal_plane=plane,
+            workspace=SimpleNamespace(root=tmp_path, data=tmp_path),
+        )
+        assert finalization.can_start, finalization.issues
+        assert CALIBRATION_LOGIC_NODE.active_device_requirements(finalization.values) == ()
+        task = CALIBRATION_LOGIC_NODE.instantiate(**build_arguments(
+            CALIBRATION_LOGIC_NODE, signal_plane=plane, finalization=finalization,
+        ))
+        assert task.camera is None and task.sequencer is None and task.pulse_sequence is None
+        host = NodeHost(
+            task,
+            plane,
+            Event().set,
+            instance_id="calibration-replay",
+            kind="task",
+            dataset_output_declarations=CALIBRATION_LOGIC_NODE.outputs,
+            required_artifacts={
+                "artifact_path": CALIBRATION_LOGIC_NODE.artifact_outputs[0].contract_id
+            },
+            task_name=CALIBRATION_LOGIC_NODE.api_name,
+        )
+        host.start(run_root=tmp_path, input_summary=task.request.to_dict())
+        deadline = time.monotonic() + 120.0
+        while time.monotonic() < deadline:
+            host.poll()
+            if host.observation.terminal:
+                break
+            time.sleep(0.01)
+        observation = host.observation
+        assert observation.phase == "done", (
+            f"replay ended in {observation.phase}: {observation.error}"
+        )
+        # The crop, exposure and pulse it was taken with, from the record
+        # saved beside the frames -- the bench of now has nothing to say.
+        assert host.final_result.run_record == acquired.run_record
+        key = host.signal_key(CAPTURE_PREVIEW_DECLARATION.name)
+        # A successful Task proves every declared output committed at
+        # least once.  The preview stays Monitor/latest-only: its
+        # retained last sample is the picture a panel keeps after the
+        # task ends, never the calibration's scientific final dataset --
+        # the saved report is that.  (It used to be withdrawn at
+        # terminal, which also made every derivation on a stopped
+        # preview answer "run no longer held".)
+        preview = plane.latest_publication(key)
+        assert preview is not None
+        assert not plane.is_generation_live(key)
+    finally:
+        if host is not None:
+            host.shutdown()
+        plane.close()
 
 
 def test_site_review_filters_once_then_runs_the_complete_analysis(tmp_path: Path, monkeypatch) -> None:
@@ -642,57 +675,35 @@ def test_calibration_run_result_deep_owns_nested_plain_truth(tmp_path: Path) -> 
 
 
 def test_a_folder_with_no_samples_says_so(tmp_path: Path) -> None:
-    """And says so without touching the bench it never used.
+    """And says so with no bench at all: a replay is handed none.
 
-    A replay holds the sequencer only because the descriptor requires one;
-    reading a folder fires nothing, yet every failure in the task sent the
-    board SAFE from an outer catch-all -- an unrelated hardware command on
-    a read-only path, whose own failure then replaced the original error.
-    The acquisition path still drives the board safe on its own failures.
+    Every failure in the task used to send the board SAFE from an outer
+    catch-all -- an unrelated hardware command on a read-only path, whose own
+    failure then replaced the original error.  A replay now holds no
+    sequencer to command; the acquisition path still drives the board safe
+    on its own failures.
     """
 
-    from types import SimpleNamespace
+    from zlc_atom.nodes.calibration import CalibrationRequest, ReadoutModelKind
 
     empty = tmp_path / "empty"
     empty.mkdir()
-    request = replace(
-        calibration_request(repeats=4),
-        frame_source=FRAMES_FROM_FOLDER,
-        saved_frames_path=str(empty),
-    )
-    safe_calls: list[str] = []
-
-    def touched(*_args, **_kwargs):
-        raise AssertionError("a saved-frame replay must not drive the bench")
-
     task = CalibrationTask(
-        camera=SimpleNamespace(
-            timeout=1.0,
-            photoelectron_conversion=None,
-            set_exposure_seconds=touched,
-            set_roi=touched,
-            working_point=touched,
-            arm=touched,
-            read_frame_records=touched,
-            finish_record_capture=touched,
-            capture_state=touched,
+        request=CalibrationRequest(
+            default_model_kind=ReadoutModelKind.BOX,
+            threshold_method="gaussian",
+            box_half_width=1,
+            psf_half_width=3,
+            psf_padding=3,
+            detection_spot_sigma=1.0,
+            detection_sigma=6.0,
+            frame_source=FRAMES_FROM_FOLDER,
+            saved_frames_path=str(empty),
         ),
-        sequencer=SimpleNamespace(
-            describe=touched,
-            load=touched,
-            fire=touched,
-            wait_done=touched,
-            snapshot=touched,
-            safe=lambda: safe_calls.append("SAFE"),
-        ),
-        request=request,
-        pulse_sequence=IMAGING_PULSE_RESOURCE.value,
-        pulse_path=IMAGING_PULSE_RESOURCE.path,
         signal_plane=FakePlane(),
     )
     with pytest.raises(ValueError, match="no saved calibration samples"):
         task.run(tmp_path)
-    assert safe_calls == [], "reading a folder is not a reason to command the board"
     run = json.loads((tmp_path / "calibration" / "run.json").read_text())
     assert run["status"]["state"] == "failed"
     assert "no saved calibration samples" in run["error"]["message"]
@@ -792,6 +803,70 @@ def test_a_preview_event_carries_the_settings_its_frames_were_frozen_with() -> N
     )
     with pytest.raises(ValueError, match="mixed settings-aware and unaware"):
         output((*steady[:2], _sample_cycle()[2]))
+
+
+def test_a_request_records_only_what_its_frame_source_uses() -> None:
+    """A replay's record says nothing about a bench it did not use.
+
+    Built from a draft in Saved frames, the request carries no bench fields
+    and the dataclass default ``photoelectrons=True``; written into a
+    notebook run's ``run.json`` as it stood, a replay of count frames was
+    recorded as "photoelectrons: True".  The record keeps what the hosted
+    run's input summary keeps: the settings of its own frame source.
+    """
+
+    analysis = {
+        "default_model_kind": "box",
+        "threshold_method": "gaussian",
+        "box_half_width": 1,
+        "psf_half_width": 3,
+        "psf_padding": 3,
+        "detection_spot_sigma": 1.0,
+        "detection_sigma": 6.0,
+        "review_detected_sites": False,
+    }
+    full = calibration_request()
+    saved = CalibrationRequest(
+        default_model_kind=full.default_model_kind,
+        threshold_method="gaussian",
+        box_half_width=1,
+        psf_half_width=3,
+        psf_padding=3,
+        detection_spot_sigma=1.0,
+        detection_sigma=6.0,
+        frame_source=FRAMES_FROM_FOLDER,
+        saved_frames_path="run/figures",
+    )
+    replay_record = {
+        **analysis,
+        "frame_source": FRAMES_FROM_FOLDER,
+        "saved_frames_path": "run/figures",
+    }
+    assert saved.to_dict() == replay_record
+    # The same with the bench fields still kept in the request.
+    assert replace(
+        full, frame_source=FRAMES_FROM_FOLDER, saved_frames_path="run/figures",
+    ).to_dict() == replay_record
+
+    # New frames keep every bench setting, and a folder kept for a later
+    # replay is not part of it.
+    acquired = replace(full, saved_frames_path="run/figures").to_dict()
+    assert acquired == {
+        "camera_key": "camera",
+        "sequencer_key": "sequencer",
+        "pulse_template": full.pulse_template,
+        "repeats": 30,
+        "reference_exposure_seconds": 0.02,
+        "readout_exposure_seconds": 0.005,
+        "camera_exposure_seconds": 0.02,
+        "reference_before_field": "duration:long_before",
+        "readout_field": "duration:short",
+        "reference_after_field": "duration:long_after",
+        PHOTOELECTRONS: True,
+        "save_frames": False,
+        **analysis,
+        "frame_source": FRAMES_FROM_CAMERA,
+    }
 
 
 def test_calibrating_from_a_folder_needs_the_folder() -> None:

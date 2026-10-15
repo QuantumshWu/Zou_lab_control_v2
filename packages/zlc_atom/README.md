@@ -271,7 +271,13 @@ For a manually controlled experiment, the product notebook calls
 `ExperimentSession.load_pulse` and `ExperimentSession.fire` around a pure
 camera measurement; those methods own compile/load and sequencer execution. For
 an automated experiment, hosted Calibration owns that whole sequence and
-returns a saved calibration artifact. Calibration discovers its site count and
+returns a saved calibration artifact. With Frames set to Saved frames it
+instead calibrates again the samples a run kept with Save every sample, taking
+the crop, exposure and pulse facts from the run record saved beside them; that
+replay is offline work, so it uses no camera, sequencer or Pulse, claims no
+device and can run while another node holds the camera. The Pulse, Samples,
+exposure and API-field settings stay in its draft greyed and unchecked, and
+New frames finds them as they were. Calibration discovers its site count and
 centers from acquired images and accepts no Target, Science Context, authored
 grid rows, columns, or site count. Feedback later combines that ordinary
 Calibration with its selected Science Context and directly maps positive Target

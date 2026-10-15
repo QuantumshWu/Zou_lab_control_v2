@@ -476,12 +476,18 @@ def finalize_logic_draft(
                 f"{descriptor.api_name} resolves availability for undeclared "
                 f"fields {sorted(unknown_fields)!r}"
             )
+        # Only for the fields the draft uses: one its mode leaves aside is
+        # neither offered nor refused, and a reason on it -- "the selected
+        # camera states no conversion" on a calibration of saved frames,
+        # which selects no camera -- would say something untrue.
+        field_availability = {
+            name: reason for name, reason in field_availability.items()
+            if descriptor.authoring_schema.is_enabled(name, raw_values)
+        }
         fields = {
             field.name: field for field in descriptor.authoring_schema.fields
         }
         for name, reason in field_availability.items():
-            if not descriptor.authoring_schema.is_enabled(name, raw_values):
-                continue
             if fields[name].value_type == "bool":
                 values[name] = False
             elif values.get(name):

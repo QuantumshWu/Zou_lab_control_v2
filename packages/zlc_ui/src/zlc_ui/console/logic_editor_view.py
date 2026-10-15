@@ -455,6 +455,11 @@ class LogicEditorView(QtWidgets.QWidget):
             if not callable(updater):
                 raise TypeError("logic UI contribution must update_projection")
             changed.connect(self.draft_changed.emit)
+            # A contribution that holds a refreshable picker (Calibration's
+            # pulse) asks for the same Refresh as the editor's own forms.
+            refresh = getattr(widget, "refresh_requested", None)
+            if refresh is not None:
+                refresh.connect(lambda *_: self.refresh_requested.emit())
             self._contributions[factory] = widget
             gap = QtWidgets.QSpacerItem(0, 0, QtWidgets.QSizePolicy.Minimum, QtWidgets.QSizePolicy.Fixed)
             self._contribution_gaps[factory] = gap
