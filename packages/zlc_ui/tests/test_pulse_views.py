@@ -2748,13 +2748,14 @@ scan.close(); view.close()
 
 def test_value_config_names_one_key_and_keeps_one_pitch(run_qt) -> None:
     """The key a field binds to is a "Config name" in the grid's header and
-    its boxes, the header is a row like the rows under it, and the
-    Subpulse page's table of these bindings is titled like this one."""
+    its boxes; the mode line, the hint and the header are rows like the rows
+    under them; the read values stand a section gap from the name boxes; and
+    the Subpulse page's table of these bindings is titled like this one."""
 
     run_qt(r'''
-from PyQt5 import QtCore
+from PyQt5 import QtCore, QtGui
 from zlc_ui.qt import ensure_qt_app
-from zlc_ui.fluent import row_gap
+from zlc_ui.fluent import ElidedLabel, row_gap, section_gap
 from zlc_ui.pulse import ConfigPageRecord, PulseConfigView, PulseComponentView
 from zlc_ui.pulse._layout import row_height
 app = ensure_qt_app(["pulse-config-pitch"])
@@ -2771,10 +2772,29 @@ headers = config._grid_headers
 assert headers[1].text() == "Config name"
 assert all(header.height() == row_height() for header in headers)
 grid = config._binding_grid
-column = [headers[0]] + [grid.itemAtPosition(row, 0).widget() for row in range(1, grid.rowCount())
-                         if grid.itemAtPosition(row, 0) is not None]
+hint = next(label for label in config.findChildren(ElidedLabel) if label.text().startswith("Choose a Config name"))
+column = [config.mode_label, hint, headers[0]] + [
+    grid.itemAtPosition(row, 0).widget() for row in range(1, grid.rowCount())
+    if grid.itemAtPosition(row, 0) is not None]
 tops = [widget.mapTo(config, QtCore.QPoint()).y() for widget in column]
-assert len(tops) >= 4 and {b - a for a, b in zip(tops, tops[1:])} == {row_height() + row_gap()}, tops
+assert len(tops) >= 6 and {b - a for a, b in zip(tops, tops[1:])} == {row_height() + row_gap()}, tops
+first_rows = [(widget.mapTo(config, QtCore.QPoint()).y() - widget.parentWidget().mapTo(config, QtCore.QPoint()).y())
+              for widget in (config.mode_label, config.new_button)]
+assert first_rows[0] == first_rows[1], ("one title-to-first-row rhythm per card", first_rows)
+image = config.grab().toImage()
+ratio = image.devicePixelRatio()
+
+def first_ink(widget):
+    origin = widget.mapTo(config, QtCore.QPoint())
+    for x in range(int(origin.x() * ratio), int((origin.x() + widget.width()) * ratio)):
+        if any(QtGui.QColor(image.pixel(x, y)).lightness() < 160
+               for y in range(int(origin.y() * ratio), int((origin.y() + widget.height()) * ratio))):
+            return x / ratio
+
+name, default = config._binding_rows["a"][1:3]
+name_right = name.mapTo(config, QtCore.QPoint()).x() + name.width()
+gutters = (first_ink(headers[2]) - name_right, first_ink(default) - name_right)
+assert all(section_gap() <= gutter <= section_gap() + 2 for gutter in gutters), gutters
 assert config._binding_rows["a"][1].lineEdit().placeholderText() == "Config name"
 config.close()
 page = PulseComponentView()
