@@ -1453,7 +1453,7 @@ class PulseEditorPresenter:
                 "period_add": "before_item: optional [period|bracket, item_id], null appends",
                 "spacer_add": "before_item: optional [period|bracket, item_id], null appends",
                 "period_remove": "period_id: remove one period using ordinary timeline editing",
-                "config.edit": "rows: [[name, numeric value, unit], ...]; edit Config draft only",
+                "config.edit": "rows: [[name, numeric value, unit], ...]; edit Config draft only; a row left all blank is dropped on save",
                 "config.load": "path: explicit Config JSON path; ordinary asynchronous load and activation; refuses unsaved Config changes unless discard_changes=true (default false)",
                 "config.save": "path: explicit Config JSON path; ordinary asynchronous save and activation of the Config draft",
                 "config.unload": "no arguments; unload active Config, preserving its draft",
@@ -2517,9 +2517,18 @@ class PulseEditorPresenter:
         # Only what a mapping cannot say is checked here; the codec's entry
         # rule (a Config name, a finite number, a unit) runs when the file is
         # written, and its refusal reaches the operator as "cannot update".
+        # A row with nothing in it says nothing -- Add parameter, then never
+        # filled -- so it is left out of the file, and the draft read back
+        # after the save no longer has it.  A row with anything in it is an
+        # entry and keeps every check.
         entries = {}
-        for name, text, unit in self._config_rows:
+        for index, (name, text, unit) in enumerate(self._config_rows, 1):
             key = name.strip()
+            if not (key or text.strip() or unit.strip()):
+                continue
+            if not key:
+                self._warn(f"Config row {index} has no name", present=present)
+                return False
             if key in entries:
                 self._warn(f"Duplicate Config name: {key}", present=present)
                 return False

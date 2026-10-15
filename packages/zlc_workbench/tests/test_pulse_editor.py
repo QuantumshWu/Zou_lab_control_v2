@@ -5142,8 +5142,15 @@ def test_editor_config_draft_is_independent_and_only_saved_values_execute(
     parameter = _bind_one_config_parameter(presenter, sequence)
     period = parameter.field_ref.period_id
     default = pulse_field_value(presenter.sequence, parameter.field_ref, parameter.unit)
-    presenter.edit_config_entries((("shared_time", str(default), parameter.unit),))
+    # A row added and never filled stays out of the file and leaves the draft.
+    presenter.edit_config_entries((("", "", ""), ("shared_time", str(default), parameter.unit), ("", " ", "")))
     assert presenter.save_config_values()
+    assert read_config_values(saved) == {"shared_time": (default, parameter.unit)}
+    assert presenter.view.config_page.entries == (("shared_time", str(default).removesuffix(".0"), parameter.unit),)
+    presenter.edit_config_entries((("shared_time", str(default), parameter.unit), ("", "3", "")))
+    assert not presenter.save_config_values()
+    assert presenter.last_warning == "Config row 2 has no name"
+    presenter.edit_config_entries((("shared_time", str(default), parameter.unit),))
     assert presenter._effective_sequence(presenter.sequence) is presenter.sequence
     # A scan-capable field still consumes Config when no Scan table is active.
     presenter.set_binding("duration", period, None, True, "config")

@@ -54,8 +54,10 @@ Runtime readers reject old numbered/source/export formats. The explicit offline
 byte backups; it is not an automatic load-time compatibility path.
 
 The Config tab edits that independent values file. Only explicit Save/Save as
-writes it; unsaved rows never reach execution. Pulse Save stores the Pulse and
-its field references, not a copy of the Config values. Device `load`/`fire`
+writes it; unsaved rows never reach execution. A row left entirely blank is
+left out when the file is saved; a row with a value or unit needs a name. Pulse
+Save stores the Pulse and its field references, not a copy of the Config
+values. Device `load`/`fire`
 reread the selected saved file and update the executable only when effective
 values change. The authored source remains separate from the applied source;
 an override never becomes the next default. Running output is not modified by
