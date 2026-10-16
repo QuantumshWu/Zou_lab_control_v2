@@ -69,6 +69,7 @@ def start_server(flow, *, on_clients, host="0.0.0.0", port=80, fps=30):
     closed, ready = Event(), Event()
     clients, latest = set(), {}
     network = {}
+    frame_ready = asyncio.Event()
 
     def drain():
         while True:
@@ -102,6 +103,13 @@ def start_server(flow, *, on_clients, host="0.0.0.0", port=80, fps=30):
         except TimeoutError:
             future.cancel()
             raise RuntimeError("The experiment UI did not respond; inspect it before repeating an action") from None
+
+    def poll_windows(requested):
+        catalog = surface.catalog()
+        visible = {item["id"] for item in catalog["windows"] if item["visible"]}
+        frames = {identity: surface.capture(identity, 1600, force)
+                  for identity, force in requested.items() if identity in visible}
+        return catalog, frames
 
     addresses = {"127.0.0.1"}
     try:
@@ -147,6 +155,7 @@ def start_server(flow, *, on_clients, host="0.0.0.0", port=80, fps=30):
             return valid_host(self.request) and source.scheme == "http" and source.netloc == self.request.host
 
         def open(self):
+            self.set_nodelay(True)
             self.identity = secrets.token_hex(12)
             self.approved = False
             self.selected = None
@@ -175,9 +184,11 @@ def start_server(flow, *, on_clients, host="0.0.0.0", port=80, fps=30):
                         if catalog["controller"] == self.identity:
                             await owner(surface.input, self.identity, {"type": "release"})
                         self.selected, self.frame = selected, None
+                        frame_ready.set()
                 elif kind == "ack":
                     if self.awaiting is not None and message.get("sequence") == self.awaiting:
                         self.awaiting = None
+                        frame_ready.set()
                 elif kind in ("control", "show", "input"):
                     if kind == "control":
                         operation = surface.take_control if message.get("take") is True else surface.release_control
@@ -237,7 +248,11 @@ def start_server(flow, *, on_clients, host="0.0.0.0", port=80, fps=30):
         notify_clients()
 
     async def stream(executor):
+        next_capture = 0.0
         while not closed.is_set():
+            if next_capture > monotonic():
+                await asyncio.sleep(next_capture - monotonic())
+            frame_ready.clear()
             started = monotonic()
             connected = [client for client in clients if client.approved]
             watched = {client.selected for client in connected}
@@ -246,7 +261,11 @@ def start_server(flow, *, on_clients, host="0.0.0.0", port=80, fps=30):
                     latest.pop(key)
             if connected:
                 try:
-                    catalog = await owner(surface.catalog)
+                    requested = {client.selected: client.selected not in latest for client in connected
+                                 if client.awaiting is None and client.selected is not None}
+                    if requested:
+                        next_capture = started + 1 / float(fps)
+                    catalog, frames = await owner(poll_windows, requested)
                     state = dict(type="state", control_enabled=True, **catalog)
                     visible = {item["id"] for item in catalog["windows"] if item["visible"]}
                     available = {item["id"] for item in catalog["windows"]}
@@ -258,8 +277,7 @@ def start_server(flow, *, on_clients, host="0.0.0.0", port=80, fps=30):
                             await client.write_message(state)
                             client.last_state = state
                     pending = [client for client in connected if client.awaiting is None and client.selected in visible]
-                    for identity in {client.selected for client in pending}:
-                        frame = await owner(surface.capture, identity, 1600, identity not in latest)
+                    for identity, frame in frames.items():
                         if frame is not None:
                             latest[identity] = frame
                     encoded = {}
@@ -287,7 +305,11 @@ def start_server(flow, *, on_clients, host="0.0.0.0", port=80, fps=30):
                                 await client.write_message(dict(type="error", message=str(error)))
                         except tornado.websocket.WebSocketClosedError:
                             pass
-            await asyncio.sleep(max(.005, 1 / float(fps) - (monotonic() - started)))
+            timeout = max(.005, next_capture - monotonic()) if next_capture > monotonic() else 1 / float(fps)
+            try:
+                await asyncio.wait_for(frame_ready.wait(), timeout)
+            except TimeoutError:
+                pass
 
     def serve():
         loop = tornado.ioloop.IOLoop()

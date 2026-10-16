@@ -98,7 +98,8 @@ zoom a plot. Adding the second finger cancels the unfinished single-finger
 gesture instead of committing a selection. **Full screen** hides the web
 controls; the small corner button reveals window selection and **Exit full
 screen**. Main windows fit the available area without stretching; modal dialogs
-retain their natural size.
+retain their natural size. Leaving the browser's native full screen does not
+leave this controls-hidden layout; use **Exit full screen** to restore it.
 Multiple clients can watch; only one remote client controls at a time. A local
 click, keypress or wheel operation takes control back immediately. Disconnecting
 does not stop a task or replay commands. File dialogs select files on the

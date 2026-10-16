@@ -8220,6 +8220,20 @@ class FluentScrollArea(QtWidgets.QScrollArea):
             {fluent_scrollbar_stylesheet("QScrollBar")}
             """
         )
+
+    def wheelEvent(self, event) -> None:  # noqa: N802 - Qt API
+        delta = event.pixelDelta()
+        if delta.isNull():
+            super().wheelEvent(event)
+            return
+        moved = False
+        for bar, amount in ((self.horizontalScrollBar(), delta.x()),
+                            (self.verticalScrollBar(), delta.y())):
+            previous = bar.value()
+            bar.setValue(previous - amount)
+            moved |= bar.value() != previous
+        event.setAccepted(moved)
+
     def set_width_bounded_widget(
         self, widget: QtWidgets.QWidget, *, inset: int | None = None, top: bool = True, bottom: bool = True,
     ) -> None:
@@ -10101,11 +10115,10 @@ class LinkedScrollPanes(QtWidgets.QWidget):
         """Turn a wheel over any pane into a move of the shared bar."""
 
         if event.type() == QtCore.QEvent.Wheel and self._bar.maximum() > 0:
-            steps = event.angleDelta().y() / 120.0
-            if steps:
-                self._bar.setValue(
-                    self._bar.value() - int(round(steps * self._bar.singleStep() * 3))
-                )
+            pixels = event.pixelDelta().y()
+            amount = pixels or int(round(event.angleDelta().y() / 120.0 * self._bar.singleStep() * 3))
+            if amount:
+                self._bar.setValue(self._bar.value() - amount)
                 return True
         return super().eventFilter(watched, event)
 

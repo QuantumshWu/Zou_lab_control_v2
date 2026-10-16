@@ -188,16 +188,11 @@ function fullscreen(active) {
   resize();
 }
 $("fullscreen").onclick = async () => {
-  if (immersive) {
-    if (document.fullscreenElement) await document.exitFullscreen();
-    fullscreen(false);
-  } else {
-    fullscreen(true);
-    if (document.documentElement.requestFullscreen) {
-      try { await document.documentElement.requestFullscreen(); }
-      catch { /* The immersive viewport also works without browser fullscreen. */ }
-    }
-  }
+  fullscreen(!immersive);
+  try {
+    if (immersive && document.documentElement.requestFullscreen) await document.documentElement.requestFullscreen();
+    else if (!immersive && document.fullscreenElement) await document.exitFullscreen();
+  } catch { /* The immersive viewport also works without browser fullscreen. */ }
 };
 $("fullscreen-controls").onclick = () => {
   const expanded = document.body.classList.toggle("show-controls");
@@ -207,13 +202,7 @@ $("fullscreen-controls").onclick = () => {
   $("fullscreen-controls").title = label;
   resize();
 };
-document.addEventListener("fullscreenchange", () => fullscreen(Boolean(document.fullscreenElement)));
-document.addEventListener("keydown", event => {
-  if (event.key !== "Escape" || !immersive) return;
-  event.preventDefault(); event.stopPropagation();
-  if (document.fullscreenElement) document.exitFullscreen();
-  else fullscreen(false);
-}, true);
+document.addEventListener("fullscreenchange", resize);
 new ResizeObserver(resize).observe($("viewport"));
 function point(e, location = e) {
   const bounds = canvas.getBoundingClientRect();

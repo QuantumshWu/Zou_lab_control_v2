@@ -241,18 +241,27 @@ class SharedWindows(QtCore.QObject):
         window.showNormal()
         return {"accepted": True}
 
-    def _release_inputs(self, *, cancel: bool = False) -> None:
+    def _pressed_target(self) -> Any:
         target = self._pressed
-        if target is not None and not sip.isdeleted(target):
+        if target is not None and sip.isdeleted(target):
+            self._pressed, self._buttons, target = None, 0, None
+        if target is not None:
+            grabber = QtWidgets.QWidget.mouseGrabber()
+            if grabber is not None and grabber.window() is target.window():
+                target = self._pressed = grabber
+        return target
+
+    def _release_inputs(self, *, cancel: bool = False) -> None:
+        target = self._pressed_target()
+        if target is not None:
             if isinstance(target, QtWidgets.QAbstractButton):
                 target.setDown(False)
             if cancel:
                 self._post(target, QtCore.QEvent(QtCore.QEvent.UngrabMouse), guard=False)
-            else:
-                for button in (QtCore.Qt.LeftButton, QtCore.Qt.RightButton, QtCore.Qt.MiddleButton):
-                    if self._buttons & int(button):
-                        self._buttons &= ~int(button)
-                        self._mouse(target, QtCore.QEvent.MouseButtonRelease, self._pointer, button, QtCore.Qt.NoModifier, guard=False)
+            for button in (QtCore.Qt.LeftButton, QtCore.Qt.RightButton, QtCore.Qt.MiddleButton):
+                if self._buttons & int(button):
+                    self._buttons &= ~int(button)
+                    self._mouse(target, QtCore.QEvent.MouseButtonRelease, self._pointer, button, QtCore.Qt.NoModifier, guard=False)
         for key, target in self._keys.items():
             if not sip.isdeleted(target):
                 self._post(target, QtGui.QKeyEvent(QtCore.QEvent.KeyRelease, key, QtCore.Qt.NoModifier), guard=False)
@@ -342,9 +351,7 @@ class SharedWindows(QtCore.QObject):
         point = QtCore.QPoint(round(x), round(y)) + canvas_origin
         position = window.mapToGlobal(point)
         self._pointer = position
-        target = self._pressed
-        if target is not None and sip.isdeleted(target):
-            self._pressed, self._buttons, target = None, 0, None
+        target = self._pressed_target()
         if target is None:
             surface = window
             for popup, rect in reversed(popups):

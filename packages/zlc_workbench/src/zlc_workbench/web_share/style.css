@@ -3,6 +3,7 @@
   color: var(--text); background: var(--bg); color-scheme: light;
 }
 * { box-sizing: border-box; }
+html, body { overflow: hidden; overscroll-behavior: none; }
 body { margin: 0; height: 100vh; height: 100dvh; display: flex; flex-direction: column; }
 header, footer { flex: none; background: var(--surface); padding: var(--window-pad); }
 header { border-bottom: 1px solid var(--border); }
@@ -33,7 +34,7 @@ input:focus, select:focus, textarea:focus { border-color: var(--focus); }
 .segmented { display: flex; border-radius: var(--radius); overflow: hidden; }
 .segmented button { border-radius: 0; }
 #ownership { color: var(--muted); }
-#viewport { flex: 1; min-height: 0; overflow: auto; padding: var(--window-pad); position: relative; }
+#viewport { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: none; padding: var(--window-pad); position: relative; }
 #screen { display: block; margin: auto; background: var(--surface); touch-action: none; }
 #placeholder { text-align: center; color: var(--muted); padding: var(--window-pad); }
 #text-tools { margin-bottom: var(--card-pad); }
