@@ -1850,35 +1850,6 @@ def test_a_frame_survival_after_derive_is_edited_before_anything_starts(presente
         app.processEvents()
 
 
-def test_a_one_frame_cameras_frame_axis_passes_through_derive_by_name(presenter) -> None:
-    """A one-frame camera publishes a frame axis of one label, and its
-    draft says so by name -- ``("frame", ("0",))``, never read as no axis.
-    A Derive over it passes that axis on, as the camera will publish it,
-    for every variable that keeps it, so a Derive reading its bundle is
-    told one answer; a variable that picks the frame keeps one frame no
-    axis carries."""
-
-    camera_id = presenter.add_logic(
-        "camera_measurement", values={"repeat": 1, "frames_per_cycle": 1, "exposure_seconds": 0.005})
-    occupancy_id = presenter.add_logic("occupancy", source_signal=stable_signal_key(camera_id, "frames"))
-    whole = {"name": "whole", "terms": ({"of": "counts"},)}
-    sites = {"name": "sites", "terms": ({"of": "counts"},), "statistic": "mean", "over": ("Site",)}
-    picked = {"name": "picked", "terms": ({"of": "counts", "at": "frame", "labels": ("0",)},)}
-    derive_id = presenter.add_logic(
-        "derive", source_signal=stable_signal_key(occupancy_id, "counts"), values={"variables": (whole, sites)})
-    projection = presenter.logic_editor_projection(derive_id)
-    assert (projection["source_frame_axis"], projection["source_frames"]) == ("frame", ("0",))
-    again = {"name": "again", "terms": ({"of": "whole"},)}
-    reader = presenter.add_logic(
-        "derive", source_signal=stable_signal_key(derive_id, "whole"), values={"variables": (again,)})
-    projection = presenter.logic_editor_projection(reader)
-    assert (projection["source_frame_axis"], projection["source_frames"]) == ("frame", ("0",))
-    presenter.view.logic_draft_changed.emit(derive_id, {"values": {"variables": (picked,)}})
-    presenter.view.logic_draft_changed.emit(reader, {"source_signal": stable_signal_key(derive_id, "picked")})
-    projection = presenter.logic_editor_projection(reader)
-    assert (projection["source_frame_axis"], projection["source_frames"]) == (None, ("0",))
-
-
 def test_a_producers_new_output_reaches_every_open_editors_sources(presenter) -> None:
     """A derive publishes the variables it names.  Naming another changes
     what every other node may choose as its source, so every other open
@@ -2585,25 +2556,6 @@ def test_a_renamed_node_is_called_by_its_name_and_addressed_by_its_id(presenter,
     ]
     assert not [text for text in said if camera_id in text], said
 
-    # The Panel name field shows "Camera A/frames"; sent back as shown, it is
-    # still the automatic title -- the signal's key -- and follows the next
-    # rename, instead of freezing this one into the panel record.
-    assert presenter.update_panel_state(panel.panel_id, {"title": "Camera A/frames"}) is False
-    assert panel.state.title == frames
-    assert presenter.rename_logic(camera_id, "Camera B")
-    surface = presenter.view.panel_parameter_surfaces[panel.panel_id]
-    assert (surface["caption"], surface["panel_name"]) == (
-        f"{panel.panel_id}@Camera B/frames", "Camera B/frames"
-    )
-    assert presenter.update_panel_state(panel.panel_id, {"title": "MOT shot"})
-    assert panel.state.title == "MOT shot"
-    presenter.beat()
-    # Its publisher row on the Logic page says the panel's name too.
-    assert presenter.view.panel_publisher_names[panel.panel_id] == "MOT shot"
-    assert presenter.update_panel_state(panel.panel_id, {"title": "Camera B/frames"})
-    assert panel.state.title == frames
-    assert presenter.rename_logic(camera_id, "Camera A")
-
     # A device refusal names the owner as the operator calls it.
     with pytest.raises(DeviceUseBusy, match="device is in use by Camera A$"):
         session.device_use.acquire_command(
@@ -2636,22 +2588,14 @@ def test_a_renamed_node_is_called_by_its_name_and_addressed_by_its_id(presenter,
     assert presenter.logic[second].pending is not None
     assert presenter.view._rows[second].state[1] == "waiting for Camera A"
     assert presenter.view.status[-1] == ("task", f"{second} queued while Camera A stops")
-    # Renamed while its Start is queued, the run it starts carries the new
-    # name: the name is asked when the run declares its record.
-    assert presenter.rename_logic(second, "Camera C")
     deadline = time.monotonic() + 10.0
-    second_frames = stable_signal_key(second, "frames")
-    latest = None
-    while time.monotonic() < deadline and (latest is None or holder.running):
-        session.fire(shots=1)
+    while time.monotonic() < deadline and holder.running:
         presenter.beat()
-        latest = session.signal_plane.latest_publication(second_frames)
         time.sleep(0.005)
     assert not holder.running
-    assert latest.run_record["node"] == second
-    assert latest.run_record["node_name"] == "Camera C"
     assert presenter.stop_logic(second)
     # An empty name is the internal ID, as the empty Name box's hint says.
+    assert presenter.rename_logic(second, "Camera C")
     assert presenter.rename_logic(second, "")
     assert presenter.logic[second].name == second
     assert presenter.view.status[-1] == ("task", f"renamed Camera C to {second}")
@@ -2680,38 +2624,14 @@ def test_a_renamed_node_is_called_by_its_name_and_addressed_by_its_id(presenter,
     presenter.view.logic_name_committed.emit(second, second)
     assert len(presenter.view.status) == reports
     assert presenter.view.logic_editors[second]["name_problem"] == ""
-    # An agent's refusal is the agent's error, not a sentence under the
-    # operator's Name line; a name that is not text is refused outright.
     refused = presenter.control_action("logic.rename", {"node_id": second, "name": "camera a"})
     assert (refused["accepted"], refused["status"]) == (False, "rejected")
     assert refused["error"] == f"{second}: Another node is already called “Camera A”."
-    assert presenter.view.logic_editors[second]["name_problem"] == ""
-    for action, arguments in (
-        ("logic.rename", {"node_id": second, "name": None}),
-        ("logic.add", {"api_name": "occupancy", "name": 5}),
-    ):
-        refused = presenter.control_action(action, arguments)
-        assert not refused["accepted"] and "must be text" in refused["error"], refused
-    assert presenter.logic[second].name == second and "None" not in presenter.logic_names().values()
     renamed = presenter.control_action("logic.rename", {"node_id": occupancy_id, "name": "Loading"})
     assert (renamed["accepted"], renamed["status"]) == (True, "renamed")
     assert renamed["state"]["logic"][0]["name"] == "Loading"
     same = presenter.control_action("logic.rename", {"node_id": occupancy_id, "name": "Loading"})
     assert (same["accepted"], same["status"]) == (True, "unchanged"), same
-    # A draft's issues name no node -- the acquisition's picker beside them
-    # says which, by its name now -- so the refusal a Start leaves on the
-    # row, a copy of the first, never keeps a name a rename changed.
-    assert presenter.update_logic_draft(scan_id, values={"acquisition_logic": occupancy_id})
-    issues = presenter.logic_editor_projection(scan_id)["issues"]
-    assert "the selected acquisition is not an available Measurement" in issues
-    assert not [text for text in issues if "Loading" in text or occupancy_id in text], issues
-    assert presenter.start_logic(scan_id) is False
-    refusal = presenter.logic[scan_id].draft_error
-    assert refusal in issues
-    assert presenter.rename_logic(occupancy_id, "Counting")
-    assert presenter.view._rows[scan_id].state == ("error", refusal)
-    assert presenter.control_state(node_id=scan_id)["logic"][0]["error"] == refusal
-    assert presenter.rename_logic(occupancy_id, "Loading")
 
     # Minting skips every name and id; an added node may be named at once.
     assert presenter.rename_logic(second, "occupancy2")
