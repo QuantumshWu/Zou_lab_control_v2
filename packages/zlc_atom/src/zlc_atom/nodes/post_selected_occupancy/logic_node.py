@@ -90,6 +90,9 @@ def condition(values: Mapping[str, object]) -> dict[str, object]:
     wanted = (values[VALUE_A.name], values[VALUE_B.name])
     if wanted == (ANY, ANY):
         raise ValueError("Frame A and Frame B are both Any: give one of them 1 or 0")
+    if frames[0] == frames[1] and ANY not in wanted:
+        raise ValueError(f"Frame A and Frame B are both {_frame_words(frames[0])}: "
+                         "give the second slot another frame, or set it to Any")
     return {"frames": frames, "mode": "values", "values": wanted}
 
 
