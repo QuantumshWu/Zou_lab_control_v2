@@ -2090,6 +2090,10 @@ class FitEngine:
         #: keying on their bytes costs a hash.  Measured on a sixty-four
         #: cell histogram frame: 4.9 ms of the 21 ms both batches spent.
         histogram_bounds: dict[bytes, Any] = {}
+        #: The model anchored at each cell's origin, one per origin: a grid's
+        #: cells mostly share their first point, and each anchoring is a
+        #: dataclass replace with five partials the collector must track.
+        anchored: dict[float, FitModelSpec] = {}
         confining = _confines_to_histogram(model)
         authored_seed = None if initial is None else _authored_seed(model, initial)
         for cell, coordinate_item in enumerate(coordinates):
@@ -2187,7 +2191,9 @@ class FitEngine:
                         raise ValueError(
                             "result-model anchoring currently requires axis 0"
                         )
-                    effective_model = model.anchored_at(origin)
+                    effective_model = anchored.get(origin)
+                    if effective_model is None:
+                        effective_model = anchored[origin] = model.anchored_at(origin)
 
                 solver_coords = coords
                 solver_values = values
