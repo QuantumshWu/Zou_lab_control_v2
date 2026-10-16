@@ -681,9 +681,9 @@ def test_a_widget_named_twice_is_unblocked_when_the_block_ends() -> None:
 def test_one_save_rule_and_one_destructive_look(run_qt) -> None:
     """Every Save is standard when clean and the primary with a star when
     unsaved; every labelled destructive command sits on the red tint while a
-    one-glyph row remover stays a ghost; a pressed command is SELECTED and a
-    disabled one a flat DIVIDER face, neither with a frame of another
-    colour."""
+    one-glyph row remover stays a ghost; a command on a tinted card is a
+    plain white face; a pressed command is SELECTED and a disabled one a
+    flat DIVIDER face, neither with a frame of another colour."""
 
     run_qt(
         """
@@ -718,9 +718,16 @@ def face(button):
     image = button.grab().toImage()
     return image.pixelColor(image.width() // 2, image.height() // 5)
 assert face(ghost).alpha() == 0, face(ghost).name()
-from zlc_ui.fluent.style import RED_TINT
+from zlc_ui.fluent.style import RED_TINT, SURFACE
 assert face(seated).name().upper() == RED_TINT.upper(), face(seated).name()
 assert not seated.isCheckable(), 'a command is never a toggle'
+on_tint = FluentButton('Expand')
+on_tint.set_on_tint(True)
+row.addWidget(on_tint)
+app.processEvents()
+image = on_tint.grab().toImage()
+for y in (0, image.height() // 5):
+    assert image.pixelColor(image.width() // 2, y).name().upper() == SURFACE.upper(), ('white, no green edge', y)
 from zlc_ui.fluent.style import DIVIDER, SELECTED
 pressed = FluentButton('Held')
 row.addWidget(pressed)
