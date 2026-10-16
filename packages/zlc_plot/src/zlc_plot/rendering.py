@@ -2872,7 +2872,11 @@ class MatplotlibRenderer:
         self._boundary_chrome_commands: dict[
             int, tuple[tuple[str, Any, tuple[Any, ...], dict[str, Any]], ...]
         ] = {}
-        self._foreground_batches: dict[str, tuple[tuple[Any, ...], list[Any]]] = {}
+        #: Per compose phase: its artists, its paint plan, and the text
+        #: slots that plan captured, by artist id (``_paint_foreground``).
+        self._foreground_batches: dict[
+            str, tuple[tuple[Any, ...], list[Any], dict[int, list[Any]]]
+        ] = {}
         #: Agg's masks of each distinct chrome stamp and frame side, keyed
         #: by snapped shape (``_facet_chrome_masks``); the exemplar artists
         #: they are drawn with, keyed by style; and the recorder they draw on.
@@ -4445,6 +4449,12 @@ class MatplotlibRenderer:
         artists = tuple(entry[1][1] for entry in entries)
         cached = self._foreground_batches.get(phase)
         if cached is None or cached[0] != artists:
+            # A plan rebuilt because its artists changed -- a cell's fit
+            # changing family -- keeps the glyphs it captured for the texts
+            # it still holds; only forgetting the plan (a moved background
+            # or chrome group) drops them.
+            held = {} if cached is None else cached[2]
+            slots: dict[int, list[Any]] = {}
             plan, masks, texts, order, group = [], [], [], [], []
 
             def flush() -> None:
@@ -4462,14 +4472,22 @@ class MatplotlibRenderer:
                         else []
                     )
                 elif isinstance(artist, Text) and commands is None:
+                    slot = held.get(id(artist))
+                    if slot is not None and slot[0] is not artist:
+                        slot = None
                     if id(artist) in self._facet_chrome_owners:
                         # A grid title changes only when the group is
                         # refreshed, which drops this plan: its glyphs are
                         # as static here as a recorded stroke's masks.
-                        layers = self._foreground_text(artist, renderer) if artist.get_visible() else []
+                        visible = artist.get_visible()
+                        if slot is None or slot[1] != visible:
+                            slot = [artist, visible, self._foreground_text(artist, renderer) if visible else []]
+                        slots[id(artist)] = slot
+                        layers = slot[2]
                     elif artist.get_rotation() == 0.0 and not artist.get_usetex() and not artist.get_path_effects():
+                        slot = slots[id(artist)] = slot or [artist, None, ()]
                         order.append((1, len(texts)))
-                        texts.append([artist, None, ()])
+                        texts.append(slot)
                         group.append(artist)
                         continue
                     else:
@@ -4487,7 +4505,7 @@ class MatplotlibRenderer:
                     masks.extend(layers)
                     group.append(artist)
             flush()
-            self._foreground_batches[phase] = (artists, plan)
+            self._foreground_batches[phase] = (artists, plan, slots)
         else:
             plan = cached[1]
         target = np.asarray(canvas.buffer_rgba())
@@ -12514,9 +12532,6 @@ class MatplotlibRenderer:
                 axis.grid(show_grid)
 
     def _remove_artists(self, artists: Iterable[Any]) -> None:
-        artists = tuple(artists)
-        if artists:
-            self._foreground_batches.clear()
         for artist in artists:
             self._line_sources.pop(id(artist), None)
             try:
@@ -13293,7 +13308,6 @@ class MatplotlibRenderer:
     ) -> None:
         from matplotlib.patches import Ellipse
 
-        self._foreground_batches.clear()
         self._fit_slots["detail"] = annotation
         if family == "failure":
             if annotation is _FitAnnotationDetail.NONE:
