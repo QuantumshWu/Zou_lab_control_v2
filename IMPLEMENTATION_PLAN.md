@@ -10,6 +10,7 @@
 
 ## 1. 当前实施范围
 
+- Pulse Add subpulse（2026-10-16，完成）：主Edit新增文件插入按钮，复用既有Subpulse读取/实例插入/Config来源机制，默认引用所选文件且保留内嵌Default；原主Config开关和独立文件草稿不变。底部四个Add同排，Remove上移，Sync与Hide/Show共享半宽格；不新增领域模型、文件格式或运行路径。两个既有直接用例通过；正式Qt按钮/文件选择验收两次插入独立ID、Config引用、来源编辑、保存重开与半宽布局，截图留ignored research，窗口已关闭。
 - Post-selected occupancy（2026-10-16，worktree `claude/r23-postselect`待人工验收，用户点名）：新processor `post_selected_occupancy`＝Occupancy＋Derive两帧后选，Relation/Values二选一；复用Occupancy owner（processor加`post_select`钩子）与Derive引擎，默认与Occupancy→Derive逐位相同（`test_post_selected_occupancy_is_occupancy_then_derives_post_selection`）。
 - Damped sine的自动初值不限制振幅、offset、频率或衰减时间；保留声明数学域、显式bounds、fixed/free及冷暖候选，完整用户初值不再计算无消费者的频谱。既有bounds用例覆盖1–300 µs扫描及其早期12点、长短衰减的single/batch恢复。
 - 停放不强制使用（2026-10-15，worktree `claude/r13-scanbind`待人工验收）：Scan Plan每轴加扫描开关，关即停放（`"enabled": false`，留在草稿与run record `parked_axes`，不读、不bind、不播放、不计shape）；启用轴的未知port/越界值、未安装设备、空Values与全部停放改在草稿阶段报issue（descriptor新增`admit_resources`钩子与schema validator），Start等待而不是build失败。API values不再被编辑器删除：Pulse不声明的名字与被plan扫的固定值保留为带×的停放行，build只应用声明的名字、其余记`unapplied_api_values`。Config来源未选文件的Subpulse播放内嵌默认（`No file — plays Default`），Subpulse文件不再提供的Scan/API标记按文件常量播放、Pulse编辑器Scan页标`not in file`，只在驱动它的地方按名拒绝。定向测试：scan plan/editor/seamless node、console草稿准入、Pulse编辑器Subpulse/Config、model_compile子脉冲。

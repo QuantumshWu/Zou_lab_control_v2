@@ -2027,11 +2027,12 @@ class PulseEditorPresenter:
                     if path is None and not present:
                         raise ValueError("supply path explicitly when inserting a Subpulse file")
                     chosen = path if path is not None else self.view.ask_open_path(
-                        "Insert Subpulse", self.pulses_directory,
+                        "Add subpulse", self.pulses_directory,
                         "ZLC Subpulse (*.subpulse.json *.json);;All files (*)",
                     )
                     if not chosen:
                         return False
+                    chosen = str(Path(chosen).expanduser().resolve())
                     fragment = read_subpulse(chosen)
                 else:
                     fragment = self._selected_component_fragment()
@@ -2049,10 +2050,13 @@ class PulseEditorPresenter:
                 # Keep the chosen side of every bracket post. A period-only
                 # insertion address loses whether the new block is in a loop.
                 candidate = _reordered_sequence(candidate, order[:position] + block + order[position:])
-                self._component_context = added.component_id
-                self._selected_subpulse_id = added.component_id
+                if action == "insert_file":
+                    candidate = set_subpulse_source(candidate, added.component_id, "config", chosen)
+                else:
+                    self._component_context = added.component_id
+                    self._selected_subpulse_id = added.component_id
                 self._apply(candidate)
-                self.view.focus_component_name(self._component_context)
+                self.view.focus_component_name(added.component_id)
             elif action == "group":
                 if self.sequence is None:
                     raise ValueError("open a Pulse before grouping its periods")

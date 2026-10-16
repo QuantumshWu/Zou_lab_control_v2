@@ -1884,6 +1884,7 @@ class PulseScheduleView(QtWidgets.QWidget):
         self.spacer_button = FluentButton("Add spacer")
         self.remove_button = FluentButton("Remove", role="destructive")
         self.bracket_button = FluentButton("Add bracket")
+        self.subpulse_button = FluentButton("Add subpulse")
         # One primary at a time: On Pulse while it would put something new
         # on the board and the document is saved; Save Pulse, with its star,
         # while the file is behind the editor -- On Pulse is then a standard
@@ -1891,23 +1892,30 @@ class PulseScheduleView(QtWidgets.QWidget):
         self.save_button = FluentButton("Save Pulse")
         # Asks for the file to read: the ellipsis says more comes first.
         self.load_button = FluentButton("Open…")
-        # Names what it hides: "Collapse" is the Subpulse's own command.  A
-        # toggle: active while the side panels are hidden.
-        self.collapse_button = FluentButton("Hide side panels")
+        self.collapse_button = FluentButton("Hide")
+        self.collapse_button.setToolTip("Hide side panels")
         self.group_button = FluentButton("Group Subpulse")
         # Three compact rows: execute; edit the timeline; save and organize.
         control_buttons = (
-            (self.run_button, 0, 0, 2), (self.stop_button, 0, 2, 1), (self.sync_button, 0, 3, 1),
+            (self.run_button, 0, 0, 2), (self.stop_button, 0, 2, 1), (self.remove_button, 0, 3, 1),
             (self.add_button, 1, 0, 1), (self.spacer_button, 1, 1, 1),
-            (self.bracket_button, 1, 2, 1), (self.remove_button, 1, 3, 1),
+            (self.bracket_button, 1, 2, 1), (self.subpulse_button, 1, 3, 1),
             (self.save_button, 2, 0, 1), (self.load_button, 2, 1, 1),
-            (self.group_button, 2, 2, 1), (self.collapse_button, 2, 3, 1),
+            (self.group_button, 2, 2, 1),
         )
         for button, row, column, span in control_buttons:
             button.setFixedHeight(control_height())
             button.setMinimumWidth(scaled_px(74, minimum=62))
             button.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
             controls.addWidget(button, row, column, 1, span)
+        view_controls = QtWidgets.QHBoxLayout()
+        view_controls.setContentsMargins(0, 0, 0, 0)
+        view_controls.setSpacing(gap)
+        for button in (self.sync_button, self.collapse_button):
+            button.setFixedHeight(control_height())
+            button.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+            view_controls.addWidget(button, 1)
+        controls.addLayout(view_controls, 2, 3)
         for column in range(4):
             controls.setColumnStretch(column, 1)
         control_layout.addLayout(controls)
@@ -2088,6 +2096,9 @@ class PulseScheduleView(QtWidgets.QWidget):
         self.spacer_button.clicked.connect(lambda: self._request_insert("insert_spacer"))
         self.remove_button.clicked.connect(self._request_remove_items)
         self.bracket_button.clicked.connect(self._request_add_bracket)
+        self.subpulse_button.clicked.connect(
+            lambda: self.component_action_requested.emit("insert_file", None)
+        )
         self.collapse_button.clicked.connect(self._toggle_left_panels)
         self.group_button.clicked.connect(self._request_group)
         self.add_port_button.clicked.connect(self._request_add_port)
@@ -2692,7 +2703,8 @@ class PulseScheduleView(QtWidgets.QWidget):
         self.names_panel_holder.setVisible(not visible)
         self.channel_panel_holder.setVisible(not visible)
         self.left_panel_stub_holder.setVisible(visible)
-        self.collapse_button.setText("Show side panels" if visible else "Hide side panels")
+        self.collapse_button.setText("Show" if visible else "Hide")
+        self.collapse_button.setToolTip("Show side panels" if visible else "Hide side panels")
         self.collapse_button.set_active(visible)
         self._settle_left_pane_width()
 
@@ -2700,7 +2712,8 @@ class PulseScheduleView(QtWidgets.QWidget):
         self.names_panel_holder.show()
         self.channel_panel_holder.show()
         self.left_panel_stub_holder.hide()
-        self.collapse_button.setText("Hide side panels")
+        self.collapse_button.setText("Hide")
+        self.collapse_button.setToolTip("Hide side panels")
         self.collapse_button.set_active(False)
         self._settle_left_pane_width()
 

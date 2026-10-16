@@ -1541,7 +1541,7 @@ assert open_width == view.left_body.sizeHint().width(), (
 )
 open_timeline = view.timeline_scroll.width()
 # It names what it hides: "Collapse" is the Subpulse's own command.
-assert view.collapse_button.text() == "Hide side panels"
+assert view.collapse_button.text() == "Hide"
 assert not view.collapse_button.is_active()
 
 view.collapse_button.click()
@@ -1554,7 +1554,7 @@ assert collapsed_width == view.left_body.sizeHint().width(), (
     f"{view.left_body.sizeHint().width()}"
 )
 assert collapsed_width < open_width, "hiding the side panels freed no width at all"
-assert view.collapse_button.text() == "Show side panels"
+assert view.collapse_button.text() == "Show"
 assert view.collapse_button.is_active(), "a toggle is held down while what it did stands"
 assert view.timeline_scroll.width() > open_timeline, (
     "the freed width went nowhere: the periods are no wider than before"
@@ -1564,7 +1564,7 @@ view.collapse_button.click()
 for _ in range(40):
     app.processEvents()
 assert view.left_scroll.width() == open_width, "Show side panels did not give it back"
-assert view.collapse_button.text() == "Hide side panels"
+assert view.collapse_button.text() == "Hide"
 assert not view.collapse_button.is_active()
 
 view.close()

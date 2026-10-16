@@ -34,7 +34,7 @@ from zlc_workbench.pulse_editor import (
     replace_sequence,
     timeline_of,
 )
-from zlc_workbench.pulse_state import PulseEditorState, read_pulse, state_to_tree
+from zlc_workbench.pulse_state import PulseEditorState, read_pulse, state_from_tree, state_to_tree
 
 from pulse_fixtures import PULSE_NAME, ordinary_imaging_sequence, write_ordinary_pulse
 
@@ -1542,6 +1542,9 @@ def test_component_instances_and_subpulse_files_share_edits_not_ownership(sequen
             view.component_action_requested.emit("insert_file", None)
             assert not view.warnings, view.warnings
             added, = presenter.sequence.components
+            assert added.source == "config" and added.config_path == str(subpulse_path.resolve())
+            assert presenter.sequence.config_enabled == sequence.config_enabled
+            assert state_from_tree(state_to_tree(presenter.state)).sequence.components == presenter.sequence.components
             periods = tuple(p.period_id for p in presenter.sequence.periods)
             bracket = next(b for b in presenter.sequence.brackets if b.bracket_id == "outer")
             enclosed = periods[periods.index(bracket.start_period_id):periods.index(bracket.end_period_id) + 1]
