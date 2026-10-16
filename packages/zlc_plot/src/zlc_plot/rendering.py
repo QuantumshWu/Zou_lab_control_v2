@@ -3645,27 +3645,25 @@ class MatplotlibRenderer:
                 np.concatenate((drawn_x, extra_x)),
                 np.concatenate((drawn_y, extra_y)),
             )
-            line.set_marker("_")
-            line.set_markersize(self.style.artists.curve_marker_size_pt)
+            wanted = "_"
             line.set_markeredgewidth(line.get_linewidth())
             line.set_markevery(
                 np.arange(marker_start, marker_start + extra_x.size, 2)
             )
         else:
             line.set_data(drawn_x, drawn_y)
-            # The marker is the style's, and the style is not what moved:
-            # a facet grid re-set three properties on three lines in every
-            # one of sixty-four cells, every frame, to the values they
-            # already held.
             marker = self.style.artists.curve.marker
             wanted = "None" if marker is None else marker
-            if line.get_marker() != wanted:
-                line.set_marker(wanted)
-            size = self.style.artists.curve_marker_size_pt
-            if line.get_markersize() != size:
-                line.set_markersize(size)
             if line.get_markevery() is not None:
                 line.set_markevery(None)
+        # Set only what changed: a grid redraws every cell's lines every
+        # frame, and each ``set_marker`` builds a MarkerStyle holding a bound
+        # method of itself -- a cycle only the collector frees.
+        if line.get_marker() != wanted:
+            line.set_marker(wanted)
+        size = self.style.artists.curve_marker_size_pt
+        if line.get_markersize() != size:
+            line.set_markersize(size)
 
     def _refresh_enveloped_lines(self, axis: Any) -> None:
         for line_id, (line, owner, x, y, isolated_glyphs) in tuple(
