@@ -158,6 +158,83 @@ def test_measurement_commits_live_then_runtime_seals_and_clears_progress() -> No
         plane.close()
 
 
+@pytest.mark.parametrize("delivery", ("exact", "latest"))
+@pytest.mark.parametrize("source_started", (False, True))
+def test_measurement_input_controls_its_live_front_not_source_lifecycle(
+    delivery: str, source_started: bool,
+) -> None:
+    plane, wake = SignalDataPlane(), Event()
+    entered, finish = Event(), Event()
+    contexts = []
+    frame = DatasetOutputDeclaration("frame", "test.frame")
+    output = DatasetOutputDeclaration("scan", "test.scan")
+    source = _Source("camera", frame)
+    source_name = source.signal_key("frame")
+
+    class Measurement:
+        def execute(self, context):
+            contexts.append(context)
+            entered.set()
+            assert finish.wait(3)
+
+    host = _host(
+        Measurement(), plane, wake, instance_id="scan", kind="measurement",
+        outputs=(output,), source=source_name, delivery=delivery,
+    )
+    scan_name = host.signal_key("scan")
+    plane.set_front_signals((source_name, scan_name))
+    try:
+        if source_started:
+            plane.begin_generation(source)
+            plane.commit_live(source, {"frame": monitor_output(frame, 0.0)})
+        host.start()
+        assert entered.wait(1)
+        # The measurement may re-arm acquisition after its own Start.
+        if source_started:
+            plane.seal_committed(source)
+        plane.begin_generation(source)
+        plane.commit_live(source, {"frame": monitor_output(frame, 1.0)})
+        first = plane.latest_publication(source_name)
+        front = plane.freeze()
+        assert front.publication(source_name) is (None if delivery == "exact" else first)
+
+        contexts[0].commit_live(
+            {"scan": monitor_output(output, 1.0)}, source_publication=first,
+        )
+        front = plane.freeze()
+        measured = plane.latest_publication(scan_name)
+        assert front.publication(source_name) is first
+        assert front.publication(scan_name) is measured
+
+        plane.commit_live(source, {"frame": monitor_output(frame, 2.0)})
+        second = plane.latest_publication(source_name)
+        front = plane.freeze()
+        assert front.publication(source_name) is (first if delivery == "exact" else second)
+        assert front.publication(scan_name) is measured
+        contexts[0].commit_live(
+            {"scan": monitor_output(output, 2.0)}, source_publication=second,
+        )
+        front = plane.freeze()
+        measured = plane.latest_publication(scan_name)
+        assert front.publication(source_name) is second
+        assert front.publication(scan_name) is measured
+
+        host.cancel("stop scan")
+        finish.set()
+        assert _wait(host, wake).phase == "cancelled"
+        plane.commit_live(source, {"frame": monitor_output(frame, 3.0)})
+        front = plane.freeze()
+        assert front.publication(source_name) is plane.latest_publication(source_name)
+        assert front.publication(scan_name) is measured
+    finally:
+        finish.set()
+        if host.running:
+            host.cancel("test finished")
+            _wait(host, wake)
+        host.shutdown()
+        plane.close()
+
+
 @pytest.mark.parametrize("ending", ("done", "failed", "cancel-before-ready", "cancel-after-ready"))
 def test_worker_ready_is_explicit_and_cannot_outlive_its_run(ending: str, monkeypatch) -> None:
     from concurrent.futures import Future

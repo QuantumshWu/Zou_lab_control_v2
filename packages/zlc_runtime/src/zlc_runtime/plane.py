@@ -2198,6 +2198,7 @@ class SignalDataPlane:
         source_state = None
         if source_name is not None:
             source_name = canonical_text(source_name, "signal route source name")
+        if source_name is not None and kind == "processor":
             source_state = self._state_for_signal_locked(source_name)
             if source_state is None:
                 raise LookupError(
@@ -2303,7 +2304,9 @@ class SignalDataPlane:
                 self._starting.difference_update(retiring_owners)
                 self._generation_ready.notify_all()
 
-    def begin_generation(self, node: object) -> StreamGenerationId:
+    def begin_generation(
+        self, node: object, *, source_name: str | None = None,
+    ) -> StreamGenerationId:
         """Start a producer run, replacing its finished retained predecessor."""
 
         owner_id = _node_instance_id(node)
@@ -2325,6 +2328,9 @@ class SignalDataPlane:
                 output_names=output_names,
                 bare_names=bare_names,
                 node=node,
+                # A worker can re-arm its input after Start; only its commits
+                # bind the consumed generation through exact parent refs.
+                source_name=source_name,
             ).generation
 
     def run_record(self, node: object) -> Mapping[str, object] | None:
