@@ -2555,6 +2555,9 @@ def test_a_renamed_node_is_called_by_its_name_and_addressed_by_its_id(presenter,
         surface["caption"], surface["panel_name"], *headings, panel_page["producer_name"],
     ]
     assert not [text for text in said if camera_id in text], said
+    # The Panel name field sends back what it shows: still the automatic title.
+    assert presenter.update_panel_state(panel.panel_id, {"title": "Camera A/frames"}) is False
+    assert panel.state.title == frames
 
     # A device refusal names the owner as the operator calls it.
     with pytest.raises(DeviceUseBusy, match="device is in use by Camera A$"):
@@ -2632,6 +2635,17 @@ def test_a_renamed_node_is_called_by_its_name_and_addressed_by_its_id(presenter,
     assert renamed["state"]["logic"][0]["name"] == "Loading"
     same = presenter.control_action("logic.rename", {"node_id": occupancy_id, "name": "Loading"})
     assert (same["accepted"], same["status"]) == (True, "unchanged"), same
+    # A draft's issues name no node, so the refusal a Start leaves on the row
+    # never keeps a name a rename changed.
+    assert presenter.update_logic_draft(scan_id, values={"acquisition_logic": occupancy_id})
+    issues = presenter.logic_editor_projection(scan_id)["issues"]
+    assert "the selected acquisition is not an available Measurement" in issues
+    assert not [text for text in issues if "Loading" in text or occupancy_id in text], issues
+    assert presenter.start_logic(scan_id) is False
+    refusal = presenter.logic[scan_id].draft_error
+    assert presenter.rename_logic(occupancy_id, "Counting")
+    assert presenter.view._rows[scan_id].state == ("error", refusal)
+    assert presenter.rename_logic(occupancy_id, "Loading")
 
     # Minting skips every name and id; an added node may be named at once.
     assert presenter.rename_logic(second, "occupancy2")
