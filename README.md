@@ -93,6 +93,12 @@ browser sees and operates the existing Qt UI; tabs, selections, device state
 and tasks are shared with the local operator, not copied into a second session.
 The browser toolbar is English and uses the application's Fluent font, colors,
 spacing and control sizes. Experiment pages retain their original Qt rendering.
+Use one finger to click or drag, two fingers together to scroll, and pinch to
+zoom a plot. Adding the second finger cancels the unfinished single-finger
+gesture instead of committing a selection. **Full screen** hides the web
+controls; the small corner button reveals window selection and **Exit full
+screen**. Main windows fit the available area without stretching; modal dialogs
+retain their natural size.
 Multiple clients can watch; only one remote client controls at a time. A local
 click, keypress or wheel operation takes control back immediately. Disconnecting
 does not stop a task or replay commands. File dialogs select files on the

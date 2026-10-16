@@ -861,6 +861,17 @@ def _qt5_plot_widget_class() -> type[Any]:
         def event(self, event: object) -> bool:
             if event.type() in pointer_cancel_events:
                 self._cancel_active_interaction()
+            if event.type() == QtCore.QEvent.NativeGesture and event.gestureType() == QtCore.Qt.ZoomNativeGesture:
+                value = float(event.value())
+                if not self._host_can_serve() or not self._interaction_gate.enabled or not math.isfinite(value) or value <= -1.0:
+                    event.ignore()
+                    return False
+                if value != 0.0:
+                    self._cancel_active_interaction()
+                    step = -math.log1p(value) / math.log(self._host.defaults.interaction.wheel_zoom_factor)
+                    self._submit_pointer("scroll", event, step=step)
+                event.accept()
+                return True
             if (
                 not self._interaction_gate.enabled
                 and event.type() in interaction_events
@@ -926,7 +937,7 @@ def _qt5_plot_widget_class() -> type[Any]:
                 painter.end()
 
         def _normalized(self, event: object) -> tuple[float, float]:
-            position = getattr(event, "position", None)
+            position = getattr(event, "position", None) or getattr(event, "localPos", None)
             if callable(position):
                 point = position()
                 x, y = float(point.x()), float(point.y())

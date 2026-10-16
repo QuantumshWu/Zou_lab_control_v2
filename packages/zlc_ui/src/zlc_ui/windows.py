@@ -62,7 +62,7 @@ class SharedWindows(QtCore.QObject):
         self._control_epoch = 0
         self._pressed: QtWidgets.QWidget | None = None
         self._press_source: tuple[Any, ...] | None = None
-        self._buttons = QtCore.Qt.NoButton
+        self._buttons = 0
         self._keys: dict[int, QtWidgets.QWidget] = {}
         self._pointer = QtCore.QPoint()
         self._hover: QtWidgets.QWidget | None = None
@@ -241,27 +241,30 @@ class SharedWindows(QtCore.QObject):
         window.showNormal()
         return {"accepted": True}
 
-    def _release_inputs(self) -> None:
+    def _release_inputs(self, *, cancel: bool = False) -> None:
         target = self._pressed
         if target is not None and not sip.isdeleted(target):
             if isinstance(target, QtWidgets.QAbstractButton):
                 target.setDown(False)
-            for button in (QtCore.Qt.LeftButton, QtCore.Qt.RightButton, QtCore.Qt.MiddleButton):
-                if self._buttons & button:
-                    self._buttons &= ~button
-                    self._mouse(target, QtCore.QEvent.MouseButtonRelease, self._pointer, button, QtCore.Qt.NoModifier, guard=False)
+            if cancel:
+                self._post(target, QtCore.QEvent(QtCore.QEvent.UngrabMouse), guard=False)
+            else:
+                for button in (QtCore.Qt.LeftButton, QtCore.Qt.RightButton, QtCore.Qt.MiddleButton):
+                    if self._buttons & int(button):
+                        self._buttons &= ~int(button)
+                        self._mouse(target, QtCore.QEvent.MouseButtonRelease, self._pointer, button, QtCore.Qt.NoModifier, guard=False)
         for key, target in self._keys.items():
             if not sip.isdeleted(target):
                 self._post(target, QtGui.QKeyEvent(QtCore.QEvent.KeyRelease, key, QtCore.Qt.NoModifier), guard=False)
-        self._pressed, self._press_source, self._buttons, self._keys = None, None, QtCore.Qt.NoButton, {}
+        self._pressed, self._press_source, self._buttons, self._keys = None, None, 0, {}
 
     @staticmethod
-    def _modifiers(message: dict[str, Any]) -> Any:
-        result = QtCore.Qt.NoModifier
+    def _modifiers(message: dict[str, Any]) -> QtCore.Qt.KeyboardModifiers:
+        result = 0
         for name in message.get("modifiers", ()):
-            result |= {"Shift": QtCore.Qt.ShiftModifier, "Control": QtCore.Qt.ControlModifier,
-                       "Alt": QtCore.Qt.AltModifier, "Meta": QtCore.Qt.MetaModifier}.get(name, QtCore.Qt.NoModifier)
-        return result
+            result |= int({"Shift": QtCore.Qt.ShiftModifier, "Control": QtCore.Qt.ControlModifier,
+                           "Alt": QtCore.Qt.AltModifier, "Meta": QtCore.Qt.MetaModifier}.get(name, QtCore.Qt.NoModifier))
+        return QtCore.Qt.KeyboardModifiers(result)
 
     @staticmethod
     def _require_remote_input(target: Any) -> None:
@@ -278,15 +281,15 @@ class SharedWindows(QtCore.QObject):
     def _mouse(self, target: Any, kind: Any, position: Any, button: Any, modifiers: Any, *, guard: bool = True) -> None:
         local = QtCore.QPointF(target.mapFromGlobal(position))
         event = QtGui.QMouseEvent(kind, local, QtCore.QPointF(target.window().mapFromGlobal(position)),
-                                 QtCore.QPointF(position), button, self._buttons, modifiers)
+                                 QtCore.QPointF(position), button, QtCore.Qt.MouseButtons(self._buttons), modifiers)
         self._post(target, event, guard=guard)
 
     def input(self, client_id: str, message: dict[str, Any]) -> dict[str, Any]:
         self._check_thread()
         if client_id != self._controller:
             raise ValueError("this browser does not control the experiment")
-        if message["type"] == "release":
-            self._release_inputs()
+        if message["type"] in ("release", "cancel"):
+            self._release_inputs(cancel=message["type"] == "cancel")
             return {"accepted": True}
         identity = str(message["window"])
         window, bounds, popups = self._surface(identity)
@@ -341,7 +344,7 @@ class SharedWindows(QtCore.QObject):
         self._pointer = position
         target = self._pressed
         if target is not None and sip.isdeleted(target):
-            self._pressed, self._buttons, target = None, QtCore.Qt.NoButton, None
+            self._pressed, self._buttons, target = None, 0, None
         if target is None:
             surface = window
             for popup, rect in reversed(popups):
@@ -371,11 +374,11 @@ class SharedWindows(QtCore.QObject):
             if button is None:
                 raise ValueError("unsupported mouse button")
             if kind == "up":
-                self._buttons &= ~button
+                self._buttons &= ~int(button)
             else:
                 self._pressed = target
                 self._press_source = (identity, message["epoch"], bounds.topLeft())
-                self._buttons |= button
+                self._buttons |= int(button)
                 if target.focusPolicy() & QtCore.Qt.ClickFocus:
                     target.setFocus(QtCore.Qt.MouseFocusReason)
             event_type = {"down": QtCore.QEvent.MouseButtonPress, "up": QtCore.QEvent.MouseButtonRelease,
@@ -388,11 +391,27 @@ class SharedWindows(QtCore.QObject):
             if not self._buttons:
                 self._pressed = None
                 self._press_source = None
-        elif kind == "wheel":
+        elif kind in ("wheel", "pinch"):
             delta = QtCore.QPoint(round(-float(message.get("delta_x", 0))), round(-float(message.get("delta_y", 0))))
-            event = QtGui.QWheelEvent(QtCore.QPointF(target.mapFromGlobal(position)), QtCore.QPointF(position),
-                                     QtCore.QPoint(), delta, self._buttons, modifiers, QtCore.Qt.NoScrollPhase, False)
-            self._post(target, event)
+            pixel_delta = delta if message.get("deltaMode", 0) == 0 else QtCore.QPoint()
+            scale = float(message.get("scale", 1.0))
+            if not math.isfinite(scale) or scale <= 0:
+                raise ValueError("pinch scale must be positive and finite")
+            while target is not None:
+                local = QtCore.QPointF(target.mapFromGlobal(position))
+                if kind == "pinch":
+                    event = QtGui.QNativeGestureEvent(QtCore.Qt.ZoomNativeGesture, local,
+                        QtCore.QPointF(target.window().mapFromGlobal(position)), QtCore.QPointF(position), scale - 1.0, 0, 0)
+                else:
+                    event = QtGui.QWheelEvent(local, QtCore.QPointF(position),
+                                             pixel_delta, delta, QtCore.Qt.MouseButtons(self._buttons), modifiers,
+                                             QtCore.Qt.ScrollUpdate if not pixel_delta.isNull() else QtCore.Qt.NoScrollPhase, False)
+                event._zlc_shared_control = (self._controller, self._control_epoch)
+                event.ignore()
+                self._app.sendEvent(target, event)
+                if event.isAccepted() or target.isWindow():
+                    break
+                target = target.parentWidget()
         else:
             raise ValueError("unsupported input event")
         return {"accepted": True}

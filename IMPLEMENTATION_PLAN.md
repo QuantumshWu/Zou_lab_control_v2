@@ -10,6 +10,8 @@
 
 ## 1. 当前实施范围
 
+- 网页输入与流畅度（2026-10-16）：Qt边界明确转换MouseButtons/KeyboardModifiers；wheel保留像素位移，并沿忽略事件的父控件传递；双指区分滚动/捏合，第二触点经UngrabMouse取消未完成单指操作，Qt原生Zoom复用Plot缩放参数。Full screen只留小Controls按钮，非模态窗口等比填满，弹窗不放大。真实Qt＋Chromium触控验收：内容滚动条0→90（未拖条）、单指Area、双指开合viewport跨度0.00648→0.00324→0.00648，既有selector/revision不变；全屏、展开及退出通过。共享变化检测使用uint32完整像素比较，独立样本11.25→1.83ms且PNG字节相同；浏览器rAF约60Hz输入的短A/B，12/30fps共享帧包中位间隔84.10/45.28ms，Qt抓图占手势时间14%/31%，最终selector数值相同。保留30fps上限、dirty-only捕获及每客户端单帧在途，未增加输入队列。长尾未改善，此数据不是实体平板或严格动作→可见像素延迟；探针等待真实DPR front接受后才注入手势，不修改Plot几何变化时的取消规则。证据在ignored research/share-approval-acceptance，无新增持久测试。
+
 - 实验应用专属网页共享（2026-10-16）：Device Manager内英文Fluent `Browser sharing`卡片负责Start/Stop、显示/复制`http://IP/zlc`、本机Allow/Reject与Disconnect；每个新连接等待本机批准，无启动参数、key或私密链接。多个已批准浏览器共享当前Flow窗口与原Qt输入；权限控件仅本机可用，未批准不交窗口目录/像素，重新连接需重新批准。默认关闭，80端口不可用时18865，HTTP仅可信隔离LAN；不改MCP、设备会话或科学逻辑。真实Windows Qt＋Chromium验收按钮启动、无key申请、批准、拒绝重连、远端不能批准、双客户端、Stop断连撤监听、再次Start两端重新申请，使用隔离目录Tornado6.5.8，未改系统环境、未Init设备或采集。已有窗口/selector/输入路径复用不变，静态窗口不重复抓图、无浏览器无抓图请求。证据在ignored research/share-approval-acceptance；未进行实体平板或真实硬件验收。
 
 - Pulse Add subpulse（2026-10-16，完成）：主Edit新增文件插入按钮，复用既有Subpulse读取/实例插入/Config来源机制，默认引用所选文件且保留内嵌Default；原主Config开关和独立文件草稿不变。底部四个Add同排，Remove上移，Sync与Hide/Show共享半宽格；不新增领域模型、文件格式或运行路径。两个既有直接用例通过；正式Qt按钮/文件选择验收两次插入独立ID、Config引用、来源编辑、保存重开与半宽布局，截图留ignored research，窗口已关闭。

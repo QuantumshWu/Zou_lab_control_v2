@@ -4,8 +4,9 @@ const canvas = $("screen"), ctx = canvas.getContext("2d", {alpha: false});
 let socket, client, controller, selected = "", windows = [], frame = null;
 let incoming = Promise.resolve(), header = null, fitted = true, connected = false, controlEnabled = false;
 let connectionMessage = "Only the experiment application is shared, not the desktop. Connecting does not start or stop an experiment.";
+let immersive = false;
 let move = null, moveRequest = 0, pointer = null, lastClick = null, composing = false;
-let wheel = null, scrolling = false, scrollOrigin = null;
+let gesture = null;
 const touches = new Map();
 const keys = new Map();
 const modifiers = (e) => ({ctrl: e.ctrlKey, shift: e.shiftKey, alt: e.altKey, meta: e.metaKey});
@@ -25,22 +26,40 @@ function flushMove() {
   cancelAnimationFrame(moveRequest);
   moveRequest = 0;
   if (move) input("move", move);
-  if (wheel) input("wheel", wheel);
   move = null;
-  wheel = null;
+  if (gesture?.updated && !gesture.ended && canInput()) {
+    gesture.updated = false;
+    const current = touchPair();
+    if (!current) return;
+    if (!gesture.mode) {
+      const translation = Math.hypot(current.clientX - gesture.start.clientX, current.clientY - gesture.start.clientY);
+      const separation = Math.abs(current.distance - gesture.start.distance) / 2;
+      if (Math.max(translation, separation) < 6) return;
+      gesture.mode = separation >= translation ? "pinch" : "wheel";
+    }
+    const location = point(gesture.event, current);
+    if (gesture.mode === "pinch") {
+      if (current.distance > 0 && gesture.last.distance > 0) input("pinch", {...location, buttons: 0, scale: current.distance / gesture.last.distance});
+    } else {
+      const previous = point(gesture.event, gesture.last);
+      input("wheel", {...location, buttons: 0, touch: true, deltaMode: 0, deltaX: previous.x - location.x, deltaY: previous.y - location.y});
+    }
+    gesture.last = current;
+  }
 }
 function release() {
-  flushMove();
-  if (ownsControl() && frame) send({type: "input", window: frame.window, epoch: frame.epoch, event: "release"});
+  cancelAnimationFrame(moveRequest); moveRequest = 0; move = null;
+  if (ownsControl() && frame) send({type: "input", window: frame.window, epoch: frame.epoch, event: "cancel"});
   const captured = [pointer?.id, ...touches.keys()];
   pointer = null; lastClick = null; keys.clear();
-  touches.clear(); scrolling = false; scrollOrigin = null;
+  touches.clear(); gesture = null;
   for (const id of captured) if (id != null && canvas.hasPointerCapture(id)) canvas.releasePointerCapture(id);
 }
 function resize() {
   if (!frame) return;
   const box = $("viewport"), padding = parseFloat(getComputedStyle(box).paddingLeft) * 2;
-  const scale = fitted ? Math.min(1, (box.clientWidth - padding) / frame.width, (box.clientHeight - padding) / frame.height) : 1;
+  const cap = immersive && !windows.find(window => window.id === selected)?.modal ? Infinity : 1;
+  const scale = fitted ? Math.min(cap, (box.clientWidth - padding) / frame.width, (box.clientHeight - padding) / frame.height) : 1;
   canvas.style.width = `${Math.max(1, frame.width * scale)}px`;
   canvas.style.height = `${Math.max(1, frame.height * scale)}px`;
 }
@@ -57,7 +76,7 @@ function refreshControls() {
   canvas.hidden = !ready;
   $("placeholder").hidden = ready;
   $("placeholder-text").textContent = !connected ? connectionMessage : !current ? "No experiment windows are available to share." : !current.visible ? "This window is hidden on the experiment computer. Take control to show it." : "Receiving the window view…";
-  $("hint").textContent = current?.blocked ? "This window is waiting for an experiment dialog. Complete the dialog first." : current?.modal ? "Experiment dialog. Confirm or cancel to return to the previous window." : mine ? "Tap or drag with one finger; scroll with two. Select a field before typing. Disconnecting does not stop the experiment." : "Read-only viewing does not change the experiment computer's windows or experiment state.";
+  $("hint").textContent = current?.blocked ? "This window is waiting for an experiment dialog. Complete the dialog first." : current?.modal ? "Experiment dialog. Confirm or cancel to return to the previous window." : mine ? "Tap or drag with one finger; scroll with two, or pinch to zoom a plot. Select a field before typing. Disconnecting does not stop the experiment." : "Read-only viewing does not change the experiment computer's windows or experiment state.";
 }
 function selectWindow(id) {
   if (windows.find(w => w.id === id)?.blocked) id = windows.find(w => w.modal && w.visible && !w.blocked)?.id || id;
@@ -157,25 +176,69 @@ for (const id of ["fit", "actual"]) $(id).onclick = () => {
   fitted = id === "fit";
   $("fit").setAttribute("aria-pressed", String(fitted)); $("actual").setAttribute("aria-pressed", String(!fitted)); resize();
 };
+function fullscreen(active) {
+  immersive = active;
+  document.body.classList.toggle("immersive", active);
+  document.body.classList.remove("show-controls");
+  $("fullscreen").textContent = active ? "Exit full screen" : "Full screen";
+  $("fullscreen-controls").hidden = !active;
+  $("fullscreen-controls").setAttribute("aria-expanded", "false");
+  $("fullscreen-controls").setAttribute("aria-label", "Show controls");
+  $("fullscreen-controls").title = "Show controls";
+  resize();
+}
+$("fullscreen").onclick = async () => {
+  if (immersive) {
+    if (document.fullscreenElement) await document.exitFullscreen();
+    fullscreen(false);
+  } else {
+    fullscreen(true);
+    if (document.documentElement.requestFullscreen) {
+      try { await document.documentElement.requestFullscreen(); }
+      catch { /* The immersive viewport also works without browser fullscreen. */ }
+    }
+  }
+};
+$("fullscreen-controls").onclick = () => {
+  const expanded = document.body.classList.toggle("show-controls");
+  const label = expanded ? "Hide controls" : "Show controls";
+  $("fullscreen-controls").setAttribute("aria-expanded", String(expanded));
+  $("fullscreen-controls").setAttribute("aria-label", label);
+  $("fullscreen-controls").title = label;
+  resize();
+};
+document.addEventListener("fullscreenchange", () => fullscreen(Boolean(document.fullscreenElement)));
+document.addEventListener("keydown", event => {
+  if (event.key !== "Escape" || !immersive) return;
+  event.preventDefault(); event.stopPropagation();
+  if (document.fullscreenElement) document.exitFullscreen();
+  else fullscreen(false);
+}, true);
 new ResizeObserver(resize).observe($("viewport"));
 function point(e, location = e) {
   const bounds = canvas.getBoundingClientRect();
   return {x: (location.clientX - bounds.left) * frame.width / bounds.width, y: (location.clientY - bounds.top) * frame.height / bounds.height, button: e.button, buttons: e.buttons, modifiers: modifiers(e)};
 }
-function touchCenter() {
+function touchPair() {
   if (touches.size < 2) return null;
-  const values = [...touches.values()];
-  return {clientX: values.reduce((sum, p) => sum + p.clientX, 0) / values.length, clientY: values.reduce((sum, p) => sum + p.clientY, 0) / values.length};
+  const [first, second] = touches.values();
+  return {clientX: (first.clientX + second.clientX) / 2, clientY: (first.clientY + second.clientY) / 2,
+    distance: Math.hypot(second.clientX - first.clientX, second.clientY - first.clientY)};
 }
 canvas.onpointerdown = e => {
   if (!canInput()) return;
   if (e.pointerType === "touch") {
     touches.set(e.pointerId, {clientX: e.clientX, clientY: e.clientY});
     canvas.setPointerCapture(e.pointerId);
-    if (touches.size > 1 || scrolling) {
-      e.preventDefault(); flushMove();
-      if (!scrolling) { input("release"); pointer = null; lastClick = null; keys.clear(); }
-      scrolling = true; scrollOrigin = touchCenter(); return;
+    if (touches.size > 1 || gesture) {
+      e.preventDefault();
+      if (!gesture) {
+        cancelAnimationFrame(moveRequest); moveRequest = 0; move = null;
+        input("cancel"); pointer = null; lastClick = null; keys.clear();
+        const start = touchPair();
+        gesture = {start, last: start, mode: null, updated: false, ended: false, event: e};
+      }
+      return;
     }
   }
   if (pointer && e.pointerId !== pointer.id) return;
@@ -189,13 +252,12 @@ canvas.onpointerdown = e => {
 canvas.onpointermove = e => {
   if (touches.has(e.pointerId)) {
     touches.set(e.pointerId, {clientX: e.clientX, clientY: e.clientY});
-    if (scrolling) {
-      const center = touchCenter();
-      if (canInput() && center && scrollOrigin) {
-        wheel = {...point(e, center), buttons: 0, deltaMode: 0, deltaX: (wheel?.deltaX || 0) + scrollOrigin.clientX - center.clientX, deltaY: (wheel?.deltaY || 0) + scrollOrigin.clientY - center.clientY};
+    if (gesture) {
+      if (!gesture.ended) {
+        gesture.event = e; gesture.updated = true;
         if (!moveRequest) moveRequest = requestAnimationFrame(flushMove);
       }
-      scrollOrigin = center; return;
+      return;
     }
   }
   if (!canInput() || (pointer && e.pointerId !== pointer.id)) return;
@@ -204,12 +266,14 @@ canvas.onpointermove = e => {
   move = p; if (!moveRequest) moveRequest = requestAnimationFrame(flushMove);
 };
 canvas.onpointerup = e => {
-  if (touches.delete(e.pointerId) && scrolling) {
-    e.preventDefault(); flushMove(); scrollOrigin = touchCenter();
-    if (!touches.size) scrolling = false;
+  if (touches.has(e.pointerId) && gesture) {
+    e.preventDefault(); flushMove(); gesture.ended = true;
+    touches.delete(e.pointerId);
+    if (!touches.size) gesture = null;
     if (canvas.hasPointerCapture(e.pointerId)) canvas.releasePointerCapture(e.pointerId);
     return;
   }
+  touches.delete(e.pointerId);
   if (!pointer || e.pointerId !== pointer.id || !canInput()) return;
   e.preventDefault(); flushMove(); const p = point(e); input("up", p);
   lastClick = pointer.moved || pointer.double ? null : {x: e.clientX, y: e.clientY, button: e.button, time: performance.now()}; pointer = null;

@@ -39,6 +39,11 @@ input:focus, select:focus, textarea:focus { border-color: var(--focus); }
 #text-tools { margin-bottom: var(--card-pad); }
 #text-tools label { display: block; margin-bottom: var(--row-gap); }
 #text-input { flex: 1; min-width: 13em; resize: none; }
+.immersive header, .immersive footer { display: none; }
+.immersive.show-controls header, .immersive.show-controls footer { display: block; }
+.immersive header { padding-right: calc(var(--window-pad) + var(--control-height) + var(--row-gap)); }
+.immersive #viewport { padding: 0; }
+#fullscreen-controls { position: fixed; z-index: 1; top: max(var(--row-gap), env(safe-area-inset-top)); right: max(var(--row-gap), env(safe-area-inset-right)); width: var(--control-height); padding: 0; }
 [hidden] { display: none !important; }
 @media (max-width: 50em) {
   #windows { max-width: none; flex-basis: calc(100% - 4em); }

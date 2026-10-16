@@ -27,8 +27,8 @@ def _patch(frame, previous):
                                    ("id", "epoch", "pixel_width", "pixel_height"))
     x, y, w, h = 0, 0, width, height
     if not reset:
-        old = np.frombuffer(previous["rgba"], np.uint8).reshape(pixels.shape)
-        changed = np.any(pixels != old, axis=2)
+        changed = (np.frombuffer(frame["rgba"], np.uint32)
+                   != np.frombuffer(previous["rgba"], np.uint32)).reshape(height, width)
         rows = np.flatnonzero(np.any(changed, axis=1))
         if not rows.size:
             return None
@@ -43,7 +43,7 @@ def _patch(frame, previous):
                 reset=reset, **metadata), buffer.getvalue()
 
 
-def start_server(flow, *, on_clients, host="0.0.0.0", port=80, fps=12):
+def start_server(flow, *, on_clients, host="0.0.0.0", port=80, fps=30):
     """Share experiment windows after local approval; return close with decide()."""
     import tornado.httpserver
     import tornado.ioloop
