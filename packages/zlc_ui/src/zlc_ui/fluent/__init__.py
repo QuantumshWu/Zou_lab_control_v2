@@ -60,7 +60,7 @@ for _name in (
 ):
     _EXPORTS[_name] = ("zlc_ui.fluent.style", _name)
 for _name in (
-    "fill_grouped_choice_combo",
+    "fill_editable_combo", "fill_grouped_choice_combo",
     "read_editable_combo", "coerce_choice_labels",
 ):
     _EXPORTS[_name] = ("zlc_ui.fluent.choice_picker", _name)

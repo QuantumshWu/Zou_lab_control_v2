@@ -19,15 +19,14 @@ from zlc_ui.fluent import (
     ACCENT_TINT,
     DIVIDER,
     MUTED_INK,
-    MUTED_LABEL_STYLE,
     RADIUS,
     SELECTED,
     SELECTED_HOVER,
     TEXT,
     FluentButton,
     FluentCardDialog,
-    FluentLabel,
     FluentSectionLabel,
+    muted_note_label,
     scaled_px,
     window_pad,
 )
@@ -86,9 +85,7 @@ class SignalChooser(FluentCardDialog):
         layout.addWidget(self.list, 1)
 
         if not self._rows:
-            empty = FluentLabel("Nothing has published yet.")
-            empty.setStyleSheet(MUTED_LABEL_STYLE)
-            layout.addWidget(empty)
+            layout.addWidget(muted_note_label("Nothing has published yet."))
 
         buttons = QtWidgets.QHBoxLayout()
         buttons.addStretch(1)

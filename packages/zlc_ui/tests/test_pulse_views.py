@@ -93,12 +93,11 @@ def test_pulse_status_lines_and_the_board_dot_take_the_one_status_table(run_qt) 
         r"""
 from PyQt5 import QtCore, QtTest
 from zlc_ui.qt import ensure_qt_app
-from zlc_ui.fluent import STATUS_CUES
+from zlc_ui.fluent import STATUS_CUES, control_height
 from zlc_ui.pulse import (
     ConnectionChoiceVM, ConnectionVM, PulseEditorView, PulseTargetView, TargetPortRecord,
     TargetWidthRule,
 )
-from zlc_ui.pulse._layout import row_height
 app = ensure_qt_app(["pulse-status-inks"])
 
 def ink(widget):
@@ -160,7 +159,7 @@ target.resize(900, 500); target.show(); app.processEvents()
 # the page's own re-showing of its rows leaves the line and its ink alone.
 remover = target._rows[1].remove_button
 assert remover.text() == "\u00d7" and remover.role() == "destructive"
-assert remover.size() == QtCore.QSize(row_height(), row_height())
+assert remover.size() == QtCore.QSize(control_height(), control_height())
 assert remover.toolTip() == "Remove this port row"
 QtTest.QTest.mouseClick(remover, QtCore.Qt.LeftButton)
 app.processEvents()
@@ -2479,9 +2478,8 @@ def test_the_scan_pages_bound_fields_list_has_one_pitch(run_qt) -> None:
     run_qt(r'''
 from PyQt5 import QtCore, QtGui
 from zlc_ui.qt import ensure_qt_app
-from zlc_ui.fluent import FluentGroupBox
+from zlc_ui.fluent import FluentGroupBox, control_height
 from zlc_ui.pulse import BindingRecord, PulseScanView, ScanPageRecord
-from zlc_ui.pulse._layout import row_height
 app = ensure_qt_app(["pulse-scan-pitch"])
 scan = PulseScanView()
 scan.resize(900, 600); scan.show()
@@ -2499,8 +2497,8 @@ assert [line.text() for line in lines] == [
 ]
 lines.insert(0, scan.scan_slots_label)
 tops = [line.mapTo(scan, QtCore.QPoint()).y() for line in lines]
-assert {line.height() for line in lines} == {row_height()}
-assert {after - before for before, after in zip(tops, tops[1:])} == {row_height()}, tops
+assert {line.height() for line in lines} == {control_height()}
+assert {after - before for before, after in zip(tops, tops[1:])} == {control_height()}, tops
 
 # The same line of each row: every text here has a letter as tall as an
 # "l", so the first inked row of each is that letter's top.
@@ -2527,7 +2525,7 @@ assert first_row(scan.scan_repeats_spin, cards["Playback"]) == first_row(scan.sc
 # A long intro (a Config error) wraps, whole, rather than being cut.
 scan.set_slots_text("Config error: " + "the named value file could not be read; " * 8)
 app.processEvents()
-assert scan.scan_slots_label.height() > row_height()
+assert scan.scan_slots_label.height() > control_height()
 scan.close()
 ''')
 
@@ -2948,9 +2946,8 @@ def test_value_config_names_one_key_and_keeps_one_pitch(run_qt) -> None:
     run_qt(r'''
 from PyQt5 import QtCore, QtGui
 from zlc_ui.qt import ensure_qt_app
-from zlc_ui.fluent import ElidedLabel, row_gap, section_gap
+from zlc_ui.fluent import ElidedLabel, control_height, row_gap, section_gap
 from zlc_ui.pulse import ConfigPageRecord, PulseConfigView, PulseComponentView
-from zlc_ui.pulse._layout import row_height
 app = ensure_qt_app(["pulse-config-pitch"])
 config = PulseConfigView()
 config.resize(1100, 700); config.show()
@@ -2963,14 +2960,14 @@ config.set_page(ConfigPageRecord(
 app.processEvents()
 headers = config._grid_headers
 assert headers[1].text() == "Config name"
-assert all(header.height() == row_height() for header in headers)
+assert all(header.height() == control_height() for header in headers)
 grid = config._binding_grid
 hint = next(label for label in config.findChildren(ElidedLabel) if label.text().startswith("Choose a Config name"))
 column = [config.mode_label, hint, headers[0]] + [
     grid.itemAtPosition(row, 0).widget() for row in range(1, grid.rowCount())
     if grid.itemAtPosition(row, 0) is not None]
 tops = [widget.mapTo(config, QtCore.QPoint()).y() for widget in column]
-assert len(tops) >= 6 and {b - a for a, b in zip(tops, tops[1:])} == {row_height() + row_gap()}, tops
+assert len(tops) >= 6 and {b - a for a, b in zip(tops, tops[1:])} == {control_height() + row_gap()}, tops
 first_rows = [(widget.mapTo(config, QtCore.QPoint()).y() - widget.parentWidget().mapTo(config, QtCore.QPoint()).y())
               for widget in (config.mode_label, config.new_button)]
 assert first_rows[0] == first_rows[1], ("one title-to-first-row rhythm per card", first_rows)

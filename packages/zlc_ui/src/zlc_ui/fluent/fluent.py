@@ -1590,7 +1590,7 @@ class FluentGroupBox(QtWidgets.QGroupBox):
             font.setWeight(QtGui.QFont.DemiBold)
             painter.setFont(font)
             painter.setPen(QtGui.QColor(self._zlc_title_color))
-            pad = scaled_px(CARD_PAD)
+            pad = card_pad()
             band = QtCore.QRect(pad, 0, max(0, self.width() - 2 * pad), self._zlc_strip_px)
             title = painter.fontMetrics().elidedText(self.title(), QtCore.Qt.ElideRight, band.width())
             painter.drawText(band, QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter, title)
@@ -1769,6 +1769,19 @@ def _button_stylesheet() -> str:
     return style
 
 
+def _paint_button_words(button: QtWidgets.QPushButton, painter, option, top: int) -> None:
+    """``button``'s label centred across its face, its line's top at ``top``."""
+
+    style = button.style()
+    area = style.subElementRect(QtWidgets.QStyle.SE_PushButtonContents, option, button)
+    area.setTop(top)
+    flags = QtCore.Qt.AlignHCenter | QtCore.Qt.AlignTop | QtCore.Qt.TextShowMnemonic
+    if not style.styleHint(QtWidgets.QStyle.SH_UnderlineShortcut, option, button):
+        flags |= QtCore.Qt.TextHideMnemonic
+    style.drawItemText(painter, area, int(flags), option.palette, button.isEnabled(),
+                       option.text, QtGui.QPalette.ButtonText)
+
+
 class FluentButton(QtWidgets.QPushButton):
     """A command, drawn by its ``role`` (see :data:`BUTTON_ROLES`).
 
@@ -1887,14 +1900,7 @@ class FluentButton(QtWidgets.QPushButton):
             paint_centred_ink(painter, self, QtCore.QRectF(self.rect()), self.font(), option.text,
                               self.glyph_ink())
         else:
-            style = self.style()
-            area = style.subElementRect(QtWidgets.QStyle.SE_PushButtonContents, option, self)
-            area.setTop(centred_line_top(0, self.height(), self.font()))
-            flags = QtCore.Qt.AlignHCenter | QtCore.Qt.AlignTop | QtCore.Qt.TextShowMnemonic
-            if not style.styleHint(QtWidgets.QStyle.SH_UnderlineShortcut, option, self):
-                flags |= QtCore.Qt.TextHideMnemonic
-            style.drawItemText(painter, area, int(flags), option.palette, self.isEnabled(),
-                               option.text, QtGui.QPalette.ButtonText)
+            _paint_button_words(self, painter, option, centred_line_top(0, self.height(), self.font()))
         painter.end()
 
     def setEnabled(self, enabled: bool) -> None:  # noqa: N802 - Qt API name
@@ -2134,16 +2140,22 @@ def _apply_fluent_context_menu(widget, event, *, extra=()) -> None:
         command()
 
 
+def _line_edit_contents(edit: QtWidgets.QLineEdit) -> tuple[QtWidgets.QStyleOptionFrame, QtCore.QRect]:
+    """``edit``'s style option and its contents (inside a sheet's border and
+    padding).  initFrom, not initStyleOption: a spin box's edit is made by
+    Qt, and PyQt refuses a protected call on an object it did not create."""
+
+    option = QtWidgets.QStyleOptionFrame()
+    option.initFrom(edit)
+    return option, edit.style().subElementRect(QtWidgets.QStyle.SE_LineEditContents, option, edit)
+
+
 def _line_edit_text_line(edit: QtWidgets.QLineEdit) -> QtCore.QRect:
     """The line box QLineEdit lays its text in: its contents less the text
     margins and its own horizontal inset, one line high, centred with Qt's
     integer rounding.  Its top plus the font's ascent is the baseline."""
 
-    option = QtWidgets.QStyleOptionFrame()
-    # initFrom, not initStyleOption: a spin box's edit is made by Qt, and
-    # PyQt refuses a protected call on an object it did not create.
-    option.initFrom(edit)
-    contents = edit.style().subElementRect(QtWidgets.QStyle.SE_LineEditContents, option, edit)
+    contents = _line_edit_contents(edit)[1]
     margins = edit.textMargins()
     area = contents.adjusted(margins.left(), margins.top(), -margins.right(), -margins.bottom())
     line = edit.fontMetrics().height()
@@ -2165,9 +2177,7 @@ def _seat_line_edit_text(edit: QtWidgets.QLineEdit) -> None:
     did.  The left and right margins stay the owner's (a readout's inset,
     a badge's room)."""
 
-    option = QtWidgets.QStyleOptionFrame()
-    option.initFrom(edit)
-    contents = edit.style().subElementRect(QtWidgets.QStyle.SE_LineEditContents, option, edit)
+    contents = _line_edit_contents(edit)[1]
     line = edit.fontMetrics().height()
     qt_top = contents.y() + (contents.height() - line + 1) // 2
     shift = centred_line_top(0, edit.height(), edit.font()) - qt_top
@@ -2194,16 +2204,11 @@ def line_edit_text_right(edit: QtWidgets.QLineEdit) -> int:
     less Qt's own inset.  A part laid over a field's right end asks this
     for the margin that keeps the text clear of it."""
 
-    option = QtWidgets.QStyleOptionFrame()
-    option.initFrom(edit)
-    contents = edit.style().subElementRect(QtWidgets.QStyle.SE_LineEditContents, option, edit)
-    return contents.right() + 1 - _QLINEEDIT_HMARGIN
+    return _line_edit_contents(edit)[1].right() + 1 - _QLINEEDIT_HMARGIN
 
 
 def _numeric_text_width(edit: QtWidgets.QLineEdit, right_edge: int | None = None) -> int:
-    option = QtWidgets.QStyleOptionFrame()
-    option.initFrom(edit)
-    contents = edit.style().subElementRect(QtWidgets.QStyle.SE_LineEditContents, option, edit)
+    option, contents = _line_edit_contents(edit)
     right = contents.right() + 1 if right_edge is None else min(contents.right() + 1, right_edge)
     margins = edit.textMargins()
     inset = edit.style().pixelMetric(QtWidgets.QStyle.PM_FocusFrameHMargin, option, edit)
@@ -3093,31 +3098,34 @@ class FluentSectionLabel(FluentLabel):
 def card_title_row(
     title: str,
     *trailing: QtWidgets.QWidget,
+    lead: tuple[QtWidgets.QWidget, ...] = (),
     summary: QtWidgets.QWidget | None = None,
 ) -> tuple[QtWidgets.QHBoxLayout, QtWidgets.QLabel]:
-    """One card's title row: its name on the left, a muted ``summary`` and
-    its commands (if any) on the right, a control's height whether or not it
-    has any.
+    """THE title row of a card or of a section inside an editor, and its
+    title: a :class:`FluentSectionLabel` (as tall as a control) on the left,
+    then ``lead`` -- the section's own control, such as a preset strip --
+    and at the right end the ``trailing`` widgets: a section's natural-width
+    summary, then its commands.  A ``summary`` given apart takes the free
+    width instead (:func:`muted_summary_label`, which elides).
 
-    The Device Manager's and the Figure Viewer's cards lay their titles out
-    with this, so cards that stand side by side have their names on one
-    baseline and a card's command sits on its title line, never alone on a
-    row of its own under it.  The title is a :class:`FluentSectionLabel`,
-    the one section title style."""
+    Cards that stand side by side have their names on one baseline, a
+    card's command sits on its title line, never alone on a row under it,
+    and the command that adds a row to a section ends on the page's right
+    edge in every editor.  The gap above the row is the layout's own."""
 
     row = QtWidgets.QHBoxLayout()
     row.setContentsMargins(0, 0, 0, 0)
     row.setSpacing(row_gap())
     heading = FluentSectionLabel(title)
     row.addWidget(heading)
+    for widget in lead:
+        row.addWidget(widget)
     if summary is None:
         row.addStretch(1)
     else:
         row.addWidget(summary, 1)
     for widget in trailing:
         row.addWidget(widget)
-    row.addItem(QtWidgets.QSpacerItem(
-        0, control_height(), QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed))
     return row, heading
 
 
@@ -8212,7 +8220,9 @@ class FluentScrollArea(QtWidgets.QScrollArea):
             {fluent_scrollbar_stylesheet("QScrollBar")}
             """
         )
-    def set_width_bounded_widget(self, widget: QtWidgets.QWidget) -> None:
+    def set_width_bounded_widget(
+        self, widget: QtWidgets.QWidget, *, inset: int | None = None, top: bool = True, bottom: bool = True,
+    ) -> None:
         """Mount vertical content that must never widen its visible host.
 
         Logic lists and Edit pages are window-bounded surfaces: long status
@@ -8224,11 +8234,17 @@ class FluentScrollArea(QtWidgets.QScrollArea):
 
         The bar's gutter is held whether or not the bar shows, so a page whose
         right margin is its inset less :func:`fluent_scrollbar_thickness`
-        ends its content on one x with or without a bar.
+        ends its content on one x with or without a bar.  ``inset`` gives the
+        widget's layout that page margin -- on every side, the right one less
+        the gutter, and none above or below where ``top`` or ``bottom`` is
+        False (a header pinned above the scroll, an action bar below it).
         """
 
         if not isinstance(widget, QtWidgets.QWidget):
             raise TypeError("bounded scroll content must be a QWidget")
+        if inset is not None:
+            widget.layout().setContentsMargins(
+                inset, inset if top else 0, max(0, inset - fluent_scrollbar_thickness()), inset if bottom else 0)
         self.setWidgetResizable(True)
         self.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
         self.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
@@ -8278,6 +8294,31 @@ class FluentScrollArea(QtWidgets.QScrollArea):
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         self._reserve_scrollbar_gutter()
+
+
+def _paint_row_rules(viewport: QtWidgets.QWidget, header: QtWidgets.QHeaderView, skip=frozenset()) -> None:
+    """One hairline under each shown row of ``header`` on ``viewport``, frame
+    to frame, except the rows in ``skip`` and a row whose bottom is the
+    frame's own edge: a rule separates rows, and there it would only double
+    the edge (a table fitted to its rows)."""
+
+    edge = frame_border_px(viewport)
+    width = float(viewport.width())
+    first = max(0, header.visualIndexAt(0))
+    last = header.visualIndexAt(viewport.height() - 1)
+    last = header.count() - 1 if last < 0 else last
+    painter = QtGui.QPainter(viewport)
+    painter.setRenderHint(QtGui.QPainter.Antialiasing, False)
+    divider = QtGui.QColor(DIVIDER)
+    for visual in range(first, last + 1):
+        row = header.logicalIndex(visual)
+        if header.isSectionHidden(row) or row in skip:
+            continue
+        bottom = header.sectionViewportPosition(row) + header.sectionSize(row)
+        if bottom < viewport.height():
+            y = device_snap(viewport, bottom, axis="y") - edge
+            painter.fillRect(QtCore.QRectF(0.0, y, width, edge), divider)
+    painter.end()
 
 
 class _TableHeader(QtWidgets.QHeaderView):
@@ -8336,27 +8377,8 @@ class _TableHeader(QtWidgets.QHeaderView):
 
     def paintEvent(self, event) -> None:  # noqa: N802 - Qt naming
         super().paintEvent(event)
-        if self.orientation() != QtCore.Qt.Vertical:
-            return
-        viewport = self.viewport()
-        edge = frame_border_px(viewport)
-        width = float(viewport.width())
-        painter = QtGui.QPainter(viewport)
-        painter.setRenderHint(QtGui.QPainter.Antialiasing, False)
-        divider = QtGui.QColor(DIVIDER)
-        first = max(0, self.visualIndexAt(0))
-        last = self.visualIndexAt(viewport.height() - 1)
-        last = self.count() - 1 if last < 0 else last
-        for visual in range(first, last + 1):
-            section = self.logicalIndex(visual)
-            if self.isSectionHidden(section):
-                continue
-            bottom = self.sectionViewportPosition(section) + self.sectionSize(section)
-            if bottom >= viewport.height():
-                continue
-            y = device_snap(viewport, bottom, axis="y") - edge
-            painter.fillRect(QtCore.QRectF(0.0, y, width, edge), divider)
-        painter.end()
+        if self.orientation() == QtCore.Qt.Vertical:
+            _paint_row_rules(self.viewport(), self)
 
 
 class _TableRules(QtWidgets.QWidget):
@@ -8865,24 +8887,8 @@ class FluentTableView(QtWidgets.QTableView):
             # reaches, and the region stops where that column starts.
             event = QtGui.QPaintEvent(event.region() & QtGui.QRegion(0, 0, cut, viewport.height()))
         super().paintEvent(event)
-        inside = {row for top_row, bottom_row, _left, _right in runs for row in range(top_row, bottom_row)}
-        width = float(viewport.width())
-        edge = frame_border_px(viewport)
-        painter = QtGui.QPainter(viewport)
-        painter.setRenderHint(QtGui.QPainter.Antialiasing, False)
-        divider = QtGui.QColor(DIVIDER)
-        for visual in range(first, last + 1):
-            row = header.logicalIndex(visual)
-            if header.isSectionHidden(row) or row in inside:
-                continue
-            bottom = self.rowViewportPosition(row) + self.rowHeight(row)
-            if bottom >= viewport.height():
-                # A rule separates rows; on the frame's own bottom edge it
-                # would only double it (a table fitted to its rows).
-                continue
-            y = device_snap(viewport, bottom, axis="y") - edge
-            painter.fillRect(QtCore.QRectF(0.0, y, width, edge), divider)
-        painter.end()
+        _paint_row_rules(viewport, header, skip={
+            row for top_row, bottom_row, _left, _right in runs for row in range(top_row, bottom_row)})
 
     def viewportEvent(self, event) -> bool:  # noqa: N802 - Qt naming
         kind = event.type()
@@ -9892,14 +9898,9 @@ class FluentSegmentedButtons(QtWidgets.QWidget):
         watched.initStyleOption(option)
         painter = QtWidgets.QStylePainter(watched)
         painter.drawControl(QtWidgets.QStyle.CE_PushButtonBevel, option)
-        style = watched.style()
-        area = style.subElementRect(QtWidgets.QStyle.SE_PushButtonContents, option, watched)
         # The control's middle, not the face's: the track's rim is even
         # above and below, so they are one.
-        offset = watched.y()
-        area.setTop(centred_line_top(-offset, self.height(), watched.font()))
-        style.drawItemText(painter, area, int(QtCore.Qt.AlignHCenter | QtCore.Qt.AlignTop),
-                           option.palette, watched.isEnabled(), option.text, QtGui.QPalette.ButtonText)
+        _paint_button_words(watched, painter, option, centred_line_top(-watched.y(), self.height(), watched.font()))
         painter.end()
         return True
 
@@ -10572,6 +10573,14 @@ class ElidedLabel(QtWidgets.QLabel):
         # On the row's one line, as a FluentLabel is.
         if not _paint_label_line(self):
             super().paintEvent(event)
+
+    @staticmethod
+    def room() -> int:
+        """What a label sized to its text keeps beyond the text: the
+        scaled_px(2) :meth:`_elide` never writes into, and the pixel a
+        fractional advance rounds down."""
+
+        return scaled_px(2) + 1
 
     def _elide(self) -> None:
         metrics = self.fontMetrics()

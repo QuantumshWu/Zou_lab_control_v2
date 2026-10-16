@@ -9,14 +9,14 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 from zlc_ui.fluent import (
     FluentButton, FluentComboBox, set_status_ink, ElidedLabel, FluentGroupBox,
     FluentLabel, FluentReadoutEdit, FluentScrollArea, FluentSectionLabel, FluentTableView, centred_line_top,
-    column_header_label, field_text_inset, fluent_scrollbar_thickness, read_editable_combo,
+    column_header_label, field_text_inset, fill_editable_combo, read_editable_combo,
     retire_widget, set_muted, signals_blocked,
 )
 
 from ._layout import (
-    bound_field_width, config_name_width, px, row_height,
+    bound_field_width, config_name_width,
 )
-from zlc_ui.fluent import card_pad, row_gap, section_gap
+from zlc_ui.fluent import card_pad, control_height, row_gap, scaled_px, section_gap
 from .models import ConfigPageRecord
 from zlc_ui.status import SUMMARY_SEPARATOR
 
@@ -52,13 +52,10 @@ class PulseConfigView(QtWidgets.QWidget):
         outer.setContentsMargins(0, 0, 0, 0)
         self.scroll = FluentScrollArea(self)
         body = QtWidgets.QWidget()
-        self.scroll.set_width_bounded_widget(body)
-        outer.addWidget(self.scroll)
         content = QtWidgets.QVBoxLayout(body)
-        # The bar's gutter stands inside the right inset (set_width_bounded_widget).
-        page = section_gap()
-        content.setContentsMargins(page, page, max(0, page - fluent_scrollbar_thickness()), page)
         content.setSpacing(section_gap())
+        self.scroll.set_width_bounded_widget(body, inset=section_gap())
+        outer.addWidget(self.scroll)
         pad = card_pad()
         file_box = FluentGroupBox("Value file")
         file_layout = QtWidgets.QVBoxLayout(file_box)
@@ -73,7 +70,7 @@ class PulseConfigView(QtWidgets.QWidget):
             ("save_as", "Save as…", "standard"), ("unload", "Unload", "destructive"),
         ):
             button = FluentButton(text, role=role)
-            button.setFixedHeight(row_height())
+            button.setFixedHeight(control_height())
             button.clicked.connect(getattr(self, f"{name}_requested"))
             setattr(self, f"{name}_button", button)
             self._file_buttons.append(button)
@@ -87,10 +84,10 @@ class PulseConfigView(QtWidgets.QWidget):
         # card keeps one pitch down to the table.
         self.path_text = FluentReadoutEdit("", flush=True)
         self.path_text.setPlaceholderText("No value file selected")
-        self.path_text.setFixedHeight(row_height())
+        self.path_text.setFixedHeight(control_height())
         file_layout.addWidget(self.path_text)
         self.file_status = ElidedLabel("Save the Config file before using its values.")
-        self.file_status.setFixedHeight(row_height())
+        self.file_status.setFixedHeight(control_height())
         file_layout.addWidget(self.file_status)
         self.values_table = FluentTableView()
         self.values_model = QtGui.QStandardItemModel(0, 3, self)
@@ -140,11 +137,11 @@ class PulseConfigView(QtWidgets.QWidget):
         self.mode_label.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop)
         self.mode_label.ensurePolished()
         self.mode_label.setContentsMargins(
-            0, centred_line_top(0, row_height(), self.mode_label.font()), 0, 0)
-        self.mode_label.setMinimumHeight(row_height())
+            0, centred_line_top(0, control_height(), self.mode_label.font()), 0, 0)
+        self.mode_label.setMinimumHeight(control_height())
         bindings_layout.addWidget(self.mode_label)
         hint = ElidedLabel("Choose a Config name for each field. Save the Pulse to keep these bindings.")
-        hint.setFixedHeight(row_height())
+        hint.setFixedHeight(control_height())
         bindings_layout.addWidget(hint)
         # Each column as wide as what it holds, so a Config name sits beside
         # the field it binds: the field column is its widest label, the name
@@ -168,7 +165,7 @@ class PulseConfigView(QtWidgets.QWidget):
         # a value never reads as the box's suffix.
         self._grid_headers[_DEFAULT].setIndent(_default_indent())
         for column, header in enumerate(self._grid_headers):
-            header.setFixedHeight(row_height())
+            header.setFixedHeight(control_height())
             self._binding_grid.addWidget(header, 0, column)
         bindings_layout.addLayout(self._binding_grid)
         self.bindings_placeholder = FluentLabel("No value bindings yet. Choose Config from a field's source control in Edit.")
@@ -314,7 +311,7 @@ class PulseConfigView(QtWidgets.QWidget):
                 widgets = (ElidedLabel(), combo, FluentReadoutEdit(flush=True), FluentReadoutEdit(flush=True),
                            ElidedLabel())
                 for widget in widgets:
-                    widget.setFixedHeight(row_height())
+                    widget.setFixedHeight(control_height())
                 combo.setFixedWidth(config_name_width())
                 # Default under its header's indent, its column as much wider:
                 # the value keeps the text room Config value has.
@@ -322,8 +319,8 @@ class PulseConfigView(QtWidgets.QWidget):
                 margins = default_value.textMargins()
                 default_value.setTextMargins(margins.left() + _default_indent(), margins.top(),
                                              margins.right(), margins.bottom())
-                default_value.setFixedWidth(px(110, minimum=90) + _default_indent())
-                config_value.setFixedWidth(px(110, minimum=90))
+                default_value.setFixedWidth(scaled_px(110, minimum=90) + _default_indent())
+                config_value.setFixedWidth(scaled_px(110, minimum=90))
                 self._binding_rows[field_id] = widgets
             for column, widget in enumerate(widgets):
                 index = self._binding_grid.indexOf(widget)
@@ -338,19 +335,8 @@ class PulseConfigView(QtWidgets.QWidget):
             parked = field_id in record.parked
             for widget in (widgets[_FIELD], widgets[_STATUS]):
                 set_muted(widget, parked)
-            combo = widgets[1]
-            draft = combo.currentText() if combo.lineEdit().hasFocus() and combo.lineEdit().isModified() else None
-            combo.setProperty("accepted_key", key)
-            with signals_blocked(combo):
-                if tuple(combo.itemData(index) for index in range(combo.count())) != keys:
-                    combo.clear()
-                    for name in keys:
-                        combo.addItem(name, name)
-                combo.setCurrentIndex(combo.findData(key))
-                combo.setEditText(key if draft is None else draft)
-                if draft is not None:
-                    combo.lineEdit().setModified(True)
-            combo.setEnabled(not record.busy)
+            fill_editable_combo(widgets[1], keys, key)
+            widgets[1].setEnabled(not record.busy)
         labels = [widgets[_FIELD].text() for widgets in self._binding_rows.values()]
         width = bound_field_width((self._grid_headers[_FIELD].text(), *labels))
         for widget in (self._grid_headers[_FIELD], *(widgets[_FIELD] for widgets in self._binding_rows.values())):

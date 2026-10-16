@@ -16,10 +16,7 @@ from zlc_ui.fluent import (
     set_status_ink, signals_blocked,
 )
 
-from ._layout import (
-    px, row_height,
-)
-from zlc_ui.fluent import card_pad, section_gap
+from zlc_ui.fluent import card_pad, control_height, scaled_px, section_gap
 
 
 class PulsePreviewView(QtWidgets.QWidget):
@@ -48,8 +45,8 @@ class PulsePreviewView(QtWidgets.QWidget):
         row = QtWidgets.QHBoxLayout(controls)
         pad = card_pad()
         row.setContentsMargins(pad, pad, pad, pad)
-        row.setSpacing(px(10, minimum=6))
-        control_h = row_height()
+        row.setSpacing(scaled_px(10, minimum=6))
+        control_h = control_height()
 
         # On/off settings are switches, the same as the console's Selectors.
         self.preview_include_off = FluentSwitch("Show off rows")
@@ -58,7 +55,7 @@ class PulsePreviewView(QtWidgets.QWidget):
         self.preview_selectors_switch.toggled.connect(self.selectors_toggled)
         self.preview_size_label = FluentLabel("Size")
         self.preview_size_combo = FluentComboBox()
-        self.preview_size_combo.setFixedSize(px(80, minimum=66), control_h)
+        self.preview_size_combo.setFixedSize(scaled_px(80, minimum=66), control_h)
         self.preview_size_combo.activated[int].connect(self._size_picked)
         self.preview_save_figure_button = FluentButton("Save figure")
         self.preview_save_figure_button.setFixedHeight(control_h)

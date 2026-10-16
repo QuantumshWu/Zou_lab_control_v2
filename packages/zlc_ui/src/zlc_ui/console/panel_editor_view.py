@@ -29,7 +29,6 @@ from zlc_ui.fluent import (
     FluentSegmentedButtons,
     FluentSettingRow,
     FluentSwitch,
-    MUTED_LABEL_STYLE,
     card_pad,
     card_title_row,
     muted_note_label,
@@ -46,6 +45,7 @@ from zlc_ui.form import (
     FluentParameterForm,
     FormFieldProps,
     FormSpec,
+    share_label_column,
 )
 
 from ._panel_projection import (
@@ -66,7 +66,6 @@ from .panel_card_view import (
     panel_section,
     relay_surface_errors,
     release_surface_errors,
-    share_label_column,
 )
 
 
@@ -138,11 +137,8 @@ class PanelEditorView(QtWidgets.QWidget):
         body = FluentPageBody()
         body_layout = QtWidgets.QVBoxLayout(body)
         # The host's page inset on every side, so this page starts where the
-        # host's other pages and its first tab's underline start; the bar's
-        # gutter stands inside the right inset (set_width_bounded_widget).
+        # host's other pages and its first tab's underline start.
         inset = window_pad() if page_inset is None else int(page_inset)
-        gutter = self.scroll.verticalScrollBar().sizeHint().width()
-        body_layout.setContentsMargins(inset, inset, max(0, inset - gutter), inset)
         # The cards stack a row gap apart, a section gap under the header.
         body_layout.setSpacing(row_gap())
         pad = card_pad()
@@ -154,8 +150,7 @@ class PanelEditorView(QtWidgets.QWidget):
         header_layout.setContentsMargins(0, 0, 0, 0)
         header_layout.setSpacing(row_gap())
         self.title_label = FluentSectionLabel(self.panel_id)
-        self.kind_label = FluentLabel("")
-        self.kind_label.setStyleSheet(MUTED_LABEL_STYLE)
+        self.kind_label = muted_note_label("")
         self.kind_label.setToolTip("The plot kind is fixed when the panel is added")
         header_layout.addWidget(self.title_label)
         header_layout.addWidget(self.kind_label)
@@ -305,7 +300,7 @@ class PanelEditorView(QtWidgets.QWidget):
         self.save_button.clicked.connect(self._save_figure)
         body_layout.addStretch(1)
 
-        self.scroll.set_width_bounded_widget(body)
+        self.scroll.set_width_bounded_widget(body, inset=inset)
         outer.addWidget(self.scroll)
         self.update_projection(projection)
 

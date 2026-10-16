@@ -13,7 +13,6 @@ from PyQt5 import QtCore, QtGui, QtWidgets, sip
 
 from zlc_ui.fluent import (
     HEADING_CSS_WEIGHT,
-    MUTED_LABEL_STYLE,
     TEXT,
     ElidedLabel,
     FluentButton,
@@ -32,9 +31,9 @@ from zlc_ui.fluent import (
     fill_grouped_choice_combo,
     fit_button_words,
     fluent_font_size,
+    muted_note_label,
     retire_widget,
     row_gap,
-    scaled_px,
     section_gap,
     set_status_ink,
     setting_label_width,
@@ -48,7 +47,6 @@ from zlc_ui.status import SUMMARY_SEPARATOR, name_words
 from .logic_row_view import (
     STATE_WORDS,
     START_LABELS,
-    mount_logic_page,
     start_label,
 )
 
@@ -140,8 +138,7 @@ class LogicEditorView(QtWidgets.QWidget):
             f'QLabel {{ color: {TEXT}; font: {HEADING_CSS_WEIGHT} {fluent_font_size()}pt "{FONT}"; '
             "background: transparent; }"
         )
-        self.kind_label = FluentLabel("")
-        self.kind_label.setStyleSheet(MUTED_LABEL_STYLE)
+        self.kind_label = muted_note_label("")
         title_row.addWidget(self.title_label, 1)
         title_row.addWidget(self.kind_label)
         header_layout.addLayout(title_row)
@@ -240,7 +237,8 @@ class LogicEditorView(QtWidgets.QWidget):
         self._body_layout.addWidget(self._artifact_result_frame)
 
         self._body_layout.addStretch(1)
-        mount_logic_page(self._scroll, body, top=False, bottom=not show_actions)
+        # The header above and the action bar below carry the page pads there.
+        self._scroll.set_width_bounded_widget(body, inset=pad, top=False, bottom=not show_actions)
         outer.addWidget(self._scroll, 1)
 
         # The node row's two fixed slots, in its order -- Start then Stop, as
@@ -354,8 +352,7 @@ class LogicEditorView(QtWidgets.QWidget):
         self.title_label.setText(title)
         self.title_label.ensurePolished()
         self.title_label.setMaximumWidth(
-            self.title_label.fontMetrics().horizontalAdvance(title) + scaled_px(2) + 1
-        )
+            self.title_label.fontMetrics().horizontalAdvance(title) + self.title_label.room())
         self.title_label.setToolTip(
             "\n".join(part for part in (title, str(incoming.get("description") or "")) if part)
         )

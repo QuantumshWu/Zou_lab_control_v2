@@ -1,8 +1,8 @@
 """Pure operator chrome for one console logic row.
 
 Also what the row shares with its node's Edit page and with the Logic list
-around it -- the status words, the Start words, the gaps and the page edges --
-so the list and every Edit page are built from one set of numbers.
+around it -- the status words, the Start words, the gaps -- so the list and
+every Edit page are built from one set of numbers.
 """
 
 from __future__ import annotations
@@ -10,22 +10,19 @@ from __future__ import annotations
 from PyQt5 import QtCore, QtWidgets
 
 from zlc_ui.fluent import (
-    CARD_PAD,
-    MUTED_LABEL_STYLE,
     ElidedLabel,
     FluentButton,
     FluentFrame,
-    FluentLabel,
-    FluentScrollArea,
     FluentStatusDot,
     FluentSwitch,
     add_row_switch,
+    card_pad,
     fit_button_words,
+    muted_note_label,
     scaled_px,
     set_status_ink,
     setting_label_width,
     status_dot_gap,
-    window_pad,
 )
 from zlc_ui.fluent import PublishedItemsLegend
 from zlc_ui.fluent import row_gap
@@ -52,33 +49,6 @@ STATE_WORDS = {
     "warning": "warning",
     "error": "error",
 }
-
-
-def mount_logic_page(
-    scroll: FluentScrollArea,
-    body: QtWidgets.QWidget,
-    *,
-    top: bool = True,
-    bottom: bool = True,
-) -> None:
-    """Put ``body`` -- a Logic page: the list, or one node's Edit -- in ``scroll``.
-
-    Every page has ONE content edge on each side, a window pad inside the tab
-    pane, so nothing moves when the operator switches between the list and
-    an Edit tab; the right margin holds the bar's gutter
-    (:meth:`FluentScrollArea.set_width_bounded_widget`).
-
-    ``top`` and ``bottom`` say whether the body's own edge is the page's: an
-    Edit page pins its header above the scroll and its action bar below it,
-    and those carry the pads there instead.
-    """
-
-    pad = window_pad()
-    gutter = scroll.verticalScrollBar().sizeHint().width()
-    body.layout().setContentsMargins(
-        pad, pad if top else 0, max(0, pad - gutter), pad if bottom else 0,
-    )
-    scroll.set_width_bounded_widget(body)
 
 
 def start_label(*, pending: bool, active: bool) -> str:
@@ -128,7 +98,7 @@ class LogicRowView(FluentFrame):
         # the command line and the legend under it.  The commands are spaced
         # by that gap too, as on the node's Edit page, so the same
         # Plot | Start | Stop group has the same air in both places.
-        pad = scaled_px(CARD_PAD)
+        pad = card_pad()
         outer.setContentsMargins(pad, pad, pad, pad)
         outer.setSpacing(row_gap())
 
@@ -141,8 +111,7 @@ class LogicRowView(FluentFrame):
         # Name and kind are fixed columns: every row's kind and status start
         # at the same x, instead of floating with the length of the name.
         self.name_label.setFixedWidth(scaled_px(200, minimum=150))
-        self.kind_label = FluentLabel(f"({self.kind})")
-        self.kind_label.setStyleSheet(MUTED_LABEL_STYLE)
+        self.kind_label = muted_note_label(f"({self.kind})")
         self.kind_label.setFixedWidth(setting_label_width(_KINDS))
         self.status_label = ElidedLabel("idle")
         self.status_label.setMinimumWidth(0)
@@ -281,6 +250,5 @@ __all__ = [
     "START_LABELS",
     "STATE_WORDS",
     "LogicRowView",
-    "mount_logic_page",
     "start_label",
 ]

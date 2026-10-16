@@ -18,10 +18,7 @@ from zlc_ui.fluent import (
     fluent_scrollbar_thickness, set_status_ink, signals_blocked,
 )
 
-from ._layout import (
-    px, row_height,
-)
-from zlc_ui.fluent import card_pad, row_gap, section_gap
+from zlc_ui.fluent import card_pad, control_height, row_gap, scaled_px, section_gap
 from .models import TargetPortRecord, TargetWidthRule
 
 
@@ -66,7 +63,7 @@ class PulseTargetView(QtWidgets.QWidget):
         layout.setSpacing(section_gap())
         pad = card_pad()
         header = FluentFrame()
-        header.setFixedHeight(px(58, minimum=48))
+        header.setFixedHeight(scaled_px(58, minimum=48))
         header_layout = QtWidgets.QHBoxLayout(header)
         header_layout.setContentsMargins(pad, pad, pad, pad)
         header_layout.setSpacing(row_gap())
@@ -126,7 +123,7 @@ class PulseTargetView(QtWidgets.QWidget):
 
         label = column_header_label(text)
         label.setIndent(field_text_inset())
-        label.setFixedHeight(row_height())
+        label.setFixedHeight(control_height())
         return label
 
     def set_width_rules(self, digital: TargetWidthRule, dac: TargetWidthRule) -> None:
@@ -191,19 +188,19 @@ class PulseTargetView(QtWidgets.QWidget):
 
     def _make_row(self, record: TargetPortRecord) -> _TargetRowWidgets:
         signal = FluentLineEdit(record.signal)
-        signal.setFixedHeight(row_height())
+        signal.setFixedHeight(control_height())
         endpoints = FluentLineEdit(", ".join(record.endpoints))
-        endpoints.setFixedHeight(row_height())
+        endpoints.setFixedHeight(control_height())
         width = FluentSpinBox()
         rule = self._width_rules[record.kind]
         width.setRange(rule.minimum, _QT_SPINBOX_MAXIMUM if rule.maximum is None else rule.maximum)
         width.setValue(max(rule.minimum, len(record.endpoints)))
-        width.setFixedSize(px(82, minimum=70), row_height())
+        width.setFixedSize(scaled_px(82, minimum=70), control_height())
         clock_endpoint = FluentLineEdit(record.clock_endpoint or "")
-        clock_endpoint.setFixedHeight(row_height())
+        clock_endpoint.setFixedHeight(control_height())
         # The row remover every list has: the ghost x, red under the pointer.
         remove_button = FluentButton("×", role="destructive")
-        remove_button.setFixedSize(row_height(), row_height())
+        remove_button.setFixedSize(control_height(), control_height())
         remove_button.setToolTip("Remove this port row")
         remove_button.clicked.connect(lambda _checked=False, key=record.key: self._remove_key(key))
         if record.kind == "dac":

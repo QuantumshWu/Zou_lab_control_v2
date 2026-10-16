@@ -1177,6 +1177,27 @@ def _form_label_width(fields) -> int:
     return setting_label_width(_shown_label(field) for field in fields)
 
 
+def share_label_column(forms, *, widths: tuple[int, ...] = ()) -> int:
+    """Give ``forms`` one label column, the widest any of their rows needs,
+    and answer it (0 when nothing needs one).
+
+    Each form sizes a column to its own words, so sections stacked down one
+    page would start their controls at as many x.  ``widths`` are the
+    columns the page's other rows need (Save figure's rows, a producer
+    contribution's labels); the caller gives those rows the answer.
+    """
+
+    forms = tuple(forms)
+    column = max(
+        (*widths, *(_form_label_width(form.spec.fields) for form in forms if form.spec.fields)),
+        default=0,
+    )
+    if column:
+        for form in forms:
+            form.set_label_width(column)
+    return column
+
+
 def _same_typed_value(left: object, right: object) -> bool:
     return type(left) is type(right) and left == right
 
@@ -2289,4 +2310,5 @@ class FluentParameterForm(QtWidgets.QWidget):
 __all__ = [
     "FluentParameterForm",
     "FormRuntimeContext",
+    "share_label_column",
 ]

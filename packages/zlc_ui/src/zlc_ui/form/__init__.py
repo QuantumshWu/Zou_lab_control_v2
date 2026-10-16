@@ -16,6 +16,7 @@ _EXPORTS = {
     "FluentParameterForm": ("zlc_ui.form.qt_form", "FluentParameterForm"),
     "being_edited": ("zlc_ui.form.qt_form", "being_edited"),
     "decimal_number_width": ("zlc_ui.form.qt_form", "decimal_number_width"),
+    "share_label_column": ("zlc_ui.form.qt_form", "share_label_column"),
 }
 
 __all__ = tuple(sorted(_EXPORTS))

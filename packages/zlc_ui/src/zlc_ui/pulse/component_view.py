@@ -7,14 +7,14 @@ from PyQt5 import QtCore, QtWidgets
 from zlc_ui.fluent import (
     ElidedLabel, FluentButton, FluentComboBox,
     FluentFrame, FluentGroupBox, FluentLabel, FluentLineEdit, FluentScrollArea,
-    fluent_scrollbar_thickness, read_editable_combo, retire_widget,
+    fill_editable_combo, read_editable_combo, retire_widget,
     set_status_ink, setting_label_width, signals_blocked,
 )
 
 from ._layout import (
-    bound_field_width, config_name_width, px, row_height,
+    bound_field_width, config_name_width,
 )
-from zlc_ui.fluent import card_pad, row_gap, section_gap
+from zlc_ui.fluent import card_pad, control_height, row_gap, scaled_px, section_gap
 from .models import ScheduleVM
 from .schedule_view import PulseScheduleView
 
@@ -39,8 +39,7 @@ class PulseComponentView(QtWidgets.QWidget):
         # the top; under them the page scrolls as one, with one vertical
         # bar: the schedule as tall as its rows, then the references.
         # The gap under the commands is above the scrolling body, so
-        # scrolled content clips one gap below them.  The bar's gutter
-        # stands inside the right inset (set_width_bounded_widget).
+        # scrolled content clips one gap below them.
         outer = QtWidgets.QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
@@ -51,11 +50,10 @@ class PulseComponentView(QtWidgets.QWidget):
         outer.addLayout(self._pinned)
         scroll = FluentScrollArea()
         page_body = QtWidgets.QWidget()
-        scroll.set_width_bounded_widget(page_body)
-        outer.addWidget(scroll, 1)
         self._page = QtWidgets.QVBoxLayout(page_body)
-        self._page.setContentsMargins(page, 0, max(0, page - fluent_scrollbar_thickness()), page)
         self._page.setSpacing(section_gap())
+        scroll.set_width_bounded_widget(page_body, inset=page, top=False)
+        outer.addWidget(scroll, 1)
         pad = card_pad()
         header = FluentFrame()
         head = QtWidgets.QVBoxLayout(header)
@@ -74,7 +72,7 @@ class PulseComponentView(QtWidgets.QWidget):
         subpulse_label.setFixedWidth(label_width)
         top.addWidget(subpulse_label)
         self.context_combo = FluentComboBox()
-        self.context_combo.setMinimumWidth(px(150))
+        self.context_combo.setMinimumWidth(scaled_px(150))
         self.context_combo.currentIndexChanged.connect(self._context_changed)
         top.addWidget(self.context_combo, 1)
         self._buttons = {}
@@ -113,18 +111,18 @@ class PulseComponentView(QtWidgets.QWidget):
         # control, their text on a control's line, so the card keeps one
         # pitch from its first row to its last.
         self.path_label = ElidedLabel("")
-        self.path_label.setFixedHeight(row_height())
+        self.path_label.setFixedHeight(control_height())
         head.addWidget(self.path_label)
         # What Save does here from the card's left edge, and the source's
         # state at its right.
         hint = QtWidgets.QHBoxLayout()
         hint.setSpacing(row_gap())
         self.scope_label = ElidedLabel("")
-        self.scope_label.setFixedHeight(row_height())
+        self.scope_label.setFixedHeight(control_height())
         hint.addWidget(self.scope_label, 1)
         self.source_status = FluentLabel("")
         set_status_ink(self.source_status, "idle")
-        self.source_status.setFixedHeight(row_height())
+        self.source_status.setFixedHeight(control_height())
         hint.addWidget(self.source_status)
         self.source_status.hide()
         head.addLayout(hint)
@@ -315,9 +313,9 @@ class PulseComponentView(QtWidgets.QWidget):
             widgets = self._binding_rows.get(field_id)
             if widgets is None:
                 label_widget = ElidedLabel(label)
-                label_widget.setFixedHeight(row_height())
+                label_widget.setFixedHeight(control_height())
                 combo = FluentComboBox()
-                combo.setFixedSize(config_name_width(), row_height())
+                combo.setFixedSize(config_name_width(), control_height())
                 combo.setEditable(True)
                 combo.lineEdit().setPlaceholderText("Config name")
                 combo.lineEdit().editingFinished.connect(lambda fid=field_id: self._commit_binding(fid))
@@ -325,16 +323,8 @@ class PulseComponentView(QtWidgets.QWidget):
                 widgets = self._binding_rows[field_id] = (label_widget, combo)
             label_widget, combo = widgets
             label_widget.setText(label)
-            with signals_blocked(combo, combo.lineEdit()):
-                values = tuple(dict.fromkeys(config_names))
-                if tuple(combo.itemData(i) for i in range(combo.count())) != values:
-                    combo.clear()
-                    for value in values:
-                        combo.addItem(value, value)
-                combo.setCurrentIndex(combo.findData(key))
-                combo.setEditText(key)
-                combo.setProperty("accepted_key", key)
-                combo.setEnabled(not busy)
+            fill_editable_combo(combo, tuple(dict.fromkeys(config_names)), key)
+            combo.setEnabled(not busy)
             self._binding_layout.addWidget(label_widget, row, 0)
             self._binding_layout.addWidget(combo, row, 1)
         width = bound_field_width([widgets[0].text() for widgets in self._binding_rows.values()])

@@ -46,7 +46,8 @@ They constrain implementation method; product and architecture truth remain in
   - 先找后写。新写 helper、样式或度量之前，先在 `zlc_ui.fluent` 和现有 owner
     里搜（`control_height`、`row_gap`、`card_pad`、`muted_note_label`、
     `set_status_ink`、`FluentSettingRow`、`share_label_column`、
-    `mount_logic_page` 等）。同一规则第二次出现时，当场收进 owner，不复制第二份。
+    `set_width_bounded_widget(inset=…)` 等）。同一规则第二次出现时，当场收进
+    owner，不复制第二份。
   - 删功能要连根删。调用方去掉某个用法时，同一个提交里删掉库中只为它服务的
     参数、状态和导出；一次重设计结束时，先清残留，再合并。
   - 一条规则只测一层：owner 层或用户路径层二选一。MCP/HTTP 只测路由，不复测
