@@ -82,8 +82,7 @@ class PanelEditorView(QtWidgets.QWidget):
     save_figure_requested = QtCore.pyqtSignal(str)
     #: A refusal the mounted Edit plot surface reported (``errorOccurred``),
     #: relayed exactly as the card relays its own: the console reports it
-    #: on the same channel.  Unconnected, an Edit surface's refusals were
-    #: the one plot error the console never heard.
+    #: on the same channel.
     plot_error = QtCore.pyqtSignal(str)
 
     def __init__(
@@ -139,10 +138,8 @@ class PanelEditorView(QtWidgets.QWidget):
         body = FluentPageBody()
         body_layout = QtWidgets.QVBoxLayout(body)
         # The host's page inset on every side, so this page starts where the
-        # host's other pages and its first tab's underline start.  The bar's
-        # gutter is held whether or not the bar shows (a width-bounded
-        # mount) and stands inside the right inset: the cards end on the
-        # host's right edge with or without a bar.
+        # host's other pages and its first tab's underline start; the bar's
+        # gutter stands inside the right inset (set_width_bounded_widget).
         inset = window_pad() if page_inset is None else int(page_inset)
         gutter = self.scroll.verticalScrollBar().sizeHint().width()
         body_layout.setContentsMargins(inset, inset, max(0, inset - gutter), inset)
@@ -469,14 +466,8 @@ class PanelEditorView(QtWidgets.QWidget):
         self._share_label_column()
 
     def _share_label_column(self) -> None:
-        """One control column down the whole page.
-
-        Each card's form sizes a label column to its own words, so Panel,
-        Semantic, Display and Save figure would start their controls at as
-        many x.  Every card takes the column the widest shown label of any
-        card needs: the forms', the Save figure rows' and the producer
-        contributions' that take the column.
-        """
+        """One control column down the whole page (:func:`share_label_column`):
+        the forms', the Save figure rows' and the producer contributions'."""
 
         forms = (self.panel_form, *self.parameter_forms.values(), self.producer_form)
         spec = (self._applied_producer or {}).get("form_spec", FormSpec(()))

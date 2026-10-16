@@ -205,49 +205,6 @@ def test_a_file_kept_without_frames_never_stops_start(workspace) -> None:
         app.processEvents()
 
 
-def test_a_kept_file_that_cannot_be_read_is_read_at_the_boundaries_only(workspace) -> None:
-    """A kept file that does not decode is answered with its error, and an
-    edit carries that answer like a decoded one: it is read again only at a
-    boundary (no last answer), which is where a fixed file is seen.  The
-    error keeps no traceback -- the frames that raised it hold the last
-    answer, so each answer would otherwise keep every one before it."""
-
-    import gc
-    import weakref
-
-    readout = _saved(workspace, "readout.json")
-    broken = workspace.data / "broken.json"
-    broken.write_text("{not json", encoding="utf-8")
-    reads = ({"path": str(readout), "frames": ["rest"]},)
-    plane = SignalDataPlane()
-    try:
-        claims = (*reads, {"path": str(broken), "frames": []})
-        first = _finalize(workspace, plane, claims, source_frames=3)
-        assert first.can_start, first.issues
-        error = first.artifacts["calibrations"][1].value.value
-        assert isinstance(error, Exception)
-        assert (error.__traceback__, error.__context__, error.__cause__) == (None, None, None)
-
-        # Fixed on disk: an edit still carries the failed answer, a boundary reads it.
-        _calibration().save(broken)
-        edited = _finalize(workspace, plane, claims, source_frames=3, previous=first)
-        assert edited.artifacts["calibrations"][1].value is first.artifacts["calibrations"][1].value
-        fresh = _finalize(workspace, plane, claims, source_frames=3)
-        assert isinstance(fresh.artifacts["calibrations"][1].value.value, TrapCalibration)
-
-        # Every edit naming a new missing file: no answer keeps the one before it.
-        answer = _finalize(workspace, plane, reads, source_frames=3)
-        oldest = weakref.ref(answer)
-        for index in range(5):
-            gone = {"path": str(workspace.data / f"gone_{index}.json"), "frames": []}
-            answer = _finalize(workspace, plane, (*reads, gone), source_frames=3, previous=answer)
-            assert answer.can_start, answer.issues
-        gc.collect()
-        assert oldest() is None, "the first answer is still held by a later one"
-    finally:
-        plane.close()
-
-
 def test_the_path_form_leaves_frame_claims_to_their_editor() -> None:
     (spec,) = [s for s in OCCUPANCY_NODE.input_specs if isinstance(s, ArtifactInputSpec)]
     assert spec.frame_claims

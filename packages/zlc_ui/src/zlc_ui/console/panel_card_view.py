@@ -144,8 +144,7 @@ def relay_surface_errors(widget: object, relay: object) -> bool:
     ONE rule for every surface mount -- the card's and the editor's.  A
     plot surface says what a gesture could not do through this one signal
     (a pointer front that lost its surface, a refused RGBA) and the mount
-    relays it so the console can report it; a mount that did not connect
-    it kept those refusals fully silent.  Returns whether a connection was
+    relays it so the console can report it.  Returns whether a connection was
     made, which is what its release needs to know.
     """
 
@@ -220,13 +219,10 @@ def data_structure_fragments(
     in that group's own order. Other domains still read their full size.
     These counts come from the current data position, not plot selection;
     their product is not a total sample count. By POSITION within the
-    Repeat group, never by name: an axis is very often called "repeat", two
-    Repeat axes may both be, and so may a Point axis, and a name lookup
-    handed the last count to every one of them.
+    Repeat group, never by name: two axes may share a name.
 
     The separator is the multiplication SIGN, not the letter: an axis is
-    very often called "x", and "(repeat)x(x)x()" asked the reader to work
-    out which of those three x's was an axis name.
+    very often called "x".
 
     A fragment is ``(text, colour, elide)``, where ``elide`` is the Qt elide
     mode this fragment gives up room by, or ``None`` for one that may not.
@@ -276,23 +272,14 @@ def data_structure_fragments(
 def elide_fragments(fragments: object, metrics: object, available: int) -> tuple:
     """The same fragments, shortened to ``available`` with their structure kept.
 
-    Eliding the LINE -- one ``elidedText`` over the whole strip's plain text --
-    threw away the two things the strip is read by.  The colours pair the
-    numbers above with the names below group by group, and a single escaped
-    string has no fragments left to colour; the brackets say where a group
-    ends, and ElideMiddle ate them from the middle outwards, so a three-domain
-    shape read "(rep...ite)" -- one bracket around everything.  Measured on a
-    15x15x15 scan, the names line asks for 1938 px and the widest card offers
-    500, so this was not the narrow case: it was every case.
-
-    The room is spent here instead.  Brackets and separators are kept whole,
-    and the room left over is shared between the group CONTENTS by equal
-    claim, not in proportion to what each asked for: a group that fits inside
-    an equal share keeps its whole name and hands the surplus back, and only
-    the groups that are genuinely long give anything up.  Splitting the width
-    in proportion instead starved the short groups to nothing -- a scan's
-    "(35) x (site)" became "() x ()" while the long one kept a stub -- which
-    is the same bracket-with-nothing-in-it this strip is not allowed to show.
+    Never one ``elidedText`` over the whole line: the colours pair the
+    numbers above with the names below group by group, and the brackets say
+    where a group ends.  Brackets and separators are kept whole, and the room
+    left over is shared between the group CONTENTS by equal claim, not in
+    proportion to what each asked for: a group that fits inside an equal
+    share keeps its whole name and hands the surplus back, and only the
+    groups that are genuinely long give anything up, so no bracket is left
+    with nothing in it.
     """
 
     fragments = tuple(fragments)
@@ -362,10 +349,7 @@ class PanelCardView(FluentGroupBox):
     def __init__(self, panel_id: str, title: str = "Panel", parent=None) -> None:
         # No Qt title: this card paints its own strip, two lines tall, as the
         # first row of its layout.  A QGroupBox title is a GEOMETRY
-        # constraint -- what it says decides how wide the widget must be --
-        # and a strip that names a signal and its shape took the card's
-        # minimum width from 149 px to 704, so the board packed cards that
-        # Qt then refused to shrink, and they overlapped.
+        # constraint -- what it says decides how wide the widget must be.
         super().__init__("", parent, title_strip_px=0)
         self.panel_id = str(panel_id)
         self._base_title = str(title)
@@ -451,7 +435,7 @@ class PanelCardView(FluentGroupBox):
         # The presenter marks the card a board-wide error line is about.  The
         # card body reserves no status row, so the dot rides the title strip
         # beside Setting and the full message travels as its tooltip.
-        self.status_dot = FluentStatusDot(size=12)
+        self.status_dot = FluentStatusDot()
         self.status_dot.hide()
 
         # The strip: one grey band across the whole top of the card, two
@@ -470,11 +454,9 @@ class PanelCardView(FluentGroupBox):
             QtWidgets.QSizePolicy.Ignored,
             QtWidgets.QSizePolicy.Fixed,
         )
-        # The band is a fill INSIDE the card's edge: the card paints its
-        # own continuous edge, and an opaque band laid from (0, 0) painted
-        # over the top and side of it -- with an unscaled corner that left
-        # a fragment of the arc showing at three device pixels a point.  It
-        # starts one edge-width in, with the inner, concentric radius.
+        # The band is a fill INSIDE the card's edge, which the card paints
+        # itself: it starts one edge-width in, with the inner, concentric
+        # radius.
         pad = self.strip_text_inset()
         title_pad = scaled_px(CARD_TITLE_PAD)
         inner_radius = max(0, scaled_px(RADIUS) - FIELD_BORDER_PX)
@@ -522,17 +504,13 @@ class PanelCardView(FluentGroupBox):
         outer.addLayout(holder)
         # An empty card is taller than what it lays out -- a fixed strip and
         # an empty body -- and a layout shorter than its widget is CENTRED
-        # in it unless told otherwise, which put an empty card's strip in
-        # the middle of its frame.  A card with a picture is exactly its
+        # in it unless told otherwise.  A card with a picture is exactly its
         # layout, so this moves nothing there.
         outer.setAlignment(QtCore.Qt.AlignTop)
         self._surface_layout = holder
         # No body placeholder: an empty card is the blank frame its picture
         # will fill, and its strip's second line says why it holds none (see
-        # _band_fragments).  A sentence centred in the body was a second
-        # layout -- one strip line instead of two, the caption sitting lower
-        # than every drawn neighbour's -- and it went on saying "pick a
-        # signal" on a card whose strip already named one.
+        # _band_fragments).
         # A bare reusable card has no TaskConsole switch, so its plot remains
         # interactive.  TaskConsoleHandle projects the global switch onto every
         # card before a mounted panel can be used.
@@ -627,10 +605,7 @@ class PanelCardView(FluentGroupBox):
         Two LINES, whatever they say: a card whose height followed its text
         would reflow the whole board every time a signal was renamed.  They
         are measured as the strip's rich text stacks them, which rounds each
-        line UP to a whole pixel: twice the font's integer line spacing was
-        two pixels short of that at the body font, and the second line's
-        descenders -- the g of "Setting", the y of "spatial-y" -- were cut
-        off by the label's edge.
+        line UP to a whole pixel (twice the integer line spacing is short).
         """
 
         probe = QtGui.QTextDocument()
@@ -650,12 +625,9 @@ class PanelCardView(FluentGroupBox):
         asks.  A card that frames a picture is that picture's size and moves
         with it, never ahead of it: a preset picked by the operator resizes
         the card when the picture drawn at it lands, in the same event, so
-        the picture, its frame and the strip change together -- not a frame
-        that jumped first and stood around the old picture, strip re-elided,
-        until the new one was painted.  How much room the card itself takes
-        is the card's own layout: its strip and its margins, measured, never
-        the constant that was restated here and went wrong the moment the
-        strip grew a second line.
+        the picture, its frame and the strip change together.  How much room
+        the card itself takes is the card's own layout: its strip and its
+        margins, measured.
         """
 
         if self._surface_framed:
@@ -1069,11 +1041,9 @@ class PanelCardView(FluentGroupBox):
         ):
             # The settings body re-measures whenever ITS OWN layout says its
             # geometry is stale -- however many layout turns nested rows take
-            # to settle.  A deferred one-shot measurement was a timing guess,
-            # and a guess that lost left the pinned body height short, with
-            # the Edit row painted over the form's last row until the popup
-            # was reopened.  Re-entry terminates: an unchanged measurement
-            # writes nothing and so requests no further layout.
+            # to settle, never a deferred one-shot timing guess.  Re-entry
+            # terminates: an unchanged measurement writes nothing and so
+            # requests no further layout.
             self._sync_settings_body_size()
         if (
             watched is self._surface
@@ -1361,11 +1331,6 @@ class PanelCardView(FluentGroupBox):
     def _sync_settings_body_size(self, *, opening: bool = False) -> None:
         """Measure the content.  Do NOT move the frame it is sitting in.
 
-        This used to re-run the whole placement -- size AND position, derived
-        afresh from the content -- whenever the form's required width or
-        height changed.  So adding one control resized the operator's frame
-        underneath them, and everything in it moved.
-
         An open frame's geometry belongs to the operator: they opened it
         there, they may have carried it somewhere else, and a control
         appearing is not a reason to take that away.  The measurements below
@@ -1392,10 +1357,8 @@ class PanelCardView(FluentGroupBox):
         required_height = body.layout().sizeHint().height()
         if body.minimumHeight() != required_height:
             body.setMinimumHeight(required_height)
-        # Finish the job here rather than a layout turn later.  The
-        # re-placement that used to follow was synchronous, so removing it
-        # left the scroll content one turn stale -- one frame of the old
-        # height on screen.  This is what widgetResizable would do next
+        # Finish the job here rather than a layout turn later, so no frame
+        # shows the old height.  This is what widgetResizable would do next
         # turn, done now, and it touches the content only.
         body.resize(
             body.width(),
@@ -1420,10 +1383,9 @@ class PanelCardView(FluentGroupBox):
         )
         if limit > popup.width():
             popup.resize(limit, popup.height())
-        # The page is a hard wall now -- the frame cannot grow past the
-        # panel area the way it once grew to the screen edge.  When the
-        # form is wider than the page can afford, the content scrolls
-        # sideways instead of being cut off.
+        # The page is a hard wall: the frame cannot grow past the panel
+        # area.  When the form is wider than the page can afford, the
+        # content scrolls sideways instead of being cut off.
         self._settings_scroll.setHorizontalScrollBarPolicy(
             QtCore.Qt.ScrollBarAsNeeded
             if limit < popup.width() + shortfall
@@ -1472,10 +1434,7 @@ class PanelCardView(FluentGroupBox):
             layout = QtWidgets.QVBoxLayout(popup)
             pad = card_pad()
             layout.setContentsMargins(pad, pad, 0, pad)
-            # The title row sits in the same air above and below it.  With
-            # no gap under it the row hugged the first field, and its close
-            # button -- centred in the row -- read as sitting low in a blank
-            # that was all above it.
+            # The title row sits in the same air above and below it.
             layout.setSpacing(pad)
             scroll = FluentScrollArea(popup)
             header = QtWidgets.QWidget(popup)

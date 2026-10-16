@@ -576,15 +576,9 @@ def _masked(value, mask, negate, texts):
 
 def changing_axes(schema: DatasetSchema, event: DatasetSchema | None) -> dict:
     """The Repeat/Point axes of ``schema`` -- what typing reads -- whose
-    labels change from one publication to the next, each with the labels
-    the latest publication ``event`` carries.
-
-    Live, a publication carries its own rows of those two domains: a finite
-    run's typing schema is its whole geometry, and an axis the latest event
-    carries otherwise is one each event carries its own part of (shots,
-    scan points); a monitor's typing schema is its latest event, whose
-    shots (Repeat) are that publication's alone.  A pick on such an axis
-    would name what most publications lack, so typing refuses it.
+    labels change from one publication to the next (a finite run's shots
+    and scan points, a monitor's shots), each with the labels the latest
+    publication ``event`` carries.  Typing refuses a pick on them.
     """
 
     if event is None:
@@ -1231,39 +1225,16 @@ def typed_variables(rows: Sequence[Mapping[str, object]],
 
 def frames_kept(rows: Sequence[Mapping[str, object]], axis: str | None, frames: tuple[str, ...],
                 members: Sequence[str] | None) -> tuple[tuple[str, ...] | None, ...]:
-    """Every variable's labels of the axis named ``axis`` -- the name the
-    source gives its readout-event axis, None when it has none -- when each
-    input member carries that axis with labels ``frames`` -- ``()`` when the
-    members carry no such axis -- which is what a source's draft says before
-    any data exists: one per variable, in card order, ``()`` when the value
-    carries no such axis, None when it cannot be told.
-
-    ``members`` are the input members' names, read as typing reads them:
-    a name is a member's before it is a variable's, a variable named like a
-    member has a name problem, a name that is neither is refused.  None when
-    the names are not known (``describe_output_frames`` is told the
-    source's axis, not its members): a name no variable has is then read
-    as a member's, so a name nothing has, or a variable named like a
-    member, is typing's alone to refuse once the members publish.
-
-    These are typing's rules on that one axis, over the same precedence
-    tree: a member carries ``frames``, a variable its own answer; a pick on
-    the axis keeps the picked labels in axis order -- ``first`` and ``last``
-    its ends as long as the value carries it, so Last follows a frame count
-    -- and one removes it; a pick of the Point domain keeps the labels its
-    rows use, one row removes it (its ``first`` or ``last`` row cannot be
-    told: which frames they carry is its row order, and whether Point has
-    an axis besides the frame axis, which typing requires, its schema --
-    only the schemas say either); any other pick leaves it; an operator's
-    sides carry the same labels
-    or one carries none, a where's mask none or the value's, and the result
-    carries them; a statistic over the axis removes it.  None for whatever
-    typing refuses on that axis -- a label it lacks, two sides that differ
-    -- for a constant beside a logic operator or a where (a number is never
-    a boolean, and has no samples to keep), and for a problem typing finds
-    first: a name, the formula's shape, a variable read that has one.  What
-    only the members' schemas say (their dtypes, their other axes) is
-    typing's to answer once they publish.
+    """Every variable's labels of the readout-event axis named ``axis``
+    (None: the source has none) when each input member carries it with
+    labels ``frames`` (``()``: they carry none) -- what a source's draft
+    says before any data exists.  One per variable, in card order: ``()``
+    when the value carries no such axis, None when it cannot be told or
+    typing would refuse it.  ``members`` are the input members' names, or
+    None when only the source's axis is known (a name no variable has is
+    then read as a member's).  These are typing's rules on that one axis,
+    over the same precedence tree; the full list is ARCHITECTURE_DESIGN.md's
+    (``describe_output_frames``).
     """
     rows = tuple(rows)
     known = () if members is None else tuple(members)

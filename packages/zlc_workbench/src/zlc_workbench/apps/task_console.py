@@ -771,11 +771,7 @@ class ExperimentGuiFlow:
     def _open_generic_control(self, key: str, device: object) -> None:
         """Read the device, then open its control on what it said.
 
-        The window used to open at once, on an EMPTY spec with a placeholder
-        note, and be re-projected once the worker had read the device -- so
-        every control the operator opened painted a page with no rows, then
-        rows with half their cells, then the page.
-        The first frame is now the whole form: nothing is shown before the
+        The first frame is the whole form: nothing is shown before the
         fields it is made of are known.  A second press while the reading
         is under way opens nothing; a reading that fails is reported where
         the press was made, on the Device Manager.

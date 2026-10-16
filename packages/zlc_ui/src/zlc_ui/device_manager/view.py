@@ -79,8 +79,7 @@ def _rule_between(layout: QtWidgets.QLayout) -> None:
 
     An item is in the list unless it was hidden ON PURPOSE.  ``isHidden``
     is not that: a card made under a window already on screen is hidden
-    until the layout's queued show reaches it, so a list filled while the
-    manager was open skipped every new card and left the last one ruled."""
+    until the layout's queued show reaches it."""
 
     frames = [
         item.widget() for item in (layout.itemAt(i) for i in range(layout.count()))
@@ -115,12 +114,11 @@ class _Disclosure(FluentButton):
     As Fluent's expander has it: at the trailing end of the header, pointing
     where the body will go -- down while it is hidden, up while it shows.  A
     square as tall as the row's controls, the chevron the combos and spin
-    boxes paint, centred on it; a text glyph sat its ink a pixel low.  It
-    is a quiet button: no face at rest, the one hover wash and press every
-    quiet thing shares, in body ink -- a command's tinted face would make it
-    a command again.  Its state is the chevron's direction, as a tree's
-    triangle; it wears no active face, which would read as "on" for a card
-    that is merely folded.
+    boxes paint, centred on it.  It is a quiet button: no face at rest, the
+    one hover wash and press every quiet thing shares, in body ink -- a
+    command's tinted face would make it a command again.  Its state is the
+    chevron's direction, as a tree's triangle; it wears no active face,
+    which would read as "on" for a card that is merely folded.
     """
 
     def __init__(self, parent=None) -> None:
@@ -156,7 +154,7 @@ class _DeviceCard(FluentFrame):
 
     def __init__(self, instance_id: str, parent=None) -> None:
         # A row of its domain's card, ruled off from the next, not a card in
-        # a card: the nested borders doubled every edge.
+        # a card.
         super().__init__(parent, rule=True)
         self.instance_id = str(instance_id)
         self.form: FluentParameterForm | None = None
@@ -286,9 +284,7 @@ class _DeviceCard(FluentFrame):
         the row like the type's when no card has one).
 
         The box asks for twice the type's share up to that width, so it
-        reaches the number boxes' edge and the type takes the rest; at an
-        equal share it ended short of the boxes under it, and held at the
-        width it pushed the commands off the card in a narrow window."""
+        reaches the number boxes' edge and the type takes the rest."""
 
         if self.name_label.width() != label_width:
             self.header_row.set_label("Role", width=label_width)
@@ -323,7 +319,7 @@ class _LiveDeviceCard(FluentFrame):
         outer = QtWidgets.QHBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         # The row's commands stand the row's one gap apart, as commands do
-        # in every other row; packed tighter they read as one segmented bar.
+        # in every other row.
         outer.setSpacing(row_gap())
         self.role_label = ElidedLabel("")
         self.detail_label = muted_note_label("")
@@ -350,8 +346,7 @@ class _LiveDeviceCard(FluentFrame):
         outer.addWidget(self.control_button)
         outer.addWidget(self.log_button)
         outer.addWidget(self.close_button)
-        # The setting stands apart from the commands, at the row's end: in
-        # the middle of them its label read as part of Log.
+        # The setting stands apart from the commands, at the row's end.
         add_row_switch(outer, self.remote_button, trail=False)
         self.control_button.clicked.connect(
             lambda: self.device_open_requested.emit(self.instance_id)
@@ -457,9 +452,7 @@ class DeviceControlView(QtWidgets.QWidget):
         outer.setSpacing(row_gap())
 
         # The owner is the page's title line, on the page's own left edge
-        # with its commands at the right; the policy's reason under it.  A
-        # bordered card around the two put the title a card's padding right
-        # of the column headings and the rows under it.
+        # with its commands at the right; the policy's reason under it.
         self.refresh_button = FluentButton("Refresh")
         self.risk_switch = FluentSwitch("Accept risk")
         title_row, self.owner_label = card_title_row("Owner: none", self.refresh_button)
@@ -557,7 +550,7 @@ class DeviceControlView(QtWidgets.QWidget):
             "is the tighter of it and the bench policy"
         )
         apply = FluentButton("Apply")
-        dot = FluentStatusDot(size=12)
+        dot = FluentStatusDot()
         status = ElidedLabel("")
         # Status has one shared width. Long messages elide behind their
         # tooltip, without moving the controls in another row.
@@ -749,10 +742,8 @@ class DeviceControlView(QtWidgets.QWidget):
             reason = str(field.get("reason", ""))
             for widget in (editor, live, apply, status):
                 widget.setToolTip(reason)
-        # NOW, not on a timer.  Every width this reads is a size hint, which
-        # exists before anything is painted; deferring it to the next pass
-        # put the headings on screen at one width and moved them at the
-        # first paint, which is the flicker every opened control showed.
+        # NOW, not on a timer: every width this reads is a size hint, which
+        # exists before anything is painted, so the headings never flicker.
         self._align_headings()
 
     def _shown_unit_changed(self, key: str, symbol: str) -> None:
@@ -912,11 +903,8 @@ class DeviceManagerView(QtWidgets.QWidget):
         outer.addWidget(self.tabs, 1)
 
         page = QtWidgets.QVBoxLayout(self.config_page)
-        # The right column scrolls in a gutter it keeps whether or not its
-        # bar shows (FluentScrollArea.set_width_bounded_widget).  That gutter
-        # lies in the page's right padding, so the right-hand cards end on
-        # the page's one right edge with the title line and the action bar,
-        # not a bar's width short of it.
+        # The right column's scroll gutter lies in the page's right padding
+        # (FluentScrollArea.set_width_bounded_widget).
         gutter = fluent_scrollbar_thickness()
         page.setContentsMargins(pad, pad, pad - gutter, pad)
         page.setSpacing(0)
@@ -925,7 +913,7 @@ class DeviceManagerView(QtWidgets.QWidget):
         # and the edited document are a compact pair on the right.
         self.status_strip = StatusStrip()
         self.status_strip.set_inset(False, right=gutter)
-        self.status_dot = FluentStatusDot(size=12)
+        self.status_dot = FluentStatusDot()
         self.status_dot.set_state("idle")
         self.document_name = ElidedLabel(
             "untitled", align=QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter
@@ -1012,16 +1000,14 @@ class DeviceManagerView(QtWidgets.QWidget):
         self.right_scroll.set_width_bounded_widget(self.right_body)
         columns.addWidget(self.right_scroll, 2)
         page.addLayout(columns, 1)
-        # A section gap above the action bar, as above every section: at a
-        # row's gap the scrolled column's cut-off edge read as a stray rule
-        # over the buttons.
+        # A section gap above the action bar, as above every section.
         page.addSpacing(pad)
 
         actions = QtWidgets.QHBoxLayout()
         actions.setContentsMargins(0, 0, gutter, 0)
         actions.setSpacing(row_gap())
         # New is a command, a button among the file commands, whose menu
-        # names the templates; a combo box in the row read as a setting.
+        # names the templates.
         self.new_button = FluentButton("New…")
         self._templates: tuple[tuple[str, str], ...] = ()
         self.load_button = FluentButton("Open…")
@@ -1050,8 +1036,7 @@ class DeviceManagerView(QtWidgets.QWidget):
         """As wide as the name, up to a cap past which it elides.
 
         The name ends on the page's right edge and the dot stands just
-        before its first letter; a fixed width put a short name's dot a
-        word's width away from it."""
+        before its first letter."""
 
         label = self.document_name
         need = label.fontMetrics().horizontalAdvance(label.text()) + _name_room()
@@ -1061,11 +1046,7 @@ class DeviceManagerView(QtWidgets.QWidget):
 
     def _align_columns(self) -> None:
         """One label column for every device card -- the widest any card
-        needs -- and one number edge, the widest number box any card has.
-
-        A card that sized its own column put its controls wherever its
-        longest label happened to end -- a device whose labels were all
-        short started its boxes forty pixels left of the card above it."""
+        needs -- and one number edge, the widest number box any card has."""
 
         if not self._cards:
             return
@@ -1100,11 +1081,9 @@ class DeviceManagerView(QtWidgets.QWidget):
     ) -> None:
         """What may be added, and what this machine cannot offer today.
 
-        A lab machine is normally missing at least one vendor runtime, and a
-        family that cannot import used to be simply absent -- indistinguishable
-        from one that does not exist.  Listed and greyed WITH the reason, the
-        window answers the question an operator actually has: not "where is my
-        camera type" but "why".
+        A lab machine is normally missing at least one vendor runtime; a
+        family that cannot import is listed and greyed WITH the reason, so
+        the window answers "why", not "where is my camera type".
         """
 
         self._choices = tuple(
@@ -1366,10 +1345,8 @@ class DeviceManagerView(QtWidgets.QWidget):
         if domain in self.domain_groups:
             return
         # The card lays out its own title row so Add device sits beside the
-        # domain's name.  At the foot of a long list it was the last thing
-        # in the scrolled column and was usually cut in half by its edge.
-        # Read out as words the one way every window does: RF and SLM in
-        # capitals, the rest in sentence case.
+        # domain's name.  Read out as words the one way every window does: RF
+        # and SLM in capitals, the rest in sentence case.
         title = name_words(domain)
         group = FluentGroupBox(title, self.left_body, title_strip_px=0)
         group_layout = QtWidgets.QVBoxLayout(group)

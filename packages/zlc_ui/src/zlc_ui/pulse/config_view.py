@@ -55,9 +55,7 @@ class PulseConfigView(QtWidgets.QWidget):
         self.scroll.set_width_bounded_widget(body)
         outer.addWidget(self.scroll)
         content = QtWidgets.QVBoxLayout(body)
-        # The cards end on every tab's right edge whether or not the bar
-        # shows: the scroll area keeps the bar's gutter at all times, and it
-        # stands inside the page's right inset rather than added to it.
+        # The bar's gutter stands inside the right inset (set_width_bounded_widget).
         page = section_gap()
         content.setContentsMargins(page, page, max(0, page - fluent_scrollbar_thickness()), page)
         content.setSpacing(section_gap())
@@ -101,9 +99,7 @@ class PulseConfigView(QtWidgets.QWidget):
         self.values_table.set_content_rows_limit(12)
         self.values_table.verticalHeader().hide()
         # Name and value take what they need, the number set right like any
-        # number and so beside its name; the unit closes the row.  Equal
-        # thirds gave the unit as much room as the name, and a stretched
-        # name put every value a table's width away from what it names.
+        # number and so beside its name; the unit closes the row.
         header = self.values_table.horizontalHeader()
         header.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeToContents)
         header.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeToContents)
@@ -153,7 +149,7 @@ class PulseConfigView(QtWidgets.QWidget):
         # Each column as wide as what it holds, so a Config name sits beside
         # the field it binds: the field column is its widest label, the name
         # and the two values have fixed widths, and the status takes the
-        # rest.  Stretch shares put a page width between them.
+        # rest.
         self._binding_grid = QtWidgets.QGridLayout()
         self._binding_grid.setHorizontalSpacing(row_gap())
         self._binding_grid.setVerticalSpacing(row_gap())
@@ -168,8 +164,8 @@ class PulseConfigView(QtWidgets.QWidget):
         # keeps one pitch from its header down.
         self._grid_headers[_NAME].setIndent(field_text_inset())
         # The Default column's words, header and values alike, start a
-        # section gap after the Config name boxes rather than a row gap:
-        # one row gap on, "2 ms" read as the box's suffix.
+        # section gap after the Config name boxes rather than a row gap, so
+        # a value never reads as the box's suffix.
         self._grid_headers[_DEFAULT].setIndent(_default_indent())
         for column, header in enumerate(self._grid_headers):
             header.setFixedHeight(row_height())

@@ -1248,13 +1248,8 @@ class ScanPlanEditor(QtWidgets.QWidget):
         return named
 
     def _value_changed(self, _key: str, *, normalized: bool = False) -> None:
-        """A value moved: the draft says so now.
-
-        A timer used to wait for the wheel to stop, because every write
-        rebuilt this section; a reconcile costs nothing, and writing later
-        put the round trip after the box's own select-all, which is what
-        cleared the selection under the wheel and made it blink.
-        """
+        """A value moved: the draft says so now, never on a timer, which
+        would land the round trip after the box's own select-all."""
 
         if self._loading:
             return

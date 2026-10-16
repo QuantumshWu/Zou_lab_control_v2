@@ -263,8 +263,7 @@ class InfoTree(QtWidgets.QTreeWidget):
     def drawRow(self, painter, option, index) -> None:  # noqa: N802 - Qt naming
         """A row under the pointer or selected is ONE rounded wash across
         its whole width, guides and chevron included: ACCENT_TINT under the
-        pointer, SELECTED when selected (SELECTED_HOVER both).  Painted per
-        cell, the selection was a square block broken at the column edge."""
+        pointer, SELECTED when selected (SELECTED_HOVER both)."""
 
         selected = self.selectionModel() is not None and self.selectionModel().isSelected(index)
         viewport = self.viewport()
@@ -310,7 +309,7 @@ class InfoTree(QtWidgets.QTreeWidget):
     def drawBranches(self, painter, rect, index) -> None:  # noqa: N802 - Qt naming
         """The nesting, drawn: a guide line down every level a row sits
         under, and a chevron on a row that opens -- pointing down while it
-        is open.  Indentation alone was a tree the eye could not follow."""
+        is open."""
 
         indent = self.indentation()
         depth = 0
@@ -453,8 +452,7 @@ class InfoTree(QtWidgets.QTreeWidget):
         else:
             parent.addChild(item)
         # What Copy puts on the clipboard, formatted only if it is asked for:
-        # an ancestor's text re-joins every leaf below it, and a tab of a few
-        # thousand rows paid that for every node while it was being built.
+        # an ancestor's text re-joins every leaf below it.
         item.setData(1, QtCore.Qt.UserRole, partial(copy_text, value))
         if _is_composite(value):
             # How many rows are under it -- a count of what follows, not a
@@ -781,13 +779,8 @@ class InfoPane(QtWidgets.QWidget):
         self._apply_pane_width()
 
     def _apply_pane_width(self) -> None:
-        """Wide enough for the label column AND for its own tab bar.
-
-        The pane used to be sized by the settings labels alone.  Five tabs did
-        not fit in that width, so the tab bar elided its titles and grew the
-        scroll arrows nobody asked for -- a navigation control that has to be
-        scrolled to be seen is one an operator does not know exists.
-        """
+        """Wide enough for the label column AND for its own tab bar, so no
+        tab title elides or scrolls out of sight."""
 
         if self._fixed_pane_width is not None:
             self.setFixedWidth(self._fixed_pane_width)
@@ -1204,7 +1197,7 @@ class InfoPane(QtWidgets.QWidget):
             is_device = node["kind"] == "device"
             # One edge for every card: a device's orange, a node's divider.
             # The root -- the node this figure shows -- says so in words on
-            # its badge line; an accent outline read as a selection.
+            # its badge line; an accent outline would read as a selection.
             card_path = QtGui.QPainterPath()
             radius = scaled_px(5, minimum=4)
             card_path.addRoundedRect(rect, radius, radius)

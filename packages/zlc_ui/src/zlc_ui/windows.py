@@ -1,16 +1,10 @@
 """Opening a GUI: one call per window, and a handle rather than a widget tree.
 
-What the outside used to receive was the window's own widgets, so it could
-reach a sub-view and push a value into one panel of one page.  Nothing stopped
-it, so it happened, and the picture on screen ended up with two owners: the
-delay column kept showing rows that Hide off had already taken out of the cards
-beside it.  A composition root that can hold a widget will sooner or later
-assemble a UI, which is the one job it does not have.
-
-So each of these returns a handle: signals to hear, methods to call, and no way
-through to a QWidget.  The window's lifecycle belongs here too -- the launcher,
-the shared screen-fit size, the centring, the retention and the close handshake
-are one sequence, and every window in this project goes through it.
+Each of these returns a handle: signals to hear, methods to call, and no way
+through to a QWidget, so no picture on screen has two owners.  The window's
+lifecycle belongs here too -- the launcher, the shared screen-fit size, the
+centring, the retention and the close handshake are one sequence, and every
+window in this project goes through it.
 """
 
 from __future__ import annotations
@@ -92,10 +86,8 @@ def open_device_control(
         # Snug fit: a control's field set is fixed for the window's life, so
         # the window takes the content's own height plus the chrome and half
         # the standard width, instead of a screen fraction of blank space.
-        # Decided BEFORE the window is shown -- it used to open at the screen
-        # fraction and then resize and re-centre itself, which is the jump
-        # every opened control made.  It stays resizable: this is the
-        # OPENING size, not a fixed one.
+        # Decided BEFORE the window is shown, so it never jumps.  It stays
+        # resizable: this is the OPENING size, not a fixed one.
         standard = screen_fit_window_size(fraction)
         # The columns are aligned before the hint is read: a control's
         # width is the width of its agreed columns, not of its widgets'

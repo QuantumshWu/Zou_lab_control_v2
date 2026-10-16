@@ -1,13 +1,6 @@
 """The whole of what a task console offers the outside: one object, no widgets.
 
-This window's seam was the worst of the four, and in an instructive way: the
-outside was handed FACTORIES -- make a card, make a logic row, ask which signal
--- and then handed the built widgets back.  A composition root that constructs
-widgets is assembling a UI whether or not the constructor came from somewhere
-else, and every per-card wire (title, size, interval, remove, edit) was strung
-across the wall one card at a time.
-
-Here the cards and the rows belong to the window.  What crosses is which panels
+The cards and the rows belong to the window.  What crosses is which panels
 exist, what each is called, and what each is showing; and back the other way,
 what the operator did TO a named panel.  A drawn panel arrives as its host,
 never as a widget, for the reason the other windows give: this package may not
@@ -19,7 +12,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from PyQt5 import QtCore, QtWidgets
+from PyQt5 import QtCore
 
 from zlc_ui.fluent import (
     FluentDialogWindow,
@@ -451,10 +444,7 @@ class TaskConsoleHandle(QtCore.QObject):
     def add_panel(self, panel_id: str, title: str) -> None:
         """Put one panel on the board, and wire it to this port.
 
-        The card is made here.  It used to be made outside and passed in, so
-        every one of its six intents had to be re-wired by whoever made it --
-        six wires per panel across the wall, and a panel whose maker forgot one
-        was a control that silently did nothing.
+        The card is made here, so its intents are wired once, by its owner.
         """
 
         key = str(panel_id)

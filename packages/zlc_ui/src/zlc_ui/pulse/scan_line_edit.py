@@ -251,14 +251,11 @@ class FluentScanLineEdit(FluentLineEdit):
             layout.setContentsMargins(margin, margin, margin, margin)
             layout.setSpacing(scaled_px(6))
             # Every row is a control's height, so the five rows keep one
-            # pitch and each label reads level with what it names: the read
-            # values were a text line tall and the rows came 31, 31, 27, 23
-            # apart.
+            # pitch and each label reads level with what it names.
             for row in range(5):
                 layout.setRowMinimumHeight(row, row_height())
             # One label column, as every form sizes its own (the widest
-            # label and a pad), not the labels' own widths: the Config
-            # name box stood 6 px from its label.
+            # label and a pad), not the labels' own widths.
             label_width = popup_label_width()
             self.config_name_label = FluentLabel("Config name")
             labels = (FluentLabel("Scan"), FluentLabel("Source"), self.config_name_label,

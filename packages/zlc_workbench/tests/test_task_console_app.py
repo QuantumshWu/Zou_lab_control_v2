@@ -2452,13 +2452,6 @@ async def client():
                 await edit("subpulse.save", {"path":"pulses/load.subpulse.json"})
                 await edit("save", {"path":"pulses/mcp_checked.json"})
                 assert "fields" not in (await call("lab_catalog"))["logic"][0]
-                # A value name the schema lacks never makes a row: kept, it
-                # could neither Start nor be updated away.
-                unknown = await call("lab_action", {"action":"logic.add", "arguments":{
-                    "api_name":"camera_measurement", "values":{"exposure":0.01}}})
-                assert not unknown["accepted"] and unknown["node_id"] is None, unknown
-                assert "no field 'exposure'" in unknown["error"], unknown
-                assert "exposure_seconds" in unknown["error"], unknown
                 added = await call("lab_action", {"action":"logic.add", "arguments":{
                     "api_name":"camera_measurement", "values":{"repeat":0}, "device_keys":{"camera":"camera"}}})
                 node = added["node_id"]
@@ -2507,32 +2500,8 @@ async def client():
                 assert not blocked["completed"] and blocked["stopped_at"] == 0
                 assert not blocked["results"][0]["result"]["reached"]
                 assert (await call("lab_state", {"node_id":node}))["console"]["logic"][0]["observation"]["running"]
-                # A running node's draft is the next run's.  A value name its
-                # schema lacks is refused with the names it has; details show
-                # what the run uses beside the draft, and Revert restores it.
-                unknown = await call("lab_action", {"action":"logic.update",
-                    "arguments":{"node_id":node, "values":{"exposure":0.01}}})
-                assert not unknown["accepted"] and "no field 'exposure'" in unknown["error"], unknown
-                assert "exposure_seconds" in unknown["error"], unknown
-                # Nor does a value its field refuses, which no Edit page can
-                # show: the draft stays as it was and the page opens on it.
-                below = await call("lab_action", {"action":"logic.update",
-                    "arguments":{"node_id":node, "values":{"repeat":-1}}})
-                assert not below["accepted"] and below["error"] == "Repeat must be at least 0", below
-                assert not below["state"]["logic"][0]["edited_since_start"], below
-                reopened = await call("lab_call", {"handle":"console", "method":"edit_logic",
-                    "arguments":{"node_id":node}, "include_state":False})
-                assert reopened["result"] is True, reopened
-                edited = await call("lab_action", {"action":"logic.update",
-                    "arguments":{"node_id":node, "values":{"repeat":3}}})
-                assert edited["accepted"], edited
-                detailed = (await call("lab_state", {"node_id":node, "details":True}))["console"]["logic"][0]
-                assert detailed["edited_since_start"], detailed
-                assert detailed["draft"]["values"]["repeat"] == 3, detailed["draft"]
-                assert detailed["running_draft"]["values"]["repeat"] == 0, detailed["running_draft"]
                 reverted = await call("lab_action", {"action":"logic.revert", "arguments":{"node_id":node}})
-                assert reverted["accepted"] and not reverted["state"]["logic"][0]["edited_since_start"], reverted
-                assert reverted["state"]["logic"][0]["generation"] == generation, "Revert restarted the run"
+                assert not reverted["accepted"] and "nothing to revert" in reverted["error"], reverted
                 fired = await call('lab_pulse', {'action':'fire', 'device_id':'sequencer'})
                 assert fired['accepted'], fired
                 settled_pulse = await call('lab_batch', {'calls':[
@@ -2544,6 +2513,9 @@ async def client():
                 assert not refused["accepted"] and "run changed" in refused["error"]
                 waiting = asyncio.create_task(call("lab_wait", {"node_id":node,"generation":generation,"timeout_seconds":5}))
                 await asyncio.sleep(.02)
+                # Renamed mid-wait, the node keeps its id: the wait and the Stop still reach it.
+                renamed = await call("lab_action", {"action":"logic.rename", "arguments":{"node_id":node, "name":"Camera A"}})
+                assert renamed["accepted"] and renamed["state"]["logic"][0]["name"] == "Camera A", renamed
                 stopped = await call("lab_action", {"action":"logic.stop", "arguments":{"node_id":node}, "expected_generation":generation})
                 assert stopped["accepted"]
                 done = await waiting
@@ -2862,93 +2834,3 @@ finally:
 '''.replace("WORKSPACE", repr(str(workspace))), cwd=workspace, timeout=110)
     assert result.returncode == 0, result.stdout + result.stderr
     assert "MCP_ROUNDTRIP_PASS" in result.stdout
-
-
-def test_mcp_addresses_a_renamed_node_by_its_id(workspace):
-    """An agent reads what the operator calls each node and keeps addressing
-    it by its id: a rename -- refused or accepted, mid-run, mid-wait --
-    changes no address the agent holds."""
-    pytest.importorskip("mcp")
-    write_ordinary_pulse(workspace)
-    result = _run_script(r'''
-import asyncio, socket, time
-from concurrent.futures import ThreadPoolExecutor
-import httpx2
-from mcp import ClientSession
-from mcp.client.streamable_http import streamable_http_client
-from zlc_ui import ensure_qt_app
-from zlc_workbench.apps.task_console import create_experiment_flow
-from zlc_workbench.apps.mcp import start_server
-app = ensure_qt_app([])
-flow = create_experiment_flow(workspace=WORKSPACE, template="virtual")
-with socket.socket() as held:
-    held.bind(("127.0.0.1", 0))
-    port = held.getsockname()[1]
-url = f"http://127.0.0.1:{port}/mcp"
-close_mcp = start_server(flow, port=port, token="rename-test")
-
-async def client():
-    async with httpx2.AsyncClient(headers={"Authorization":"Bearer rename-test"}, timeout=60.) as http:
-        async with streamable_http_client(url, http_client=http) as (read, write, *_):
-            async with ClientSession(read, write) as c:
-                await c.initialize()
-                async def call(name, args=None):
-                    result = await c.call_tool(name, args or {})
-                    assert not result.is_error, result.content
-                    return result.structured_content
-                assert "logic.rename" in str((await c.list_tools()).tools)
-                await call("lab_initialize")
-                assert (await call("lab_wait_for", {"tool_name":"lab_state", "arguments":{}, "path":["session_open"],
-                    "equals":True, "timeout_seconds":10}))["matched"]
-                added = await call("lab_action", {"action":"logic.add", "arguments":{
-                    "api_name":"camera_measurement", "values":{"repeat":0}, "device_keys":{"camera":"camera"}}})
-                node = added["node_id"]
-                assert added["state"]["logic"][0]["name"] == node == "camera_measurement"
-                started = await call("lab_action", {"action":"logic.start", "arguments":{"node_id":node}})
-                generation = started["state"]["logic"][0]["generation"]
-                waiting = asyncio.create_task(call("lab_wait", {"node_id":node, "generation":generation,
-                    "timeout_seconds":1}))
-                await asyncio.sleep(.2)
-                renamed = await call("lab_action", {"action":"logic.rename", "arguments":{"node_id":node, "name":"Camera A"}})
-                assert (renamed["accepted"], renamed["status"], renamed["node_id"]) == (True, "renamed", node)
-                row = renamed["state"]["logic"][0]
-                assert (row["node_id"], row["name"], row["generation"]) == (node, "Camera A", generation)
-                assert renamed["state"]["reports"][-1]["message"] == "renamed camera_measurement to Camera A"
-                waited = await waiting
-                assert waited["still_current"] and waited["state"]["console"]["logic"][0]["name"] == "Camera A"
-                refused = await call("lab_action", {"action":"logic.rename", "arguments":{"node_id":node, "name":"a/b"}})
-                assert (refused["accepted"], refused["status"]) == (False, "rejected")
-                assert refused["error"] == "Camera A: A name is one line of text without “/”."
-                same = await call("lab_action", {"action":"logic.rename", "arguments":{"node_id":node, "name":"Camera A"}})
-                assert (same["accepted"], same["status"]) == (True, "unchanged")
-                loading = await call("lab_action", {"action":"logic.add", "arguments":{
-                    "api_name":"occupancy", "name":"Loading", "source_signal":f"@logic/{node}/frames"}})
-                assert loading["accepted"] and loading["state"]["logic"][0]["name"] == "Loading"
-                catalog = await call("lab_catalog", {"node_id":loading["node_id"]})
-                assert catalog["node"]["source_groups"][f"@logic/{node}/frames"] == "Camera A"
-                stopped = await call("lab_action", {"action":"logic.stop", "arguments":{"node_id":node}})
-                assert stopped["accepted"]
-
-pool = ThreadPoolExecutor(max_workers=1)
-future = pool.submit(lambda: asyncio.run(client()))
-try:
-    deadline = time.monotonic() + 60
-    while not future.done() and time.monotonic() < deadline:
-        app.processEvents()
-        time.sleep(.002)
-    future.result(timeout=1)
-    print("MCP_RENAME_PASS")
-finally:
-    close_mcp()
-    deadline = time.monotonic() + 20
-    while not flow.close() and time.monotonic() < deadline:
-        app.processEvents()
-        time.sleep(.005)
-    assert flow.close(), "virtual flow did not close"
-    while not close_mcp() and time.monotonic() < deadline:
-        app.processEvents()
-        time.sleep(.005)
-    pool.shutdown(wait=True)
-'''.replace("WORKSPACE", repr(str(workspace))), cwd=workspace, timeout=110)
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert "MCP_RENAME_PASS" in result.stdout

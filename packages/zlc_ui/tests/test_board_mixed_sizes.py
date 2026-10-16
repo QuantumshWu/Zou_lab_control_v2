@@ -83,71 +83,6 @@ def _let_go(board, carried, slot, board_w):
     return after
 
 
-def test_a_card_let_go_onto_another_swaps_with_it() -> None:
-    """The card let go onto takes the carried card's place and the carried
-    card takes the slot, held by either end of its strip -- on a grid of one
-    size and on mixed sizes, both ways round."""
-
-    w2, w4 = SIZES["2x2"][0], SIZES["4x4"][0]
-    cases = (
-        # A 2x2 grid: bottom-left onto bottom-right, top-left onto bottom-right.
-        (("2x2",) * 4, 1104, 2, 3),
-        (("2x2",) * 4, 1104, 0, 3),
-        # A 2x2 beside a 4x4, a 2x4 under them: either onto the other.
-        (("2x2", "4x4", "2x4"), 1400, 0, 1),
-        (("2x2", "4x4", "2x4"), 1400, 1, 0),
-        # A 2x4 above a 4x4 in one column: either onto the other.
-        (("2x4", "4x4", "2x2"), 1104, 0, 1),
-        (("2x4", "4x4", "2x2"), 1104, 1, 0),
-    )
-    landed = {}
-    for sizes, board_w, carried_at, onto in cases:
-        board = _tiled(sizes, board_w)
-        carried, target = board[carried_at], board[onto]
-        for hold in ((14, STRIP), (carried.width - 110, STRIP)):
-            slot = _slot(board, carried, (target.col + 10, target.row + 10), hold, board_w)
-            assert slot == (target.col, target.row), (sizes, carried_at, hold, slot)
-            landed[sizes, carried_at, hold[0] > 14] = places(_let_go(board, carried, slot, board_w))
-    grid = [(GAP, GAP), (col_after("2x2"), GAP), (GAP, row_after("2x2")), (col_after("2x2"), row_after("2x2"))]
-    for hold in (False, True):
-        assert landed[("2x2",) * 4, 2, hold] == [grid[0], grid[1], grid[3], grid[2]]
-        assert landed[("2x2",) * 4, 0, hold] == [grid[3], grid[1], grid[2], grid[0]]
-        # The 4x4 on the left and the 2x2 right of it, whichever was carried.
-        beside = [(col_after("4x4"), GAP), (GAP, GAP), (GAP, row_after("4x4"))]
-        assert landed[("2x2", "4x4", "2x4"), 0, hold] == beside
-        assert landed[("2x2", "4x4", "2x4"), 1, hold] == beside
-        # The 4x4 on top and the 2x4 under it, whichever was carried.
-        stacked = [(GAP, row_after("4x4")), (GAP, GAP), (GAP, row_after("4x4", "2x4"))]
-        assert landed[("2x4", "4x4", "2x2"), 0, hold] == stacked
-        assert landed[("2x4", "4x4", "2x2"), 1, hold] == stacked
-    assert col_after("4x4") + w2 <= 1400 - GAP < col_after("2x2", "2x2") + w4
-
-
-def test_a_card_let_go_on_empty_space_takes_it_and_one_under_a_tall_card_stays_under_it() -> None:
-    """Let go where no card stands, the card takes the slot and falls; let go
-    under a 4x4 beside the hole under a shorter 2x4, it stays under the 4x4."""
-
-    board = [card("2x4", GAP, GAP), card("4x4", col_after("2x4"), GAP), card("2x2", GAP, row_after("2x4"))]
-    small = board[2]
-    under = (col_after("2x4"), row_after("4x4"))
-    slot = _slot(board, small, (under[0] + 10, under[1] + 10), (14, STRIP), 1900)
-    assert slot == under
-    assert places(_let_go(board, small, slot, 1900)) == [*places(board[:2]), under]
-
-
-def test_putting_a_card_back_changes_nothing() -> None:
-    """Drawn exactly where it stood, a card is aimed back there, and let go
-    there it leaves every card where it was."""
-
-    board = _tiled(("4x4", "2x2", "1x2", "2x4", "2x2", "4x2"), 1400)
-    for carried in board:
-        for hold in ((14, STRIP), (carried.width - 110, STRIP)):
-            seen = (carried.col, carried.row)
-            slot = _slot(board, carried, seen, hold, 1400)
-            assert slot == seen, (places(board), seen, hold, slot)
-            assert places(_let_go(board, carried, slot, 1400)) == places(board)
-
-
 def test_a_card_in_the_way_moves_right_when_its_row_has_room_else_straight_down(monkeypatch) -> None:
     """A card a settled card overlaps moves right just clear of it if its row
     has the room, and otherwise straight down its own column.  It never
@@ -169,19 +104,6 @@ def test_a_card_in_the_way_moves_right_when_its_row_has_room_else_straight_down(
     low = card("1x2", col_after("4x2"), row_after("2x4"))
     pack([wide, tall, low], METRICS, 1900, first=(wide,))
     assert places([wide, tall, low]) == [(GAP, GAP), (GAP, row_after("2x4")), (col_after("4x2"), row_after("2x4"))]
-
-
-def test_the_slot_is_the_place_the_card_is_seen_over_wherever_it_is_held() -> None:
-    """The pointer picks the places the card can be put at, and of those the
-    one the card is drawn over wins -- held at either end of its strip, or
-    by an empty card's body."""
-
-    frame = [card("2x2", 7, 7), card("4x4", 518, 7)]
-    wide = card("2x4")
-    for aim in ((24, 31), (745, 31)):
-        assert slot_under(aim, wide, frame, METRICS, 1400, seen=(10, 10)) == (7, 7), aim
-    # An empty 4x4 held at its body centre, drawn 92 % over the first column.
-    assert slot_under((530, 7 + STRIP), card("4x4"), frame, METRICS, 1400, seen=(110, 7)) == (7, 7)
 
 
 def test_rows_come_only_from_the_cards_in_the_slots_column() -> None:

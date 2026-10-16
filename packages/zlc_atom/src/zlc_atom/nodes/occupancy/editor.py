@@ -1,46 +1,19 @@
 """Occupancy's calibrations: one row per file, the frames it reads as columns.
 
-The operator says which file reads which frames the way they think it --
-this one the first frame, that one the last, another the rest -- by marking
-cells.  The ends of the cycle are named by what they are: "First" is frame
-0 whatever the count and "Last" follows the count, so they have their own
-columns and no numbered column repeats them; the numbered columns are the
-MIDDLE frames, which keep their number.  "Rest" takes whatever no file
-names.  A frame reached through Rest shows as a dashed card in its file's
-row (on First or Last when it is an end); a frame nobody reads is an empty
-red card in every row, and one two files reach is a red card with the
-reason below.  A middle number the source no longer has between its ends
-is kept, an amber card with an amber note below: it reads nothing in this
-cycle and stops nothing.  Nothing here changes a claim because the frame
-count changed: what was authored stays until the operator edits it.
-
-A file with no frame is PARKED, not wrong: kept in the list, read for
-nothing and checked against nothing, its name muted and counted in the
-summary ("· 1 file not read") -- a later "Add calibration…" while another
-file reads the rest starts that way, and so does a file whose last frame
-was given to another.  A file is replaced by the … and removed by the ×
-that end its row -- both on the row, where they are looked for -- and
-clicking its name replaces it too.  A file row is one line, as tall as every
-other control and one row pitch from the next: what the file is (its
-exposure, sites and model, or why it cannot be read) is in the name's
-tooltip with its path.  The readout model -- which model each file is read
-with, set once -- is a segmented choice under the files it applies to: the
-four models are this node's closed set.  The problems, then the notes,
-stand under that choice and above the section's hint, one sentence each,
-so the files and the model keep their place whether one is there or not.
-
-The section opens like every editor's section: its title, then at the right
-end its summary and "Add calibration…".  The file names stand in the
-editor's label column, shared with the form, so the first card, the model
-choice and the form's fields start on one edge.  The column is set by the
-labels that stay ("Readout model", the form's) and a fixed room for file
-names, never by a file name itself, so it does not move as files come and
-go.  A row is named as every sentence about it names it
-(:func:`claim_names`: a Calibration run's folder, any other file's stem, or "row N" before it has a file),
-elided in the middle when it is wider than the column; the tooltip reads
-the whole path.  The console resolves the
-files and projects how the source's frames read them; this widget only
-draws that and writes the edits back.
+The claim rules are :mod:`zlc_atom.nodes._framework.frames`'s; the console
+resolves the files and projects how the source's frames read them, and this
+widget only draws that and writes the edits back.  "First" and "Last" have
+their own columns; the numbered columns are the MIDDLE frames.  A frame
+reached through Rest is a dashed card in its file's row; a frame nobody
+reads is an empty red card in every row, one two files reach a red card
+with the reason below; an absent middle number an amber card with an amber
+note.  A parked file's name is muted and counted in the summary ("· 1 file
+not read").  A file is replaced by the … (or a click on its name) and
+removed by the × that end its row; what it is lives in the name's tooltip.
+The readout model is a segmented choice under the files.  The file names
+stand in the editor's shared label column, set by the labels that stay and
+a fixed room for file names so it never moves as files come and go; a row
+is named by :func:`claim_names`, elided in the middle.
 """
 
 from __future__ import annotations

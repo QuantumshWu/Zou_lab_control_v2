@@ -301,8 +301,7 @@ class _RowsEditor(QtWidgets.QWidget):
     every other control on the form.
 
     Add stands on the field's own line, beside its label, and the rows
-    follow it a form gap apart: under the rows it was a button alone on a
-    line of its own, and the rows sat closer than the form's rows did.
+    follow it a form gap apart.
     """
 
     def __init__(
@@ -2196,17 +2195,13 @@ class FluentParameterForm(QtWidgets.QWidget):
                 field = next(field for field in spec.fields if field.key == key)
                 self._install_row(field, *parts)
 
-            # Only the rows whose POSITION changed.  This used to be
-            # "any key was replaced or the key list differs", so adding
-            # one row at the end pulled every surviving row out of the
-            # layout and put it back -- which is most of what the
-            # operator sees as the form collapsing and rebuilding.
+            # Only the rows whose POSITION changed, so adding one row does
+            # not pull every surviving row out of the layout and back.
             #
             # Compare LIKE WITH LIKE.  A row built above is already in
             # ``self._rows`` but not yet in the layout, so comparing the
-            # layout against the whole wanted list said "order changed"
-            # for every append -- the very case the paragraph above says
-            # is handled.  The question is whether the rows that ARE
+            # layout against the whole wanted list would say "order
+            # changed" for every append.  The question is whether the rows that ARE
             # placed are in the right relative order; the ones that are
             # not placed get inserted below regardless.
             placed = [

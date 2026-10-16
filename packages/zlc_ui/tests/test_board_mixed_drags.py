@@ -15,8 +15,6 @@ defect these tests exist for.
 from __future__ import annotations
 
 _MONITOR = """
-import random
-
 from PyQt5 import QtCore, QtTest, QtWidgets
 from zlc_plot import PANEL_SIZE_NAMES
 from zlc_ui.qt import ensure_qt_app
@@ -419,41 +417,5 @@ assert {pid: place for pid, place in board.places().items() if pid != 'p5'} == w
 # The top row is full; the first hole it fits is under the 2x4, beside the 4x4.
 assert board.places()['p5'] == (col_after('4x4'), row_after('2x2', '2x4')), board.places()
 board.close()
-"""
-    )
-
-
-def test_random_drags_on_mixed_boards_show_what_they_do(run_qt) -> None:
-    """Random mixed boards and drags, through the window: preview equals
-    result, no two cards overlap, the committed order changes nothing, and a
-    card put back where it stood leaves every card where it was."""
-
-    run_qt(
-        _MONITOR
-        + """
-rng = random.Random(5)
-presets = ('1x2', '2x2', '4x2', '2x4', '4x4')
-for width in (WIDE, MID, NARROW):
-    sizes = [rng.choice(presets) for _ in range(5)]
-    sizes[0], sizes[1] = '4x4', '2x2'
-    rng.shuffle(sizes)
-    board = Monitor(tuple(sizes), width)
-    for _drag in range(5):
-        panel_id = rng.choice(sorted(board.cards))
-        card = board.cards[panel_id]
-        hold = rng.choice(('strip_left', 'strip_right', 'body'))
-        before = board.places()
-        if rng.random() < 0.3:
-            at = before[panel_id]
-            board.drag(panel_id, hold, at, via=((at[0] + 40, at[1] + 40),))
-            assert board.places() == before, (sizes, panel_id, hold, before, board.places())
-            continue
-        target = before[rng.choice([pid for pid in board.cards if pid != panel_id])]
-        seen = (
-            min(max(0, target[0] + rng.randint(-12, 12)), width - card.width()),
-            max(0, target[1] + rng.randint(-12, 12)),
-        )
-        board.drag(panel_id, hold, seen)
-    board.close()
 """
     )

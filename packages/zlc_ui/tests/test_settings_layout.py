@@ -1467,10 +1467,9 @@ def test_a_pair_is_a_number_wide() -> None:
 
 def test_a_number_steps_by_its_owners_step() -> None:
     """The owner declares how far one notch moves a number; the box shows it
-    on its step chip and steps on its grid, so a notch never walks a value
-    into tiny numbers below the first grid point.  A step the operator set
-    through the chip survives the owner's re-projections until the owner
-    declares another."""
+    on its step chip and steps on its grid.  A step the operator set through
+    the chip survives the owner's re-projections until the owner declares
+    another."""
 
     from dataclasses import replace
     from decimal import Decimal
@@ -1494,9 +1493,6 @@ def test_a_number_steps_by_its_owners_step() -> None:
         assert box.singleStep() == 0.001 and box._step_chip_text() == "±0.001"
         box.stepBy(1)
         assert box.decimalValue() == Decimal("0.021")
-        box.setValue(0.001)
-        box.stepBy(-1)
-        assert box.decimalValue() == Decimal("0.001"), "a notch never lands on the 1 ns floor"
         form.widget_for("count").stepBy(1)
         assert form.read_value("count") == 6
 

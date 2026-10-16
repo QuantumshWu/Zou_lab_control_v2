@@ -102,7 +102,7 @@ PAIR_RULES = ("all", "consecutive", "from_first", "to_last")
 
 
 def _rule_pairs(rule: str, frames: int) -> tuple[tuple[int, int], ...]:
-    """The forward pairs one named selection asks of ``frames`` frames."""
+    """The forward pairs one of :data:`PAIR_RULES` asks of ``frames`` frames."""
 
     if rule == "all":
         return _forward_pairs(frames)
@@ -110,9 +110,7 @@ def _rule_pairs(rule: str, frames: int) -> tuple[tuple[int, int], ...]:
         return tuple((frame, frame + 1) for frame in range(frames - 1))
     if rule == "from_first":
         return tuple((0, frame) for frame in range(1, frames))
-    if rule == "to_last":
-        return tuple((frame, frames - 1) for frame in range(frames - 1))
-    raise ValueError(f"frame survival selection must be one of {', '.join(PAIR_RULES)} or explicit pairs")
+    return tuple((frame, frames - 1) for frame in range(frames - 1))
 
 
 def _checked_selection(selection) -> str | tuple[tuple[int, int | str], ...]:
@@ -157,8 +155,6 @@ def _checked_overrides(overrides):
     if not overrides:
         return ()
     pairs = _checked_pairs(tuple((start, end) for start, end, _selected in overrides))
-    if any(not isinstance(selected, bool) for _start, _end, selected in overrides):
-        raise ValueError("frame survival pair selected must be boolean")
     return tuple((*pair, selected) for pair, (_start, _end, selected) in zip(pairs, overrides))
 
 

@@ -623,14 +623,8 @@ class PlotSelectionSource:
         self,
         callback: Callable[[object], object],
     ) -> Callable[[], None]:
-        """Report display-state changes through the SAME release list.
-
-        This one used to be installed straight on the host, so its
-        unsubscribe was dropped on the floor: every rebind of an unchanged
-        Edit host added another identical display callback and released
-        none, and each colour-limit drag afterwards enqueued one panel
-        interaction per Refresh the operator had pressed.
-        """
+        """Report display-state changes through the SAME release list, so
+        a rebind of an unchanged Edit host never leaves a callback behind."""
 
         if not callable(callback):
             raise TypeError("display observation callback must be callable")

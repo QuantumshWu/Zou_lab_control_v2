@@ -2,12 +2,10 @@
 
 A status severity is a plain word, and the two sides that must agree on it
 sit on opposite sides of the Qt boundary: the strip that colours it, and the
-headless presenters that choose it.  It used to be neither's -- bare strings
-written at every call site and checked only inside the widget, by raising --
-so one mistyped word ("info") travelled from a panel edit into a Qt slot
-and took the whole console down with it.  Here it belongs to the package
-both sides already depend on, in a module that imports nothing, so
-referencing it costs no Qt; the strip builds its colour table from it.
+headless presenters that choose it, so a mistyped word never reaches a Qt
+slot.  Here it belongs to the package both sides already depend on, in a
+module that imports nothing, so referencing it costs no Qt; the strip builds
+its colour table from it.
 
 The words a summary or status line is built from live here for the same
 reason: a count, the mark between a line's parts and a declared name read

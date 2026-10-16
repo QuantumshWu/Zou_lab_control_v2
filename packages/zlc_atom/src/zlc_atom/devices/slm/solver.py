@@ -19,7 +19,6 @@ import json
 import os
 from pathlib import Path
 from threading import Condition, Event, Lock, Thread
-from typing import Any
 
 import numpy as np
 from zlc_durable import atomic_write_file, strict_json_loads, write_readable_json

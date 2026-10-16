@@ -2,12 +2,8 @@
 
 The packer depends only on rectangle geometry: it is GIVEN each card's
 rectangle and the clear gap between them, and imports neither UI nor
-rendering backends.
-
-It used to be given a preset NAME per card and a callable that turned one
-into a size, which made "how big is a card" a second answer beside the
-card's own layout -- and one that cannot be right, since two cards of the
-same preset differ by whatever is mounted in them.
+rendering backends.  A card's size is its own layout's answer, never a
+preset name's.
 """
 
 from __future__ import annotations

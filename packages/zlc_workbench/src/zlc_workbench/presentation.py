@@ -347,9 +347,8 @@ class PlotPanelPort:
     def surface_age_seconds(self) -> float:
         """How long the oldest surface still travelling for this panel has been out.
 
-        Zero when nothing is travelling.  A surface that never lands used to
-        be indistinguishable from a signal that stopped arriving: the panel
-        simply stayed still.  Its age is the fact that tells the two apart,
+        Zero when nothing is travelling.  Its age is the fact that tells a
+        surface that never lands from a signal that stopped arriving,
         and the console says it on the card once it passes its patience --
         says it, and keeps waiting, because a render that is late is either
         slow or dead and nothing here can tell which.
@@ -722,19 +721,12 @@ class PlotPanelPort:
                 # session's own projection replacement absorbs the new
                 # generation, so the mounted widget, the operator's
                 # in-flight gesture and every subscription survive the
-                # shot boundary.  Rebuilding the host per generation tore
-                # a drag apart whenever a shot landed mid-gesture -- the
-                # mouse stayed grabbed by a widget whose host had been
-                # retired, and the drag went dead until release.
+                # shot boundary.
                 #
-                # A new presentation EPOCH is the same story told by a
-                # different trigger, and it used to replace the host
-                # unconditionally.  Turning Selectors on takes a history
-                # lease, which moves the signal from windowed to indexed,
-                # which invalidates every panel on it -- so the gesture the
-                # operator started next went nowhere and the box they had
-                # just drawn came back where the remembered one was.  The
-                # epoch says RE-PROJECT; the geometry says what came out.
+                # A new presentation EPOCH (Selectors on moves the signal
+                # from windowed to indexed) is the same story told by a
+                # different trigger: the epoch says RE-PROJECT; the
+                # geometry says what came out.
                 # A host holds a shape, so the shape decides, whichever
                 # trigger asked.
                 # Asked only when a trigger asks: comparing geometry on every
@@ -799,10 +791,8 @@ class PlotPanelPort:
                     # The host holds this data and refuses a revision it
                     # holds; what the panel still owes is the SCREEN.  A
                     # render whose consumer was cancelled after the host
-                    # committed it, or whose cohort was abandoned, left the
-                    # accepted surface behind the host -- and while the
-                    # source stood, the re-offer used to be cancelled once
-                    # per beat, so the picture never caught up.  The host's
+                    # committed it, or whose cohort was abandoned, leaves the
+                    # accepted surface behind the host.  The host's
                     # own current front is the answer, re-described.  Only
                     # a companion that moved -- the one thing drawn OVER
                     # unchanged data -- is a configure, and only then: a
@@ -1376,11 +1366,8 @@ class PlotPanelPort:
                     self.last_error_publication = None if self._surface is None else self._surface.publication
 
     def reject(self, update: SurfaceUpdate, error: BaseException | None) -> None:
-        """Abandon a prepared update, and remember why.
-
-        It used to be a silent no-op, so a panel whose render failed simply
-        stopped changing -- indistinguishable from a signal that had stopped
-        arriving, which is the other thing a still panel means.
+        """Abandon a prepared update, and remember why, so a failed render is
+        told apart from a signal that stopped arriving.
 
         A ``CancelledError`` is not remembered.  A cancelled render was
         coalesced away because a newer frame is already queued behind it (or
@@ -1498,10 +1485,7 @@ class PlotPanelPort:
     def report_waiting(self, missing_signal: str) -> None:
         """The signal this panel is presenting without, or held back for.
 
-        This used to be ``del missing_signal`` -- a panel frozen behind a
-        companion that would never publish showed NOTHING: no error, no
-        waiting, an operator staring at a stale frame with no way to learn
-        why.  The name is now a standing condition on the card, cleared the
+        The name is a standing condition on the card, cleared the
         moment an update carrying every declared signal is presented.
         """
 

@@ -304,15 +304,10 @@ def _drafted_values(
     subject: str, descriptor: Any, values: Mapping[str, Any]
 ) -> tuple[dict[str, Any], str]:
     """``values`` as the node's draft keeps them and "", or why they may not
-    enter it, in one sentence.
-
-    A name the schema does not declare is no setting of the node: kept, it
-    would ride along in every later draft, Start and comparison with the
-    running configuration, and no edit could take it out again.  A value
-    ``logic_draft_value`` refuses is one no Edit page can show.  Adding a
-    row and changing its draft refuse both; an incomplete draft, one a
-    cross-field rule refuses, and a number list's text still being typed
-    stay draft issues.
+    enter it, in one sentence: a name the schema does not declare (no edit
+    could take it out again) or a value ``logic_draft_value`` refuses (one
+    no Edit page could show).  An incomplete draft, a cross-field refusal
+    and a number list's text still being typed stay draft issues.
     """
 
     fields = {field.name: field for field in descriptor.authoring_schema.fields}
@@ -375,9 +370,8 @@ def _shown_resource_path(value: object, directory: Path) -> str:
     """A workspace resource's path as its field shows it.
 
     A file inside the resource's own directory is named from there
-    (``imaging_template.json``): the name is what tells two pulses apart,
-    and as the end of a long absolute path it was the part a narrow field
-    pushed out of view.  Anything else is shown whole.  The field's tooltip
+    (``imaging_template.json``): the name is what tells two pulses apart.
+    Anything else is shown whole.  The field's tooltip
     names the whole path either way (``FluentPathEdit`` reads a relative
     text against its ``base_dir``, the same directory), and the draft keeps
     what was written: finalization reads a relative name in this same
@@ -714,12 +708,8 @@ class PanelBinding:
     #: that no longer describes what is on screen.
     interaction_viewport: Any = None
     #: What this panel is currently SAYING is wrong, as text -- empty when
-    #: nothing is.  It used to hold whichever exception object carried the
-    #: refusal and was compared by identity, so a source that raises a fresh
-    #: object per attempt (a fit callback runs per event) was "new" every
-    #: beat: the same sentence was reported, the surface degraded and the
-    #: editor rebuilt over and over.  A condition is what it SAYS, not which
-    #: object said it.
+    #: nothing is.  A condition is what it SAYS, not which exception object
+    #: said it: a fit callback raises a fresh object per event.
     reported_condition: str = ""
     #: Why this panel's authored settings are not on screen: a required role
     #: has no axis, so the picture is the last one that could be drawn.  It
@@ -828,9 +818,7 @@ class PanelBinding:
         # and simply publishes the next value.  Either is a new REVISION of
         # the input on screen, and that is what Edit's freeze is compared
         # with.  Coverage is a fact of the SignalValue, not of the
-        # publication: read off two publications it was None for both, so
-        # the same-run branch never fired and the badge stayed dark while
-        # the live card moved on.
+        # publication (where it is None).
         shown = getattr(surface.plot_input, "snapshot", surface.plot_input)
         shown_ref = getattr(shown, "ref", None)
         frozen_ref = getattr(frozen.snapshot, "ref", None)
@@ -1106,9 +1094,7 @@ class ConsolePresenter:
         plot_error = getattr(self.view, "panel_plot_error", None)
         if plot_error is not None:
             # The plot widget's own refusal channel (errorOccurred, relayed by
-            # the card).  Unconnected, a pointer currency-guard refusal --
-            # "the painted pointer front is no longer layout-compatible" --
-            # was fully silent and the panel just stopped answering gestures.
+            # the card), so a refused gesture is never silent.
             plot_error.connect(self._guarded(self._panel_plot_error))
         draft_changed = getattr(self.view, "logic_draft_changed", None)
         if draft_changed is not None:
@@ -1240,10 +1226,8 @@ class ConsolePresenter:
         vocabulary is projected, never repaired after a host rejects it.
         """
 
-        # Never reused.  Minted from the panel COUNT, an id came back the moment
-        # anything was removed -- and the second panel to hold it overwrote the
-        # first in place: its plotting host and selection bridge were never
-        # closed, and two live bridges published derived signals under one name.
+        # Never reused: an id minted from the panel COUNT would come back once
+        # anything was removed, and two live bridges would publish under one name.
         signal_name = str(signal)
         front = self.session.signal_plane.freeze()
         current = front.value(signal_name)
@@ -1423,14 +1407,8 @@ class ConsolePresenter:
             # A port asks for this when a prepared front was REFUSED -- the
             # operator zoomed or dragged while it was in flight -- so what it
             # owes is another staging pass at the publication nobody has seen
-            # yet.  It used to ask for a new representation EPOCH, which is
-            # the demand for a FRESH HOST: with a bounded history standing,
-            # every shot deepens the schema, so epoch-plus-changed-shape
-            # replaced the panel's host on the very gestures that refused the
-            # front -- a whole new session, worker, figure and first paint in
-            # the render child per notch, each one pasting the console's
-            # one-round-trip-old mirror of the viewport back over the zoom the
-            # operator had just set.  Owing a pass keeps the host.
+            # yet -- never a new representation EPOCH, which would replace the
+            # panel's host on the very gestures that refused the front.
             invalidate=lambda panel_id: self.board.owe_presentation(
                 (panel_id,)
             ),
@@ -2087,9 +2065,8 @@ class ConsolePresenter:
         except (KeyError, TypeError, ValueError):
             # A table this Dataset refuses is a STATE of the panel, as the
             # Setting form already treats it (_schema_projected_parameters
-            # carries the refusal as its reason).  Raised from here it took
-            # down whatever was publishing the panel: a board load that had
-            # kept such a panel for repair died on it half mounted.
+            # carries the refusal as its reason); raised from here it would
+            # take down whatever was publishing the panel.
             projection = None
         if (state is None or state is binding.state) and subject is None and schema is None:
             # Asked about the panel's OWN state on the data its card shows,
@@ -2183,12 +2160,8 @@ class ConsolePresenter:
             binding.state = replace(state, **changes)
             if "selector" in changes:
                 # A region is held in TWO places: this record, and a selector
-                # artist on every host that is painting it.  Retiring one
-                # alone left the card drawing a box the panel no longer had,
-                # so the derived signal stopped and a surface mounted
-                # afterwards -- Edit -- was built from a record with nothing
-                # in it, which reads exactly as "the card shows my ROI and
-                # Edit does not".  Both go, and the operator is told.
+                # artist on every host that is painting it.  Both go, and the
+                # operator is told.
                 if binding.bridge is not None:
                     binding.bridge.clear_selection()
                 for host in (binding.host, binding.editor_host):
@@ -2369,16 +2342,9 @@ class ConsolePresenter:
                     accepted_display = getattr(answer, "value", answer)
             # ONE proof decides whether a stored interaction can be placed:
             # the SELECTION's own vocabulary against the subject it was drawn
-            # in, which is panel_selection_matches_subject below.  Comparing
-            # two independently resolved SPECS was a second, cruder proxy for
-            # that same question standing in front of it, and it answered
-            # "no" for reasons that have nothing to do with coordinates: this
-            # host's spec is resolved against ITS subject -- frozen data, for
-            # Edit -- while the accepted one was resolved against the card's
-            # live data, and a plan that reads an axis SIZE makes the two
-            # disagree as soon as a standing history has deepened past one of
-            # its thresholds.  The operator's ROI then vanished from Edit
-            # with nothing said anywhere.  A thresholds question is about
+            # in, which is panel_selection_matches_subject below -- never two
+            # independently resolved SPECS, which disagree on axis SIZES between
+            # frozen and live data.  A thresholds question is about
             # what THIS host will draw, so it asks this host's own spec.
             selection_subject = (
                 None
@@ -2521,11 +2487,8 @@ class ConsolePresenter:
 
         Every pending host operation is settled on the owner -- the live
         card's presentation, but also the Edit surface's mount, its gesture
-        subscription and the clearing of its pending entry.  Only the live
-        host used to ask for the wake; an editor's finished configuration
-        or freeze then waited for whatever woke the owner next -- a shot,
-        or the display beat -- one such wait per hop of opening Edit, of
-        Refresh, of a moved target.
+        subscription and the clearing of its pending entry -- so every one
+        asks for the wake rather than waiting for the next shot or beat.
         """
 
         add = getattr(pending, "add_done_callback", None)
@@ -2553,11 +2516,8 @@ class ConsolePresenter:
     ) -> bool:
         """Put one completed host operation on the panel's staged widget.
 
-        THE moment a card changes what it shows.  Mounting the new host first
-        and presenting later meant the card went blank for however long the
-        replacement took to render -- a facet grid of twenty-five cells is
-        seconds of nothing -- and any front that arrived in between met the
-        previous host's widget.  Showing the host of the pixels that are
+        THE moment a card changes what it shows, so the card never goes
+        blank while a replacement renders.  Showing the host of the pixels that are
         landing keeps the old picture until the new one exists, and is a
         no-op once the card already shows it.
         """
@@ -2758,11 +2718,9 @@ class ConsolePresenter:
         del value
 
         # The target says WHICH DATA this projection is for; it does not
-        # say how the panel is being looked at.  It was captured when the
-        # projection was submitted, so a replacement already in flight
-        # when the operator finished a drag mounted the pre-drag camera --
-        # the record held the new one and the screen jumped back to the
-        # old one.  Identity fields still come from the target (a retarget
+        # say how the panel is being looked at: it was captured when the
+        # projection was submitted, before a drag that may have finished
+        # since.  Identity fields still come from the target (a retarget
         # must not be undone by a stale record); everything the operator
         # authors comes from the record as it stands now.
         current = binding.state
@@ -3028,7 +2986,8 @@ class ConsolePresenter:
         )
         # A rename changes every heading and label below without changing
         # the plane or the wiring, so the names are part of the context.
-        names_key = self._names_key()
+        names = self.logic_names()
+        names_key = tuple(names.items())
         previous = self._signal_choice_context
         if (
             previous is not None
@@ -3037,7 +2996,6 @@ class ConsolePresenter:
             and previous[2] == names_key
         ):
             return
-        names = self.logic_names()
         panel_publishers = tuple(
             (
                 panel_id,
@@ -3066,10 +3024,7 @@ class ConsolePresenter:
         )
         # THE KEY MUST WATCH WHAT ELIGIBILITY WATCHES.  Overlay choices
         # depend on publications and generation families, and none of that
-        # is visible in the name/label/producer groups -- so after a stop
-        # and restart the groups settled back to equal while occupancy's
-        # eligibility flipped, and the one refresh that would have offered
-        # it never ran: the overlay combobox stayed empty for good.
+        # is visible in the name/label/producer groups.
         overlay_offers = tuple(
             (
                 panel_id,
@@ -3113,10 +3068,7 @@ class ConsolePresenter:
         revision and holds it until Refresh, which is what makes a fit or a
         saved figure reproducible -- but the moment worth holding is the one
         the operator stepped aside to look at, not whenever this panel
-        happened to be created.  A panel opened at the start of a scan and
-        edited ten minutes later showed the scan's first point, which is not
-        the picture the card beside it was showing, and no amount of looking
-        at the Edit tab could say why.
+        happened to be created.
         """
 
         binding = self.panels.get(panel_id)
@@ -3250,8 +3202,7 @@ class ConsolePresenter:
             # sends back may be that reading, not a name the operator typed.
             # Unchanged, it changes nothing; equal to how the signal reads,
             # it is the automatic title again (the key), which follows the
-            # node's name and the next signal.  Kept as text, it froze one
-            # node name into the record.
+            # node's name and the next signal.
             typed = str(changes["title"]).strip()
             if typed == self._panel_name(binding):
                 del changes["title"]
@@ -3267,9 +3218,7 @@ class ConsolePresenter:
         title = title or signal or current.kind
         merged: dict[str, Any] = {
             "signal": signal,
-            # Validated above; without this line the patch was checked and
-            # then silently dropped -- legal only while the old policy made
-            # the current value the single legal one.
+            # Validated above.
             "cell_kind": str(changes.get("cell_kind", current.cell_kind)),
             "size": str(changes.get("size", current.size)),
             "interval_ms": int(changes.get("interval_ms", current.interval_ms)),
@@ -3300,13 +3249,12 @@ class ConsolePresenter:
             merged["interaction"] = {name: None for name in current.interaction}
         for name in ("semantic", "display", "fit"):
             # Axis assignments and fit models belong to one exact
-            # signal/cell vocabulary.  Carrying either into another and
-            # silently filtering whatever no longer fits made a typo and an
-            # old configuration indistinguishable.  Appearance remains
-            # reusable across kinds; a LIMIT is not appearance -- it
-            # describes the quantity the old kind plotted, and the spec
-            # that declares it says so -- so it starts over with the
-            # projection and the fit.
+            # signal/cell vocabulary; carried into another and filtered, a
+            # typo and an old configuration would be indistinguishable.
+            # Appearance remains reusable across kinds; a LIMIT is not
+            # appearance -- it describes the quantity the old kind
+            # plotted, and the spec that declares it says so -- so it
+            # starts over with the projection and the fit.
             if name in {"semantic", "fit"} and projection_identity_changed:
                 values = {}
             elif name == "display" and projection_identity_changed:
@@ -3351,15 +3299,10 @@ class ConsolePresenter:
                     severity="error",
                 )
                 return False
-            # THE WHOLE TABLE, not just the row the operator touched.
-            # Composing the default spec with one key discarded every fate
-            # authored before it: giving spatial-x the x fate silently
-            # returned spatial-y from group to reduced, and after a vacant
-            # intermediate state the next edit started from the kind's
-            # default -- which is what made fates look like they were
-            # fighting each other.  A bag is ONE edit (composed_spec), and
-            # the bag is the panel's table with this change applied, which
-            # is exactly how a saved board is restored.
+            # THE WHOLE TABLE, not just the row the operator touched, so no
+            # fate authored before is discarded.  A bag is ONE edit
+            # (composed_spec), and the bag is the panel's table with this
+            # change applied, exactly as a saved board is restored.
             edited = {
                 str(name): value
                 for name, value in dict(changes["semantic"]).items()
@@ -3482,10 +3425,10 @@ class ConsolePresenter:
             self._report(f"{panel_id}: {_error_text(error)}", severity="error")
             return False
         if "display" in changes:
-            # What no host could ever accept must never be STORED: an
-            # inverted limit pair used to pass through here, fail the host
-            # at its next start, and lock the operator out of every surface
-            # that could repair it.  The appearance bag keeps other kinds'
+            # What no host could ever accept must never be STORED (an
+            # inverted limit pair would fail the host at its next start and
+            # lock the operator out of every surface that could repair it).
+            # The appearance bag keeps other kinds'
             # vocabulary; the contract judges this kind's own subset, and
             # an INCOMPLETE state still passes -- fixed limits materialize
             # on the next configure.
@@ -3652,9 +3595,7 @@ class ConsolePresenter:
             if value is None:
                 # A live port draws what it drew until a candidate replaces
                 # it, so changing WHAT it draws -- the signal or the cell --
-                # is refused while nothing can prepare the change.  Accepted,
-                # the record claimed cells the card never drew, and the next
-                # plot edit found no such plot to match its host to.  The
+                # is refused while nothing can prepare the change.  The
                 # unchanged record goes back to every view: the form that
                 # sent the pick is still showing it.
                 if (not _same_panel_plot_identity(candidate, current)
@@ -3762,8 +3703,7 @@ class ConsolePresenter:
                 candidate_port.close()
                 # Nothing was retargeted, so nothing may say it was: the
                 # record goes back with the card, which still draws what it
-                # drew.  Keeping the new name over the old picture made the
-                # next pick of the same signal a no-op.
+                # drew, and the next pick of the same signal is not a no-op.
                 binding.state = current
                 binding.vacancy = previous_vacancy
                 binding.parameter_surface = previous_surface
@@ -3953,10 +3893,8 @@ class ConsolePresenter:
             )
         except (TypeError, ValueError, KeyError) as error:
             # Never answer a refused VALUE by deleting the vocabulary:
-            # which controls a panel has is a fact about its KIND.  The
-            # schema-projected sibling learned this first; this path kept
-            # answering with an empty control set, which is a different
-            # FIELD SET and sends the form down its replacement path.
+            # which controls a panel has is a fact about its KIND (an empty
+            # control set is a different FIELD SET).
             display_unavailable = _error_text(error)
             controls = parameter_controls_for_kind(
                 state.kind,
@@ -4021,9 +3959,7 @@ class ConsolePresenter:
             # default spec was the accepted view.  The refusal IS the reason
             # the fate the operator picked is not on screen -- "needs 323
             # cells, which exceeds the fixed layout capacity of 64; pin an
-            # axis or change a fate" names the way out -- and it was being
-            # dropped here, so the form redrew unchanged and the pick simply
-            # looked like it had not registered.
+            # axis or change a fate" names the way out.
             semantic_reason = str(error)
             resolved = spec
             try:
@@ -4061,17 +3997,10 @@ class ConsolePresenter:
             display_unavailable = ""
         except (TypeError, ValueError, KeyError) as error:
             # WHICH controls a panel has is a fact about its KIND; what
-            # they hold is the authored bag.  Answering "one of these
-            # values is unacceptable" by returning no controls at all
-            # said the second thing with the first thing's words, and
-            # the consequences ran a long way: an empty control set is
-            # a different FIELD SET, which sends the Setting form down
-            # its replacement path, which destroys the widget the
-            # operator's cursor is in and re-measures the popup around
-            # them.  Deleting a colour maximum collapsed a form of
-            # twenty-nine rows to eleven that way.
-            #
-            # So: keep the vocabulary, from the kind alone, and say what
+            # they hold is the authored bag.  An empty control set is a
+            # different FIELD SET, which would send the Setting form down
+            # its replacement path under the operator's cursor.  So: keep
+            # the vocabulary, from the kind alone, and say what
             # could not be applied -- exactly as the sibling that
             # describes an unbound panel already does.
             display_unavailable = _error_text(error)
@@ -4082,9 +4011,7 @@ class ConsolePresenter:
             )
         # The authored table is put back on these rows by
         # _publish_panel_state, which every path handing a surface to a view
-        # goes through -- keyed on the row's own "key".  A second overlay
-        # here read "name", a key semantic_entries has never emitted, so it
-        # matched nothing and only looked like it was doing the work.
+        # goes through -- keyed on the row's own "key".
         entries = list(semantic_entries(description))
         return self._parameter_surface(
             controls,
@@ -4154,14 +4081,9 @@ class ConsolePresenter:
         vocabulary: the field set is declared -- by the host's accepted
         description while one still describes the authored target, by the
         schema projection before any host ever has -- and an error may
-        only annotate it.  This used to swap every degraded panel onto
-        the schema projection, whose fit section is empty by design
-        ("only fit truly needs a live host"), so any late error -- one
-        recorded AFTER a run stopped, with no next present to write the
-        description back -- deleted the fit controls from the Setting
-        form for good.  The tenth-odd instance of the same disease, and
-        the law it violated was already written
-        (ARCHITECTURE_DESIGN.md:101/103).
+        only annotate it (ARCHITECTURE_DESIGN.md:101/103).  The schema
+        projection's fit section is empty by design, so swapping a degraded
+        panel onto it would delete the fit controls for good.
 
         The Fit column's reason line exists for the never-described case
         only: there it is true that fit models resolve when the plot
@@ -4235,13 +4157,10 @@ class ConsolePresenter:
     ) -> None:
         """Put the panel record back to what the host last accepted.
 
-        A refused edit used to leave three things standing: the panel's own
-        state, the Runtime history lease already resized to the new window,
-        and the live port already retargeted at the refused spec.  The picture
-        stayed on the previous spec, so the panel claimed a setting nothing
-        had ever drawn -- and the next shot was projected through the refused
-        one.  The plot session rolls its own state back; this is the same
-        transaction on this side of the boundary.
+        A refused edit must not leave the panel's own state, the Runtime
+        history lease or the live port on the refused spec, or the panel
+        claims a setting nothing drew.  The plot session rolls its own state
+        back; this is the same transaction on this side of the boundary.
         """
 
         if not isinstance(fallback, PanelState) or binding.state == fallback:
@@ -4326,14 +4245,14 @@ class ConsolePresenter:
                 if (binding.configuration is None and binding.host is host
                         and not binding.vacancy):
                     # Nothing replaces it -- the signal has no value or no
-                    # fitting cell, or the candidate was refused.  Kept, the
-                    # same resubmit ran on every beat, saying the same line
-                    # each time.  The panel lets go of it and waits portless
-                    # for the once-per-run mount.  A vacancy the resubmit
-                    # found keeps it instead: the last Front stays on the
-                    # card, the selection bridge goes on deriving the ROI
-                    # outputs from every new publication without a host, the
-                    # history lease holds, and the repair edit remounts.
+                    # fitting cell, or the candidate was refused.  The panel
+                    # lets go of it (rather than resubmit every beat) and
+                    # waits portless for the once-per-run mount.  A vacancy
+                    # the resubmit found keeps it instead: the last Front
+                    # stays on the card, the selection bridge goes on
+                    # deriving the ROI outputs from every new publication
+                    # without a host, the history lease holds, and the
+                    # repair edit remounts.
                     self._release_panel(binding)
                     self.view.show_panel(binding.panel_id, None)
                     self._publish_panel_state(binding)
@@ -4408,14 +4327,8 @@ class ConsolePresenter:
                             candidate_port.reject(update, error)
                             candidate_port.close()
                             # AND THE OLD ONE GOES.  The state already names
-                            # the new signal -- the title, the Setting form
-                            # and the schema all describe it -- so leaving
-                            # the old port attached kept the card drawing
-                            # the signal the panel no longer targets, beat
-                            # after beat, with no gesture that could
-                            # re-attach it: a second retarget to the same
-                            # signal is a no-op because the state already
-                            # equals it.  Portless, the panel waits to mount:
+                            # the new signal, and a second retarget to it is
+                            # a no-op.  Portless, the panel waits to mount:
                             # _settle_panel_hosts tries it at most once per
                             # run of its source (``mount_attempted``), so a
                             # failure that outlasts that try -- a transient
@@ -4424,10 +4337,8 @@ class ConsolePresenter:
                             # the operator picks the signal again.  That is
                             # the price of not rebuilding a refused host on
                             # every beat.  Everything the old port drove goes
-                            # with it, through _release_panel: a host kept
-                            # its picture, and a selection bridge kept
-                            # publishing ROI/fit results derived from the
-                            # old signal while the record named the new one.
+                            # with it, through _release_panel: its host and
+                            # its selection bridge.
                             if binding.port is not None:
                                 self._release_panel(binding)
                                 self.view.show_panel(binding.panel_id, None)
@@ -5093,17 +5004,14 @@ class ConsolePresenter:
     ) -> None:
         """Show a newer freeze on the editor's own host, as the card shows a shot.
 
-        Refresh used to tear the Edit surface down and build another: a new
-        PlotSession over the frozen history, its projection, its fit, its
-        first paint -- 1.2 s on a 40-cell grid over a thousand shots, for a
-        picture the card beside it had just drawn incrementally in a tenth
-        of that.  The editor host takes the new data the way the live host
-        does, through the same prepare/solve/commit pair, and keeps its
-        artists, caches and configuration.  The pending operation settles
-        through the one editor-configuration path, so the frozen
-        description is the host's own -- and only that settle makes
+        Refresh never rebuilds the Edit surface (a new session, fit and
+        first paint per Refresh).  The editor host takes the new data the
+        way the live host does, through the same prepare/solve/commit pair,
+        and keeps its artists, caches and configuration.  The pending
+        operation settles through the one editor-configuration path, so the
+        frozen description is the host's own -- and only that settle makes
         ``frozen`` the panel's record.  A host that cannot take the data --
-        the target moved, the geometry changed -- is replaced, as before.
+        the target moved, the geometry changed -- is replaced.
         """
 
         from zlc_data.snapshot_projection import schemas_continue
@@ -5111,10 +5019,8 @@ class ConsolePresenter:
         entry = binding.editor_configuration
         # The surface Edit has, or the one being staged for it: a host
         # built for the previous freeze takes this one through its data
-        # pipeline, queued behind its own configuration.  Opening Edit
-        # under a live source used to build a second host here -- the
-        # owed presentation arrived while the first was still starting,
-        # and the first was retired before it ran a single operation.
+        # pipeline, queued behind its own configuration -- including one
+        # still starting, so no second host is built here.
         host = binding.editor_host
         if host is None and entry is not None:
             host = entry[0]
@@ -5162,14 +5068,11 @@ class ConsolePresenter:
     ) -> object:
         """Listen to everything the operator can do on Edit's frozen surface.
 
-        The source is bound to the HOST and lives as long as it.  It used to
-        be bound to the freeze: every re-acceptance of the same host closed
-        the old source and opened a new one, and a gesture the child was
-        already answering came back addressed to the subscription just
-        released -- a wheel turned while Edit re-accepted its picture zoomed
-        the surface and the panel never heard of it.  Which freeze a gesture
-        was made on is the gesture's own data identity, checked where it is
-        accepted; the freeze Edit shows is the binding's record, read there.
+        The source is bound to the HOST and lives as long as it, not to the
+        freeze, so a gesture answered across a re-acceptance still reaches
+        the panel.  Which freeze a gesture was made on is the gesture's own
+        data identity, checked where it is accepted; the freeze Edit shows
+        is the binding's record, read there.
         """
 
         panel_id = binding.panel_id
@@ -5256,9 +5159,8 @@ class ConsolePresenter:
         """Refresh Edit from the next accepted canonical presentation.
 
         ``report_unchanged`` is the Refresh button's: a press that finds Edit
-        already current says so.  Opening Edit freezes through here too, and
-        there the same sentence was a claim about a snapshot the operator had
-        not looked at yet -- one that stayed on the strip after it went stale.
+        already current says so; opening Edit freezes through here too,
+        without that sentence.
         """
 
         binding = self.panels.get(str(panel_id))
@@ -5315,21 +5217,17 @@ class ConsolePresenter:
         newer_pending = (
             publication is not None and publication is not shown_publication
         )
-        # Otherwise Refresh adopts what the card is showing, right now.
-        # Asking the PLANE what to freeze was the defect: a derived signal
-        # (an ROI feeding a second panel) is retired with the run that
-        # produced it, so the plane answers "nothing published" while the
-        # card is still showing a perfectly good picture -- and Refresh
-        # returned False without touching anything.  The panel's accepted
-        # surface is the authority on what the operator sees.
-        # Adoption does not wait on the newer publication.  Whenever the
-        # card has moved ahead of Edit, showing that picture NOW is what
-        # the operator asked for; the pending publication still arrives
-        # through ``refresh_requested`` below.  Making the two exclusive
-        # meant a press whose card was already ahead did nothing visible
-        # until the next shot rendered -- and nothing at all if the bench
-        # had stopped.  The atomic-swap contract is untouched: when Edit
-        # already holds the card's picture there is nothing to adopt.
+        # Otherwise Refresh adopts what the card is showing, right now --
+        # never the PLANE's answer: a derived signal (an ROI feeding a second
+        # panel) is retired with the run that produced it while the card
+        # still shows its picture.  The panel's accepted surface is the
+        # authority on what the operator sees.
+        # Adoption does not wait on the newer publication.  Whenever the card
+        # has moved ahead of Edit, showing that picture NOW is what the
+        # operator asked for; the pending publication still arrives through
+        # ``refresh_requested`` below.  The atomic-swap contract is
+        # untouched: when Edit already holds the card's picture there is
+        # nothing to adopt.
         if (
             shown_input is not None
             and describes_current
@@ -5764,12 +5662,9 @@ class ConsolePresenter:
     def beat(self) -> None:
         """Advance lifecycle always; Pause freezes only the PICTURE.
 
-        PAUSE IS NOT AN IDLE BENCH.  It used to skip the tick entirely, and
-        the tick is the only periodic caller of the plane's freeze -- which
-        is not a read but the sole pump of the latest-only processor lane --
-        so pausing the display also stopped the display clock and stopped
-        every selection- and fit-derived signal from being computed at all.
-        The tick now always runs and only STAGING is withheld.
+        PAUSE IS NOT AN IDLE BENCH.  The tick is the only periodic caller
+        of the plane's freeze -- the sole pump of the latest-only processor
+        lane -- so it always runs and only STAGING is withheld.
 
         The commit runs even while paused: a batch already travelling must
         still land -- atomically, as one group -- or pausing at the wrong
@@ -5926,10 +5821,8 @@ class ConsolePresenter:
         """The board as a portable document: what is on it, in what order.
 
         A board is the arrangement an operator built -- which signals, drawn how
-        big, redrawing how often, and which nodes are producing them.  It took
-        an afternoon to arrange and did not survive closing the window, because
-        nothing here could say what it was.  Saving DATA is a different act and
-        already had a button; this is the other one.
+        big, redrawing how often, and which nodes are producing them.  Saving
+        DATA is a different act.
 
         Only what an operator chose is written, plus the identity each panel
         had: a panel is a producer -- its Bridge publishes the ROI and fit
@@ -6476,14 +6369,11 @@ class ConsolePresenter:
         if values is None:
             return
         # Keyed by the host's durable identity (``_display_host_key``):
-        # ``id()`` recycles the moment a replaced host is collected, so a
-        # fresh editor host inherited the dead host's high-water revision
-        # and its callbacks were dropped forever -- Refresh appeared to stop
-        # refreshing, and half-dropped mirrors flip-flopped the zoom.
+        # ``id()`` recycles the moment a replaced host is collected, and a
+        # fresh host must not inherit a dead host's high-water revision.
         source_key = self._display_host_key(source)
         revision = getattr(state, "revision", None)
         if revision is not None:
-            # ``id()`` recycles the
             seen = binding.display_sync_revisions.get(source_key)
             if seen is not None and revision <= seen:
                 return
@@ -6852,11 +6742,8 @@ class ConsolePresenter:
         """Keep live and frozen views on one selector/viewport truth."""
 
         if viewport is not _UNCHANGED:
-            # Zoom and pan are how an operator looks, not what they ask for.
-            # A viewport used to be routed to the producer whenever no region
-            # was drawn, so moving the view re-pointed the hardware; and a
-            # region taken away then routed the viewport in its place instead
-            # of putting back what the region had overwritten.
+            # Zoom and pan are how an operator looks, not what they ask for:
+            # a viewport is never routed to the producer.
             if (
                 binding.interaction_viewport is not None
                 and binding.interaction_viewport[1] == viewport
@@ -7077,9 +6964,7 @@ class ConsolePresenter:
         # be asked to be is the publication the panel has ACCEPTED: the
         # host renders every revision it is handed while acceptance runs on
         # the board's beat, so on a live panel those two are routinely
-        # different objects -- and requiring them to be the same refused
-        # every region the operator drew after the first: the ROI kept the
-        # first box's shape for ever.
+        # different objects.
         if not panel_selection_matches_subject(
             observation.state, observation.subject
         ):
@@ -7362,9 +7247,7 @@ class ConsolePresenter:
             # role and a refused write both at the write that produced them.
             # A refused parameter expression has no such moment: it arrives
             # with a description, so this is where it is found and therefore
-            # where it is said.  It used to be pushed into the Setting form
-            # as a field instead, which put a control-shaped thing that is
-            # not a control under the controls it was about.
+            # where it is said -- never as a field in the Setting form.
             refused = _refused_expression(binding)
             unapplied = binding.vacancy or binding.unapplied_display or refused
             # A surface still travelling past the console's patience is the
@@ -7992,11 +7875,6 @@ class ConsolePresenter:
         person reads it."""
 
         return self._signal_text(binding.state.title, names)
-
-    def _names_key(self) -> tuple[tuple[str, str], ...]:
-        """Every node's id and name, for a cache that a rename must expire."""
-
-        return tuple((binding.node_id, binding.name) for binding in self.logic.values())
 
     def _reserved_headings(self) -> set[str]:
         """The headings a node's name must not take, so no picker files two
@@ -8640,9 +8518,7 @@ class ConsolePresenter:
         The two option sets are PASSED IN, not gathered here.  Building the
         compatible-source set is the most expensive thing a finalization
         does -- it walks every logic output and every published signal --
-        and this key existed to avoid doing it, so gathering it to decide
-        whether to gather it left the guard costing exactly what it saved,
-        every row, every beat.
+        and this key exists to avoid doing it.
         """
 
         source = binding.draft.source_signal.strip()
@@ -9142,8 +9018,8 @@ class ConsolePresenter:
         try:
             # Admission BEFORE the build reads a device: a device under a
             # Control's tune holds its own I/O lock for the whole tune (an
-            # N100 rate change: seconds), and the build read it here on the
-            # Qt thread -- the console froze for the tune, then was refused.
+            # N100 rate change: seconds), and the build would read it here
+            # on the Qt thread.
             holders = self.session.device_use.command_holders(
                 tuple(finalization.device_keys.values())
             )
@@ -9456,12 +9332,9 @@ class ConsolePresenter:
         guessing between a run that had not finished stopping and a
         picture that had not finished travelling.
 
-        Only the READ needs the plane.  The gate used to be every panel with
-        a surface in flight, which made a restart wait on the whole display
-        pipeline -- a render child that was slow but alive (its heartbeat
-        passes the silence check), a join-window cohort that cannot seal
-        while the display is paused, a cohort queued behind one of those --
-        for as long as any of them lasted.  A panel being retargeted has a
+        Only the READ needs the plane, so a restart never waits on the
+        whole display pipeline (a slow render child, a cohort that cannot
+        seal while paused).  A panel being retargeted has a
         candidate port reading too, and it is asked the same question.
         """
 
@@ -9510,14 +9383,11 @@ class ConsolePresenter:
         """(row state, status text); ``finalization`` is the caller's own
         finalization of this row in the same turn, when it has one.
 
-        The state is a word of the row's vocabulary -- idle, draft, running,
-        warning, error -- and a draft whose issues refuse a Start is
-        ``draft``, never ``idle``.  A run whose Restart was refused is
-        ``warning``: it goes on, but not with what the operator asked for,
-        which needs their attention and is not a failure.  The node's Edit
-        page is told the same word, so the row and the page draw one status
-        one way: a draft drawn grey on one and amber on the other was two
-        looks for one status.
+        The state is a word of the row's vocabulary (``STATE_WORDS``): a
+        draft whose issues refuse a Start is ``draft``, never ``idle``; a run
+        whose Restart was refused is ``warning`` (it goes on, but not with
+        what the operator asked for).  The node's Edit page is told the same
+        word.
         """
 
         def draft_issues() -> tuple[str, ...]:
@@ -9711,9 +9581,8 @@ class ConsolePresenter:
         """Stable keys whose declared Dataset contract matches this input.
 
         ``descriptions`` lets a caller that already read the plane hand that
-        read in.  Three of these questions are asked side by side about one
-        unchanged plane, and each used to take the lock and rebuild the
-        whole description list again.  ``values`` are the authored values
+        read in: three of these questions are asked side by side about one
+        unchanged plane.  ``values`` are the authored values
         the consumer's Dataset inputs are read from: its draft's when
         omitted, the running configuration's for a follow restart.
         """
@@ -9792,20 +9661,17 @@ class ConsolePresenter:
         consumer_node_id: str,
         options: tuple[str, ...],
     ) -> tuple[tuple[str, ...], dict[str, str], dict[str, str], dict[str, str]]:
-        """The compatible sources' labels, groups and texts, from ONE read.
-
-        A Logic editor open beside a running scan re-projects on every 100 ms
-        beat, so the answers come from one read of the plane's projection.
+        """The compatible sources' labels, groups and texts, from ONE read of
+        the plane's projection (an open editor re-projects every 100 ms beat).
         ``options`` is the compatible set the caller already walked.
 
-        A source is filed under its producer (the group) and listed by its
-        output name, the same words before and after it publishes; the
-        closed combo reads it as every status, caption and row reads the
-        same signal (:func:`signal_text`, ``Occupancy 1/occupied``), whether
-        or not a shape is known yet.  A bundle reads as its members in the
-        order Derive's Inputs list them, the first spelled as a status
-        spells it (``Occupancy 1/counts, occupied, frame_judged``).  The shape is the editor's to show where it matters
-        (Derive's inputs, Occupancy's frame count, Frame Survival's grid).
+        A source is filed under its producer and read as every status reads
+        the same signal (:func:`signal_text`, ``Occupancy 1/occupied``), the
+        same words before and after it publishes; a bundle reads as its
+        members in the order Derive's Inputs list them
+        (``Occupancy 1/counts, occupied, frame_judged``).  The closed combo
+        never shows a shape: the shape is the editor's to show (Derive's
+        inputs, Occupancy's frame count, Frame Survival's grid).
         """
 
         descriptions, _by_name, projected, _families = self._signal_projection()
@@ -10407,20 +10273,14 @@ class ConsolePresenter:
         draft: LogicDraft | None = None,
         _visited=frozenset(),
     ) -> tuple[str | None, tuple[str, ...]] | None:
-        """``(name, labels)`` of the readout-event axis -- the frames one
-        cycle of this node's source carries -- by the name the source gives
-        it (None for one frame no axis carries).
-
-        Each signal is asked of its PRODUCER first: its explicit pure
-        metadata callback can preserve or describe upstream draft frames,
-        without constructing a node or inventing a data schema. When it has
-        none, or its draft cannot say, the plane says (:meth:`_plane_frames`),
-        so what a producer already published still answers while its draft
-        is being edited.  A node reading a whole bundle (``select_bundle``)
-        reads every member, not only the one its source names: the answer is
-        the members' axis when every member carries the same, None when
-        they differ -- one answer cannot say which member carries which.
-        None while there is no source or nothing says yet.
+        """``(name, labels)`` of the readout-event axis one cycle of this
+        node's source carries (None for one frame no axis carries): the
+        PRODUCER's ``describe_output_frames`` first, then the plane
+        (:meth:`_plane_frames`), so what a producer already published still
+        answers while its draft is being edited; for a ``select_bundle``
+        node, an answer only when every member carries the same axis (one
+        answer cannot say which member carries which).  None while there is
+        no source or nothing says yet (ARCHITECTURE_DESIGN.md, frames).
         ``draft`` names the source: the node's draft's when omitted.
         """
 

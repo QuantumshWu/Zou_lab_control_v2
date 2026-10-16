@@ -767,9 +767,9 @@ def start_server(flow, *, host="127.0.0.1", port: int, token: str, allow_control
             return result
 
         @tool()
-        async def lab_devices(action: Literal["inspect", "load", "save"],
+        async def lab_devices(action: Literal["load", "save"],
                               path: str | None = None) -> dict[str, object]:
-            """Inspect or load/save the native apparatus draft without initializing hardware.
+            """Load or save the native apparatus draft without initializing hardware.
             Load requires an existing workspace apparatus JSON. Save uses the Devices codec.
             This never implicitly initializes devices or shuts down a Session; use lab_initialize.
             """
@@ -780,8 +780,6 @@ def start_server(flow, *, host="127.0.0.1", port: int, token: str, allow_control
                 if flow.devices is None:
                     raise RuntimeError("Devices window is unavailable")
                 manager = flow.devices.presenter
-                if action == "inspect":
-                    return state()
                 if manager.device_operation_active:
                     return dict(accepted=False, error="Device operation is still pending", state=state())
                 result = manager.load(selected) if action == "load" else manager.save(selected, present=False)

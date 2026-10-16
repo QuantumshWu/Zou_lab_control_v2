@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-import sys
 
 
 def _opener(arguments: argparse.Namespace, ratio: float):

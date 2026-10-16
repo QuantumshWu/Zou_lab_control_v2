@@ -52,15 +52,11 @@ def row_spacing() -> int:
     return px(CHANNEL_ROW_SPACING, minimum=3)
 
 
-def channel_label_width() -> int:
-    return px(CHANNEL_LABEL_WIDTH, minimum=84)
-
-
 def label_column_width(labels) -> int:
     """A side panel's label column: its widest label and the air after it,
-    capped at :func:`channel_label_width`."""
+    capped at :data:`CHANNEL_LABEL_WIDTH`."""
 
-    return min(channel_label_width(), setting_label_width(labels, minimum=0))
+    return min(px(CHANNEL_LABEL_WIDTH, minimum=84), setting_label_width(labels, minimum=0))
 
 
 def config_name_width() -> int:
@@ -111,7 +107,6 @@ def period_card_width(*, ports=(), analog_mode_choices=()) -> int:
     if not codes:
         return width
     from zlc_ui.fluent import FluentComboBox
-    from zlc_ui.fluent.fluent import _numeric_text_width
     from .scan_line_edit import FluentScanLineEdit
 
     combo, edit = FluentComboBox(), FluentScanLineEdit()
@@ -231,9 +226,8 @@ def add_labeled_widget(layout, label_text: str, widget: QtWidgets.QWidget) -> El
 
 
 __all__ = [
-    "COUNT_SAMPLE", "add_labeled_widget", "bound_field_width", "card_caption",
-    "channel_label_width", "channel_name_edit_width",
-    "config_name_width", "count_box_width", "form_control_cell", "form_label",
+    "add_labeled_widget", "bound_field_width", "card_caption", "channel_name_edit_width",
+    "config_name_width", "count_box_width", "form_label",
     "label_column_width", "panel_top_height", "quiet",
     "period_card_width", "period_control_width", "px", "row_height",
     "row_spacing", "spacer_card_width",

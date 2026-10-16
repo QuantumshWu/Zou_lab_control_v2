@@ -203,19 +203,13 @@ class Workspace:
         apparatus.json.  One folder, wherever the launcher was double-clicked
         from, and it travels with the code that opens it.
 
-        NOT the working directory, which is what this used to fall back on: a
-        double-clicked launcher starts in the folder holding it, so "the
-        default pulse folder" was a different folder depending on how the
-        window was opened, and a saved pulse landed somewhere nobody would look
-        for it again.
+        NOT the working directory: a double-clicked launcher starts in the
+        folder holding it, so that would depend on how the window was opened.
 
         It is created on demand, HERE.  A home that must be made by hand
         before the first save is a home that will not be there -- and this is
         the only place that knows the home is meant rather than merely named,
-        so it cannot be left to whoever asks for it next.  It used to be made
-        as a side effect of copying packaged pulses into it; those pulses are
-        gone, because a pulse belongs to the operator's folder and not to the
-        code, and making the folder was never the copier's job anyway.
+        so it cannot be left to whoever asks for it next.
 
         The pulse folder comes with it: it is one of the MARKERS, so a home
         without one is not yet recognisable as an experiment's, not even to

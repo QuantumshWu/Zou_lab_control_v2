@@ -47,7 +47,6 @@ from zlc_ui.form.qt_form import _form_label_width
 from zlc_ui.status import SUMMARY_SEPARATOR, name_words
 from .logic_row_view import (
     STATE_WORDS,
-    STATUS_DOT,
     START_LABELS,
     mount_logic_page,
     start_label,
@@ -96,11 +95,8 @@ class LogicEditorView(QtWidgets.QWidget):
         self._contributions: dict[object, QtWidgets.QWidget] = {}
 
         # THREE BANDS: the header, the rows, the action bar.  Only the rows
-        # scroll.  The node's name and the status line that says why Start is
-        # off stay above them, and Start, Stop and Remove stay below them, on
-        # a page taller than its tab -- in the body, the action bar of a scan
-        # with two axes and three API values stood below the fold, and the
-        # Stop for a running scan was a scroll away on its own page.
+        # scroll, so the name, the status and Start/Stop/Remove stay in view
+        # on a page taller than its tab.
         outer = QtWidgets.QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
@@ -117,16 +113,14 @@ class LogicEditorView(QtWidgets.QWidget):
         # contribution that opens with a section title and before the action
         # bar.  The body spacing is the row gap and each contribution's
         # spacer adds the rest of a section gap, sized by _space_sections
-        # from what is shown -- a block spacing of its own had put 9 between
-        # rows that stand 5 apart everywhere else.
+        # from what is shown.
         self._body_layout = QtWidgets.QVBoxLayout(body)
         self._body_layout.setSpacing(row_gap())
         #: The spacer above each contribution, by its factory.
         self._contribution_gaps: dict[object, QtWidgets.QSpacerItem] = {}
 
-        # What this is on one line, how it stands on the next: the kind sat
-        # a third of the way across and a long draft error wrapped into a
-        # block beside it.  The status line is a dot and words, the way the
+        # What this is on one line, how it stands on the next.  The status
+        # line is a dot and words, the way the
         # console's status strip says things.  A section gap under it, on
         # the body's left and right edges.
         header = QtWidgets.QWidget()
@@ -155,15 +149,14 @@ class LogicEditorView(QtWidgets.QWidget):
         # The air between a dot and its words is the status strip's, so this
         # dot reads as the node row's and the strip's.
         status_row.setSpacing(status_dot_gap())
-        self.status_dot = FluentStatusDot(size=STATUS_DOT)
+        self.status_dot = FluentStatusDot()
         self.status_label = FluentLabel("stopped")
         self.status_label.setWordWrap(True)
         self.status_label.setMinimumWidth(0)
         self.status_label.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop)
         # The dot sits on the FIRST line of a status that wraps, centred on
         # that line's capitals the way a row's dot is centred on its words:
-        # the line's top, down its ascent, back up half a capital.  Centred
-        # on the line box instead, it stood a pixel and a half high.
+        # the line's top, down its ascent, back up half a capital.
         metrics = QtGui.QFontMetricsF(self.status_label.font())
         dot_top = metrics.ascent() - metrics.capHeight() / 2 - self.status_dot.height() / 2
         dot_column = QtWidgets.QVBoxLayout()
@@ -195,7 +188,7 @@ class LogicEditorView(QtWidgets.QWidget):
             ),
         ))
         self.name_form = FluentParameterForm(empty, {})
-        self.name_form.committed.connect(self._name_finished)
+        self.name_form.committed.connect(lambda _key: self._send_typed_name())
         name_layout.addWidget(self.name_form)
         self.name_problem_label = error_note_label()
         self._name_problem_row = FluentSettingRow(
@@ -409,9 +402,7 @@ class LogicEditorView(QtWidgets.QWidget):
             # THE ONE LABEL COLUMN, from the labels that are SHOWN: the
             # visible form rows, the selectors and results, and every
             # contribution that takes the column.  A field a contribution
-            # manages is not a form row, and its label -- Frame Survival's
-            # "Published pairs" -- had pushed every control right of a
-            # column nobody's words filled; nor is the unit of a row whose
+            # manages is not a form row; nor is the unit of a row whose
             # picker says it (the forms measure the words their rows show).
             # Words that come and go -- calibration files, a pulse's API
             # values -- get the room their contribution keeps for them.
@@ -527,11 +518,6 @@ class LogicEditorView(QtWidgets.QWidget):
             box.setModified(False)
             self.name_committed.emit(box.text().strip())
 
-    def _name_finished(self, _key: str) -> None:
-        """Return (or Qt's own word that a changed box was left)."""
-
-        self._send_typed_name()
-
     def _name_left(self) -> None:
         """The focus left the Name box: what was typed is sent, then the box
         shows the node's name as it stands, and a refusal of text no longer
@@ -571,12 +557,10 @@ class LogicEditorView(QtWidgets.QWidget):
         """Create, retire and enable this projection's contribution widgets.
 
         LIFECYCLE ONLY.  Which fields a contribution manages decides what the
-        form below may show, so this has to run before the structure guard --
-        but handing each widget the projection does not, and doing it here put
-        the contribution's own work (a scan plan re-parsed, its template ports
-        walked, a tunable-device range read dispatched) outside the guard that
-        exists to stop exactly that on a projection that did not change.
-        Projecting happens with the rest of the structure, below.
+        form below may show, so this has to run before the structure guard;
+        handing each widget the projection happens with the rest of the
+        structure, inside that guard, so an unchanged projection costs no
+        contribution work.
         """
 
         factories = tuple(projection.get("ui_contributions", ()) or ())

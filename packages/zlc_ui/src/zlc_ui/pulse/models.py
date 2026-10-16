@@ -351,8 +351,7 @@ class ScanPageRecord:
     table_text: str = ""
     #: What stands in the table's place while there is none to show (none
     #: yet, or one made for other fields): a muted placeholder, never table
-    #: text -- the table view reads its text as Python, and a sentence there
-    #: came out with its "and" drawn as a keyword.
+    #: text.
     table_note: str = ""
     source_text: str = ""
     source_dirty: bool = False

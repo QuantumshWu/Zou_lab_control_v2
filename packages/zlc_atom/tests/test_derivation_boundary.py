@@ -42,7 +42,7 @@ from zlc_atom.nodes.camera.measurement import (
 from zlc_atom.devices.camera.contract import CameraFrameRecord, CameraWorkingPoint
 from zlc_atom.nodes.occupancy.logic_node import LOGIC_NODE as OCCUPANCY_LOGIC_NODE
 from zlc_atom.nodes import FrameClaim
-from zlc_atom.nodes.occupancy.processor import OCCUPANCY_OUTPUTS, OccupancyProcessor
+from zlc_atom.nodes.occupancy.processor import OCCUPANCY_OUTPUTS, CalibrationReading, OccupancyProcessor
 from zlc_plot import (
     IMAGE_POINT_OVERLAY_GEOMETRY_RECORD,
     image_point_overlay_geometry,
@@ -192,7 +192,7 @@ def test_a_count_the_readout_cannot_judge_is_invalid_not_empty() -> None:
         ReadoutModelKind.BOX,
         FrameContract((3, 3)),
     )
-    processor = OccupancyProcessor(calibration)
+    processor = OccupancyProcessor((CalibrationReading(calibration),))
 
     def judged(pixel: float):
         image = np.full((3, 3), pixel, dtype=np.float64)
@@ -235,7 +235,7 @@ def test_occupancy_preserves_scan_axes_for_live_events_and_the_complete_run() ->
         (ReadoutModel(sites, [5.0], [0.0], [10.0], [True], [1.0]),),
         ReadoutModelKind.BOX, FrameContract((72, 92)),
     )
-    processor = OccupancyProcessor(calibration)
+    processor = OccupancyProcessor((CalibrationReading(calibration),))
     source = SignalValue("camera/frames", frames, None)
     writer = ScanDatasetWriter(((135.0,),), (("power", "mVpp"),), run_repeats=50)
     scan = SimpleNamespace(instance_id="scan", dataset_output_declarations=(SCAN_OUTPUT,),
@@ -281,7 +281,7 @@ def test_occupancy_classifies_only_event_cells_and_runtime_owns_full_history(
     assert source is not None
     calibration = _single_site_calibration(node, source)
     processor = OccupancyProcessor(
-        calibration,
+        (CalibrationReading(calibration),),
         source_signal="event-camera/frames",
     )
     assert processor.dataset_output_declarations is OCCUPANCY_OUTPUTS
