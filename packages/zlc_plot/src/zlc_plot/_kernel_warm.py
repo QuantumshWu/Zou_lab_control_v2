@@ -403,6 +403,7 @@ def _render(
     *,
     size: str = "2x2",
     fit: bool = False,
+    model: str | None = None,
 ) -> None:
     from . import PlotSession  # noqa: PLC0415
 
@@ -410,11 +411,12 @@ def _render(
     try:
         session.rgba()
         if fit:
-            # THE MODEL THE PRODUCT WOULD OFFER, not one named here: the
-            # registry sorts a target's default first, which is what a panel
-            # opens on, and a name typed here would go stale the day the
-            # catalogue changed.  A plot with no valid model for its target
-            # simply has no fit to warm.
+            # THE MODEL THE PANEL OPENS WITH when it names one this picture
+            # offers -- a family's kernels load on its first dispatch -- and
+            # otherwise the one the product would offer: the registry sorts
+            # a target's default first, and a name typed here would go stale
+            # the day the catalogue changed.  A plot with no valid model for
+            # its target simply has no fit to warm.
             #
             # And THROUGH ``configure``, which is the call a panel makes.
             # Warming with ``session.fit`` instead left the live request
@@ -422,9 +424,10 @@ def _render(
             # and presenting a result -- cold, and a child's first
             # configure(fit=) still cost 140 ms after everything else was
             # hot.
-            models = session.fit_models
-            if models:
-                session.configure(fit={"model": str(models[0].model_id)})
+            offered = [str(item.model_id) for item in session.fit_models]
+            if offered:
+                chosen = model if model in offered else offered[0]
+                session.configure(fit={"model": chosen})
     finally:
         session.close()
 
@@ -792,7 +795,11 @@ def _fit_picture(
 
 
 def warm_fit(
-    spec: Any, *, storage: Any, proceed: Callable[[], bool] = lambda: True
+    spec: Any,
+    *,
+    storage: Any,
+    model: str | None = None,
+    proceed: Callable[[], bool] = lambda: True,
 ) -> None:
     """The second level: the fit a panel of ``spec``'s kind may ask for.
 
@@ -836,10 +843,19 @@ def warm_fit(
     target = handler_for(semantic_spec(spec)).fit_target
     if target is None or not proceed():
         return
+    grid = isinstance(spec, FacetGridPlot)
     snapshot, picture, parameters, size = _fit_picture(
-        FitTarget(target), isinstance(spec, FacetGridPlot), np.dtype(storage)
+        FitTarget(target), grid, np.dtype(storage)
     )
-    _render(snapshot, picture, parameters, size=size, fit=True)
+    _render(snapshot, picture, parameters, size=size, fit=True, model=model)
+    if grid and FitTarget(target) is FitTarget.SERIES and proceed():
+        # A scan grid's cells with missing points differ in their
+        # coordinates and are solved one at a time, which is the serial
+        # solver's own first dispatch.
+        snapshot, picture, parameters, size = _fit_picture(
+            FitTarget.SERIES, False, np.dtype(storage)
+        )
+        _render(snapshot, picture, parameters, size=size, fit=True, model=model)
 
 
 # ------------------------------------------------------------ the warmer

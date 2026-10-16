@@ -467,11 +467,13 @@ print(solvers_loaded_by_a_spare)
 
 
 def test_the_fit_is_warmed_for_the_panels_kind_and_shape_alone(monkeypatch) -> None:
-    """The second level draws ONE picture: the panel's own family, in the
-    panel's own shape.  A single plot's fit takes the serial solver, a
-    grid's live fit is a batch over its cells under prange, and a camera's
-    hands the engine a whole image -- each its own first dispatch, and the
-    picture that pays it is the one the panel will ask for.  A panel with
+    """The second level draws the panel's own family, in the panel's own
+    shape.  A single plot's fit takes the serial solver, a grid's live fit
+    is a batch over its cells under prange, and a camera's hands the engine
+    a whole image -- each its own first dispatch, and the picture that pays
+    it is the one the panel will ask for; a scan grid also draws the single
+    curve, whose serial solver its cells take while points are missing.  A
+    panel with
     no fit warms nothing; so does a child that is closing.  And the first
     level draws no fit at all, which is what leaves a spare's memory at
     what every panel needs.
@@ -502,17 +504,18 @@ def test_the_fit_is_warmed_for_the_panels_kind_and_shape_alone(monkeypatch) -> N
     image = ImagePlot(AxisRef.cell_data("x"), AxisRef.cell_data("y"))
     curve = CurvePlot(AxisRef.point("x"))
     for spec, expected in (
-        (curve, ("CurvePlot", None, True)),
-        (RollingPlot(), ("CurvePlot", None, True)),
-        (HistogramPlot(), ("HistogramPlot", None, True)),
-        (image, ("ImagePlot", None, True)),
-        (FacetGridPlot(AxisRef.cell_data("site"), curve), ("FacetGridPlot", "CurvePlot", True)),
-        (FacetGridPlot(AxisRef.cell_data("y"), HistogramPlot()), ("FacetGridPlot", "HistogramPlot", True)),
-        (FacetGridPlot(None, image), ("FacetGridPlot", "ImagePlot", True)),
+        (curve, [("CurvePlot", None, True)]),
+        (RollingPlot(), [("CurvePlot", None, True)]),
+        (HistogramPlot(), [("HistogramPlot", None, True)]),
+        (image, [("ImagePlot", None, True)]),
+        (FacetGridPlot(AxisRef.cell_data("site"), curve),
+         [("FacetGridPlot", "CurvePlot", True), ("CurvePlot", None, True)]),
+        (FacetGridPlot(AxisRef.cell_data("y"), HistogramPlot()), [("FacetGridPlot", "HistogramPlot", True)]),
+        (FacetGridPlot(None, image), [("FacetGridPlot", "ImagePlot", True)]),
     ):
         drawn.clear()
         _kernel_warm.warm_fit(spec, storage=np.uint16)
-        assert drawn == [expected], (spec, drawn)
+        assert drawn == expected, (spec, drawn)
 
     # In the panel's storage: an image fit's kernels are compiled per dtype.
     storages.clear()

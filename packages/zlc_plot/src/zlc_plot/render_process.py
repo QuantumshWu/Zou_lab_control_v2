@@ -3444,12 +3444,12 @@ def _render_process_main(connection: Connection, name: str) -> None:
     #: Set by the first create request: from then on the warming below
     #: stops before its next picture, so a panel never queues behind it.
     requested = Event()
-    #: The panel this child was given -- its spec and its storage, appended
-    #: by the create that builds it -- and the moment its first front went
-    #: out.  What the warming goes on to after that is that panel's own fit,
-    #: in the first gap of the parent's requests, whose last arrival the
-    #: service loop stamps here.
-    panel: list[tuple[object, object]] = []
+    #: The panel this child was given -- its spec, its storage and the fit
+    #: model it opens with, appended by the create that builds it -- and the
+    #: moment its first front went out.  What the warming goes on to after
+    #: that is that panel's own fit, in the first gap of the parent's
+    #: requests, whose last arrival the service loop stamps here.
+    panel: list[tuple[object, object, object]] = []
     shown = Event()
     last_request = [monotonic()]
 
@@ -3509,9 +3509,12 @@ def _render_process_main(connection: Connection, name: str) -> None:
             stopping.wait(_FIT_WARM_QUIET_SECONDS - quiet)
         if stopping.is_set():
             return
-        spec, storage = panel[0]
+        spec, storage, model = panel[0]
         try:
-            warm_fit(spec, storage=storage, proceed=lambda: not stopping.is_set())
+            warm_fit(
+                spec, storage=storage, model=model,
+                proceed=lambda: not stopping.is_set(),
+            )
         except Exception:  # noqa: BLE001 -- reported, never fatal
             traceback.print_exc()
         # Temporary fit surfaces have the same ordinary lifetime as any
@@ -3755,7 +3758,8 @@ def _render_process_main(connection: Connection, name: str) -> None:
             if isinstance(snapshot, OwnedSnapshot)
             else None
         )
-        panel.append((spec, storage))
+        fit = (initial_configuration or {}).get("fit") or {}
+        panel.append((spec, storage, fit.get("model")))
         with state_lock:
             hosts[host_id] = host
             last_front_sequence[host_id] = -1
