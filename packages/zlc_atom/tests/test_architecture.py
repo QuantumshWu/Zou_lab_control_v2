@@ -228,6 +228,8 @@ def test_node_cross_imports_have_only_owner_edges() -> None:
 
     Tasks may compose existing scientific capabilities. Those edges remain
     explicit so a task reuses each owner rather than copying its science.
+    Post-selected occupancy is the one processor that does: it IS Occupancy
+    plus Derive's post-selection (user-asked), so it reuses both owners.
     """
 
     nodes_root = ROOT / "src" / "zlc_atom" / "nodes"
@@ -258,6 +260,8 @@ def test_node_cross_imports_have_only_owner_edges() -> None:
         ("slm_rearrangement", "calibration"),
         ("slm_rearrangement", "slm_feedback"),
         ("slm_rearrangement_recording", "slm_rearrangement"),
+        ("post_selected_occupancy", "occupancy"),
+        ("post_selected_occupancy", "derive"),
     }
     kinds = {
         path.parent.name: _descriptor_kind(path)
@@ -266,7 +270,7 @@ def test_node_cross_imports_have_only_owner_edges() -> None:
     sideways = {
         source
         for source, target in node_edges
-        if target != "calibration"
+        if target != "calibration" and source != "post_selected_occupancy"
     }
     assert all(kinds[source] is NodeKind.TASK for source in sideways), (
         "only a Task may drive another node's engine; a measurement that "

@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
 
 import numpy as np
 from zlc_data import (
+    AxisSpec,
     CoordinateFrameId,
     DatasetSchema,
     DomainSpec,
@@ -111,7 +112,10 @@ class OccupancyProcessor:
     claims it (:mod:`zlc_atom.nodes._framework.frames`), resolved against the
     frames that actually arrive.  One calibration on its own reads every
     frame.  ``parked`` names the files kept but not read: they go into the
-    run record only.
+    run record only.  ``post_select`` is Post-selected occupancy's step
+    (``nodes/post_selected_occupancy``): every result passes it, with the
+    cycle's frame axis (None: one frame), before it is returned, and the
+    run record keeps ``post_select_record`` as ``post_selection``.
     """
 
     def __init__(
@@ -121,7 +125,11 @@ class OccupancyProcessor:
         parked: Sequence[Path | None] = (),
         source_signal: str | None = None,
         model_kind: ReadoutModelKind | None = None,
+        post_select: Callable[[OccupancyResult, AxisSpec | None], OccupancyResult] | None = None,
+        post_select_record: Mapping[str, object] | None = None,
     ) -> None:
+        self._post_select = post_select
+        self._post_select_record = post_select_record
         readings = tuple(calibrations)
         self.parked: tuple[Path | None, ...] = tuple(
             None if path is None else Path(path).expanduser().resolve() for path in parked)
@@ -430,7 +438,10 @@ class OccupancyProcessor:
             # route; copying it here would create a second frame truth.
             "frame_judged": frames,
         }
-        return OccupancyResult(artifacts)
+        result = OccupancyResult(artifacts)
+        if self._post_select is None:
+            return result
+        return self._post_select(result, self._frame_axis(frames.block.schema))
 
     @staticmethod
     def _frame_axis(schema: DatasetSchema):
@@ -549,6 +560,8 @@ class OccupancyProcessor:
                     for path in self.parked
                 ],
                 "model_kind": self._model_kind.value,
+                **({} if self._post_select_record is None
+                   else {"post_selection": dict(self._post_select_record)}),
             },
         }
 

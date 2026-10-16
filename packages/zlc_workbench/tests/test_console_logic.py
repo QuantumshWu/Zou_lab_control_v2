@@ -1850,6 +1850,123 @@ def test_a_frame_survival_after_derive_is_edited_before_anything_starts(presente
         app.processEvents()
 
 
+def test_post_selected_occupancy_is_occupancy_then_derives_post_selection(presenter, tmp_path) -> None:
+    """User-asked (2026-10-16): Post-selected occupancy reads the camera
+    frames as Occupancy does and publishes Occupancy's members valid only
+    where a condition on two frames holds -- a relation between them, or the
+    values one or both must have.  On one 12-frame input its defaults are
+    bit-identical to Occupancy -> Derive (same = occupied first == occupied
+    last, kept = occupied where same) and each condition equals the Derive
+    formula that says it; a middle frame keeps its number, Last follows the
+    frame count, and what cannot be post-selected is refused in a sentence.
+    Before any data a Frame Survival downstream has the camera's frames, and
+    the mode not chosen stays in the draft unchecked."""
+
+    import numpy as np
+    from zlc_atom.devices.camera.contract import CameraFrameRecord
+    from zlc_atom.nodes import FrameClaim
+    from zlc_atom.nodes.calibration import CALIBRATION_ARTIFACT_CODEC
+    from zlc_atom.nodes.camera.measurement import frames_snapshot
+    from zlc_atom.nodes.derive import DERIVE_SCHEMA, DeriveProcessor
+    from zlc_runtime import SignalValue
+
+    occupancy_node = presenter.catalog.get("occupancy")
+    post_node = presenter.catalog.get("post_selected_occupancy")
+    sites = 4
+    path = tmp_path / "box.json"
+    _box_calibration(tuple(f"site-{k}" for k in range(sites)), tuple((3.0 * k + 1, 1.0) for k in range(sites)),
+                     (45.0,) * sites, (3, 3 * sites)).save(path)
+    claims = (FrameClaim(CALIBRATION_ARTIFACT_CODEC.resolve(path), ("rest",)),)
+
+    def camera(count, seed):
+        """Eight cycles of ``count`` frames, each site loaded or not, three sites unjudgeable."""
+
+        levels = np.where(np.random.default_rng(seed).random((8, count, sites)) < 0.5, 10.0, 0.0)
+        levels[0, 0, 1] = levels[2, -1, 3] = levels[3, count // 2, 0] = np.nan
+        cycles = [[CameraFrameRecord(np.repeat(np.repeat(levels[r, f], 3)[None], 3, axis=0), f)
+                   for f in range(count)] for r in range(8)]
+        return SignalValue("camera/frames", frames_snapshot(
+            cycles, producer="camera", generation="g", revision=1, value_unit="count"), None)
+
+    defaults = {field.name: field.default for field in post_node.authoring_schema.fields}
+
+    def post_selected(source, **changes):
+        node = post_node.build(calibrations=claims, source_signal=source.name, **{**defaults, **changes})
+        return node, node.evaluate(source)
+
+    def frame(label, op=""):
+        return {"of": "occupied", "at": "frame", "labels": (label,), **({"op": op} if op else {})}
+
+    def derived(source, *mask):
+        occupancy = occupancy_node.build(calibrations=claims, source_signal=source.name,
+                                         model_kind="default").evaluate(source)
+        rows = DERIVE_SCHEMA.project_values({"variables": (
+            {"name": "same", "publish": False, "terms": mask},
+            {"name": "kept", "terms": ({"of": "occupied"}, {"op": "where", "of": "same"})},
+            {"name": "kept_counts", "terms": ({"of": "counts"}, {"op": "where", "of": "same"})},
+        )})["variables"]
+        published = DeriveProcessor(variables=rows, primary_output="occupied", input_outputs=(
+            "occupied", "counts")).evaluate_inputs({
+                "bundle": SignalValue("o/occupied", occupancy["occupied"].snapshot, None),
+                "counts": SignalValue("o/counts", occupancy["counts"].snapshot, None)})
+        return occupancy, {"occupied": published["kept"].snapshot, "counts": published["kept_counts"].snapshot}
+
+    def same(outputs, expected):
+        for member, want in expected.items():
+            got = outputs[member].snapshot
+            assert got.block.values.dtype == want.block.values.dtype, member
+            assert np.array_equal(got.block.values, want.block.values, equal_nan=True), member
+            assert np.array_equal(got.expanded_validity(), want.expanded_validity()), member
+
+    twelve = camera(12, 7)
+    node, outputs = post_selected(twelve)
+    occupancy, expected = derived(twelve, frame("first"), frame("last", "=="))
+    same(outputs, expected)
+    for member, published in outputs.items():
+        assert published.snapshot.block.schema == occupancy[member].snapshot.block.schema, member
+    judged = occupancy["frame_judged"].snapshot
+    assert np.array_equal(outputs["frame_judged"].snapshot.block.values, judged.block.values, equal_nan=True)
+    assert np.array_equal(outputs["frame_judged"].snapshot.expanded_validity(), judged.expanded_validity())
+    assert 0 < outputs["occupied"].snapshot.expanded_validity().sum() < (
+        occupancy["occupied"].snapshot.expanded_validity().sum()), "some sites are post-selected away"
+    assert node.describe_run({"frames": twelve})["parameters"]["post_selection"] == {
+        "frames": ("first", "last"), "mode": "relation", "relation": "=="}
+    for changes, mask in (
+        ({"relation": ">"}, (frame("first"), frame("last", ">"))),
+        ({"relation": "<="}, (frame("first"), frame("last", "<="))),
+        ({"mode": "values", "value_a": "true", "value_b": "false"}, (frame("first"), frame("last", "and not"))),
+        ({"mode": "values", "value_a": "true", "value_b": "any"}, (frame("first"),)),
+        ({"mode": "values", "value_a": "true", "value_b": "true"}, (frame("first"), frame("last", "and"))),
+        ({"frame_b": "5"}, (frame("first"), frame("5", "=="))),
+    ):
+        same(post_selected(twelve, **changes)[1], derived(twelve, *mask)[1])
+    ten = camera(10, 8)
+    same(post_selected(ten)[1], derived(ten, frame("first"), frame("9", "=="))[1])
+    with pytest.raises(ValueError, match=r"Frame B's middle frame 10 is not in this source \(frames 0–9\)"):
+        post_selected(ten, frame_b="10")
+    with pytest.raises(ValueError, match="needs at least two frames per cycle and this source carries 1"):
+        post_selected(camera(1, 9))
+
+    camera_id = presenter.add_logic("camera_measurement", values={"frames_per_cycle": 12})
+    node_id = presenter.add_logic("post_selected_occupancy", source_signal=stable_signal_key(camera_id, "frames"))
+    survival_id = presenter.add_logic("frame_survival", source_signal=stable_signal_key(node_id, "occupied"))
+    editors = presenter.view.logic_editors
+    assert editors[node_id]["source_frames"] == editors[survival_id]["source_frames"] == tuple(map(str, range(12)))
+    presenter.view.logic_draft_changed.emit(camera_id, {"values": {"frames_per_cycle": 10}})
+    assert editors[survival_id]["source_frames"] == tuple(map(str, range(10)))
+    for values, sentence in (
+        ({"frame_b": "first"}, "Frame A and Frame B are both the first frame: a relation needs two different frames"),
+        ({"frame_b": "rest"}, "Frame B must be first, last or a middle frame number, not 'rest'"),
+        ({"frame_b": "last", "mode": "values", "value_a": "any"},
+         "Frame A and Frame B are both Any: give one of them 1 or 0"),
+    ):
+        presenter.view.logic_draft_changed.emit(node_id, {"values": values})
+        assert sentence in presenter.logic_editor_projection(node_id)["issues"]
+    presenter.view.logic_draft_changed.emit(node_id, {"values": {"mode": "relation"}})
+    assert not any("Frame" in issue for issue in presenter.logic_editor_projection(node_id)["issues"])
+    assert presenter.logic[node_id].draft.values["value_a"] == "any", "the other mode's values stay as written"
+
+
 def test_a_producers_new_output_reaches_every_open_editors_sources(presenter) -> None:
     """A derive publishes the variables it names.  Naming another changes
     what every other node may choose as its source, so every other open
