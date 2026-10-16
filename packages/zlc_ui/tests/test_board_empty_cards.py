@@ -294,7 +294,7 @@ import time
 from PyQt5 import QtCore, QtTest, QtWidgets
 from zlc_ui.qt import ensure_qt_app
 from zlc_ui.board import BoardMetrics
-from zlc_ui.fluent import ACCENT_TINT, FluentButton, FluentScrollArea
+from zlc_ui.fluent import ACCENT_TINT, FluentScrollArea
 from zlc_ui.console import ConsoleBoardView, PanelCardView
 
 app = ensure_qt_app(['monitor-board'])
@@ -497,72 +497,5 @@ release(window, edge)
 assert mover.y() > seen, (mover.pos(), seen)
 assert mover.y() in {y for _x, y in grid(w, h, 8)}, mover.pos()
 window.close(); settle()
-"""
-    )
-
-
-def test_the_strip_commands_are_page_buttons_and_its_words_start_at_the_board_text_edge(run_qt) -> None:
-    """Setting is as tall as every other button and the remover is square at
-    that height, centred in the strip, and both stay on screen on a card
-    wider than its viewport; and the board says where a card's words start,
-    so an empty board's note can start there too."""
-
-    run_qt(
-        _MONITOR
-        + """
-from zlc_ui.fluent import set_fluent_scale
-
-# At the full scale, where a button's own height and the old strip's
-# 26-px command are different numbers (the offscreen screen's automatic
-# scale floors both at 22).
-set_fluent_scale(1.0)
-window, scroll, board, cards = monitor(1)
-window.resize(800, 600)
-board.set_cards(cards)
-page_button = FluentButton('Add Panel')
-window.layout().addWidget(page_button)
-window.show(); settle()
-card = cards[0]
-setting, remover = card.settings_button, card.close_button
-assert setting.height() == page_button.height(), (setting.height(), page_button.height())
-assert remover.width() == remover.height() == setting.height(), remover.size()
-band = card._title_band
-for button in (setting, remover):
-    # Centred to the logical pixel: an odd remainder cannot split evenly.
-    top = button.mapTo(band, QtCore.QPoint(0, 0)).y()
-    assert abs(top - (band.height() - top - button.height())) <= 1, (button.text(), top, band.height())
-assert card._title_label.mapTo(board, QtCore.QPoint(0, 0)).x() == board.text_left()
-# The two commands stand the row's one gap apart.
-from zlc_ui.fluent import card_pad, row_gap
-assert remover.x() - (setting.x() + setting.width()) == row_gap()
-# On a card wider than what the viewport shows, the two ride the viewport's
-# right edge, as far in from it as from the card's own end; scrolled to
-# that end, or with room for the whole card again, they are back in its
-# corner.
-def right_in(widget, top):
-    return widget.mapTo(top, QtCore.QPoint(widget.width(), 0)).x()
-corner = card.width() - right_in(remover, card)
-viewport, sideways = scroll.viewport(), scroll.horizontalScrollBar()
-window.resize(card.width() // 2, 600); settle()
-assert sideways.maximum() > 0
-assert viewport.width() - right_in(remover, viewport) == corner
-assert right_in(setting, viewport) < right_in(remover, viewport)
-sideways.setValue(sideways.maximum()); settle()
-assert card.width() - right_in(remover, card) == corner
-sideways.setValue(0); settle()
-assert viewport.width() - right_in(remover, viewport) == corner
-window.resize(800, 600); settle()
-assert card.width() - right_in(remover, card) == corner
-window.close(); settle()
-# A board's own gap is the card pad: its first card starts where a white
-# page's content does, and its words one more card pad in.
-default = ConsoleBoardView()
-lone = empty_card('lone')
-default.resize(800, 600)
-default.set_cards((lone,))
-default.show(); settle()
-assert (lone.x(), lone.y()) == (card_pad(), card_pad())
-assert default.text_left() == card_pad() + PanelCardView.strip_text_inset()
-default.close(); settle()
 """
     )

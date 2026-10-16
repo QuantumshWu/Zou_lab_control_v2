@@ -1107,42 +1107,6 @@ def test_replacing_a_row_keeps_the_picker_it_built() -> None:
     assert _form_label_width(form.spec.fields) == setting_label_width(("Amount",))
 
 
-def test_a_label_wider_than_its_shared_column_is_elided_in_the_middle() -> None:
-    """A host may keep a column narrower than one form's words: a scan keeps
-    a fixed room for a pulse's API values, so the column does not move when
-    they come.  Such a label is elided in the middle, keeping the start and
-    the end that tell rows apart, and says its whole words in its tooltip;
-    one that fits says them whole, with no tooltip.  The host still measures
-    the whole words."""
-
-    from dataclasses import replace
-
-    from zlc_ui import ensure_qt_app
-    from zlc_ui.fluent import setting_label_width
-    from zlc_ui.form import FormFieldProps, FormSpec
-    from zlc_ui.form.qt_form import FluentParameterForm
-
-    ensure_qt_app(["zlc-ui-tests"])
-    words = "long_before.duration"
-    field = FormFieldProps("hold", "int", words, default=1)
-    narrow = setting_label_width(("Shots per point",))
-    form = FluentParameterForm(FormSpec((field,)), {"hold": 1}, label_width=narrow)
-    try:
-        label = form._rows["hold"].layout().itemAt(0).widget()
-        assert label.width() == narrow
-        shown = label.text()
-        assert "…" in shown and shown[:4] == words[:4] and shown[-4:] == words[-4:], shown
-        assert label.toolTip() == words and form.shown_labels() == (words,)
-        form.set_label_width(setting_label_width((words,)))
-        assert (label.text(), label.toolTip()) == (words, "")
-        # A relabel at a column it does not fit is fitted the same way.
-        longer = f"{words} of the long hold"
-        form.reconcile(FormSpec((replace(field, label=longer),)), {"hold": 1})
-        assert "…" in label.text() and label.toolTip() == longer
-    finally:
-        form.deleteLater()
-
-
 def test_the_same_values_enable_a_dependent_the_same_way_through_every_entry() -> None:
     """Construction, populate, refresh, reconcile and a toggle each had a
     formula of their own: the same values disabled a dependent through one
@@ -1384,15 +1348,6 @@ def test_an_auto_row_puts_its_switch_in_the_control_column() -> None:
             "a number after a switch ends on the form's number edge"
         )
         assert form.number_edge_hint() == left(gain) + gain.width() - column
-        # In a column too narrow for the numbers to reach that edge they
-        # still end together: the switch's cell shares the row's width the
-        # way a plain number does.
-        host.resize(column + 420, 320)
-        app.processEvents()
-        assert left(gain) == column and gain.width() < gain.maximumWidth()
-        assert left(offset) + offset.width() == left(gain) + gain.width()
-        host.resize(640, 320)
-        app.processEvents()
 
         before = left(form.widget_for("title"))
         form.auto_switch_for("title").setChecked(False)

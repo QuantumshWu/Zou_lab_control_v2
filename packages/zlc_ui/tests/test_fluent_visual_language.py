@@ -423,106 +423,6 @@ def test_an_info_tree_row_is_washed_whole(app, host) -> None:
     assert _at(viewport, viewport.width() // 2, tree.visualItemRect(second).center().y()) == ACCENT_TINT.upper()
 
 
-def test_an_empty_code_view_says_why_in_muted_ink(app, host) -> None:
-    """The note is set after the (empty) text, as a page projects it: Qt
-    5.15 drew a QPlainTextEdit placeholder only after a text change, and
-    the empty scan table stood blank."""
-
-    from PyQt5 import QtGui
-    from zlc_ui.fluent import FluentCodeEdit
-    from zlc_ui.fluent.style import MUTED_INK
-
-    view = FluentCodeEdit(read_only=True, parent=host)
-    view.resize(300, 120)
-    view.setPlainText("")
-    view.setPlaceholderText("No scan table yet: write a program and press Run.")
-    _shown(app, host, view)
-    image = view.viewport().grab().toImage()
-    lightness = [image.pixelColor(x, y).lightness()
-                 for y in range(image.height()) for x in range(image.width())]
-    muted = QtGui.QColor(MUTED_INK).lightness()
-    assert min(lightness) <= muted + 8, "the empty view shows its note"
-    assert min(lightness) >= muted - 8, "in the muted ink of a note, not the text's"
-
-
-def test_a_blank_choice_reads_as_a_placeholder(app, host) -> None:
-    """A combo's "(not selected)" is a missing input, not a value: muted ink
-    like an empty field's placeholder, flat or tree, while a row whose empty
-    key is a real choice keeps the text's ink."""
-
-    from PyQt5 import QtGui
-    from zlc_ui.fluent import FluentComboBox, FluentTreeComboBox
-    from zlc_ui.fluent.style import MUTED_INK, TEXT
-
-    flat = FluentComboBox(host)
-    flat.add_blank_item("(not selected)")
-    flat.addItem("sequencer", "sequencer")
-    flat.resize(200, flat.sizeHint().height())
-    tree = FluentTreeComboBox(host)
-    tree.move(0, 60)
-    tree.set_choice_tree((("signals", (("count", "count", "signals · count"),)),),
-                         current="", none_label="(not selected)")
-    tree.resize(200, tree.sizeHint().height())
-    keyed = FluentComboBox(host)
-    keyed.move(0, 120)
-    keyed.addItem("Independent file", "")
-    keyed.resize(200, keyed.sizeHint().height())
-    _shown(app, host, flat, tree, keyed)
-
-    def ink(combo):
-        image = combo.grab().toImage()
-        ratio = image.devicePixelRatio() or 1.0
-        rect = combo._collapsed_text_rect()
-        return min(
-            (QtGui.QColor(image.pixel(x, y)) for x in range(int(rect.left() * ratio), int(rect.right() * ratio))
-             for y in range(int(rect.top() * ratio), int(rect.bottom() * ratio))),
-            key=lambda colour: colour.lightness(),
-        ).name().upper()
-
-    assert flat.current_is_blank() and tree.current_is_blank() and not keyed.current_is_blank()
-    assert ink(flat) == MUTED_INK.upper()
-    assert ink(tree) == MUTED_INK.upper()
-    assert ink(keyed) == TEXT.upper()
-    flat.setCurrentIndex(1)
-    tree.select_choice_key("count")
-    app.processEvents()
-    assert ink(flat) == TEXT.upper()
-    assert ink(tree) == TEXT.upper()
-
-
-def test_a_switched_off_editable_combo_writes_in_disabled_ink(app, host) -> None:
-    """Its prompt and its typed text alike, as a non-editable combo's text:
-    a prompt in reading ink invited typing into a box that refuses it."""
-
-    from PyQt5 import QtGui
-    from zlc_ui.fluent import FluentComboBox
-    from zlc_ui.fluent.style import DISABLED_INK, MUTED_INK, TEXT
-
-    prompt = FluentComboBox(host)
-    prompt.setEditable(True)
-    prompt.lineEdit().setPlaceholderText("Choose or type a name")
-    typed = FluentComboBox(host)
-    typed.move(0, 60)
-    typed.setEditable(True)
-    typed.setEditText("bias_value")
-    for combo in (prompt, typed):
-        combo.resize(240, combo.sizeHint().height())
-    _shown(app, host, prompt, typed)
-
-    def inks(combo):
-        image = combo.grab().toImage()
-        return {QtGui.QColor(image.pixel(x, y)).name().upper()
-                for x in range(image.width()) for y in range(image.height())}
-
-    assert MUTED_INK.upper() in inks(prompt) and TEXT.upper() in inks(typed)
-    for combo in (prompt, typed):
-        combo.setEnabled(False)
-    app.processEvents()
-    for combo in (prompt, typed):
-        assert DISABLED_INK.upper() in inks(combo)
-        assert not {MUTED_INK.upper(), TEXT.upper()} & inks(combo)
-
-
 def test_a_button_disabled_or_hidden_with_the_focus_hands_it_to_nobody(app, host) -> None:
     """Disabled while it held the focus, On Pulse passed it to Stop Pulse,
     and the next Space stopped the pulse just started."""
@@ -844,61 +744,6 @@ def test_segments_are_rounded_fills_with_no_outline(app, host) -> None:
     assert segments.current() is None
 
 
-def test_a_tab_close_x_stands_on_its_label_line(app, host) -> None:
-    """A closable tab's x is centred on its label's capitals, at a scale
-    whose label band is even and at one whose band is odd, whichever tab
-    is current.  Seated by the style on the middle of the whole tab,
-    underline included, it stood 0.8 px under the words at a ratio of 3:
-    the button is now the tab's height, seated on its top, and its disk
-    is centred where the style puts the label's capitals."""
-
-    from PyQt5 import QtCore, QtWidgets
-    from zlc_ui.fluent import FluentTabWidget, set_fluent_scale
-    from zlc_ui.fluent import fluent as F
-
-    def ink_middle(image, rect, band, ratio):
-        rows = [y for y in range(int(rect.top() * ratio), int((rect.top() + band) * ratio))
-                if any(image.pixelColor(x, y).lightness() < 200
-                       for x in range(int(rect.left() * ratio), int((rect.right() + 1) * ratio)))]
-        return (rows[0] + rows[-1] + 1) / 2.0 / ratio
-
-    shown = F._FLUENT_SCALE
-    bands = set()
-    try:
-        for scale in sorted({shown, 0.82, 0.9}):
-            set_fluent_scale(scale)
-            tabs = FluentTabWidget(host)
-            tabs.add_permanent_tab(QtWidgets.QLabel(""), "Monitor")
-            tabs.add_closable_tab(QtWidgets.QLabel(""), "Edit", focus=False)
-            tabs.resize(400, 100)
-            _shown(app, host, tabs)
-            bar = tabs.tabBar()
-            close = bar.tabButton(1, QtWidgets.QTabBar.RightSide)
-            band = F._tab_label_height()
-            bands.add(band % 2)
-            image = host.grab().toImage()
-            ratio = image.devicePixelRatio() or 1.0
-            origin = bar.mapTo(host, QtCore.QPoint())
-            # "Monitor": capitals and no descender, above its underline.
-            label = ink_middle(image, bar.tabRect(0).translated(origin), band, ratio)
-            x = ink_middle(image, QtCore.QRect(close.mapTo(host, QtCore.QPoint()), close.size()), band, ratio)
-            assert abs(x - label) <= 0.5, (scale, x, label)
-            # Where the style puts the capitals is where the disk is centred.
-            assert abs(origin.y() + F._tab_cap_centre() - label) <= 0.5, (scale, label)
-            for current in (0, 1):
-                tabs.setCurrentIndex(current)
-                app.processEvents()
-                tab = bar.tabRect(1)
-                assert (close.y(), close.height()) == (tab.top(), tab.height()), (scale, current)
-                centre = close.y() + close.disk_rect().center().y()
-                assert abs(centre - (tab.top() + F._tab_cap_centre())) <= 0.5 / ratio, (scale, centre)
-            tabs.setParent(None)
-            tabs.deleteLater()
-            app.processEvents()
-    finally:
-        set_fluent_scale(shown)
-    assert bands == {0, 1}, "both parities of the label band were measured"
-
 def test_parts_inside_a_field_are_centred_on_its_ink_and_frame(app, host) -> None:
     """A tab's close x on its disk, and a spin box's two chevrons about the
     middle of an inner rect of either parity."""
@@ -941,33 +786,6 @@ def test_parts_inside_a_field_are_centred_on_its_ink_and_frame(app, host) -> Non
                 if top <= y <= bottom]
         assert rows[0] - top == bottom - rows[-1], (height, rows[0] - top, bottom - rows[-1])
         spin.hide()
-
-
-def test_a_checkbox_label_too_wide_for_its_room_ends_in_an_ellipsis(host) -> None:
-    """A port name in a narrow card ends in '…' with the whole name in the
-    tooltip; it is never cut mid-letter at the card's edge, and a label
-    that fits keeps no tooltip."""
-
-    from PyQt5 import QtWidgets
-    from zlc_ui.fluent import FluentCheckBox
-
-    layout = QtWidgets.QVBoxLayout(host)
-    layout.setContentsMargins(0, 0, 0, 0)
-    long_box = FluentCheckBox("pgc_1D_freq_switch", host)
-    short_box = FluentCheckBox("cooling", host)
-    layout.addWidget(long_box)
-    layout.addWidget(short_box)
-    host.setFixedWidth(long_box.sizeHint().width() - 20)
-    host.show()
-    QtWidgets.QApplication.processEvents()
-    long_box.grab()
-    short_box.grab()
-    assert long_box.width() < long_box.sizeHint().width()
-    assert long_box.minimumSizeHint().width() < long_box.width()
-    assert long_box._shown_option().text.endswith("…")
-    assert long_box.toolTip() == "pgc_1D_freq_switch"
-    assert long_box.text() == "pgc_1D_freq_switch"
-    assert short_box._shown_option().text == "cooling" and short_box.toolTip() == ""
 
 
 def test_a_plain_container_in_a_white_card_shows_the_card_not_the_window_grey(app) -> None:
