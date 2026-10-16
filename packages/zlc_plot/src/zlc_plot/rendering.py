@@ -213,12 +213,15 @@ def _install_text_raster_memo(renderer: Any) -> None:
             entry = memo[key]
         except KeyError:
             entry = _text_raster_entry(renderer, s, prop, angle, antialiased)
-            if len(memo) >= _TEXT_RASTER_MEMO_LIMIT:
-                memo.clear()
-            # The font properties are the artist's live object; the key
-            # keeps its own copy so a later edit of the artist cannot
-            # rewrite a stored key underneath the dictionary.
-            memo[(s, prop.copy(), angle, antialiased)] = entry
+            # A live value (a fit's headline number) is a new string every
+            # frame: stored, it would only churn the memo and the collector.
+            if not getattr(mtext, "_zlc_live_value", False):
+                if len(memo) >= _TEXT_RASTER_MEMO_LIMIT:
+                    memo.clear()
+                # The font properties are the artist's live object; the key
+                # keeps its own copy so a later edit of the artist cannot
+                # rewrite a stored key underneath the dictionary.
+                memo[(s, prop.copy(), angle, antialiased)] = entry
         if entry is None:
             return None
         mask, offset_x, offset_y, shift_x, shift_y = entry
@@ -13407,7 +13410,8 @@ class MatplotlibRenderer:
             # The symbol and the value are two artists; see
             # _fit_parameter_parts for why.  The value's anchor follows
             # the symbol's width, set when the symbol is.
-            self._fit_slots["annotation_value"] = label_text()
+            value = self._fit_slots["annotation_value"] = label_text()
+            value._zlc_live_value = True
 
     def _update_fit_annotation(
         self,
