@@ -1263,6 +1263,22 @@ def test_rank_deficient_cell_stays_on_compiled_batch_without_scalar_fallback(
     assert not flat.covariance_valid
     assert np.all(np.isnan(flat.standard_errors))
 
+    solve = _fit_compiled.solve_compiled_batch
+    for field in ("parameters", "fitted_values", "covariance"):
+        def invalid_cell(*args, **kwargs):
+            output = solve(*args, **kwargs)
+            getattr(output, field)[1].flat[0] = np.nan
+            return output
+
+        monkeypatch.setattr(_fit_compiled, "solve_compiled_batch", invalid_cell)
+        isolated, errors = engine.fit_batch(
+            model, ((x,),) * len(observations), tuple(observations)
+        )
+        assert isolated[1] is None and "invalid" in errors[1]
+        for cell in (0, *range(2, len(observations))):
+            assert errors[cell] is None
+            _assert_fit_equal(isolated[cell], results[cell])
+
 
 def test_compiled_batch_judges_finiteness_on_the_points_it_fitted() -> None:
     """A masked NaN observation leaves a cell's covariance valid.
@@ -1625,6 +1641,23 @@ def test_reflected_trust_region_step_is_measured_to_the_sphere_ahead() -> None:
     reflected = np.array([0.9, 1.8]) + (3.9 / 41.0) * np.array([-1.0, 2.0])
     np.testing.assert_allclose(step, reflected, rtol=1e-9)
     assert objective(step) < objective(0.995 * np.array([0.9, 1.8]))
+
+
+def test_trust_region_handles_an_underflowing_secular_derivative() -> None:
+    step = np.empty(3)
+    eigenvalues = np.array([0.0, 1.0, 10.0])
+    gradient = np.array([4e-18, 0.006, 0.06])
+    alpha = _fit_compiled._trust_eigh(
+        12, eigenvalues, np.eye(3), gradient, 1e97, 4e-100, step,
+    )
+    assert alpha > 0.0 and np.all(np.isfinite(step))
+    assert np.linalg.norm(step) == pytest.approx(1e97)
+    np.testing.assert_allclose((eigenvalues + alpha) * step, -gradient, rtol=0.02, atol=1e-20)
+    alpha = _fit_compiled._trust_eigh(
+        12, eigenvalues, np.eye(3), np.zeros(3), 1e97, 0.0, step,
+    )
+    assert alpha == 0.0
+    np.testing.assert_array_equal(step, np.zeros(3))
 
 
 def test_radial_regular_image_fast_path_matches_coordinate_path() -> None:

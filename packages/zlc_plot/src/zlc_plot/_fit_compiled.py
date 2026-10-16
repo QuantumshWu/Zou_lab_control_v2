@@ -808,7 +808,15 @@ def _trust_eigh(
     gradient_squared = 0.0
     for index in range(count):
         gradient_squared += projected_gradient[index] * projected_gradient[index]
-    alpha_upper = math.sqrt(gradient_squared) / radius
+    gradient_norm = math.sqrt(gradient_squared)
+    if not math.isfinite(gradient_norm) or gradient_norm == 0.0:
+        gradient_norm = 0.0
+        for index in range(count):
+            gradient_norm = math.hypot(gradient_norm, projected_gradient[index])
+        if gradient_norm == 0.0:
+            output[:] = 0.0
+            return 0.0
+    alpha_upper = gradient_norm / radius
     alpha_lower = 0.0
     if full_rank:
         norm_squared = 0.0
@@ -835,28 +843,47 @@ def _trust_eigh(
             math.sqrt(max(alpha_lower * alpha_upper, 0.0)),
         )
     for _iteration in range(10):
-        if alpha < alpha_lower or alpha > alpha_upper:
+        if (not full_rank and alpha == 0.0) or alpha < alpha_lower or alpha > alpha_upper:
             alpha = max(
                 0.001 * alpha_upper,
                 math.sqrt(max(alpha_lower * alpha_upper, 0.0)),
             )
         norm_squared = 0.0
         derivative_numerator = 0.0
+        stable_derivative = False
         for index in range(count):
             denominator = eigenvalues[index] + alpha
             value = projected_gradient[index] / denominator
             norm_squared += value * value
-            derivative_numerator += (
-                projected_gradient[index]
-                * projected_gradient[index]
-                / (denominator * denominator * denominator)
-            )
+            cube = denominator * denominator * denominator
+            if cube == 0.0:
+                stable_derivative = True
+            else:
+                derivative_numerator += (
+                    projected_gradient[index]
+                    * projected_gradient[index]
+                    / cube
+                )
         norm = math.sqrt(norm_squared)
         phi = norm - radius
-        derivative = -derivative_numerator / norm
+        if stable_derivative or not math.isfinite(derivative_numerator):
+            norm = 0.0
+            for index in range(count):
+                norm = math.hypot(
+                    norm, projected_gradient[index] / (eigenvalues[index] + alpha)
+                )
+            derivative = 0.0
+            for index in range(count):
+                denominator = eigenvalues[index] + alpha
+                relative = projected_gradient[index] / denominator / norm
+                derivative += relative * relative / denominator
+            phi = norm - radius
+            ratio = -(1.0 - radius / norm) / derivative
+        else:
+            derivative = -derivative_numerator / norm
+            ratio = phi / derivative
         if phi < 0.0:
             alpha_upper = alpha
-        ratio = phi / derivative
         alpha_lower = max(alpha_lower, alpha - ratio)
         alpha -= (phi + radius) * ratio / radius
         if abs(phi) < 0.01 * radius:
@@ -1580,34 +1607,38 @@ def _solve_cell(
     for seed_index in range(seed_count):
         for index in range(free_count):
             free_seed[index] = full_seeds[seed_index, free_indices[index]]
-        (
-            solved,
-            cost,
-            raw_rss,
-            status,
-            iterations,
-            nfev,
-            njev,
-        ) = _solve_seed(
-            objective_callback,
-            coordinates,
-            observations,
-            valid,
-            full_template,
-            free_indices,
-            free_seed,
-            free_lower,
-            free_upper,
-            weights,
-            use_weights,
-            poisson,
-            loss_code,
-            max_nfev,
-            ftol,
-            xtol,
-            gtol,
-            context,
-        )
+        try:
+            (
+                solved,
+                cost,
+                raw_rss,
+                status,
+                iterations,
+                nfev,
+                njev,
+            ) = _solve_seed(
+                objective_callback,
+                coordinates,
+                observations,
+                valid,
+                full_template,
+                free_indices,
+                free_seed,
+                free_lower,
+                free_upper,
+                weights,
+                use_weights,
+                poisson,
+                loss_code,
+                max_nfev,
+                ftol,
+                xtol,
+                gtol,
+                context,
+            )
+        except Exception:
+            best_status = STATUS_INVALID if not have else best_status
+            continue
         successful = status > STATUS_MAX_NFEV
         choose = False
         if not have:
@@ -1651,7 +1682,7 @@ def _solve_cell(
         ):
             break
     if not have:
-        return best_full, math.inf, math.inf, STATUS_NO_CANDIDATE, 0, 0, 0, -1
+        return best_full, math.inf, math.inf, best_status, 0, 0, 0, -1
     return (
         best_full,
         best_cost,
@@ -1821,10 +1852,12 @@ def _finalize_one(
                 covariance[row, column] = math.nan
         return fitted, residuals, covariance, errors, math.inf, False
 
-    fitted, full_jacobian = value_jacobian_callback(
-        coordinates, parameters, free_count != 0,
+    selected = np.count_nonzero(valid)
+    selected_fitted, full_jacobian = value_jacobian_callback(
+        coordinates if selected == point_count else coordinates[:, valid],
+        parameters, free_count != 0,
     )
-    if fitted.size != point_count:
+    if selected_fitted.size != selected:
         fitted = np.full(point_count, np.nan, dtype=np.float64)
         for row in range(parameter_count):
             errors[row] = math.nan
@@ -1832,6 +1865,10 @@ def _finalize_one(
                 covariance[row, column] = math.nan
         return fitted, residuals, covariance, errors, math.inf, False
 
+    fitted = (
+        selected_fitted if selected == point_count
+        else np.full(point_count, np.nan, dtype=np.float64)
+    )
     selected = 0
     raw_rss = 0.0
     finite = True
@@ -1843,13 +1880,10 @@ def _finalize_one(
         copy_row = copy_row or free_indices[free] < free
     jacobian_row = np.empty(free_count if copy_row else 0, dtype=np.float64)
     for point in range(point_count):
-        residuals[point] = observations[point] - fitted[point]
         if not valid[point]:
-            # A masked point is outside the fit; its residual (NaN for a NaN
-            # observation) says nothing about the solution's finiteness.
-            for free in range(free_count):
-                scaled_jacobian[point, free] = 0.0
             continue
+        fitted[point] = selected_fitted[selected]
+        residuals[point] = observations[point] - fitted[point]
         if not math.isfinite(fitted[point]) or not math.isfinite(residuals[point]):
             finite = False
         selected += 1
@@ -1886,14 +1920,14 @@ def _finalize_one(
             finite = False
         if copy_row:
             for free in range(free_count):
-                jacobian_row[free] = full_jacobian[point, free_indices[free]]
+                jacobian_row[free] = full_jacobian[selected - 1, free_indices[free]]
         for free in range(free_count):
             value = (
-                (jacobian_row[free] if copy_row else full_jacobian[point, free_indices[free]])
+                (jacobian_row[free] if copy_row else full_jacobian[selected - 1, free_indices[free]])
                 * residual_scale
                 * robust_scale
             )
-            scaled_jacobian[point, free] = value
+            scaled_jacobian[selected - 1, free] = value
             if not math.isfinite(value):
                 finite = False
 
@@ -1910,11 +1944,11 @@ def _finalize_one(
     if covariance_valid:
         # Only right singular vectors enter covariance. Factor J=Q*R using
         # LAPACK Householder QR, without forming Q or the unused N-by-free U.
-        qr_columns = scaled_jacobian.T.copy()
+        qr_columns = scaled_jacobian[:selected].T.copy()
         tau = np.empty(free_count, dtype=np.float64)
         info = _GEQRF(
-            ord("d"), point_count, free_count, qr_columns.ctypes,
-            point_count, tau.ctypes,
+            ord("d"), selected, free_count, qr_columns.ctypes,
+            selected, tau.ctypes,
         )
         if info != 0:
             raise np.linalg.LinAlgError("covariance QR factorization failed")

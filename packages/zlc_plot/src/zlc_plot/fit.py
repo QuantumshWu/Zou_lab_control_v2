@@ -2331,7 +2331,8 @@ class FitEngine:
         if not prepared:
             return tuple(results), tuple(failures)
 
-        buckets: dict[tuple[int, bytes, bytes], list[int]] = {}
+        buckets: dict[tuple[Any, ...], list[int]] = {}
+        grid_groups: dict[tuple[Any, ...], list[int]] = {}
         # One digest per coordinate OBJECT, not per cell: a tensor facet's
         # cells share the same axis arrays, and hashing the same quarter
         # megabyte forty times over was most of the batch's Python time.
@@ -2355,10 +2356,42 @@ class FitEngine:
                 digest.digest(),
                 item["free_index"].tobytes(),
             )
+            axes = item["compiled_coords"]
+            if (
+                not counted and not item["binned"] and len(axes) == 1
+                and bool(np.all(np.diff(axes[0]) > 0.0))
+            ):
+                group = (
+                    item["free_index"].tobytes(), item["origin"],
+                    opts.evaluation_budget(item["solver_values"].size),
+                    item["weights"] is not None,
+                )
+                key += group
+                grid_groups.setdefault(group, []).append(cell)
+            item["bucket"] = key
             buckets.setdefault(key, []).append(cell)
 
-        for bucket in buckets.values():
+        layouts = {}
+        for group, cells in grid_groups.items():
+            keys = {prepared[cell]["bucket"] for cell in cells}
+            if len(keys) == 1:
+                continue
+            axes = [prepared[cell]["compiled_coords"][0] for cell in cells]
+            grid = np.unique(np.concatenate(axes))
+            # Sparse batch scratch must not exceed twice the compact input.
+            if len(cells) * grid.size > 2 * sum(axis.size for axis in axes):
+                continue
+            key = ("masked", *group)
+            for previous in keys:
+                del buckets[previous]
+            buckets[key] = cells
+            layouts[key] = (
+                grid, [np.searchsorted(grid, axis) for axis in axes], group[2],
+            )
+
+        for key, bucket in buckets.items():
             check()
+            layout = layouts.get(key)
             items = [prepared[cell] for cell in bucket]
             requested_lower = items[0]["requested_lower"]
             requested_upper = items[0]["requested_upper"]
@@ -2370,7 +2403,17 @@ class FitEngine:
                 np.ascontiguousarray(axis, dtype=np.float64)
                 for axis in items[0]["compiled_coords"]
             )
-            value_stack = np.stack([item["solver_values"] for item in items])
+            valid_stack = None
+            if layout is None:
+                value_stack = np.stack([item["solver_values"] for item in items])
+            else:
+                grid, positions, budget = layout
+                shared_coordinates = (grid,)
+                value_stack = np.zeros((len(items), grid.size), dtype=np.float64)
+                valid_stack = np.zeros(value_stack.shape, dtype=np.bool_)
+                for local, (item, selected) in enumerate(zip(items, positions)):
+                    value_stack[local, selected] = item["solver_values"]
+                    valid_stack[local, selected] = True
             weight_stack: np.ndarray | None = None
             if any(item["weights"] is not None for item in items):
                 weight_stack = np.stack(
@@ -2380,7 +2423,10 @@ class FitEngine:
                         else item["weights"]
                         for item in items
                     ]
-                )
+                ) if layout is None else np.zeros_like(value_stack)
+                if layout is not None:
+                    for local, (item, selected) in enumerate(zip(items, positions)):
+                        weight_stack[local, selected] = item["weights"]
             authored_flags = np.asarray(
                 [item["authored"] is not None for item in items],
                 dtype=np.bool_,
@@ -2426,7 +2472,7 @@ class FitEngine:
                     value_stack[0] if len(bucket) == 1 else value_stack,
                     base_lower=base_lower,
                     base_upper=base_upper,
-                    valid=None,
+                    valid=valid_stack,
                     requested_lower=requested_lower,
                     requested_upper=requested_upper,
                     requested_mask=requested_mask,
@@ -2438,7 +2484,10 @@ class FitEngine:
                     ),
                     poisson=counted,
                     loss=opts.loss,
-                    max_nfev=opts.evaluation_budget(value_stack.shape[-1]),
+                    max_nfev=(
+                        opts.evaluation_budget(value_stack.shape[-1])
+                        if layout is None else budget
+                    ),
                     ftol=1.0e-8,
                     xtol=1.0e-8,
                     gtol=1.0e-8,
@@ -2553,16 +2602,23 @@ class FitEngine:
                     or output.reduced_chi_square.shape != (len(bucket),)
                 ):
                     raise ValueError("compiled fit returned invalid batch shapes")
-                if (
-                    not np.all(np.isfinite(output.parameters[active]))
-                    or not np.all(np.isfinite(output.fitted_values[active]))
-                    or not np.all(np.isfinite(output.residuals[active]))
-                    or not np.all(
-                        np.isfinite(output.reduced_chi_square[active])
+                invalid = (
+                    ~np.all(np.isfinite(output.parameters), axis=1)
+                    | ~np.all(
+                        np.isfinite(output.fitted_values)
+                        | (False if valid_stack is None else ~valid_stack), axis=1,
                     )
-                    or np.any(output.reduced_chi_square[active] < 0.0)
-                ):
-                    raise ValueError("compiled fit returned invalid batch arrays")
+                    | ~np.all(
+                        np.isfinite(output.residuals)
+                        | (False if valid_stack is None else ~valid_stack), axis=1,
+                    )
+                    | ~np.isfinite(output.reduced_chi_square)
+                    | (output.reduced_chi_square < 0.0)
+                ) & active
+                for local in np.flatnonzero(invalid):
+                    items[local]["final_error"] = (
+                        "compiled fit returned invalid arrays"
+                    )
                 if bool(np.any(covariance_rows)):
                     covariance_values = output.covariance[covariance_rows]
                     error_values = output.standard_errors[covariance_rows]
@@ -2571,26 +2627,27 @@ class FitEngine:
                         axis1=1,
                         axis2=2,
                     )
-                    if (
-                        not np.all(np.isfinite(covariance_values))
-                        or not np.all(np.isfinite(error_values))
-                        or not np.allclose(
+                    invalid = (
+                        ~np.all(np.isfinite(covariance_values), axis=(1, 2))
+                        | ~np.all(np.isfinite(error_values), axis=1)
+                        | ~np.all(np.isclose(
                             covariance_values,
                             np.swapaxes(covariance_values, 1, 2),
                             rtol=1e-12,
                             atol=1e-15,
-                        )
-                        or np.any(diagonal < 0.0)
-                        or np.any(error_values < 0.0)
-                        or not np.allclose(
+                        ), axis=(1, 2))
+                        | np.any(diagonal < 0.0, axis=1)
+                        | np.any(error_values < 0.0, axis=1)
+                        | ~np.all(np.isclose(
                             error_values**2,
                             diagonal,
                             rtol=1e-10,
                             atol=1e-15,
-                        )
-                    ):
-                        raise ValueError(
-                            "compiled fit returned invalid batch covariance"
+                        ), axis=1)
+                    )
+                    for local in np.flatnonzero(covariance_rows)[invalid]:
+                        items[local]["final_error"] = (
+                            "compiled fit returned invalid covariance"
                         )
             except Exception as error:
                 batch_error = str(error) or type(error).__name__
@@ -2630,11 +2687,15 @@ class FitEngine:
                     item["final_fitted"]
                     if item["binned"]
                     else output.fitted_values[local]
+                    if layout is None
+                    else _readonly(output.fitted_values[local][positions[local]])
                 )
                 residuals = (
                     item["final_residuals"]
                     if item["binned"]
                     else output.residuals[local]
+                    if layout is None
+                    else _readonly(output.residuals[local][positions[local]])
                 )
                 indices = _readonly(item["indices"])
                 reduced = float(output.reduced_chi_square[local])
