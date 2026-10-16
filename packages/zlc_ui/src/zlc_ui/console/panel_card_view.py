@@ -30,7 +30,6 @@ from zlc_ui.fluent import (
     FluentSectionLabel,
     FluentSettingsPopupAnchor,
     FluentStatusDot,
-    fluent_scrollbar_thickness,
     fluent_text_width,
     MUTED_INK,
     RADIUS,
@@ -1422,8 +1421,10 @@ class PanelCardView(FluentGroupBox):
             header_layout = QtWidgets.QHBoxLayout(header)
             # The close x ends where the fields end: the body stops a pad
             # short of the scroll viewport, which stops the bar's gutter
-            # short of the frame's edge.
-            header_layout.setContentsMargins(0, 0, pad + fluent_scrollbar_thickness(), 0)
+            # short of the frame's edge.  The popup is a window of its own, so
+            # its bar is the style's, not one fluent_scrollbar_thickness() sizes.
+            gutter = scroll.verticalScrollBar().sizeHint().width()
+            header_layout.setContentsMargins(0, 0, pad + gutter, 0)
             header_layout.setSpacing(row_gap())
             drag_handle = FluentLabel(
                 f"Setting · {self.panel_id}",
