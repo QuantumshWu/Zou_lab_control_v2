@@ -335,6 +335,9 @@ class PulseComponentView(QtWidgets.QWidget):
     def _commit_binding(self, field_id: str) -> None:
         combo = self._binding_rows[field_id][1]
         key = read_editable_combo(combo)
+        # Committed, the name is no longer a draft: the owner's projection
+        # shows what it accepted, a refused name included.
+        combo.lineEdit().setModified(False)
         if key != (combo.property("accepted_key") or ""):
             self.edit_requested.emit("config_binding", (field_id, key))
 

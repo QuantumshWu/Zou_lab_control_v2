@@ -2937,6 +2937,58 @@ scan.close(); view.close()
 ''')
 
 
+def test_the_subpulse_binding_box_shows_the_owners_answer_after_enter(run_qt) -> None:
+    """A refused Config name returns to the bound key, and a key bound
+    elsewhere replaces a committed one; only a name still being typed
+    survives a projection."""
+
+    run_qt(r'''
+from PyQt5 import QtCore, QtTest
+from zlc_ui.qt import ensure_qt_app
+from zlc_ui.pulse import FieldVM, PeriodVM, PulseComponentView, ScheduleVM
+app = ensure_qt_app(["pulse-subpulse-binding"])
+period = PeriodVM("p0", "P0", FieldVM("4"), "us", ("us",))
+vm = ScheduleVM(1, 1, "Loading", "50 MHz", "4 us", "", 1, "0/0 ports", "", (), (period,))
+page = PulseComponentView()
+page.resize(1000, 600); page.show(); page.activateWindow()
+bound, commits = {"key": "t"}, []
+
+def project():
+    page.set_document(vm, contexts=(("load", "Loading"),), context_id="load",
+                      bindings=(("p0:duration", "P0.duration", bound["key"]),), config_names=("t", "bias"))
+
+def owner(_action, payload):
+    commits.append(payload[1])
+    if " " not in payload[1]:
+        bound["key"] = payload[1]
+    project()
+
+page.edit_requested.connect(owner)
+project()
+combo = page._binding_rows["p0:duration"][1]
+edit = combo.lineEdit()
+
+def type_in(text, enter=True):
+    edit.setFocus(); edit.selectAll(); app.processEvents()
+    assert edit.hasFocus()
+    QtTest.QTest.keyClicks(edit, text)
+    if enter:
+        QtTest.QTest.keyClick(edit, QtCore.Qt.Key_Return)
+    app.processEvents()
+
+type_in("bad name")
+assert combo.currentText() == "t" and commits == ["bad name"], ("a refused name stayed", combo.currentText(), commits)
+type_in("bias")
+bound["key"] = "t"; project()
+assert combo.currentText() == "t", "a key bound elsewhere must replace a committed name"
+page.context_combo.setFocus(); app.processEvents()
+assert commits == ["bad name", "bias"] and bound["key"] == "t", ("leaving the box recommitted", commits)
+type_in("unfin", enter=False)
+project()
+assert combo.currentText() == "unfin", "a projection erased a name being typed"
+''')
+
+
 def test_value_config_names_one_key_and_keeps_one_pitch(run_qt) -> None:
     """The key a field binds to is a "Config name" in the grid's header and
     its boxes; the mode line, the hint and the header are rows like the rows
