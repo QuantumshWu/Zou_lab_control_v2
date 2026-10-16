@@ -56,6 +56,7 @@ class SharedWindows(QtCore.QObject):
         self._owners: dict[QtWidgets.QWidget, QtWidgets.QWidget] = {}
         self._dirty: set[QtWidgets.QWidget] = set()
         self._frames: dict[str, dict[str, Any]] = {}
+        self._capture_image = QtGui.QImage()
         self._capturing = False
         self._closed = False
         self._controller: str | None = None
@@ -181,6 +182,47 @@ class SharedWindows(QtCore.QObject):
             (id(popup), rect.getRect()) for popup, rect in popups
         ))
 
+    def _focused_input(self, window: Any, popups: Any) -> Any:
+        target = self._app.focusWidget()
+        if target is None or target.window() not in {window, *(popup for popup, _rect in popups)}:
+            target = (popups[-1][0] if popups else window).focusWidget()
+        return target
+
+    def input_targets(self, identity: str) -> list[dict[str, Any]]:
+        """Expose visible native text-input geometry, never field contents."""
+        window, bounds, popups = self._surface(identity)
+        origin = window.mapToGlobal(bounds.topLeft())
+        focused = self._focused_input(window, popups)
+        targets = []
+        for surface in (window, *(popup for popup, _rect in popups)):
+            for kind in (QtWidgets.QLineEdit, QtWidgets.QTextEdit, QtWidgets.QPlainTextEdit):
+                for widget in surface.findChildren(kind):
+                    if widget.window() is not surface or not widget.isVisible() or not widget.isEnabled():
+                        continue
+                    content = widget if isinstance(widget, QtWidgets.QLineEdit) else widget.viewport()
+                    rect = content.visibleRegion().boundingRect()
+                    if rect.isEmpty():
+                        continue
+                    try:
+                        self._require_remote_input(widget)
+                    except ValueError:
+                        continue
+                    position = content.mapToGlobal(rect.topLeft()) - origin
+                    context = widget.parentWidget() if isinstance(widget.parentWidget(), QtWidgets.QAbstractSpinBox) else widget
+                    hints = context.inputMethodHints()
+                    mode = "text"
+                    for flag, value in ((QtCore.Qt.ImhDigitsOnly, "numeric"), (QtCore.Qt.ImhFormattedNumbersOnly, "decimal"),
+                                        (QtCore.Qt.ImhDialableCharactersOnly, "tel"), (QtCore.Qt.ImhEmailCharactersOnly, "email"),
+                                        (QtCore.Qt.ImhUrlCharactersOnly, "url")):
+                        if hints & flag:
+                            mode = value
+                            break
+                    targets.append(dict(id=str(id(widget)), rect=[position.x(), position.y(), rect.width(), rect.height()],
+                        inputmode=mode, multiline=not isinstance(widget, QtWidgets.QLineEdit), readonly=widget.isReadOnly() or context.isReadOnly(),
+                        password=isinstance(widget, QtWidgets.QLineEdit) and widget.echoMode() != QtWidgets.QLineEdit.Normal,
+                        focused=(widget is focused or context is focused or widget.isAncestorOf(focused)) if focused is not None else False))
+        return targets
+
     def capture(self, identity: str, max_width: int = 1600, force: bool = False) -> dict[str, Any] | None:
         self._check_thread()
         window, bounds, popups = self._surface(identity)
@@ -192,7 +234,9 @@ class SharedWindows(QtCore.QObject):
             return None
         scale = min(1.0, max(1, int(max_width)) / bounds.width())
         width, height = math.ceil(bounds.width() * scale), math.ceil(bounds.height() * scale)
-        frame = QtGui.QImage(width, height, QtGui.QImage.Format_RGBA8888)
+        frame = self._capture_image
+        if frame.width() != width or frame.height() != height:
+            frame = self._capture_image = QtGui.QImage(width, height, QtGui.QImage.Format_RGBA8888)
         frame.fill(QtCore.Qt.white)
         painter = QtGui.QPainter(frame)
         painter.scale(scale, scale)
@@ -209,6 +253,7 @@ class SharedWindows(QtCore.QObject):
             id=identity, epoch=previous.get("epoch", 0) + int(changed),
             sequence=previous.get("sequence", 0) + 1, width=bounds.width(), height=bounds.height(),
             origin=[bounds.x(), bounds.y()], pixel_width=width, pixel_height=height,
+            inputs=self.input_targets(identity),
         )
         self._frames[identity] = {**record, "geometry": geometry, "max_width": max_width}
         record["rgba"] = frame.constBits().asstring(frame.sizeInBytes())
@@ -313,15 +358,12 @@ class SharedWindows(QtCore.QObject):
             raise ValueError("a modal dialog must be answered first")
         kind, modifiers = str(message["type"]), self._modifiers(message)
         if kind in ("key_down", "key_up", "text"):
-            target = self._app.focusWidget()
-            surfaces = {window, *(popup for popup, _rect in popups)}
-            if target is None or target.window() not in surfaces:
-                target = (popups[-1][0] if popups else window).focusWidget()
+            target = self._focused_input(window, popups)
             if target is None or not target.isVisible() or not target.isEnabled():
                 raise ValueError("no experimental input field has keyboard focus")
             self._require_remote_input(target)
             if kind == "text":
-                event = QtGui.QInputMethodEvent()
+                event = QtGui.QInputMethodEvent(str(message.get("preedit", "")), [])
                 event.setCommitString(str(message.get("text", "")))
             else:
                 key = str(message.get("key", ""))
@@ -386,8 +428,11 @@ class SharedWindows(QtCore.QObject):
                 self._pressed = target
                 self._press_source = (identity, message["epoch"], bounds.topLeft())
                 self._buttons |= int(button)
-                if target.focusPolicy() & QtCore.Qt.ClickFocus:
-                    target.setFocus(QtCore.Qt.MouseFocusReason)
+                focus = target
+                while focus is not None and not focus.focusPolicy() & QtCore.Qt.ClickFocus:
+                    focus = focus.parentWidget()
+                if focus is not None:
+                    focus.setFocus(QtCore.Qt.MouseFocusReason)
             event_type = {"down": QtCore.QEvent.MouseButtonPress, "up": QtCore.QEvent.MouseButtonRelease,
                           "double": QtCore.QEvent.MouseButtonDblClick}[kind]
             self._mouse(target, event_type, position, button, modifiers)
@@ -453,6 +498,7 @@ class SharedWindows(QtCore.QObject):
         self._windows.clear()
         self._owners.clear()
         self._frames.clear()
+        self._capture_image = QtGui.QImage()
         self._dirty.clear()
         self._ids.clear()
         self._hover = None

@@ -19,7 +19,7 @@
       <button id="control">Take control</button><span id="ownership">Read-only</span>
       <div class="spacer"></div>
       <div class="segmented" aria-label="Local display scale"><button id="fit" aria-pressed="true">Fit</button><button id="actual" aria-pressed="false">100%</button></div>
-      <button id="fullscreen">Full screen</button><button id="keyboard" aria-expanded="false">Type text</button><button id="disconnect" class="quiet">Disconnect</button>
+      <button id="fullscreen">Full screen</button><button id="disconnect" class="quiet">Disconnect</button>
     </div>
     <p id="error" role="alert" hidden></p>
   </header>
@@ -28,12 +28,10 @@
     <div id="placeholder"><p id="placeholder-text">Only the experiment application is shared, not the desktop. Connecting does not start or stop an experiment.</p><button id="show-window" hidden>Show window</button></div>
   </main>
   <footer>
-    <div id="text-tools" hidden>
-      <label for="text-input">Type into the selected field in the experiment window</label>
-      <div class="row"><textarea id="text-input" rows="1" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Select a field in the shared view, then type here"></textarea><button data-key="Backspace">Backspace</button><button data-key="Enter">Enter</button><button data-key="Escape">Esc</button><button data-key="Tab">Tab</button></div>
-    </div>
     <span id="hint">This is the same experiment session. All operations run on the experiment computer.</span>
   </footer>
+  <input id="direct-input" class="direct-input" aria-label="Selected experiment field" tabindex="-1" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" hidden>
+  <textarea id="direct-multiline" class="direct-input" aria-label="Selected experiment field" tabindex="-1" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" hidden></textarea>
   <button id="fullscreen-controls" aria-label="Show controls" title="Show controls" aria-expanded="false" hidden>☰</button>
   <script src="/zlc/client.js" defer></script>
 </body>

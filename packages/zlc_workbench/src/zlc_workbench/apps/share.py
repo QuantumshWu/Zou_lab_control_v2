@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
 from importlib.resources import files
 from io import BytesIO
@@ -17,6 +18,9 @@ from urllib.parse import urlsplit
 
 import numpy as np
 from PIL import Image
+
+
+_MAX_PENDING_FRAMES = 2
 
 
 def _patch(frame, previous):
@@ -40,10 +44,10 @@ def _patch(frame, previous):
     metadata = {key: frame[key] for key in
                 ("epoch", "sequence", "width", "height", "pixel_width", "pixel_height")}
     return dict(type="frame", window=frame["id"], x=x, y=y, w=w, h=h,
-                reset=reset, **metadata), buffer.getvalue()
+                reset=reset, inputs=frame.get("inputs", ()), **metadata), buffer.getvalue()
 
 
-def start_server(flow, *, on_clients, host="0.0.0.0", port=80, fps=30):
+def start_server(flow, *, on_clients, host="0.0.0.0", port=80, fps=60):
     """Share experiment windows after local approval; return close with decide()."""
     import tornado.httpserver
     import tornado.ioloop
@@ -53,8 +57,8 @@ def start_server(flow, *, on_clients, host="0.0.0.0", port=80, fps=30):
     from zlc_ui.windows import SharedWindows
     from ..board import attach_qt_owner_turn
 
-    if not 0 <= int(port) <= 65535 or not 1 <= float(fps) <= 30:
-        raise ValueError("sharing requires a valid port and 1–30 frames per second")
+    if not 0 <= int(port) <= 65535 or not 1 <= float(fps) <= 60:
+        raise ValueError("sharing requires a valid port and 1–60 frames per second")
     assets = {name: files("zlc_workbench").joinpath("web_share", name).read_bytes()
               for name in ("index.html", "client.js", "style.css")}
     sockets = tornado.netutil.bind_sockets(int(port), address=host)
@@ -160,11 +164,28 @@ def start_server(flow, *, on_clients, host="0.0.0.0", port=80, fps=30):
             self.approved = False
             self.selected = None
             self.frame = None
-            self.awaiting = None
+            self.sent_sequence = None
+            self.awaiting = deque()
+            self.writing = None
             self.last_state = None
             clients.add(self)
             self.write_message(dict(type="pending", message="Waiting for approval on the experiment computer."))
             notify_clients()
+
+        def send_stream(self, message, *, binary=False):
+            self.writing = self.write_message(message, binary=binary)
+            self.writing.add_done_callback(self.stream_written)
+
+        def stream_written(self, future):
+            if not future.cancelled():
+                try:
+                    future.result()
+                except tornado.websocket.WebSocketClosedError:
+                    self.close()
+                except Exception:
+                    logging.getLogger(__name__).exception("Experiment sharing write failed")
+                    self.close(1011, "Window transmission failed; reconnect to continue viewing.")
+            frame_ready.set()
 
         async def on_message(self, raw):
             try:
@@ -183,11 +204,12 @@ def start_server(flow, *, on_clients, host="0.0.0.0", port=80, fps=30):
                     if self.selected != selected:
                         if catalog["controller"] == self.identity:
                             await owner(surface.input, self.identity, {"type": "release"})
-                        self.selected, self.frame = selected, None
-                        frame_ready.set()
+                    self.selected, self.frame, self.sent_sequence = selected, None, None
+                    frame_ready.set()
                 elif kind == "ack":
-                    if self.awaiting is not None and message.get("sequence") == self.awaiting:
-                        self.awaiting = None
+                    acknowledged = (message.get("window"), message.get("epoch"), message.get("sequence"))
+                    if self.awaiting and acknowledged == self.awaiting[0]:
+                        self.awaiting.popleft()
                         frame_ready.set()
                 elif kind in ("control", "show", "input"):
                     if kind == "control":
@@ -249,63 +271,98 @@ def start_server(flow, *, on_clients, host="0.0.0.0", port=80, fps=30):
 
     async def stream(executor):
         next_capture = 0.0
-        while not closed.is_set():
-            if next_capture > monotonic():
-                await asyncio.sleep(next_capture - monotonic())
-            frame_ready.clear()
+        prefetched = None
+
+        async def capture_after(requested, deadline):
+            nonlocal next_capture
+            if deadline > monotonic():
+                await asyncio.sleep(deadline - monotonic())
             started = monotonic()
+            if requested:
+                next_capture = started + 1 / float(fps)
+            return await owner(poll_windows, requested)
+
+        while not closed.is_set():
+            frame_ready.clear()
             connected = [client for client in clients if client.approved]
+            writable = [client for client in connected if client.writing is None or client.writing.done()]
+            requested = {}
+            if not connected and prefetched is not None:
+                prefetched.cancel()
+                await asyncio.gather(prefetched, return_exceptions=True)
+                prefetched = None
             watched = {client.selected for client in connected}
             for key in tuple(latest):
                 if key not in watched:
                     latest.pop(key)
             if connected:
                 try:
-                    requested = {client.selected: client.selected not in latest for client in connected
-                                 if client.awaiting is None and client.selected is not None}
-                    if requested:
-                        next_capture = started + 1 / float(fps)
-                    catalog, frames = await owner(poll_windows, requested)
+                    requested = {client.selected: client.selected not in latest for client in writable
+                                 if len(client.awaiting) < _MAX_PENDING_FRAMES and client.selected is not None}
+                    if prefetched is None:
+                        catalog, frames = await capture_after(requested, next_capture)
+                    else:
+                        capture = prefetched
+                        prefetched = None
+                        catalog, frames = await capture
                     state = dict(type="state", control_enabled=True, **catalog)
                     visible = {item["id"] for item in catalog["windows"] if item["visible"]}
                     available = {item["id"] for item in catalog["windows"]}
                     for key in tuple(latest):
                         if key not in available:
                             latest.pop(key)
-                    for client in connected:
+                    for client in writable:
                         if client.last_state != state:
-                            await client.write_message(state)
+                            client.send_stream(state)
                             client.last_state = state
-                    pending = [client for client in connected if client.awaiting is None and client.selected in visible]
+                    pending = [client for client in writable if len(client.awaiting) < _MAX_PENDING_FRAMES and client.selected in visible]
                     for identity, frame in frames.items():
                         if frame is not None:
                             latest[identity] = frame
+                    # Reserve credit for the frame about to be encoded before capturing another.
+                    next_requested = {client.selected: client.selected not in latest for client in pending
+                                      if len(client.awaiting) + int(latest.get(client.selected) is not client.frame)
+                                      < _MAX_PENDING_FRAMES}
+                    if next_requested:
+                        prefetched = asyncio.create_task(capture_after(next_requested, next_capture))
                     encoded = {}
                     for client in pending:
                         frame = latest.get(client.selected)
                         if frame is None or frame is client.frame:
                             continue
-                        key = (id(frame), id(client.frame))
+                        baseline, sent_sequence = client.frame, client.sent_sequence
+                        key = (id(frame), id(baseline))
                         if key not in encoded:
-                            encoded[key] = await asyncio.get_running_loop().run_in_executor(executor, _patch, frame, client.frame)
+                            encoded[key] = await asyncio.get_running_loop().run_in_executor(executor, _patch, frame, baseline)
+                        if (client not in clients or not client.approved or client.selected != frame["id"]
+                                or client.frame is not baseline or client.sent_sequence != sent_sequence):
+                            continue
                         update = encoded[key]
                         client.frame = frame
+                        if update is None and frame.get("inputs") != baseline.get("inputs"):
+                            client.send_stream(dict(type="inputs", window=frame["id"],
+                                epoch=frame["epoch"], inputs=frame.get("inputs", ())))
                         if update is not None:
                             metadata, png = update
-                            client.awaiting = metadata["sequence"]
-                            await client.write_message(metadata)
-                            await client.write_message(png, binary=True)
+                            metadata = {**metadata, "base_sequence": None if metadata["reset"] else sent_sequence}
+                            client.sent_sequence = metadata["sequence"]
+                            client.awaiting.append((metadata["window"], metadata["epoch"], metadata["sequence"]))
+                            client.send_stream(metadata)
+                            client.send_stream(png, binary=True)
                 except tornado.websocket.WebSocketClosedError:
                     pass
                 except Exception as error:
                     logging.getLogger(__name__).exception("Experiment sharing frame failed")
-                    for client in connected:
+                    for client in writable:
                         try:
                             if client.ws_connection is not None:
-                                await client.write_message(dict(type="error", message=str(error)))
+                                client.send_stream(dict(type="error", message=str(error)))
                         except tornado.websocket.WebSocketClosedError:
                             pass
-            timeout = max(.005, next_capture - monotonic()) if next_capture > monotonic() else 1 / float(fps)
+            if prefetched is not None or (requested and next_capture <= monotonic()
+                    and any(len(client.awaiting) < _MAX_PENDING_FRAMES for client in writable)):
+                continue
+            timeout = max(.001, next_capture - monotonic()) if next_capture > monotonic() else 1 / float(fps)
             try:
                 await asyncio.wait_for(frame_ready.wait(), timeout)
             except TimeoutError:

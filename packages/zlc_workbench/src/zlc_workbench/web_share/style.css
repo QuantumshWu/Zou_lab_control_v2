@@ -37,9 +37,7 @@ input:focus, select:focus, textarea:focus { border-color: var(--focus); }
 #viewport { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: none; padding: var(--window-pad); position: relative; }
 #screen { display: block; margin: auto; background: var(--surface); touch-action: none; }
 #placeholder { text-align: center; color: var(--muted); padding: var(--window-pad); }
-#text-tools { margin-bottom: var(--card-pad); }
-#text-tools label { display: block; margin-bottom: var(--row-gap); }
-#text-input { flex: 1; min-width: 13em; resize: none; }
+.direct-input { position: fixed; opacity: 0; pointer-events: none; padding: 0; border: 0; resize: none; font-size: 16px; }
 .immersive header, .immersive footer { display: none; }
 .immersive.show-controls header, .immersive.show-controls footer { display: block; }
 .immersive header { padding-right: calc(var(--window-pad) + var(--control-height) + var(--row-gap)); }

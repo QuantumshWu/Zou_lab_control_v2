@@ -94,7 +94,9 @@ and tasks are shared with the local operator, not copied into a second session.
 The browser toolbar is English and uses the application's Fluent font, colors,
 spacing and control sizes. Experiment pages retain their original Qt rendering.
 Use one finger to click or drag, two fingers together to scroll, and pinch to
-zoom a plot. Adding the second finger cancels the unfinished single-finger
+zoom a plot. Tap an editable field to type directly using the device keyboard;
+text, paste and input-method composition go to the original Qt field.
+Adding the second finger cancels the unfinished single-finger
 gesture instead of committing a selection. **Full screen** hides the web
 controls; the small corner button reveals window selection and **Exit full
 screen**. Main windows fit the available area without stretching; modal dialogs

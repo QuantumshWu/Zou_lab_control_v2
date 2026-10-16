@@ -7,6 +7,7 @@ let connectionMessage = "Only the experiment application is shared, not the desk
 let immersive = false;
 let move = null, moveRequest = 0, pointer = null, lastClick = null, composing = false;
 let gesture = null;
+let editor = null, editing = null;
 const touches = new Map();
 const keys = new Map();
 const modifiers = (e) => ({ctrl: e.ctrlKey, shift: e.shiftKey, alt: e.altKey, meta: e.metaKey});
@@ -48,6 +49,7 @@ function flushMove() {
   }
 }
 function release() {
+  closeInput();
   cancelAnimationFrame(moveRequest); moveRequest = 0; move = null;
   if (ownsControl() && frame) send({type: "input", window: frame.window, epoch: frame.epoch, event: "cancel"});
   const captured = [pointer?.id, ...touches.keys()];
@@ -62,21 +64,20 @@ function resize() {
   const scale = fitted ? Math.min(cap, (box.clientWidth - padding) / frame.width, (box.clientHeight - padding) / frame.height) : 1;
   canvas.style.width = `${Math.max(1, frame.width * scale)}px`;
   canvas.style.height = `${Math.max(1, frame.height * scale)}px`;
+  positionInput();
 }
 function refreshControls() {
   const current = windows.find(w => w.id === selected), mine = ownsControl();
   $("control").disabled = !connected || !controlEnabled || (controller != null && !mine);
   $("control").textContent = mine ? "Release control" : "Take control";
   $("ownership").textContent = !controlEnabled ? "Viewing only on this server" : mine ? "You have control" : controller != null ? "Another client has control · Read-only" : "Read-only";
-  $("keyboard").disabled = !mine;
-  $("text-input").disabled = !mine;
-  document.querySelectorAll("[data-key]").forEach(button => button.disabled = !mine);
+  if (!mine) closeInput();
   $("show-window").hidden = !current || current.visible || !mine;
   const ready = connected && current?.visible && frame?.window === selected;
   canvas.hidden = !ready;
   $("placeholder").hidden = ready;
   $("placeholder-text").textContent = !connected ? connectionMessage : !current ? "No experiment windows are available to share." : !current.visible ? "This window is hidden on the experiment computer. Take control to show it." : "Receiving the window view…";
-  $("hint").textContent = current?.blocked ? "This window is waiting for an experiment dialog. Complete the dialog first." : current?.modal ? "Experiment dialog. Confirm or cancel to return to the previous window." : mine ? "Tap or drag with one finger; scroll with two, or pinch to zoom a plot. Select a field before typing. Disconnecting does not stop the experiment." : "Read-only viewing does not change the experiment computer's windows or experiment state.";
+  $("hint").textContent = current?.blocked ? "This window is waiting for an experiment dialog. Complete the dialog first." : current?.modal ? "Experiment dialog. Confirm or cancel to return to the previous window." : mine ? "Tap a field to type. Drag with one finger; scroll with two, or pinch to zoom a plot. Disconnecting does not stop the experiment." : "Read-only viewing does not change the experiment computer's windows or experiment state.";
 }
 function selectWindow(id) {
   if (windows.find(w => w.id === id)?.blocked) id = windows.find(w => w.modal && w.visible && !w.blocked)?.id || id;
@@ -88,9 +89,11 @@ function selectWindow(id) {
 }
 function updateState(message) {
   const prior = windows.find(w => w.id === selected), oldModals = new Set(windows.filter(w => w.modal && w.visible).map(w => w.id));
-  if (controller === client && (message.controller !== client || message.control_enabled === false)) release();
+  const lostControl = controller === client && (message.controller !== client || message.control_enabled === false);
   if ("control_enabled" in message) controlEnabled = message.control_enabled === true;
-  controller = message.controller; windows = message.windows;
+  controller = message.controller;
+  if (lostControl) release();
+  windows = message.windows;
   const signature = JSON.stringify(windows.map(w => [w.id, w.title, w.visible, w.blocked]));
   if ($("windows").dataset.signature !== signature) {
     $("windows").replaceChildren(...windows.map(w => new Option((w.title || (w.modal ? "Experiment dialog" : "Experiment window")) + (w.blocked ? " · Waiting for dialog" : w.visible ? "" : " · Hidden"), w.id)));
@@ -117,6 +120,10 @@ async function receive(data, ws) {
       $("connection").textContent = "Connected"; $("connection").dataset.state = "connected";
       error(); refreshControls();
     } else if (message.type === "state") updateState(message);
+    else if (message.type === "inputs" && frame?.window === message.window && frame.epoch === message.epoch) {
+      frame.inputs = message.inputs;
+      syncInput();
+    }
     else if (message.type === "frame") header = message;
     else if (message.type === "error" || (message.type === "result" && message.ok === false)) error(message.message || message.error || "The operation did not complete.");
     return;
@@ -125,9 +132,18 @@ async function receive(data, ws) {
   if (!patch) throw new Error("Received a window image without its frame metadata. Please reconnect.");
   try {
     if (patch.window !== selected) return;
+    if (!patch.reset && (!frame || frame.window !== patch.window || frame.epoch !== patch.epoch || frame.sequence !== patch.base_sequence)) {
+      if (frame) {
+        frame = null;
+        send({type: "select", window: selected});
+        refreshControls();
+      }
+      return;
+    }
+    const baseline = frame;
     const bitmap = await createImageBitmap(data);
     try {
-      if (socket !== ws || patch.window !== selected) return;
+      if (socket !== ws || patch.window !== selected || (!patch.reset && frame !== baseline)) return;
       if (patch.reset) {
         canvas.width = patch.pixel_width; canvas.height = patch.pixel_height;
         ctx.fillStyle = "white"; ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -135,10 +151,11 @@ async function receive(data, ws) {
       ctx.drawImage(bitmap, patch.x, patch.y);
       const resized = !frame || frame.width !== patch.width || frame.height !== patch.height;
       frame = patch;
+      syncInput();
       if (resized) resize();
       if (canvas.hidden) refreshControls();
     } finally { bitmap.close(); }
-  } finally { if (socket === ws) send({type: "ack", sequence: patch.sequence}); }
+  } finally { if (socket === ws) send({type: "ack", window: patch.window, epoch: patch.epoch, sequence: patch.sequence}); }
 }
 function connect() {
   if (socket) socket.close();
@@ -156,7 +173,6 @@ function connect() {
     if (socket !== ws) return;
     release(); connected = false; client = null; controller = null; frame = null; selected = ""; windows = []; controlEnabled = false;
     $("connect").textContent = "Request connection"; $("connection-request").hidden = false; $("toolbar").hidden = true;
-    $("text-tools").hidden = true; $("keyboard").setAttribute("aria-expanded", "false");
     connectionMessage = "Request a connection to ask for approval in Device Manager. Disconnecting does not stop the experiment.";
     if (event.reason) error(event.reason);
     $("connection").textContent = "Disconnected"; $("connection").dataset.state = ""; refreshControls();
@@ -204,6 +220,37 @@ $("fullscreen-controls").onclick = () => {
 };
 document.addEventListener("fullscreenchange", resize);
 new ResizeObserver(resize).observe($("viewport"));
+function closeInput() {
+  const previous = editor, field = editing;
+  editor = null; editing = null;
+  if (composing && field) input("text", {preedit: ""});
+  composing = false;
+  if (previous) { previous.value = ""; previous.blur(); previous.hidden = true; }
+}
+function positionInput() {
+  if (!editor || !editing || !frame) return;
+  const bounds = canvas.getBoundingClientRect(), [x, y, width, height] = editing.rect;
+  Object.assign(editor.style, {left: `${bounds.left+x*bounds.width/frame.width}px`, top: `${bounds.top+y*bounds.height/frame.height}px`,
+    width: `${width*bounds.width/frame.width}px`, height: `${height*bounds.height/frame.height}px`});
+}
+function openInput(target) {
+  if (!canInput() || target.readonly) return;
+  const next = $(target.multiline ? "direct-multiline" : "direct-input");
+  if (editor !== next || editing?.id !== target.id) closeInput();
+  editor = next; editing = {...target, confirmed: Boolean(target.focused)};
+  if (!target.multiline) editor.type = target.password ? "password" : "text";
+  editor.inputMode = target.inputmode; editor.readOnly = target.readonly;
+  editor.hidden = false; positionInput(); editor.focus({preventScroll: true});
+}
+function syncInput() {
+  if (!editing) return;
+  let target = frame.inputs?.find(item => item.id === editing.id);
+  if (editing.confirmed) target = frame.inputs?.find(item => item.focused) || target;
+  if (!target || target.readonly || !canInput()) { closeInput(); return; }
+  if (target.id !== editing.id) { openInput(target); return; }
+  editing = {...target, confirmed: editing.confirmed || target.focused};
+  positionInput();
+}
 function point(e, location = e) {
   const bounds = canvas.getBoundingClientRect();
   return {x: (location.clientX - bounds.left) * frame.width / bounds.width, y: (location.clientY - bounds.top) * frame.height / bounds.height, button: e.button, buttons: e.buttons, modifiers: modifiers(e)};
@@ -222,6 +269,7 @@ canvas.onpointerdown = e => {
     if (touches.size > 1 || gesture) {
       e.preventDefault();
       if (!gesture) {
+        closeInput();
         cancelAnimationFrame(moveRequest); moveRequest = 0; move = null;
         input("cancel"); pointer = null; lastClick = null; keys.clear();
         const start = touchPair();
@@ -231,10 +279,13 @@ canvas.onpointerdown = e => {
     }
   }
   if (pointer && e.pointerId !== pointer.id) return;
-  e.preventDefault(); canvas.focus({preventScroll: true}); flushMove();
+  e.preventDefault(); flushMove();
   const p = point(e), now = performance.now();
+  const target = [...(frame.inputs || [])].reverse().find(item => !item.readonly && p.x >= item.rect[0] && p.y >= item.rect[1] && p.x < item.rect[0]+item.rect[2] && p.y < item.rect[1]+item.rect[3]);
+  if (editing?.id !== target?.id) closeInput();
+  if (!target) canvas.focus({preventScroll: true});
   const twice = lastClick && now - lastClick.time < 400 && e.button === lastClick.button && Math.hypot(e.clientX - lastClick.x, e.clientY - lastClick.y) < 5;
-  pointer = {id: e.pointerId, x: e.clientX, y: e.clientY, moved: false, double: twice};
+  pointer = {id: e.pointerId, x: e.clientX, y: e.clientY, moved: false, double: twice, field: target};
   canvas.setPointerCapture(e.pointerId);
   input(twice ? "double" : "down", p); if (twice) lastClick = null;
 };
@@ -265,8 +316,10 @@ canvas.onpointerup = e => {
   touches.delete(e.pointerId);
   if (!pointer || e.pointerId !== pointer.id || !canInput()) return;
   e.preventDefault(); flushMove(); const p = point(e); input("up", p);
+  const field = pointer.field;
   lastClick = pointer.moved || pointer.double ? null : {x: e.clientX, y: e.clientY, button: e.button, time: performance.now()}; pointer = null;
   if (canvas.hasPointerCapture(e.pointerId)) canvas.releasePointerCapture(e.pointerId);
+  if (field) openInput(field);
 };
 canvas.onpointercancel = release;
 canvas.onlostpointercapture = e => { if (pointer || touches.has(e.pointerId)) release(); };
@@ -287,26 +340,42 @@ canvas.onkeyup = e => {
   e.preventDefault(); keys.delete(e.code); input("key_up", {key: e.key, code: e.code, modifiers: modifiers(e)});
 };
 canvas.onpaste = e => { if (canInput()) { e.preventDefault(); input("text", {text: e.clipboardData.getData("text/plain")}); } };
-canvas.onblur = release;
+canvas.onblur = event => { if (event.relatedTarget !== editor) release(); };
 window.addEventListener("blur", release);
 document.addEventListener("visibilitychange", () => { if (document.hidden) release(); });
-$("keyboard").onclick = () => {
-  const show = $("text-tools").hidden; $("text-tools").hidden = !show;
-  $("keyboard").setAttribute("aria-expanded", String(show));
-  if (show) $("text-input").focus();
-};
-function tapKey(key) { input("key_down", {key}); input("key_up", {key}); }
-for (const button of document.querySelectorAll("[data-key]")) button.onclick = () => tapKey(button.dataset.key);
 function sendText() {
-  const edit = $("text-input");
-  if (!composing && edit.value) { input("text", {text: edit.value}); edit.value = ""; }
+  if (!composing && editor?.value && editing) {
+    input("text", {text: editor.value}); editor.value = "";
+  }
 }
-$("text-input").oncompositionstart = () => { composing = true; };
-$("text-input").oncompositionend = () => { composing = false; queueMicrotask(sendText); };
-$("text-input").oninput = e => { if (!e.isComposing) sendText(); };
-$("text-input").addEventListener("beforeinput", e => {
-  if (composing || e.isComposing) return;
-  const key = {deleteContentBackward: "Backspace", deleteContentForward: "Delete", insertLineBreak: "Enter"}[e.inputType];
-  if (key) { e.preventDefault(); tapKey(key); }
-});
+for (const edit of [$("direct-input"), $("direct-multiline")]) {
+  edit.onblur = () => { if (editor === edit) release(); };
+  edit.addEventListener("compositionstart", () => { composing = true; });
+  edit.addEventListener("compositionupdate", event => { if (editing) input("text", {preedit: event.data}); });
+  edit.addEventListener("compositionend", () => { composing = false; queueMicrotask(sendText); });
+  edit.oninput = event => { if (!event.isComposing) sendText(); };
+  edit.onpaste = event => {
+    if (!editing) return;
+    event.preventDefault(); input("text", {text: event.clipboardData.getData("text/plain")});
+  };
+  edit.onkeydown = event => {
+    if (!editing || event.isComposing || composing || ["Process", "Dead", "Unidentified"].includes(event.key)) return;
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "v") return;
+    if (event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey) return;
+    event.preventDefault(); keys.set(event.code, event.key);
+    input("key_down", {key: event.key, code: event.code, modifiers: modifiers(event), repeat: event.repeat});
+  };
+  edit.onkeyup = event => {
+    if (!keys.has(event.code) || !editing) return;
+    event.preventDefault(); keys.delete(event.code);
+    input("key_up", {key: event.key, code: event.code, modifiers: modifiers(event)});
+  };
+  edit.onbeforeinput = event => {
+    if (!editing || composing || event.isComposing) return;
+    const key = {deleteContentBackward: "Backspace", deleteContentForward: "Delete", insertLineBreak: "Enter", insertParagraph: "Enter"}[event.inputType];
+    if (key) {
+      event.preventDefault(); input("key_down", {key}); input("key_up", {key});
+    }
+  };
+}
 connect();
