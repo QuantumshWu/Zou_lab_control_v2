@@ -90,11 +90,27 @@ def immutable_bool_array(values, *, shape: tuple[int, ...]) -> np.ndarray:
     return immutable_array(source, dtype=np.dtype(bool), shape=shape)
 
 
-def compact_immutable_array(source: np.ndarray) -> np.ndarray:
-    """Retain this plane, not unrelated bytes backing a transient slice."""
+def owning_bytes(source: np.ndarray) -> bytes | None:
+    """The ``bytes`` object whose whole content ``source`` is, else None.
+
+    A C-contiguous view whose base chain ends in ``bytes`` of exactly its
+    size IS that object: a consumer that needs the plane as bytes takes the
+    object instead of copying it out.  ``b"".join`` copies exact ``bytes``
+    items with the GIL released; given any other buffer it holds the GIL for
+    the whole copy, which for a cycle of camera frames stalls every other
+    thread of the process for tens of milliseconds.
+    """
+
     owner: object = source
     while isinstance(owner, (np.ndarray, memoryview)):
         owner = owner.base if isinstance(owner, np.ndarray) else owner.obj
     if source.flags.c_contiguous and isinstance(owner, bytes) and len(owner) == source.nbytes:
+        return owner
+    return None
+
+
+def compact_immutable_array(source: np.ndarray) -> np.ndarray:
+    """Retain this plane, not unrelated bytes backing a transient slice."""
+    if owning_bytes(source) is not None:
         return source
     return np.ndarray(source.shape, dtype=source.dtype, buffer=source.tobytes(order="C"))

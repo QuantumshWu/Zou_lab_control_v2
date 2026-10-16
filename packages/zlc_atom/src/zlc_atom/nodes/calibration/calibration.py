@@ -667,7 +667,10 @@ def _box_bounds(center: tuple[float, float], radius: int, image_shape: tuple[int
     return x - int(radius), y - int(radius), width, height
 
 
-def extract_box_signals(image: object, centers_xy: object, *, radius: int = 1) -> np.ndarray:
+def extract_box_signals(
+    image: object, centers_xy: object, *, radius: int = 1,
+    frame_indices: np.ndarray | None = None,
+) -> np.ndarray:
     """The TOTAL of each site's box, in the frame's own counts.
 
     The box statistic is the sum of the pixels inside it -- how much the
@@ -694,12 +697,14 @@ def extract_box_signals(image: object, centers_xy: object, *, radius: int = 1) -
         raise ValueError("image must be two-dimensional, or a stack of two-dimensional frames")
     stacked = array.ndim == 3
     frames = array if stacked else array[None]
+    frame_index = slice(None) if frame_indices is None else frame_indices[:, None, None, None]
+    frame_count = frames.shape[0] if frame_indices is None else len(frame_indices)
     radius = int(radius)
     if radius < 0:
         raise ValueError("radius must be non-negative")
     centers = np.asarray(centers_xy, dtype=float).reshape(-1, 2)
     size = 2 * radius + 1
-    output = np.full((frames.shape[0], len(centers)), np.nan, dtype="<f8")
+    output = np.full((frame_count, len(centers)), np.nan, dtype="<f8")
     if len(centers):
         # The one placement rule (box_fits): a rounded centre, radius each
         # way, wholly inside the picture -- for every site at once.
@@ -715,7 +720,7 @@ def extract_box_signals(image: object, centers_xy: object, *, radius: int = 1) -
             raise ValueError(f"site center {outside!r} with radius {radius} lies outside image")
         yy = y0[:, None, None] + np.arange(size)[None, :, None]
         xx = x0[:, None, None] + np.arange(size)[None, None, :]
-        windows = frames[:, yy, xx].reshape(frames.shape[0], len(centers), size * size)
+        windows = frames[frame_index, yy, xx].reshape(frame_count, len(centers), size * size)
         sums = windows.sum(axis=2, dtype=np.float64)
         if frames.dtype.kind in "biu":
             output[:] = sums
@@ -734,6 +739,7 @@ def extract_psf_signals(
     background: str = "annulus",
     radius: int = 2,
     padding: int = 3,
+    frame_indices: np.ndarray | None = None,
 ) -> np.ndarray:
     """Extract one calibrated linear PSF statistic per site.
 
@@ -749,6 +755,8 @@ def extract_psf_signals(
         raise ValueError("image must be two-dimensional, or a stack of two-dimensional frames")
     stacked = array.ndim == 3
     frames = array if stacked else array[None]
+    frame_index = slice(None) if frame_indices is None else frame_indices[:, None, None, None]
+    frame_count = frames.shape[0] if frame_indices is None else len(frame_indices)
     image_shape = frames.shape[1:]
     centers = np.asarray(centers_xy, dtype=float).reshape(-1, 2)
     size = 2 * int(radius) + 1
@@ -767,7 +775,7 @@ def extract_psf_signals(
         boxes = np.asarray(boxes_xywh, dtype=int)
     if boxes.shape != (len(centers), 4):
         raise ValueError("boxes_xywh must have shape (N, 4)")
-    output = np.full((frames.shape[0], len(centers)), np.nan, dtype="<f8")
+    output = np.full((frame_count, len(centers)), np.nan, dtype="<f8")
 
     # The normal calibrated path has equal, complete PSF boxes and complete
     # annuli.  Gather those windows once, for every frame, instead of
@@ -798,9 +806,9 @@ def extract_psf_signals(
     if (background == "none" and complete_boxes) or complete_annuli:
         yy = boxes[:, 1, None, None] + np.arange(size)[None, :, None]
         xx = boxes[:, 0, None, None] + np.arange(size)[None, None, :]
-        cuts = np.asarray(frames[:, yy, xx], dtype=float)
+        cuts = np.asarray(frames[frame_index, yy, xx], dtype=float)
         finite_cuts = np.isfinite(cuts).all(axis=(2, 3))
-        offsets = np.zeros((frames.shape[0], len(boxes)), dtype="<f8")
+        offsets = np.zeros((frame_count, len(boxes)), dtype="<f8")
         if complete_annuli and pad:
             padded_size = size + 2 * pad
             padded_yy = (
@@ -813,7 +821,7 @@ def extract_psf_signals(
                 - pad
                 + np.arange(padded_size)[None, None, :]
             )
-            padded = np.asarray(frames[:, padded_yy, padded_xx], dtype=float)
+            padded = np.asarray(frames[frame_index, padded_yy, padded_xx], dtype=float)
             ring_mask = np.ones((padded_size, padded_size), dtype=bool)
             ring_mask[pad : pad + size, pad : pad + size] = False
             rings = padded[:, :, ring_mask]
@@ -821,11 +829,13 @@ def extract_psf_signals(
             if np.any(finite_rings):
                 offsets[finite_rings] = np.nanmedian(rings[finite_rings], axis=1)
         products = kernels[None] * (cuts - offsets[:, :, None, None])
-        sums = np.ascontiguousarray(products).reshape(frames.shape[0], len(boxes), size * size).sum(axis=2)
+        sums = np.ascontiguousarray(products).reshape(frame_count, len(boxes), size * size).sum(axis=2)
         output[finite_cuts] = sums[finite_cuts]
         return output if stacked else output[0]
 
-    for frame_index, frame in enumerate(frames):
+    frame_rows = range(frames.shape[0]) if frame_indices is None else frame_indices
+    for frame_index, source_index in enumerate(frame_rows):
+        frame = frames[source_index]
         for index, (box, kernel) in enumerate(zip(boxes, kernels, strict=True)):
             x, y, width, height = (int(value) for value in box)
             if kernel.shape != (height, width):
@@ -1354,12 +1364,13 @@ class TrapCalibration:
         frames: object,
         *,
         model_kind: ReadoutModelKind | None = None,
+        frame_indices: np.ndarray | None = None,
     ) -> np.ndarray:
         """Every frame's site signals at once: ``(frames, sites)``.
 
         The same numbers :meth:`signals` gives frame by frame, from one
-        gather over the whole stack -- what lets an occupancy read a
-        many-frame cycle in one call per calibration.
+        gather over the stack. Optional frame indices select only the windows
+        that this calibration reads, without copying their complete images.
         """
 
         array = np.asarray(frames)
@@ -1374,6 +1385,7 @@ class TrapCalibration:
                 array,
                 self.site_map.centers_xy,
                 radius=model.integration_half_width,
+                frame_indices=frame_indices,
             )
         else:
             values = extract_psf_signals(
@@ -1384,6 +1396,7 @@ class TrapCalibration:
                 background=model.background,
                 radius=model.integration_half_width,
                 padding=model.psf_padding,
+                frame_indices=frame_indices,
             )
         usable = self.site_map.valid_sites & model.usable_sites
         return np.where(usable[None, :], values, np.nan)

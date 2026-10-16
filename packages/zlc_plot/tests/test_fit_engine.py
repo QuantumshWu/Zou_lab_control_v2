@@ -1555,6 +1555,25 @@ def test_fit_bounds_are_enforced() -> None:
             np.testing.assert_allclose(result.parameter_values, single.parameter_values, rtol=1e-12)
             assert float(np.sum((result.fitted_values - values) ** 2)) < 2e-9
 
+    # A damped oscillation's observed span supplies seeds, not parameter bounds.
+    for count, decay in ((50, 3000.0), (12, 3000.0), (50, 15.0)):
+        x = np.linspace(1.0, 300.0, 50)[:count]
+        elapsed = x - x[0]
+        parameters = (0.3, 0.5, 0.02, decay, 0.2)
+        values = (
+            0.3 * np.sin(2.0 * np.pi * 0.02 * elapsed + 0.2)
+            * np.exp(-elapsed / decay) + 0.5
+        )
+        single = engine.fit("damped_sine", (x,), values)
+        batch, failures = engine.fit_batch(
+            "damped_sine", ((x,), (x,)), (values, values)
+        )
+        assert failures == (None, None)
+        for result in (single, *batch):
+            assert result is not None and result.success
+            np.testing.assert_allclose(result.parameter_values, parameters, rtol=1e-6)
+            assert float(result.residuals @ result.residuals) < 1e-16
+
 
 def test_fit_cancellation_is_checked_before_work() -> None:
     (x,), values, _ = _anchor("gaussian_offset")

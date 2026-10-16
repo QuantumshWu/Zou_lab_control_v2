@@ -347,14 +347,7 @@ def test_stale_revision_is_rejected_before_prepare_and_commit() -> None:
 
 
 def test_a_failed_first_explicit_live_fit_settles_its_future() -> None:
-    """A solve that RAN and failed answers the request that asked for it.
-
-    The first explicit live fit is solved on the analysis executor; its
-    failure was caught into a local and never handed to the request's
-    completion, so ``fit_async(live=True)`` on three points stayed pending
-    for ever while the source stood still.  The request stays armed -- the
-    next revision may solve -- but the Future is answered.
-    """
+    """Explicit failures settle; configured live fits retain their request."""
 
     session = _session()
     try:
@@ -364,4 +357,33 @@ def test_a_failed_first_explicit_live_fit_settles_its_future() -> None:
         assert session.last_fit is None
         assert session._live_fit_request is not None
     finally:
+        session.close()
+
+    x = np.linspace(0., 8., 41)
+    schema = make_dataset_schema(repeat_domain(size=1), mapped_domain_from_columns({"x": x}))
+    values = .2 + .4 * np.exp(-x / 7.) * np.sin(2 * np.pi * .5 * x + .2)
+    first = make_snapshot(schema, values[None], 0, validity=(np.arange(41) == 0)[None],
+                          generation="partial-fit")
+    later = make_snapshot(schema, values[None], 1, generation="partial-fit")
+    session = PlotSession(first, CurvePlot(AxisRef.point("x")))
+    events = []
+    unsubscribe = session.subscribe_fit(events.append)
+    try:
+        # Invalid authoring still refuses the change; insufficient data does not.
+        with pytest.raises(ValueError, match="unknown parameters"):
+            session.configure(fit={"model": "damped_sine", "initial": {"unknown": 1.}})
+        assert session._live_fit_request is None
+        session.configure(fit={"model": "damped_sine"})
+        assert session._live_fit_request is not None
+        assert session.last_fit is not None and not session.last_fit.success
+        assert "1 finite here" in session.last_fit.message
+        assert np.isnan(session.last_fit.parameter_values).all()
+        prepared = session.prepare_live_frame(later).result(timeout=10)
+        solved = session.solve_live_frame(prepared).result(timeout=10)
+        finalization = session.commit_live_frame(prepared, solved)
+        session.publish_live_frame(finalization)
+        assert session.last_fit.success and session.last_fit.source_revision == 1
+        assert [(event.result.source_revision, event.result.success) for event in events] == [(0, False), (1, True)]
+    finally:
+        unsubscribe()
         session.close()

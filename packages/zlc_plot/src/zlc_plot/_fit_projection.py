@@ -2304,6 +2304,9 @@ class FitProjection:
         result: FitResult,
         selection: FitSelection,
     ) -> FitOverlay:
+        if not result.success:
+            return FitOverlay(success=False, diagnostic=result.message,
+                              facet_index=selection.facet_index, group_key=selection.group_key)
         parameter_display = self._display_fit_parameters(result)
         headline_parameter = next(
             (

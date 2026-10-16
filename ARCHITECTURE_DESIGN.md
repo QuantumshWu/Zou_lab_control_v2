@@ -224,10 +224,13 @@ Node new chunk
 
 ### 5.1 Exact Data/Fit pairing
 
+- Live Fit首次配置的数据求解失败与后续失败同义：保留请求、呈现原数据与invalid fit诊断，后续同代数据自动继续；不因首点不足销毁Host。非法作者初值/边界仍拒绝，静态显式fit仍报错，取消与超时沿原处理。
+
 - 数值名称由生产该量的owner写入`ValueSchema.name`，不是Runtime地址或Plot猜测。普通named snapshot使用信号短名；Occupancy/FrameSurvival与用户Derive的已发布变量声明各自的新量名，Fit参数与ROI统计使用输出名。仅增加扫描/历史维度或裁剪ROI时保留输入value schema/name，Seamless接survival仍标survival而不是scan。Plot从同一QuantityArray.label读取：Curve/Rolling的Y、Histogram的X、Image/Heatmap/3D的色条或Z均用值名＋单位；Histogram的计数/密度轴仍由统计定义命名。显式Plot标签优先，真正无名Dataset才使用value占位。名称与Dataset/Figure同存同读，不另加标签注册表、来源追踪或图种/节点特判；Manual编辑已有Dataset保留值名，新建无名数据用其作者名称。
 - Facet的layout只拥有title，轴/值的显式标签由现有cell.labels唯一保存。构造时将外层显式x/y/value优先规范到cell后清外层对应项；renderer、Focus、label carry均读同一semantic cell，不在每次渲染时重建spec。换轴删除失去角色的旧标签，不能被旧cell fallback重新带回。
 - Pulse字段显示由field_label统一读取`period.name or period_id`：duration为`MOT.duration`，DAC为`MOT.<port label>`，delay为`<port label>.delay`。同一Pulse的有效Period显示名必须唯一，空Name允许使用唯一ID；错误输入只提示并恢复已有字段显示，不改执行程序。ScanColumn/ScanPort的name/port保留变量ID，label用于界面；扫描Dataset的AxisId继续由原port identity产生，Axis.name单独承接显示label，Period改名不得破坏Plan/selector接线或改写值/单位。
 - Exponential的短区间数据只能提供初值，不能据其x/y跨度限制A/B或寿命tau；只保留tau>0的数学域及用户显式约束。固定B后可需要远大于观测窗口的tau，不能用自动上限排除合法更低损失解。fixed/free映射及通用solver停止容差不因此另建分支。
+- Damped sine的观测跨度、振幅范围与频谱峰只提供初值，不生成参数边界；single/batch共用模型数学域、显式bounds与三相位冷启动候选。
 - Histogram的single/bimodal Gaussian及Poisson-Gaussian只包含其命名的概率分量，不默认添加每bin平底beta；已删除其参数、背景组件、gap-floor种子及从population/fidelity扣除K*beta的旁路。数值COUNT_FLOOR仍只为Poisson deviance计算服务，普通Series Gaussian的背景B保留。直方图fit的观测数取bin数与样本数（各bin计数之和）中较小者，不多于自由参数时与其它fit同一句「needs more points」拒绝，不把样本太少的cell解到预算用完。
 - `release_recapture`是普通Series模型：`q=exp(-W0((2π f t)^2))`、`P=A[1-exp(-eta*q)]/[1-exp(-eta)]+B`，参数为amplitude/offset/eta/frequency，显示符号A/B/eta/f；eta无量纲、f为普通频率并复用sine的inverse-axis单位，时间原点固定为物理t=0而非选区起点。A/B可经现有表达式固定。模型/Jacobian/自动初值只有同一套Numba实现，single/batch复用通用TRF与现有协方差；继续使用Series数值/SEM拟合契约，不隐式构造binomial trial counts或另建温度Task。
 - `display_interval`只控制Surface刷新deadline，不决定active history lease内的Measurement primary index是否存在。Runtime只在lease起点之后为indexed-derived Dataset写value或invalid；昂贵Surface计算同一same-shot group只允许一个active，并在忙时只保留Plane latest完整输入，中间indices仍以invalid存在而不排完整frame。
@@ -485,6 +488,8 @@ Node new chunk
 - 同一次application的compiler、wire table、readback、Pulse Editor Run/Sync/Hold/Step与Seamless Dataset共用一个量化结果。Dataset coordinates和run record记录实际played values；若所需分辨率使两个不同authored points坍缩为同一点，必须在碰device前loud拒绝。
 
 ### 7.2 Camera
+
+- 多Calibration的帧选择与BOX/PSF像素窗口提取共用一次gather；不先复制被选中的整幅图像。无选帧仍复用全栈入口，帧顺序、NaN、validity和读出数学不变。
 
 - 接收内存预算是容量上限，不是必须分满的目标。有限采集的SDK环形缓存及应用FIFO不超过本次已知总帧数；持续采集继续按预算分配，不能按科学history缩小。只有确实可能产生的数据需要接收存储，不为两帧采集构造数万帧槽位。
 

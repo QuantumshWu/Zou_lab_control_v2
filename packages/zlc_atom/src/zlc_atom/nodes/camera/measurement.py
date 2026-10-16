@@ -20,6 +20,7 @@ from zlc_data import (
     SPATIAL_X,
     SPATIAL_Y,
     integer,
+    owning_bytes,
 )
 from zlc_runtime import DatasetCoverage, MonitorCoverage
 from zlc_runtime import (
@@ -192,9 +193,9 @@ def frames_snapshot(
     """Cycles of frames as one dataset: (cycle) x (frame) x (y, x).
 
     Every publisher of camera frames -- the finite capture, the monitor slot,
-    and a scan that owns its camera -- means exactly this dataset, so they
-    build it here.  Three copies of the same stacking is how the frame point
-    column drifts between the live view and the saved run.
+    and the SLM feedback and rearrangement tasks -- means exactly this
+    dataset, so they build it here.  A stacking per publisher is how the
+    frame point column drifts between the live view and the saved run.
     """
 
     frames = tuple(tuple(cycle) for cycle in cycles)
@@ -203,16 +204,22 @@ def frames_snapshot(
     sizes = {len(cycle) for cycle in frames}
     if len(sizes) != 1 or not sizes.pop():
         raise ValueError("every published camera cycle must have the same frames")
-    # Every record already owns its frame as contiguous immutable bytes, which
-    # the Dataset keeps as it is.  One frame is handed on as that view; several
-    # are joined with the one copy the Dataset needs.  Stacking them into a
-    # writable array first was a copy the Dataset then made again to own it.
+    # Every record owns its frame as contiguous immutable bytes, which the
+    # Dataset keeps as it is.  One frame is handed on as that view; several
+    # are joined with the one copy the Dataset needs, from the frames' own
+    # bytes objects so that copy runs without the GIL (owning_bytes).
     images = [record.image for cycle in frames for record in cycle]
     first = images[0]
     values = (
         first
         if len(images) == 1
-        else np.frombuffer(b"".join(images), dtype=first.dtype)
+        else np.frombuffer(
+            b"".join([
+                image if (owner := owning_bytes(image)) is None else owner
+                for image in images
+            ]),
+            dtype=first.dtype,
+        )
     )
     return snapshot_from_array(
         values.reshape(len(frames), len(frames[0]), *first.shape),
