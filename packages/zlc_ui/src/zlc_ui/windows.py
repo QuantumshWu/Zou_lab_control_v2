@@ -9,7 +9,11 @@ window in this project goes through it.
 
 from __future__ import annotations
 
+import math
+import weakref
 from typing import Any
+
+from PyQt5 import QtCore, QtGui, QtWidgets, sip
 
 from .fluent import (
     WINDOW_SCREEN_FRACTION,
@@ -18,6 +22,408 @@ from .fluent import (
     screen_fit_window_size,
 )
 from .qt import ensure_qt_app
+
+
+def _handle_window(handle: Any) -> QtWidgets.QWidget | None:
+    window = handle if isinstance(handle, QtWidgets.QWidget) else getattr(handle, "_window", None)
+    return window if isinstance(window, QtWidgets.QWidget) and not sip.isdeleted(window) else None
+
+
+def associate_window(parent_handle: Any, child_handle: Any) -> None:
+    """Declare a launched companion's UI parent without changing native ownership."""
+    parent, child = _handle_window(parent_handle), _handle_window(child_handle)
+    if parent is None or child is None:
+        raise ValueError("window association needs two live GUI handles")
+    parent = parent.window()
+    while (reference := getattr(parent, "_zlc_shared_parent", None)) is not None:
+        ancestor = reference()
+        if ancestor is None or sip.isdeleted(ancestor):
+            break
+        parent = ancestor.window()
+    child._zlc_shared_parent = weakref.ref(parent)
+
+
+class SharedWindows(QtCore.QObject):
+    """Mirror only one experiment's Qt trees; its existing owners still handle input."""
+
+    def __init__(self, roots: Any) -> None:
+        app = ensure_qt_app()
+        super().__init__(app)
+        self._app, self._roots = app, roots
+        self._ids: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+        self._next_id = 0
+        self._windows: dict[str, QtWidgets.QWidget] = {}
+        self._owners: dict[QtWidgets.QWidget, QtWidgets.QWidget] = {}
+        self._dirty: set[QtWidgets.QWidget] = set()
+        self._frames: dict[str, dict[str, Any]] = {}
+        self._capturing = False
+        self._closed = False
+        self._controller: str | None = None
+        self._control_epoch = 0
+        self._pressed: QtWidgets.QWidget | None = None
+        self._press_source: tuple[Any, ...] | None = None
+        self._buttons = QtCore.Qt.NoButton
+        self._keys: dict[int, QtWidgets.QWidget] = {}
+        self._pointer = QtCore.QPoint()
+        self._hover: QtWidgets.QWidget | None = None
+        self._native_dialogs = app.testAttribute(QtCore.Qt.AA_DontUseNativeDialogs)
+        app.setAttribute(QtCore.Qt.AA_DontUseNativeDialogs, True)
+        app.installEventFilter(self)
+
+    def _check_thread(self) -> None:
+        if QtCore.QThread.currentThread() != self._app.thread():
+            raise RuntimeError("shared windows must be accessed on the Qt thread")
+        if self._closed:
+            raise RuntimeError("window sharing is closed")
+
+    def theme(self) -> dict[str, str]:
+        """Project the native Fluent tokens into the browser's small control strip."""
+        from .fluent import fluent as f
+
+        self._check_thread()
+        return {
+            "font-family": f'"{f.FONT}", sans-serif', "font-size": f"{f.fluent_font_size()}pt",
+            "heading-weight": str(f.HEADING_CSS_WEIGHT), "control-height": f"{f.control_height()}px",
+            "radius": f"{f._radius()}px", "row-gap": f"{f.row_gap()}px",
+            "card-pad": f"{f.card_pad()}px", "window-pad": f"{f.window_pad()}px",
+            "button-pad": f"{f.scaled_px(f.BUTTON_PADDING_H, minimum=6)}px",
+            "field-pad": f"{f.field_text_inset()}px", "text": f.TEXT, "bg": f.BG,
+            "surface": f.SURFACE, "muted": f.MUTED_INK, "button": f.BUTTON_TINT,
+            "button-ink": f.HOVER, "hover": f._mixed(f.BUTTON_TINT, f.ACCENT, .25).name(),
+            "pressed": f.SELECTED, "primary": f.ACCENT_STRONG, "primary-ink": f.SURFACE,
+            "border": f.DIVIDER, "field-border": f.PLACEHOLDER, "focus": f.ACCENT,
+            "danger": f.RED_DARK, "disabled-bg": f.DIVIDER, "disabled-ink": f.DISABLED_INK,
+        }
+
+    @staticmethod
+    def _parent(window: QtWidgets.QWidget) -> QtWidgets.QWidget | None:
+        for name in ("_zlc_shared_parent", "_toggle_anchor_ref"):
+            reference = getattr(window, name, None)
+            parent = None if reference is None else reference()
+            if parent is not None and not sip.isdeleted(parent):
+                return parent.window()
+        anchor = getattr(window, "_dialog_anchor", None)
+        if anchor is not None and not sip.isdeleted(anchor):
+            return anchor.window()
+        parent = window.parentWidget()
+        return None if parent is None else parent.window()
+
+    def _refresh(self) -> None:
+        roots = {window for value in self._roots() if (window := _handle_window(value)) is not None}
+        retained = set(getattr(self._app, "_zlc_retained_windows", ())) | roots
+        candidates = set(self._app.topLevelWidgets()) | retained
+        owners: dict[QtWidgets.QWidget, QtWidgets.QWidget] = {}
+        for window in candidates:
+            if (sip.isdeleted(window) or window.windowType() == QtCore.Qt.ToolTip
+                    or getattr(window, "_zlc_close_committed", False)
+                    or window not in retained and not window.isVisible()):
+                continue
+            current, visited = window, set()
+            while current is not None and current not in visited:
+                visited.add(current)
+                if current in roots:
+                    owners[window] = current
+                    break
+                current = self._parent(current)
+        for window in owners:
+            if window not in self._ids:
+                self._next_id += 1
+                self._ids[window] = f"w{self._next_id}"
+                self._dirty.add(window)
+        self._owners = owners
+        self._windows = {self._ids[w]: w for w in owners if w.windowType() != QtCore.Qt.Popup}
+        self._frames = {key: value for key, value in self._frames.items() if key in self._windows}
+        self._dirty.intersection_update(owners)
+
+    def catalog(self) -> dict[str, Any]:
+        self._check_thread()
+        self._refresh()
+        modal = self._app.activeModalWidget()
+        records = []
+        for identity, window in self._windows.items():
+            parent = self._parent(window)
+            while parent is not None and parent.windowType() == QtCore.Qt.Popup:
+                parent = self._parent(parent)
+            records.append(dict(
+                id=identity, title=window.windowTitle(), width=window.width(),
+                height=window.height(), visible=window.isVisible() and not window.isMinimized(),
+                modal=window.isModal(), parent=None if parent is None else self._ids.get(parent),
+                blocked=modal is not None and modal is not window and not modal.isAncestorOf(window),
+            ))
+        return {"windows": sorted(records, key=lambda item: int(item["id"][1:])), "controller": self._controller}
+
+    def _surface(self, identity: str) -> tuple[Any, Any, Any]:
+        self._refresh()
+        window = self._windows.get(str(identity))
+        if window is None or not window.isVisible() or window.isMinimized():
+            raise ValueError("the experiment window is no longer visible")
+        origin = window.mapToGlobal(QtCore.QPoint())
+        bounds = window.rect()
+        popups = []
+        for candidate in self._owners:
+            if candidate.windowType() != QtCore.Qt.Popup or not candidate.isVisible():
+                continue
+            parent = self._parent(candidate)
+            while parent is not None and parent.windowType() == QtCore.Qt.Popup:
+                parent = self._parent(parent)
+            if parent is window:
+                position = candidate.mapToGlobal(QtCore.QPoint()) - origin
+                rect = QtCore.QRect(position, candidate.size())
+                bounds = bounds.united(rect)
+                popups.append((candidate, rect))
+        active = self._app.activePopupWidget()
+        popups.sort(key=lambda item: (item[0] is active, int(self._ids[item[0]][1:])))
+        return window, bounds, popups
+
+    @staticmethod
+    def _geometry(window: Any, bounds: Any, popups: Any) -> tuple[Any, ...]:
+        return (window.width(), window.height(), bounds.getRect(), tuple(
+            (id(popup), rect.getRect()) for popup, rect in popups
+        ))
+
+    def capture(self, identity: str, max_width: int = 1600, force: bool = False) -> dict[str, Any] | None:
+        self._check_thread()
+        window, bounds, popups = self._surface(identity)
+        geometry = self._geometry(window, bounds, popups)
+        previous = self._frames.get(identity, {})
+        changed = previous.get("geometry") != geometry
+        if (not force and not changed and previous.get("max_width") == max_width
+                and not any(w in self._dirty for w in (window, *(p[0] for p in popups)))):
+            return None
+        scale = min(1.0, max(1, int(max_width)) / bounds.width())
+        width, height = math.ceil(bounds.width() * scale), math.ceil(bounds.height() * scale)
+        frame = QtGui.QImage(width, height, QtGui.QImage.Format_RGBA8888)
+        frame.fill(QtCore.Qt.white)
+        painter = QtGui.QPainter(frame)
+        painter.scale(scale, scale)
+        self._capturing = True
+        try:
+            window.render(painter, -bounds.topLeft())
+            for popup, rect in popups:
+                popup.render(painter, rect.topLeft() - bounds.topLeft())
+        finally:
+            painter.end()
+            self._capturing = False
+        self._dirty.difference_update((window, *(p[0] for p in popups)))
+        record = dict(
+            id=identity, epoch=previous.get("epoch", 0) + int(changed),
+            sequence=previous.get("sequence", 0) + 1, width=bounds.width(), height=bounds.height(),
+            origin=[bounds.x(), bounds.y()], pixel_width=width, pixel_height=height,
+        )
+        self._frames[identity] = {**record, "geometry": geometry, "max_width": max_width}
+        record["rgba"] = frame.constBits().asstring(frame.sizeInBytes())
+        return record
+
+    def take_control(self, client_id: str) -> dict[str, Any]:
+        self._check_thread()
+        if self._controller not in (None, client_id):
+            raise ValueError("another browser controls the experiment")
+        if self._controller != client_id:
+            self._control_epoch += 1
+        self._controller = client_id
+        return {"controller": self._controller}
+
+    def release_control(self, client_id: str) -> dict[str, Any]:
+        self._check_thread()
+        if self._controller == client_id:
+            self._release_inputs()
+            self._controller = None
+        return {"controller": self._controller}
+
+    def show(self, client_id: str, identity: str) -> dict[str, Any]:
+        self._check_thread()
+        if client_id != self._controller:
+            raise ValueError("this browser does not control the experiment")
+        self._refresh()
+        window = self._windows.get(str(identity))
+        if window is None:
+            raise ValueError("the experiment window is no longer available")
+        window.showNormal()
+        return {"accepted": True}
+
+    def _release_inputs(self) -> None:
+        target = self._pressed
+        if target is not None and not sip.isdeleted(target):
+            if isinstance(target, QtWidgets.QAbstractButton):
+                target.setDown(False)
+            for button in (QtCore.Qt.LeftButton, QtCore.Qt.RightButton, QtCore.Qt.MiddleButton):
+                if self._buttons & button:
+                    self._buttons &= ~button
+                    self._mouse(target, QtCore.QEvent.MouseButtonRelease, self._pointer, button, QtCore.Qt.NoModifier, guard=False)
+        for key, target in self._keys.items():
+            if not sip.isdeleted(target):
+                self._post(target, QtGui.QKeyEvent(QtCore.QEvent.KeyRelease, key, QtCore.Qt.NoModifier), guard=False)
+        self._pressed, self._press_source, self._buttons, self._keys = None, None, QtCore.Qt.NoButton, {}
+
+    @staticmethod
+    def _modifiers(message: dict[str, Any]) -> Any:
+        result = QtCore.Qt.NoModifier
+        for name in message.get("modifiers", ()):
+            result |= {"Shift": QtCore.Qt.ShiftModifier, "Control": QtCore.Qt.ControlModifier,
+                       "Alt": QtCore.Qt.AltModifier, "Meta": QtCore.Qt.MetaModifier}.get(name, QtCore.Qt.NoModifier)
+        return result
+
+    def _post(self, target: Any, event: Any, *, guard: bool = True) -> None:
+        if guard:
+            event._zlc_shared_control = (self._controller, self._control_epoch)
+        self._app.postEvent(target, event)
+
+    def _mouse(self, target: Any, kind: Any, position: Any, button: Any, modifiers: Any, *, guard: bool = True) -> None:
+        local = QtCore.QPointF(target.mapFromGlobal(position))
+        event = QtGui.QMouseEvent(kind, local, QtCore.QPointF(target.window().mapFromGlobal(position)),
+                                 QtCore.QPointF(position), button, self._buttons, modifiers)
+        self._post(target, event, guard=guard)
+
+    def input(self, client_id: str, message: dict[str, Any]) -> dict[str, Any]:
+        self._check_thread()
+        if client_id != self._controller:
+            raise ValueError("this browser does not control the experiment")
+        if message["type"] == "release":
+            self._release_inputs()
+            return {"accepted": True}
+        identity = str(message["window"])
+        window, bounds, popups = self._surface(identity)
+        frame = self._frames.get(identity)
+        releasing = (message["type"] == "up" and self._pressed is not None
+                     and self._press_source is not None and self._press_source[:2] == (identity, message.get("epoch")))
+        if not releasing and (frame is None or message.get("epoch") != frame["epoch"]
+                or frame["geometry"] != self._geometry(window, bounds, popups)):
+            raise ValueError("window geometry changed; wait for its current image")
+        modal = self._app.activeModalWidget()
+        if modal is not None and modal is not window and not modal.isAncestorOf(window):
+            raise ValueError("a modal dialog must be answered first")
+        kind, modifiers = str(message["type"]), self._modifiers(message)
+        if kind in ("key_down", "key_up", "text"):
+            target = self._app.focusWidget()
+            surfaces = {window, *(popup for popup, _rect in popups)}
+            if target is None or target.window() not in surfaces:
+                target = (popups[-1][0] if popups else window).focusWidget()
+            if target is None or not target.isVisible() or not target.isEnabled():
+                raise ValueError("no experimental input field has keyboard focus")
+            if kind == "text":
+                event = QtGui.QInputMethodEvent()
+                event.setCommitString(str(message.get("text", "")))
+            else:
+                key = str(message.get("key", ""))
+                names = {"Enter": "Return", "Escape": "Escape", "Backspace": "Backspace",
+                         "Tab": "Tab", "Delete": "Delete", "Insert": "Insert", "Home": "Home",
+                         "End": "End", "PageUp": "PageUp", "PageDown": "PageDown",
+                         "ArrowLeft": "Left", "ArrowRight": "Right", "ArrowUp": "Up", "ArrowDown": "Down",
+                         "Shift": "Shift", "Control": "Control", "Alt": "Alt", "Meta": "Meta", " ": "Space"}
+                code = getattr(QtCore.Qt, "Key_" + names.get(key, key), 0)
+                if not code and len(key) == 1:
+                    code = ord(key.upper()) if len(key.upper()) == 1 else 0
+                if kind == "key_down":
+                    self._keys[code] = target
+                else:
+                    target = self._keys.pop(code, target)
+                    if sip.isdeleted(target):
+                        return {"accepted": False, "reason": "the focused control was closed"}
+                text = key if len(key) == 1 and not modifiers & (QtCore.Qt.ControlModifier | QtCore.Qt.MetaModifier) else ""
+                event = QtGui.QKeyEvent(QtCore.QEvent.KeyPress if kind == "key_down" else QtCore.QEvent.KeyRelease,
+                                       code, modifiers, str(message.get("text", text)), bool(message.get("repeat", False)))
+            self._post(target, event)
+            return {"accepted": True}
+        x, y = float(message["x"]), float(message["y"])
+        if not math.isfinite(x) or not math.isfinite(y):
+            raise ValueError("pointer coordinates must be finite")
+        canvas_origin = self._press_source[2] if releasing else bounds.topLeft()
+        point = QtCore.QPoint(round(x), round(y)) + canvas_origin
+        position = window.mapToGlobal(point)
+        self._pointer = position
+        target = self._pressed
+        if target is not None and sip.isdeleted(target):
+            self._pressed, self._buttons, target = None, QtCore.Qt.NoButton, None
+        if target is None:
+            surface = window
+            for popup, rect in reversed(popups):
+                if rect.contains(point):
+                    surface = popup
+                    break
+            if popups and surface is window:
+                if kind in ("down", "double"):
+                    self._post(popups[-1][0], QtGui.QKeyEvent(QtCore.QEvent.KeyPress, QtCore.Qt.Key_Escape, modifiers))
+                return {"accepted": False, "reason": "pointer is outside the open popup"}
+            local = surface.mapFromGlobal(position)
+            if not surface.rect().contains(local):
+                return {"accepted": False, "reason": "pointer is outside the window"}
+            target = surface.childAt(local) or surface
+        if not target.isEnabled():
+            return {"accepted": False, "reason": "the control is disabled"}
+        if kind == "move":
+            if target is not self._hover:
+                if self._hover is not None and not sip.isdeleted(self._hover):
+                    self._post(self._hover, QtCore.QEvent(QtCore.QEvent.Leave))
+                self._post(target, QtCore.QEvent(QtCore.QEvent.Enter))
+                self._hover = target
+            self._mouse(target, QtCore.QEvent.MouseMove, position, QtCore.Qt.NoButton, modifiers)
+        elif kind in ("down", "up", "double"):
+            button = {0: QtCore.Qt.LeftButton, 1: QtCore.Qt.MiddleButton, 2: QtCore.Qt.RightButton}.get(message.get("button", 0))
+            if button is None:
+                raise ValueError("unsupported mouse button")
+            if kind == "up":
+                self._buttons &= ~button
+            else:
+                self._pressed = target
+                self._press_source = (identity, message["epoch"], bounds.topLeft())
+                self._buttons |= button
+                if target.focusPolicy() & QtCore.Qt.ClickFocus:
+                    target.setFocus(QtCore.Qt.MouseFocusReason)
+            event_type = {"down": QtCore.QEvent.MouseButtonPress, "up": QtCore.QEvent.MouseButtonRelease,
+                          "double": QtCore.QEvent.MouseButtonDblClick}[kind]
+            self._mouse(target, event_type, position, button, modifiers)
+            if kind == "up" and button == QtCore.Qt.RightButton:
+                self._post(target, QtGui.QContextMenuEvent(
+                    QtGui.QContextMenuEvent.Mouse, target.mapFromGlobal(position), position, modifiers,
+                ))
+            if not self._buttons:
+                self._pressed = None
+                self._press_source = None
+        elif kind == "wheel":
+            delta = QtCore.QPoint(round(-float(message.get("delta_x", 0))), round(-float(message.get("delta_y", 0))))
+            event = QtGui.QWheelEvent(QtCore.QPointF(target.mapFromGlobal(position)), QtCore.QPointF(position),
+                                     QtCore.QPoint(), delta, self._buttons, modifiers, QtCore.Qt.NoScrollPhase, False)
+            self._post(target, event)
+        else:
+            raise ValueError("unsupported input event")
+        return {"accepted": True}
+
+    def eventFilter(self, watched: Any, event: Any) -> bool:
+        control = getattr(event, "_zlc_shared_control", None)
+        if control is not None and control != (self._controller, self._control_epoch):
+            return True
+        if self._closed or self._capturing or not isinstance(watched, QtWidgets.QWidget):
+            return False
+        kind = event.type()
+        if kind in (QtCore.QEvent.MouseButtonPress, QtCore.QEvent.KeyPress, QtCore.QEvent.Wheel) and event.spontaneous():
+            if self._controller is not None:
+                self._refresh()
+                if watched.window() in self._owners:
+                    self._release_inputs()
+                    self._controller = None
+        if kind in (QtCore.QEvent.Paint, QtCore.QEvent.UpdateRequest, QtCore.QEvent.Resize,
+                    QtCore.QEvent.Show, QtCore.QEvent.Hide, QtCore.QEvent.Move):
+            window = watched.window()
+            if window in self._owners:
+                self._dirty.add(window)
+        return False
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._check_thread()
+        self._release_inputs()
+        self._controller = None
+        self._app.setAttribute(QtCore.Qt.AA_DontUseNativeDialogs, self._native_dialogs)
+        self._windows.clear()
+        self._owners.clear()
+        self._frames.clear()
+        self._dirty.clear()
+        self._ids.clear()
+        self._hover = None
+        self._roots = lambda: ()
+        self._closed = True
+        self.deleteLater()
 
 
 def _window_screenshot(window: Any, *, include_dialog: bool = False) -> Any:
@@ -236,6 +642,8 @@ def open_task_console(
 
 
 __all__ = [
+    "SharedWindows",
+    "associate_window",
     "save_window_screenshot",
     "window_screenshot_png",
     "open_device_control",

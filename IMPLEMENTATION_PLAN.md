@@ -1,6 +1,6 @@
 # ZLC — Current Implementation Status
 
-更新时间：2026-10-15
+更新时间：2026-10-16
 
 状态：`PLOT/RUNTIME/WORKBENCH CUT COMPLETE / OVERALL GOAL IN PROGRESS`
 
@@ -9,6 +9,8 @@
 完成证明。
 
 ## 1. 当前实施范围
+
+- 实验应用专属网页共享（2026-10-16，worktree完成待用户验收）：`experiment.bat --share`启动独立Tornado HTTP/WebSocket入口及随产品安装的英文网页资源；Fluent字体、颜色与尺寸同源。当前Flow与派生窗口沿公共UI归属提供画面/输入，不共享桌面、不新建设备会话、不经MCP。默认不启动，支持只读和HTTPS证书；私密LAN链接仅在启动终端输出，失败保留实验，退出非阻塞撤下服务。单controller、旧输入撤销、关闭modal退出目录及伴随窗口归属已验证。真实Windows Qt＋Chromium走通Virtual Init、TaskConsole、Pulse Control、下拉/文件/确认框、文字输入、Plot框选/滚轮与双客户端控制/断线；静态窗口无重复抓图，无浏览器无抓图请求。使用隔离目录的产品pin Tornado6.5.8验证，未改系统环境；证据在ignored research/share-acceptance，窗口/浏览器/服务已关闭。未进行实体平板或真实硬件验收。
 
 - Pulse Add subpulse（2026-10-16，完成）：主Edit新增文件插入按钮，复用既有Subpulse读取/实例插入/Config来源机制，默认引用所选文件且保留内嵌Default；原主Config开关和独立文件草稿不变。底部四个Add同排，Remove上移，Sync与Hide/Show共享半宽格；不新增领域模型、文件格式或运行路径。两个既有直接用例通过；正式Qt按钮/文件选择验收两次插入独立ID、Config引用、来源编辑、保存重开与半宽布局，截图留ignored research，窗口已关闭。
 - Post-selected occupancy（2026-10-16，worktree `claude/r23-postselect`待人工验收，用户点名）：新processor `post_selected_occupancy`＝Occupancy＋Derive两帧后选，Relation/Values二选一；复用Occupancy owner（processor加`post_select`钩子）与Derive引擎，默认与Occupancy→Derive逐位相同（`test_post_selected_occupancy_is_occupancy_then_derives_post_selection`）。

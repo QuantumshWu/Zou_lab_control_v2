@@ -73,6 +73,52 @@ bin\migrate_units.bat          one-shot rewrite of saved pulses to one unit
                                spelling (originals kept beside them)
 ```
 
+### Experiment windows in a browser
+
+Opt in when starting the experiment:
+
+```powershell
+.\bin\experiment.bat --share
+```
+
+The launcher prints private connection links for this computer's LAN addresses.
+Open one on the tablet or optical-table display. Share only with trusted
+operators: the link authorizes access to the running experiment, and browser
+actions have the same consequences as clicking its local controls.
+
+Only windows belonging to this experiment are shared: Device Manager,
+TaskConsole, device controls, Pulse/SLM editors, their Figure Viewers and
+associated dialogs. No desktop or unrelated application is captured. The
+browser sees and operates the existing Qt UI; tabs, selections, device state
+and tasks are shared with the local operator, not copied into a second session.
+The browser toolbar is English and uses the application's Fluent font, colors,
+spacing and control sizes. Experiment pages retain their original Qt rendering.
+Multiple clients can watch; only one remote client controls at a time. A local
+click, keypress or wheel operation takes control back immediately. Disconnecting
+does not stop a task or replay commands. File dialogs select files on the
+experiment computer, not the tablet; while sharing, they use Qt's in-application
+dialog so they remain accessible.
+
+Options:
+
+- `--share-read-only`: disable remote control for all clients.
+- `--share-host`: bind address; defaults to `0.0.0.0` (local network interfaces).
+- `--share-port`: defaults to `18865`; `0` chooses an available port. An occupied
+  explicit port reports a sharing failure without closing the experiment.
+- `--share-cert` and `--share-key`: certificate and private-key PEM paths for
+  HTTPS/WSS. Both must be supplied together, and clients must trust the certificate.
+
+Without certificates, HTTP/WebSocket traffic is **unencrypted**. The private
+link prevents unauthenticated access but not network eavesdropping; use a trusted
+isolated LAN, or provide HTTPS. Do not forward the port to the internet. Windows
+Firewall must permit the chosen port on the intended private network; the app
+does not change firewall settings.
+
+Sharing is off unless `--share` is supplied, and `--check` never starts it.
+Closing the experiment stops its sharing service. A sharing startup failure
+leaves the experiment available. This is independent of MCP: MCP's loopback,
+authentication and lifecycle are unchanged, and no browser calls MCP or a driver.
+
 ### AI / MCP access
 
 Ordinary `bin/experiment.bat` starts local MCP control automatically. AI can

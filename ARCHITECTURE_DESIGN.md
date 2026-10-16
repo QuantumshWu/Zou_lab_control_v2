@@ -399,6 +399,11 @@ Node new chunk
 
 ## 6. UI与Lifecycle
 
+- 实验网页共享只由显式`--share`启动，默认关闭、`--check`不启动；`--share-host/port/read-only`控制监听与远端操作，`--share-cert/key`成对启用HTTPS/WSS。没有证书的HTTP仅用于可信隔离LAN，token不是链路加密，不改防火墙、不发布到互联网。它独立于MCP，不改变MCP协议、loopback或安全边界。Workbench仅组合当前`ExperimentGuiFlow`和Tornado网络传输，浏览器静态资源随产品安装，不建立第二Session或暴露driver。
+- 共享画面与输入属于`zlc_ui`的窗口边界：只从当前Flow的Device Manager、Console、device controls及显式关联的派生窗取像素，Qt父子/菜单/模态窗沿同一归属处理，不抓桌面。FigureViewer及其归档Pulse Editor只登记逻辑归属，不改变Qt parent或关闭生命周期；共享期间文件选择使用Qt对话框，仍读写实验机文件。鼠标、触控、滚轮与键盘回到原Qt控件，参数、设备占用与任务执行继续走原owner；多个浏览器只共享当前界面状态，不拥有独立页签或科学数据副本。
+- 网页共享按token授权、多观察者单远端controller；本机真实点击、按键或滚轮立即收回远端控制，断连释放输入与控制但不停止实验、不重放命令。未观看窗口不持续抓图，慢客户端不积压帧，编码和网络传输不占Qt owner。共享失败独立报告且保留实验，退出停止监听并复用原关闭流程；没有开启共享时不安装抓图循环或输入监听。
+- 网页外壳使用英文，字体、字号、颜色、间距与控件尺寸从现有Fluent owner投影，不维护独立主题数值。实验内容由原Qt窗口绘制，传输仅更新变化区域；Fit只缩小、不放大小对话框。临时窗口关闭后退出共享目录，仍存活的独立伴随窗口归属于同一实验而不被其打开者的关闭撤走；控制权撤销后尚未分派的旧输入不得执行。
+
 - 实验 AI 的 MCP 随普通 experiment 启动默认提供本机接入及操作能力，`--no-mcp`显式关闭、`--mcp-read-only`显式限制只读，`--check`不启动服务。它不是第二个实验执行器，只连接当前`ExperimentGuiFlow`的Session/Console；请求交给原Qt owner，执行继续走原设备占用和worker。MCP SDK是正常安装依赖，不在启动时临时pip。每个实际监听实例写出自己的本机连接信息/凭据，AI可在实验启动之后连接；默认端口占用可分配空闲端口，显式端口冲突清楚报告且不关闭实验。服务仍限loopback、验证token、拒绝浏览器跨源访问；协议沿官方MCP SDK。
 - MCP通用handle发现/描述/调用直接指向当前流程和原业务owner，不维护另一份每功能白名单作为能力上限：公开API的签名/文档直接来自对象，GUI intent来自现有Handle信号；不递归暴露底层driver或任意Qt内部方法，不增加第二设备会话。常用快捷工具只是便捷入口。文件操作的公开API接受显式路径，交互提示与异步错误由原owner提供机器可读结果；反射工具只属于developer工具档，默认operator档只给原生工具（`lab_guide`、`lab_catalog`与原生动作）；缺少快捷工具时developer可用同一公开API，必要时用实际GUI，不把缺MCP动作当作系统没有能力。连接器可以代理当前MCP传输，但不得启动/重放实验或伪造设备成功。
 - STDIO连接器对当前端点保留一份HTTP/MCP transport与SDK校验缓存，不缓存实验状态、不逐调用重建会话；同一task进入/退出传输context，等待与Stop可并发，在途请求不跨窗口切换，失败不重放。允许同源能力说明、已验证原生Layout配方以及调用现有owner的有限配置/启动组合；禁止在MCP复制科学计算、设备执行、采集调度或长时运行生命周期。组合错误、拒绝、等待未达成或generation已变化即停止，显式expect只能增加条件，不能掩盖原失败；已生效前序动作不回滚、不重放。配方只绑定原字段、配置与启动既有节点，返回既有运行身份；不得静默Stop其它运行、Init设备、选SLM相位或重做Calibration。

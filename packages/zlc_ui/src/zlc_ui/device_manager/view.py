@@ -1170,12 +1170,14 @@ class DeviceManagerView(QtWidgets.QWidget):
             window.activateWindow()
             return
         from zlc_ui.fluent import open_fluent_window
+        from zlc_ui.windows import associate_window
 
         window = windows[key] = open_fluent_window(
             lambda: _ServerLogView(snapshot),
             title=f"{label} log@Zou lab",
             window_ratio=0.45,
         )
+        associate_window(self, window)
 
         def forget() -> None:
             # A closed log window is over: the next request builds a new

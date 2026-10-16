@@ -2371,6 +2371,9 @@ class FigureViewerPresenter:
             self.view.set_status("this viewer cannot open the Pulse Editor", error=True)
             return None
         editor = self._open_pulse_editor(sequence=sequence)
+        from zlc_ui.windows import associate_window
+
+        associate_window(self.view, editor)
         self.view.set_status(f"opened recorded pulse {played.name} in Pulse Editor")
         return editor
 

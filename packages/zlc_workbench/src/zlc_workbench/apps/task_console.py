@@ -57,6 +57,24 @@ def _parser() -> argparse.ArgumentParser:
         "--mcp-read-only", action="store_true",
         help="restrict MCP to observation (enabled MCP otherwise allows experiment actions)",
     )
+    parser.add_argument(
+        "--share", action="store_true",
+        help="share this experiment's windows with authenticated LAN browsers",
+    )
+    parser.add_argument(
+        "--share-host", default="0.0.0.0",
+        help="browser-sharing bind address (default: all local interfaces)",
+    )
+    parser.add_argument(
+        "--share-port", type=int, default=18865,
+        help="browser-sharing port (default 18865; 0 chooses an available port)",
+    )
+    parser.add_argument(
+        "--share-read-only", action="store_true",
+        help="allow viewing only, without browser mouse or keyboard control",
+    )
+    parser.add_argument("--share-cert", type=Path, help="HTTPS certificate PEM file")
+    parser.add_argument("--share-key", type=Path, help="HTTPS private-key PEM file")
     return parser
 
 
@@ -484,6 +502,7 @@ class ExperimentGuiFlow:
 
     def _open_work_windows(self, session: object) -> None:
         from ..board import attach_qt
+        from zlc_ui.windows import associate_window
 
         if self.session is not None:
             raise RuntimeError("this experiment flow already has an active session")
@@ -495,6 +514,7 @@ class ExperimentGuiFlow:
                 request_close=self._console_owner_ready,
                 run_device_read=self._device_worker_run,
             )
+            associate_window(self.devices, console)
             timer = attach_qt(
                 self._beat,
                 interval_ms=_beat_interval_ms(presenter),
@@ -742,6 +762,9 @@ class ExperimentGuiFlow:
     def _adopt_device_control(self, key: str, device: object, control: object) -> None:
         """This control is the one window for ``key`` until it closes."""
 
+        from zlc_ui.windows import associate_window
+
+        associate_window(self.devices, control)
         control.set_device_label(self.session.device_labels.get(key, key))
         self.device_controls[key] = control
         self._device_control_devices[key] = device
@@ -2024,6 +2047,7 @@ def _open_saved_figure(
     """
 
     from .figure_viewer import create_window as create_viewer_window
+    from zlc_ui.windows import associate_window
 
     path = parent.ask_open_path(
         "Open saved figure", start, "Saved figures (*.npz);;All files (*)"
@@ -2033,12 +2057,14 @@ def _open_saved_figure(
     # The viewer's own public entry, not a second assembly of it: one window
     # definition means the console cannot open a viewer that differs from the
     # one the viewer's launcher opens.
-    return create_viewer_window(
+    viewer = create_viewer_window(
         path=path,
         workspace=workspace,
         monitor_render=monitor_render,
         editor_render=editor_render,
-    ).presenter
+    )
+    associate_window(parent, viewer)
+    return viewer.presenter
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -2048,6 +2074,10 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--mcp-port must be between 0 and 65535")
     if arguments.no_mcp and (arguments.mcp_port is not None or arguments.mcp_read_only):
         parser.error("--no-mcp cannot be combined with other MCP options")
+    if not 0 <= arguments.share_port <= 65535:
+        parser.error("--share-port must be between 0 and 65535")
+    if (arguments.share_cert is None) != (arguments.share_key is None):
+        parser.error("--share-cert and --share-key must be supplied together")
 
     from zlc_ui import counted, ensure_qt_app
 
@@ -2111,6 +2141,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     print(f"workspace: {flow.space.root}")
     close_mcp = None
+    close_share = None
     connection_path = None
 
     def stop_mcp():
@@ -2125,6 +2156,33 @@ def main(argv: list[str] | None = None) -> int:
             connection_path = None
 
     try:
+        if arguments.share:
+            try:
+                from .share import start_server as start_share
+
+                close_share = start_share(
+                    flow, host=arguments.share_host, port=arguments.share_port,
+                    allow_control=not arguments.share_read_only,
+                    certfile=arguments.share_cert, keyfile=arguments.share_key,
+                )
+            except (ImportError, OSError, RuntimeError, ValueError) as error:
+                message = f"Browser sharing could not start: {error}. The experiment GUI remains available."
+                print(f"warning: {message}", file=sys.stderr)
+                flow.devices.show_status(message, "warning")
+            else:
+                application.aboutToQuit.connect(close_share)
+                connection = close_share.connection_info
+                mode = "view only" if arguments.share_read_only else "view and control"
+                print(f"Browser sharing ({mode}; trusted LAN only):", flush=True)
+                for url in connection.get("urls", (connection["url"],)):
+                    print(f"  {url}", flush=True)
+                print("Keep these links private. Browser actions affect this running experiment.", flush=True)
+                if arguments.share_cert is None:
+                    print("HTTP is unencrypted: use only a trusted isolated LAN, or supply --share-cert and --share-key.", flush=True)
+                flow.devices.show_status(
+                    f"Browser sharing: {mode}. Private connection links are in the launcher terminal.",
+                    "warning",
+                )
         if not arguments.no_mcp:
             try:
                 import errno
@@ -2170,5 +2228,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
         return int(application.exec_())
     finally:
+        if close_share is not None:
+            close_share()
         stop_mcp()
         flow.close()
