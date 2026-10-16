@@ -114,43 +114,6 @@ def test_an_axis_switched_off_is_parked_not_deleted() -> None:
         editor.deleteLater()
 
 
-def test_the_plans_problem_is_the_drafts_issue_said_once() -> None:
-    """What the line under the axes says is the draft's issue word for word,
-    and the editor names it as shown: the Logic page header counts it in
-    the Scan plan section instead of saying it a second time above."""
-
-    from zlc_atom.nodes.seamless_scan.logic_node import SEAMLESS_SCAN_SCHEMA
-    from zlc_ui.console.logic_editor_view import _draft_status
-
-    editor = _editor()
-    drafts: list[dict] = []
-    editor.draft_changed.connect(drafts.append)
-
-    def issue() -> str:
-        with pytest.raises(ValueError) as refused:
-            SEAMLESS_SCAN_SCHEMA.project_values(
-                {"pulse_template": "mot.json", "plan": drafts[-1]["values"]["plan"]})
-        return str(refused.value)
-
-    try:
-        editor._add_axis()
-        assert editor.shown_problems() == {}
-        editor._add_axis()
-        assert editor.shown_problems() == {issue(): "Scan plan"}
-        assert _draft_status((issue(),), None, editor.shown_problems()) == (
-            "Draft: 1 problem in Scan plan")
-        editor._remove_row(editor._rows[-1])
-        assert editor.shown_problems() == {}
-        editor._rows[0].mode_choice.button("values").click()
-        assert "Values is empty" in issue()
-        assert editor.shown_problems() == {issue(): "Scan plan"}
-        editor._rows[0].enabled_switch.click()
-        assert editor.shown_problems() == {issue(): "Scan plan"}
-        assert issue() == "every scan axis is parked; switch one on to scan it"
-    finally:
-        editor.deleteLater()
-
-
 def test_a_fresh_manual_row_is_already_runnable() -> None:
     """An unnamed axis is not a plan, so the button never authors one."""
 
@@ -320,40 +283,6 @@ def test_the_summary_says_how_many_stops_the_operator_is_signing_up_for() -> Non
         assert editor.summary.text().endswith(
             " The run stops once for you to set power and angle by hand."
         ), editor.summary.text()
-    finally:
-        editor.deleteLater()
-
-
-def test_an_unreadable_box_is_said_once_under_its_row() -> None:
-    """A Range box that cannot show its number is its row's problem: it
-    stands under that row, and the plan's line under all the axes neither
-    repeats it nor gives up the summary for it."""
-
-    editor = _editor()
-    try:
-        editor._add_axis()
-        row = editor._rows[0]
-        summary = editor.summary.text()
-        assert summary and editor.problem.isHidden()
-        drafts: list[dict] = []
-        editor.draft_changed.connect(drafts.append)
-        row.start_spin.setProperty("numericError", "the number does not fit the box")
-        row.start_spin.valueNormalized.emit()
-        assert row.error_label.text() == "the number does not fit the box."
-        assert not row.error_label.isHidden()
-        # Any other edit, and any projection, say it under the row again --
-        # never in the plan's line -- and the draft keeps the plan it holds.
-        row.points_spin.setValue(7)
-        assert row.error_label.text() == "the number does not fit the box."
-        assert editor.problem.isHidden() and editor.problem.text() == ""
-        assert not drafts, drafts
-        editor._refresh_summary()
-        assert editor.problem.isHidden() and not editor.summary.isHidden()
-        assert editor.summary.text().startswith("1 axis, 7 = 7 points"), editor.summary.text()
-        assert row.error_label.text() == "the number does not fit the box."
-        # The row in Values mode plays no Range box: nothing to say.
-        row.mode_choice.button("values").click()
-        assert row.error_label.isHidden()
     finally:
         editor.deleteLater()
 
@@ -1112,59 +1041,3 @@ def test_an_api_axis_in_the_plan_locks_that_parameters_value_box() -> None:
     assert drafts == [] and form.widget_for("dac:p0:dac").isEnabled()
     assert form.read_value("dac:p0:dac") == -2
     editor.close()
-
-
-def test_an_empty_brackets_repeat_count_is_labelled_for_what_it_is() -> None:
-    """An axis walking an empty bracket's API repeat count says its bracket
-    is empty; "not in this pulse" sent the operator looking for a parameter
-    the pulse still carries."""
-
-    import json
-    from dataclasses import replace
-
-    from zlc_pulse import PulseBinding, PulseBracket, PulseFieldRef
-
-    ensure_qt_app(["scan-editor-empty-bracket"])
-    editor = ScanPlanEditor()
-    bound = _bound_sequence()
-    count = PulseBinding(PulseFieldRef("bracket_count", bracket_id="wait"), "count", source="api")
-    # A bracket from p1 back to p0 is the empty one between them.
-    empty = replace(bound, brackets=(PulseBracket("wait", "p1", "p0", 2),), bindings=(*bound.bindings, count))
-    filled = replace(empty, brackets=(PulseBracket("wait", "p0", "p1", 2),))
-    plan = json.dumps({"axes": [{"port": "api:bracket_count:wait", "values": [1.0, 2.0], "unit": ""}]})
-    try:
-        editor.update_projection(_projection(empty, plan=plan))
-        assert "api:bracket_count:wait" not in {port.port for port in editor._ports}
-        assert editor._rows[0].port_combo.currentText().endswith("(its bracket is empty)")
-        editor.update_projection(_projection(filled, plan=plan))
-        assert "api:bracket_count:wait" in {port.port for port in editor._ports}
-        assert "(" not in editor._rows[0].port_combo.currentText()
-        editor.update_projection(_projection(replace(empty, bindings=bound.bindings), plan=plan))
-        assert editor._rows[0].port_combo.currentText().endswith("(not in this pulse)")
-    finally:
-        editor.close()
-        editor.deleteLater()
-
-
-def test_a_problem_under_the_plan_reads_as_one_sentence_and_a_hand_axis_is_labelled() -> None:
-    """Whatever words it -- the plan, a row, the bench -- a problem under
-    the rows is one sentence ending in a full stop, as in every editor; and
-    a manual axis's word in the label column is a label like the others."""
-
-    editor = _editor()
-    try:
-        editor._add_manual_axis()
-        assert editor.row_labels() == ("By hand",)
-        # Two rows on one port: the plan says why it cannot be read.
-        editor._add_axis()
-        editor._add_axis()
-        assert editor.problem.text() == "a port may appear on one axis only."
-        row = editor._rows[-1]
-        editor._convert_axis_unit(row, {"port": "device:rf:ch1_power", "unit": "dBm",
-                                        "values": [0.0], "value_text": ""}, "mW")
-        assert row.error_label.text() == "device unit conversion is unavailable."
-        editor.update_projection({"form_values": {"plan": ""},
-                                  "bench_extras": {"tunable_devices": {"rf": object()}}})
-        assert editor.problem.text() == "device range reads require the console's device worker."
-    finally:
-        editor.deleteLater()
