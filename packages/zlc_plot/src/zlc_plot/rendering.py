@@ -4960,6 +4960,8 @@ class MatplotlibRenderer:
 
         vertices: list[np.ndarray] = []
         offsets = [0]
+        series_orders: list[list[int]] = []
+        singleton_draws: list[Any] = []
         colours: list[np.ndarray] = []
         widths: list[float] = []
         clips: list[tuple[int, int, int, int]] = []
@@ -4994,10 +4996,12 @@ class MatplotlibRenderer:
             # Each series is handed to the kernel as the standalone panel
             # hands it to its Line2D (``_thinned_to_columns``).
             window, columns = _pixel_columns(axes)
-            for item in cell_series:
+            for series_order, item in enumerate(cell_series):
+                source_x = np.asarray(item.x, dtype=np.float64)
+                source_y = np.where(item.valid, item.y, np.nan)
                 item_x, plotted_y = _thinned_to_columns(
-                    np.asarray(item.x, dtype=np.float64),
-                    np.where(item.valid, item.y, np.nan),
+                    source_x,
+                    source_y,
                     window,
                     columns,
                 )
@@ -5028,20 +5032,67 @@ class MatplotlibRenderer:
                 colours.append(packed_colour)
                 widths.append(line_width)
                 clips.append(clip)
+                if len(series_orders) <= series_order:
+                    series_orders.append([])
+                series_orders[series_order].append(len(vertices) - 1)
+                singleton = None
+                if item.summary is None or item.summary[4]:
+                    point_x, point_y = _bounded_isolated_curve_points(
+                        source_x, source_y, window, columns,
+                    )
+                    if point_x.size:
+                        singleton = (axes, point_x, point_y, slot)
+                singleton_draws.append(singleton)
         if not vertices:
             return False
         clip_boxes = np.asarray(clips, dtype=np.int32)
-        lane_offsets = self._polyline_lane_offsets(clip_boxes)
-        kernels.raster_polylines(
-            kernels.readable(np.concatenate(vertices)),
-            kernels.readable(np.asarray(offsets, dtype=np.int64)),
-            kernels.readable(np.asarray(colours, dtype=np.uint8)),
-            kernels.readable(np.asarray(widths, dtype=np.float64)),
-            kernels.readable(clip_boxes),
-            kernels.readable(lane_offsets),
-            kernels.stroke_bands(lane_offsets.size - 1),
-            canvas_rgba,
-        )
+        colour_values = np.asarray(colours, dtype=np.uint8)
+        width_values = np.asarray(widths, dtype=np.float64)
+        passes: Any = (None,)
+        marker = None
+        if any(item is not None for item in singleton_draws):
+            from matplotlib.lines import Line2D
+
+            marker = Line2D(
+                [], [], linestyle="None", marker="_",
+                markersize=self.style.artists.curve_marker_size_pt,
+                markeredgewidth=line_policy.linewidth, alpha=line_policy.alpha,
+            )
+            marker.set_figure(self._figure)
+            # Disjoint cells run together; each series keeps line-before-marker order.
+            passes = tuple(series_orders)
+        for indices in passes:
+            if indices is None:
+                current_vertices, current_offsets = vertices, offsets
+                current_colours, current_widths = colour_values, width_values
+                current_clips = clip_boxes
+            else:
+                current_vertices = [vertices[index] for index in indices]
+                current_offsets = np.r_[0, np.cumsum([len(item) for item in current_vertices])]
+                current_colours, current_widths = colour_values[indices], width_values[indices]
+                current_clips = clip_boxes[indices]
+            lane_offsets = self._polyline_lane_offsets(current_clips)
+            kernels.raster_polylines(
+                kernels.readable(np.concatenate(current_vertices)),
+                kernels.readable(np.asarray(current_offsets, dtype=np.int64)),
+                kernels.readable(current_colours),
+                kernels.readable(current_widths),
+                kernels.readable(current_clips),
+                kernels.readable(lane_offsets),
+                kernels.stroke_bands(lane_offsets.size - 1),
+                canvas_rgba,
+            )
+            if marker is not None:
+                for index in indices:
+                    singleton = singleton_draws[index]
+                    if singleton is None:
+                        continue
+                    axes, point_x, point_y, slot = singleton
+                    marker.set_color(cycle[slot])
+                    marker.set_data(point_x, point_y)
+                    marker.set_transform(axes.transData)
+                    marker.set_clip_box(axes.bbox)
+                    marker.draw(canvas.get_renderer())
         return True
 
     def _error_bar_plan(
@@ -6838,11 +6889,8 @@ class MatplotlibRenderer:
     ) -> bool:
         """Whether the native stroke can paint every visible primitive.
 
-        The native kernel strokes solid polylines and nothing else, so the
-        authored curve style is admitted first: a dashed line or a marker
-        belongs to the generic artists, which draw the LineToken as
-        declared.  Admitting a marker-only style here drew it as a
-        connected line live and as unconnected markers in the export.
+        Solid polylines use the native kernel and singleton glyphs use Agg.
+        Other authored markers and dashed lines remain with generic artists.
         """
 
         if not series:
@@ -6855,11 +6903,6 @@ class MatplotlibRenderer:
             " ",
         ):
             return False
-        for item in series:
-            isolated = (item.summary[4] if item.summary is not None
-                        else bool(np.any(_isolated_curve_mask(item.valid))))
-            if isolated:
-                return False
         return True
 
     def _ensure_lines(self, axes: Any, count: int, key: str) -> list[Any]:

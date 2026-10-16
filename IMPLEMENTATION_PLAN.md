@@ -478,7 +478,7 @@
 - Feedback Monitor固定自动打开四张图：canonical Camera Measurement逐帧publication经mean reduction得到的带编号site map实时图、observable
   uniformity、site signal evolution和Target share evolution；phase保留为信号和最终Figure但不自动开panel。
 - Feedback每shot每site的信号是BOX读出（Calibration BOX几何内像素求和的真实光子计数；不用Calibration的matched-filter权重，也不为未观测site借uniform PSF）；每site只在完整shot batch上做受约束双高斯与full-data ΔBIC>10判定。dark site按bracket（最新观测优先）向loaded share二分或沿方向逐分辨率爬行，在share空间由本轮loop步不与之相反的loaded sites（loop送它同向、或对它无所求；hold的site除外）出资（总功率精确守恒、每site每candidate至多一个分辨率、绝不把任何site压向其自身方向的反面、hold的site份额不动）；bright fraction低于全阵中位数一半的loaded site视为在loading ramp上：hold、不出资、不被识别excitation扰动；probe episode每site一次，方向只由verdict改变。formal-double使用loop gain除以实测plant slope（前6个ordinary update携带±2%识别excitation：正负平衡的log图样在被激励site内平移一个公共对数保持总份额，未激励site绝对份额不变），无adaptive scalar。`probe_combined`计入`maximum feedback updates`，diagnostic candidates不计。
-- Grouped Curve与Grouped Rolling共用hover/lock/wheel contract：hover仅轻微加粗，lock才压暗其它lines；无框标签固定axes右上角，lock加`* `并接管滚轮逐series移动。standalone/Facet Curve的孤立valid点使用同一Line2D短横线glyph；invalid仍断线。
+- Grouped Curve与Grouped Rolling共用hover/lock/wheel contract：hover仅轻微加粗，lock才压暗其它lines；无框标签固定axes右上角，lock加`* `并接管滚轮逐series移动。standalone/Facet Curve与Rolling的孤立valid点使用同一Line2D短横线glyph；solid场景保留native线/SEM，Agg孤点按series顺序合成并裁剪，不合并半透明覆盖；invalid仍断线。
 - ImagePlot与FacetGrid image cell不再暴露interpolation参数；schema/style/Panel Setting/Edit均删除该字段，renderer唯一固定值为`nearest`。
 - Feedback failure与normal/Stop封存同一选择（最佳已完整测量candidate到SLM与`final/`），summary
   记录错误；只有封存写不出时才restore起始phase。未测phase不得成为final。
@@ -518,6 +518,7 @@
 
 ### 2.6 Plot三进程边界
 
+- Windows渲染子进程显式声明HighQoS；不绑核、不提高优先级、不改系统电源或主进程计时策略，声明失败只报告性能诊断。
 - TaskConsole/FigureViewer采用固定B/A/C拓扑：B拥有Qt、Runtime、Logic、device通信、PanelState、SelectionBridge与same-shot accept；A是Monitor render pool，每块Monitor面板在自己的子进程里拥有其DataView/Fit/Render/Compose（一面板一子进程，绝不合租）；单一C拥有Panel Edit、point review、Panel/FigureViewer Save、Calibration/SLM Feedback的Figure render/export，以及flow里由设备卡打开的Pulse Editor预览与SLM Editor三张图。A/C交互Host复用`RasterPlotHost/PlotSession`；C纯文件save worker直接使用同一Session/renderer、不建立无消费者screen front。正式Workbench没有B进程内Plot fallback。
 - 同一application只有一个A池与一个C；TaskConsole打开的FigureViewer与device editor共享并分别持有owner lease，最后窗口关闭才shutdown。A/C崩溃由现有Panel replacement lifecycle恢复，旧完整Front继续可读，不能把partial frame或latest publication伪装成旧surface。
 - B→A/C的同一Dataset revision每service只传一次并按host/pending引用计数；A/C→B的RGBA使用只读shared-memory lease，QImage不复制像素。父子消息统一使用owned `send_bytes(pickle.dumps)`/`pickle.loads(recv_bytes())`，避开Python3.13 `Connection.send`临时BytesIO export生命周期错误。

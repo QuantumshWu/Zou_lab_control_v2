@@ -324,6 +324,7 @@ Node new chunk
 - 原始数值打包只由DataBlock.packed_planes处理布局、compact mask及按需sigma，不做finite过滤或统计；Plot复用该方法后再计算，完整物化仅在有空位时一次scatter到canonical范围。不得再为保存、Processor整数组读取或Plot各留一套逐块拼装。无归约的dense单块借同一数组；未请求sigma不能因共用入口而被计算。
 - Indexed Rolling（以及finite run上的Rolling，按repeat）的既有归约结果只按持有中的不可变plane身份、真实布局及计算配置复用，只重算新段落到的history行；旧结果整批搬运，新/改变的输入整批计算。缓存只在当前表示能消费时继承，完成复用后丢弃未消费的旧packed carry；缩小/关闭history不得因全部统计命中而钉住旧窗口。当前DataView只持当前source或本次复用所需的前一source，不链接全部revision。中心化SEM保持原统计定义，不改grouped/ungrouped trailing权重。
 - FacetGrid的facet role可为空；为空不是semantic vacancy，也不允许UI或renderer伪造Dataset轴，而是唯一一个完整cell，标题为`Facet 1`。同一cell kind的projection、fit、selector、Focus和Figure grammar仍走普通Facet路径；给真实轴Facet fate后才扩为多cell。
+- Solid Curve、Rolling及Facet的孤立有效点沿公共屏幕点选择，以Agg的`_` marker绘制，线与SEM仍走原native入口；同一series的线先于孤点、不同series保序，透明度与axes裁剪由Agg处理，不因孤点让整图退回artist路径。
 - Curve prepared state同时拥有series、valid runs、SEM low/high、fit source presentation与style。每根SEM误差棒以stem与两cap的几何并集为一个工字形，subpixel coverage之后只应用一次alpha；不同误差棒仍独立混色，不能按整数display column合并为min/max envelope。Native、Agg与导出读取同一端点与屏幕尺度style，也共用同一条cap规则（`_effective_cap_width`）：一组点的平均像素间距小于1个设备像素时该组只画stem、省略cap（stem已连成实带，cap只加厚带的边缘，逐个混色看不出区别），更疏时每个cap都画。间距按正在画的那张画布的设备像素量：同一画面里prepared series的native快路、artist上的native plan与Agg全画三条路径同判，所以hover/聚焦materialize后的帧与屏幕帧一致；导出在自己的dpi（默认`export_dpi`）下重判，屏幕上省略cap的一组可能在导出里间距够宽而画cap，高DPR屏幕上画cap的一组也可能在导出里省略。Facet pooled y范围必须包含finite SEM low/high。Fit annotation由公共Matplotlib MathText语义owner格式化；native可缓存MathText最终RGBA，但不得删除`$`、反斜杠或下标后用第二套plain glyph语法重画。
 - 未声明coordinate labels的数值轴由共享SmartOffset/locator按空间决定ticks；一旦Dataset显式声明完整coordinate labels，每个label都必须在对应tick原样显示，不得为避免重叠静默抽稀、改写或省略。标签密度、Panel尺寸与zoom是operator明确authoring后的取舍。
 - Tick label字号只有normal `6.5 pt`与compact `3.25 pt`，删除逐级×0.8和剩余空间比例缩字。保持对应tick的锚点/alignment；公共locator先在原字号选择可行数字刻度，最终真实text/data-frame/标题碰撞时先尝试更稀的合法lattice与formatter，再在确实无解时切compact；同轴至少两个数值刻度，不单独隐藏Text制造marks/导出分歧。可选计数侧栏zero优先由同一locator省略，色条两端和显式coordinate names不裁。Facet等价axes共同采用最终lattice，改变刻度时同步其native marks；布局变宽后可恢复刻度/字号，稳定布局不重复规划。3.25 pt仍拥挤时接受重叠，不移动锚点、不引入其它字号。
@@ -348,6 +349,7 @@ Node new chunk
   钉住后缺OpenMP运行库的机器在第一个并行kernel就报出缺的层。上面的BLAS限额针对pip wheel自带的
   OpenBLAS；链接MKL的numpy（launcher也接受的conda解释器）不受它约束。
   B不初始化Plot kernel pool；不得用跨host render/fit锁重新串行化A。
+- Windows渲染子进程在自身入口声明HighQoS，不将实况绘图的执行性能交给窗口焦点启发式；不改变调度优先级、CPU affinity、主进程或系统电源方案。平台拒绝该性能声明时报告诊断并沿正常渲染路径继续。
 - RegularImage live batch即使具有完整warm seed也必须保留cold proxy竞争，再以选出的seed做full refinement；warm不能跳过cold证据、成为不可恢复的authority。
 - RegularImage的single是同一批量数值流程的一条lane；不得按cell数量维护不同full-refinement算法。规则网格以明确的内部shape/axis包交给同一TRF，不展开重复的逐像素坐标，也不改变Dataset或Plot轴语义。现有数值context同时供prepare与objective使用，可保留每cell一次计算的中心化统计量；原始物理参数、bounds和损失/收敛含义保持不变。最终质量仍由真实数据的直接残差核对，不能用不稳定的大数相减或放松精度换取提速。
 - 编译Fit中未启用权重时，由既有use_weights表示并传递空权重行，所有objective/finalizer只在启用时读取权重数据；不得为默认权重1建立完整B×N数组。前景仍由Agg/FreeType/MathText产生字形/覆盖率，现有compose按原顺序批量重放；未纳入批量覆盖的artist在原顺序位置保留既有draw，不另建科学数据路线。Image的备用像素在fallback/export消费时才由公共owner物化，普通native帧不重复生成一份未绘制RGBA。

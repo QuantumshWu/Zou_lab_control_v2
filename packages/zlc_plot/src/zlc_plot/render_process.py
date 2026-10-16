@@ -22,6 +22,7 @@ import os
 from pathlib import Path
 import pickle
 from queue import Empty, Queue
+import sys
 from threading import Condition, Event, Lock, RLock, Thread, current_thread
 from time import monotonic
 import traceback
@@ -3367,6 +3368,16 @@ def _send_error(send: Callable[[object], None], request_id: int, error: BaseExce
 
 def _render_process_main(connection: Connection, name: str) -> None:
     """Child entry: multiplex commands over unchanged local RasterPlotHosts."""
+
+    if os.name == "nt":
+        # HighQoS declares latency-sensitive work without priority or affinity changes.
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        power = (ctypes.c_ulong * 3)(1, 1, 0)  # version, EXECUTION_SPEED control, disabled
+        if not kernel32.SetProcessInformation(
+            ctypes.c_void_p(-1), 4, ctypes.byref(power), ctypes.sizeof(power),
+        ):  # ProcessPowerThrottling
+            print(f"Render HighQoS unavailable: {ctypes.WinError(ctypes.get_last_error())}",
+                  file=sys.stderr)
 
     from .config import DEFAULTS
     from zlc_data import OwnedSnapshot
