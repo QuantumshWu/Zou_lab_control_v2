@@ -2925,12 +2925,17 @@ class ConsolePresenter:
             if panel_id and own(name):
                 continue
             groups.setdefault(producer, []).append((label, name))
-        # Grouped by the producer's id; headed by what a person calls it.
+        return self._headed(groups)
+
+    def _headed(
+        self, groups: Mapping[str, list[tuple[str, str]]],
+    ) -> tuple[tuple[str, tuple[tuple[str, str], ...]], ...]:
+        """Signal ``groups`` gathered by their producer's id, each headed by
+        what a person calls that producer."""
+
         names = self.logic_names()
-        return tuple(
-            (producer_text(producer, names) if producer else UNGROUPED_HEADING, tuple(leaves))
-            for producer, leaves in groups.items()
-        )
+        return tuple((producer_text(producer, names) if producer else UNGROUPED_HEADING, tuple(leaves))
+                     for producer, leaves in groups.items())
 
     def _publication_families(self, publication: object) -> frozenset[tuple]:
         return frozenset(
@@ -2965,11 +2970,7 @@ class ConsolePresenter:
                 continue
             if families.get(row.name) == primary_families:
                 groups.setdefault(row.producer, []).append((row.label, row.name))
-        names = self.logic_names()
-        return tuple(
-            (producer_text(producer, names) if producer else UNGROUPED_HEADING, tuple(leaves))
-            for producer, leaves in groups.items()
-        )
+        return self._headed(groups)
 
     def _refresh_signal_choices(self) -> None:
         """Offer newly published signals on cards that are already open.
@@ -3095,13 +3096,7 @@ class ConsolePresenter:
                     # the very field that would fix it).  The editor stays
                     # open, the refusal is reported, and every accepted
                     # state change offers the mount again.
-                    binding.snapshot_error = _error_text(error)
-                    self._refresh_panel_snapshot_status(binding)
-                    self._report(
-                        f"cannot mount {self._panel_name(binding)} plot editor: "
-                        f"{_error_text(error)}",
-                        severity="error",
-                    )
+                    self._snapshot_refused(binding, "mount", error)
         if callable(focused):
             focused(panel_id)
         if not callable(opened) and not callable(focused):
@@ -4463,13 +4458,7 @@ class ConsolePresenter:
                                         frozen=candidate_frozen,
                                     )
                                 except Exception as error:
-                                    binding.snapshot_error = _error_text(error)
-                                    self._refresh_panel_snapshot_status(binding)
-                                    self._report(
-                                        f"cannot update {self._panel_name(binding)} "
-                                        f"plot editor: {_error_text(error)}",
-                                        severity="error",
-                                    )
+                                    self._snapshot_refused(binding, "update", error)
                             else:
                                 binding.frozen_data = candidate_frozen
                                 binding.snapshot_error = ""
@@ -4586,13 +4575,7 @@ class ConsolePresenter:
                 except Exception as error:
                     if editor_host is not binding.editor_host:
                         self._retire_plot_host(editor_host)
-                    binding.snapshot_error = _error_text(error)
-                    self._refresh_panel_snapshot_status(binding)
-                    self._report(
-                        f"cannot update {self._panel_name(binding)} plot editor: "
-                        f"{_error_text(error)}",
-                        severity="error",
-                    )
+                    self._snapshot_refused(binding, "update", error)
     def _direct_producer_node_id(self, signal: str) -> str | None:
         for binding in self.logic.values():
             if any(
@@ -4632,6 +4615,15 @@ class ConsolePresenter:
             "source_status": source_status,
             "snapshot_error": binding.snapshot_error,
         }
+
+    def _snapshot_refused(self, binding: PanelBinding, verb: str, error: BaseException) -> None:
+        """Hold ``error`` as the panel's snapshot error, say it on its Edit
+        tab, and report that its plot editor could not ``verb``."""
+
+        binding.snapshot_error = _error_text(error)
+        self._refresh_panel_snapshot_status(binding)
+        self._report(f"cannot {verb} {self._panel_name(binding)} plot editor: {binding.snapshot_error}",
+                     severity="error")
 
     def _refresh_panel_snapshot_status(self, binding: PanelBinding) -> None:
         if binding.editor_open:
@@ -4934,13 +4926,7 @@ class ConsolePresenter:
         try:
             self._replace_panel_editor_host(binding)
         except Exception as error:
-            binding.snapshot_error = _error_text(error)
-            self._refresh_panel_snapshot_status(binding)
-            self._report(
-                f"cannot mount {self._panel_name(binding)} plot editor: "
-                f"{_error_text(error)}",
-                severity="error",
-            )
+            self._snapshot_refused(binding, "mount", error)
 
     def _replace_panel_editor_host(
         self,
@@ -5257,13 +5243,7 @@ class ConsolePresenter:
                     # never the other way round.
                     self._freeze_panel(binding, frozen)
             except Exception as error:
-                binding.snapshot_error = _error_text(error)
-                self._refresh_panel_snapshot_status(binding)
-                self._report(
-                    f"cannot mount {self._panel_name(binding)} plot "
-                    f"editor: {_error_text(error)}",
-                    severity="error",
-                )
+                self._snapshot_refused(binding, "mount", error)
                 return False
             if binding.editor_open:
                 self.refresh_panel_editor(panel_id)
