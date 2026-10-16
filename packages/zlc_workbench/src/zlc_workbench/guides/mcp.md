@@ -203,6 +203,23 @@ A Derive reads its source's whole bundle, so its source frames are known only
 while every member carries the same frames (a Derive over a Derive whose
 variables keep different frames answers once it has published).
 
+Post-selected occupancy (`post_selected_occupancy`) is Occupancy with the
+post-selection done for you: the same frames source, `calibrations` rows,
+`model_kind` and refusals, and the same `counts`, `occupied` and `frame_judged`,
+with counts and occupied valid only where a condition on two frames of the cycle
+holds for that shot and site. Its defaults equal Occupancy followed by Derive
+`same` = occupied at `first` == occupied at `last` (internal), `kept` = occupied
+where same, so use it instead of building that Derive. `frame_a` and `frame_b`
+take Occupancy's frame words (`first`, `last`, a middle frame number; default
+`first` and `last`). `mode` is either `relation` (default): `relation` is one of
+Derive's `==` (default) `!=` `>` `<` `>=` `<=` on booleans, false < true, both
+frames judged and different; or `values`: `value_a` and `value_b` are each
+`true` (1), `false` (0) or `any` (not asked, its frame need not be judged), at
+least one not `any` -- e.g. `{'mode': 'values', 'value_a': 'true', 'value_b':
+'false'}` keeps loaded at first and empty at last. The other mode's fields stay
+in the draft unused: never clear them to make Start work. `frame_judged` passes
+through unchanged (pixels have no site). Frame Survival reads its `occupied`.
+
 Derive is algebra within one evaluation of one producer's bundle: live, each
 publication; at the end of a finite run, the run's Dataset. Read the member
 names, axis names and exact labels from

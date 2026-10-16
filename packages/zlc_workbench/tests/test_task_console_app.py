@@ -969,6 +969,7 @@ assert catalog == (
     ('Processor: derive', ('logic', 'derive')),
     ('Processor: frame_survival', ('logic', 'frame_survival')),
     ('Processor: occupancy', ('logic', 'occupancy')),
+    ('Processor: post_selected_occupancy', ('logic', 'post_selected_occupancy')),
     ('Task: calibration', ('logic', 'calibration')),
     ('Task: slm_feedback', ('logic', 'slm_feedback')),
     ('Task: slm_rearrangement', ('logic', 'slm_rearrangement')),

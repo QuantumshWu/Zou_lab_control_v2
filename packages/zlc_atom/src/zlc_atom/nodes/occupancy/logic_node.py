@@ -55,6 +55,8 @@ def _build(
     *,
     calibrations: Sequence[FrameClaim],
     source_signal: str,
+    post_select=None,
+    post_select_record=None,
     **values: object,
 ) -> OccupancyProcessor:
     authored = OCCUPANCY_SCHEMA.project_values(values)
@@ -71,6 +73,8 @@ def _build(
         ),
         source_signal=selected_source,
         model_kind=readout_model_kind_from_choice(authored["model_kind"]),
+        post_select=post_select,
+        post_select_record=post_select_record,
     )
 
 
