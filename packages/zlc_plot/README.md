@@ -335,8 +335,8 @@ Notebook 和 Qt 都消费同一个 `SurfacePlan`。宿主窗口或浏览器区�
 与 Figure export 用一个这样的子进程。`RenderProcessPool` 给每块 live Monitor 面板一个
 自己的子进程，一面板一子进程、绝不合租：编译核 `nogil` 本来就能逃出 GIL，artist
 更新、chrome 绘制和每帧 front 的 pickle 逃不掉，同一解释器里的几块面板一次只跑一块。
-池提前备着 `DEFAULT_RENDER_SPARES`（4）个没被任何面板碰过的子进程，一个被取走就补
-一个，超过 `DEFAULT_RENDER_SETTLED_SPARES`（2）个在画之后降到 2；找不到备用的面板为自己
+池提前备着 `DEFAULT_RENDER_SPARES`（6）个没被任何面板碰过的子进程，一块板挂载时每块
+面板取走一个、备用数逐个降到 `DEFAULT_RENDER_SETTLED_SPARES`（2），此后取走一个就补一个；找不到备用的面板为自己
 新起一个并等它启动，不去挤一个正在画的。面板关闭即退休它的子进程。代价只是内存，
 每个子进程约两百兆。
 

@@ -340,31 +340,27 @@ def test_a_pool_keeps_at_least_one_child_warm() -> None:
         RenderProcessPool("   ")
 
 
-def test_a_board_that_has_arrived_stops_holding_a_board_in_reserve(
+def test_a_board_spends_the_opening_reserve_and_then_holds_the_settled_count(
     spawned,
 ) -> None:
-    """Four warm is an answer to "a whole board at once", asked once.
-
-    A board arrives together and then GROWS one panel at a time, so the
-    opening count is the wrong answer for the rest of the session: four
-    more idle renderers is most of a gigabyte held against an operator who
-    adds one panel.  Past the settled count the pool holds the settled
-    count instead -- and comes back up when the board is closed, because
-    the next board arrives the same way the first did.
+    """A board arriving at once mounts every panel on a child that was warm
+    before it asked: nothing is started for it and no warm child is retired
+    under it while it arrives.  Then the settled count stands -- holding the
+    opening reserve for the rest of the session is most of a gigabyte against
+    an operator who adds one panel -- and a closed board brings it back.
     """
 
     pool = RenderProcessPool("test", spares=4, settled_spares=2)
     _settled(pool, warm=4)
 
-    taken = []
-    for tag in ("a", "b"):
+    for warm, tag in ((3, "a"), (2, "b")):
         pool.build_host(tag)
-        taken.append(tag)
-        _settled(pool, warm=4)
+        _settled(pool, warm=warm)
+    assert len(spawned) == 4
 
-    # The third panel is what makes this a board rather than an opening.
     pool.build_host("c")
     _settled(pool, warm=2)
+    assert len(spawned) == 5
     assert len([member for member in spawned if member.host_count]) == 3
 
     for member in [item for item in spawned if item.host_count]:
