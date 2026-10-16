@@ -4,16 +4,16 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <title>ZLC · Experiment sharing</title>
-  <link rel="stylesheet" href="/theme.css">
-  <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/zlc/theme.css">
+  <link rel="stylesheet" href="/zlc/style.css">
 </head>
 <body>
   <header>
     <div class="heading"><strong>ZLC · Experiment sharing</strong><span id="connection" role="status">Not connected</span></div>
-    <form id="connection-form" class="row">
-      <label for="token">Access key</label><input id="token" type="password" autocomplete="off" placeholder="Use the sharing link or key from the experiment computer" required>
-      <button id="connect" class="primary">Connect</button>
-    </form>
+    <div id="connection-request" class="row">
+      <button id="connect" class="primary">Request connection</button>
+      <span>Approve this browser in Device Manager on the experiment computer.</span>
+    </div>
     <div id="toolbar" class="row" hidden>
       <label for="windows">Window</label><select id="windows" aria-label="Experiment window"></select>
       <button id="control">Take control</button><span id="ownership">Read-only</span>
@@ -34,6 +34,6 @@
     </div>
     <span id="hint">This is the same experiment session. All operations run on the experiment computer.</span>
   </footer>
-  <script src="/client.js" defer></script>
+  <script src="/zlc/client.js" defer></script>
 </body>
 </html>

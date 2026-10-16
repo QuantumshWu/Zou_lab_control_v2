@@ -75,16 +75,16 @@ bin\migrate_units.bat          one-shot rewrite of saved pulses to one unit
 
 ### Experiment windows in a browser
 
-Opt in when starting the experiment:
+Start the experiment normally. In Device Manager, click **Start sharing** in
+**Browser sharing**. Open the displayed address on the tablet or optical-table
+display, for example `http://192.168.1.100/zlc`. No access key or launch option is
+needed. Port 80 is preferred; if unavailable, the address includes `:18865`.
 
-```powershell
-.\bin\experiment.bat --share
-```
-
-The launcher prints private connection links for this computer's LAN addresses.
-Open one on the tablet or optical-table display. Share only with trusted
-operators: the link authorizes access to the running experiment, and browser
-actions have the same consequences as clicking its local controls.
+Each browser waits for local approval. Device Manager lists its IP and browser;
+click **Allow** or **Reject**. Multiple clients may be approved. **Disconnect**
+revokes one client; **Stop sharing** disconnects everyone and stops listening
+without stopping the experiment. Reconnecting requires fresh approval. Only the
+local operator can change sharing permissions, not a remote browser.
 
 Only windows belonging to this experiment are shared: Device Manager,
 TaskConsole, device controls, Pulse/SLM editors, their Figure Viewers and
@@ -99,22 +99,12 @@ does not stop a task or replay commands. File dialogs select files on the
 experiment computer, not the tablet; while sharing, they use Qt's in-application
 dialog so they remain accessible.
 
-Options:
+HTTP/WebSocket traffic is **unencrypted**. Local approval controls access but
+does not prevent network eavesdropping; use only a trusted isolated LAN. Do not
+forward the port to the internet. Windows Firewall must permit the chosen port
+on the intended private network; the app does not change firewall settings.
 
-- `--share-read-only`: disable remote control for all clients.
-- `--share-host`: bind address; defaults to `0.0.0.0` (local network interfaces).
-- `--share-port`: defaults to `18865`; `0` chooses an available port. An occupied
-  explicit port reports a sharing failure without closing the experiment.
-- `--share-cert` and `--share-key`: certificate and private-key PEM paths for
-  HTTPS/WSS. Both must be supplied together, and clients must trust the certificate.
-
-Without certificates, HTTP/WebSocket traffic is **unencrypted**. The private
-link prevents unauthenticated access but not network eavesdropping; use a trusted
-isolated LAN, or provide HTTPS. Do not forward the port to the internet. Windows
-Firewall must permit the chosen port on the intended private network; the app
-does not change firewall settings.
-
-Sharing is off unless `--share` is supplied, and `--check` never starts it.
+Sharing is off until the local operator enables it in Device Manager.
 Closing the experiment stops its sharing service. A sharing startup failure
 leaves the experiment available. This is independent of MCP: MCP's loopback,
 authentication and lifecycle are unchanged, and no browser calls MCP or a driver.

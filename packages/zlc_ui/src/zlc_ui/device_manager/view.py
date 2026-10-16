@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from html import escape
 
 from PyQt5 import QtCore, QtGui, QtWidgets
 
@@ -19,6 +20,7 @@ from zlc_ui.fluent import (
     FluentFrame,
     FluentGroupBox,
     FluentLineEdit,
+    FluentReadoutEdit,
     FluentScrollArea,
     FluentSettingRow,
     FluentStatusDot,
@@ -819,6 +821,8 @@ class DeviceManagerView(QtWidgets.QWidget):
     load_requested = QtCore.pyqtSignal()
     save_as_requested = QtCore.pyqtSignal()
     lifecycle_requested = QtCore.pyqtSignal()
+    sharing_requested = QtCore.pyqtSignal()
+    sharing_decided = QtCore.pyqtSignal(str, bool)
     device_remove_requested = QtCore.pyqtSignal(str)
     role_committed = QtCore.pyqtSignal(str, str)
     type_picked = QtCore.pyqtSignal(str, str)
@@ -846,6 +850,8 @@ class DeviceManagerView(QtWidgets.QWidget):
         #: The live log window of each loaded device that has one open.
         self._device_log_windows: dict[str, QtWidgets.QWidget] = {}
         self._remoted: set[str] = set()
+        self._sharing_rows: dict[str, tuple] = {}
+        self._sharing_projection = None
         self._busy = False
         self._lifecycle_enabled = False
         self._lifecycle_commits = True
@@ -958,6 +964,42 @@ class DeviceManagerView(QtWidgets.QWidget):
         )
         self.runtime_note.setWordWrap(True)
         right.addWidget(self.runtime_note)
+
+        self.sharing_group = FluentGroupBox(
+            "Browser sharing", self.right_body, title_strip_px=0
+        )
+        self.sharing_group.setProperty("zlc_local_only", True)
+        sharing = QtWidgets.QVBoxLayout(self.sharing_group)
+        sharing.setContentsMargins(inner, inner, inner, inner)
+        sharing.setSpacing(row_gap())
+        self.sharing_button = FluentButton("Start sharing")
+        sharing.addLayout(card_title_row("Browser sharing", self.sharing_button)[0])
+        self.sharing_address = FluentReadoutEdit("", flush=True)
+        self.sharing_copy = FluentButton("Copy address")
+        address_row = QtWidgets.QHBoxLayout()
+        address_row.setSpacing(row_gap())
+        address_row.addWidget(self.sharing_address, 1)
+        address_row.addWidget(self.sharing_copy)
+        sharing.addLayout(address_row)
+        self.sharing_status = muted_note_label("")
+        self.sharing_status.setTextFormat(QtCore.Qt.PlainText)
+        self.sharing_status.setWordWrap(True)
+        sharing.addWidget(self.sharing_status)
+        self.sharing_clients_layout = _ruled_list()
+        sharing.addLayout(self.sharing_clients_layout)
+        self.sharing_note = muted_note_label(
+            "Trusted LAN only. Approve each browser here."
+        )
+        self.sharing_note.setWordWrap(True)
+        sharing.addWidget(self.sharing_note)
+        self.sharing_button.clicked.connect(self.sharing_requested.emit)
+        self.sharing_copy.clicked.connect(
+            lambda: QtWidgets.QApplication.clipboard().setText(
+                self.sharing_address.text()
+            )
+        )
+        right.addWidget(self.sharing_group)
+        self.set_sharing(False)
         right.addStretch(1)
         self.right_scroll.set_width_bounded_widget(self.right_body)
         columns.addWidget(self.right_scroll, 2)
@@ -1195,6 +1237,92 @@ class DeviceManagerView(QtWidgets.QWidget):
         self._remoted = {str(instance_id) for instance_id in instance_ids}
         for instance_id, card in self._loaded_cards.items():
             card.remote_button.setChecked(instance_id in self._remoted)
+
+    def set_sharing(
+        self,
+        active: bool,
+        urls: tuple[str, ...] = (),
+        clients: tuple[dict, ...] = (),
+        error: str = "",
+    ) -> None:
+        records = tuple(
+            (str(item["id"]), str(item["address"]),
+             str(item["browser"]), str(item["status"]))
+            for item in clients
+        )
+        projection = (bool(active), tuple(urls), records, str(error))
+        if projection == self._sharing_projection:
+            return
+        self._sharing_projection = projection
+        self.sharing_button.setText("Stop sharing" if active else "Start sharing")
+        self.sharing_button.set_role("destructive" if active else "standard")
+        self.sharing_address.setText(urls[0] if urls else "")
+        self.sharing_address.setToolTip("\n".join(urls))
+        self.sharing_address.setVisible(bool(urls))
+        self.sharing_copy.setVisible(bool(urls))
+        pending = sum(status == "pending" for _, _, _, status in records)
+        connected = len(records) - pending
+        text = (
+            f"{pending} awaiting approval · {connected} connected"
+            if pending else f"{connected} connected"
+            if connected else "Waiting for browser requests."
+            if active else "Sharing is off."
+        )
+        self.sharing_status.setText(error or text)
+        set_status_ink(
+            self.sharing_status,
+            "error" if error else "warning" if pending else "idle",
+        )
+        wanted = {client_id for client_id, _, _, _ in records}
+        for client_id in tuple(self._sharing_rows):
+            if client_id not in wanted:
+                frame, *_ = self._sharing_rows.pop(client_id)
+                self.sharing_clients_layout.removeWidget(frame)
+                retire_widget(frame)
+        for index, (client_id, address, browser, status) in enumerate(records):
+            widgets = self._sharing_rows.get(client_id)
+            if widgets is None:
+                frame = FluentFrame(self.sharing_group, rule=True)
+                row = QtWidgets.QHBoxLayout(frame)
+                row.setContentsMargins(0, 0, 0, 0)
+                row.setSpacing(row_gap())
+                identity = QtWidgets.QVBoxLayout()
+                identity.setSpacing(0)
+                title = ElidedLabel("")
+                detail = ElidedLabel("")
+                title.setTextFormat(QtCore.Qt.PlainText)
+                detail.setTextFormat(QtCore.Qt.PlainText)
+                identity.addWidget(title)
+                identity.addWidget(detail)
+                row.addLayout(identity, 1)
+                allow = FluentButton("Allow")
+                reject = FluentButton("Reject", role="destructive")
+                row.addWidget(allow)
+                row.addWidget(reject)
+                allow.clicked.connect(
+                    lambda _checked=False, key=client_id:
+                    self.sharing_decided.emit(key, True)
+                )
+                reject.clicked.connect(
+                    lambda _checked=False, key=client_id:
+                    self.sharing_decided.emit(key, False)
+                )
+                widgets = (frame, title, detail, allow, reject)
+                self._sharing_rows[client_id] = widgets
+                self.sharing_clients_layout.insertWidget(index, frame)
+            frame, title, detail, allow, reject = widgets
+            title.setText(address)
+            browser_name = next((name for marker, name in (
+                ("Edg", "Edge"), ("OPR/", "Opera"), ("Firefox/", "Firefox"),
+                ("FxiOS/", "Firefox"), ("Chrome/", "Chrome"), ("CriOS/", "Chrome"),
+                ("Safari/", "Safari"),
+            ) if marker in browser), "Browser")
+            detail.setText(f"{browser_name} · {status.capitalize()}")
+            detail.setToolTip(escape(browser))
+            set_status_ink(detail, "warning" if status == "pending" else "idle")
+            allow.setVisible(status == "pending")
+            reject.setText("Reject" if status == "pending" else "Disconnect")
+        _rule_between(self.sharing_clients_layout)
 
     def set_discovery_enabled(
         self,

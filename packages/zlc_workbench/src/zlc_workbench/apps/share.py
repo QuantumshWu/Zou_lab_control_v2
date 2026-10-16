@@ -11,7 +11,6 @@ import logging
 from queue import Empty, Queue
 import secrets
 import socket
-import ssl
 from threading import Event, Thread
 from time import monotonic
 from urllib.parse import urlsplit
@@ -44,9 +43,8 @@ def _patch(frame, previous):
                 reset=reset, **metadata), buffer.getvalue()
 
 
-def start_server(flow, *, host="0.0.0.0", port=18865, token=None,
-                 allow_control=True, fps=12, certfile=None, keyfile=None):
-    """Start an explicitly enabled application-only viewer; return nonblocking close."""
+def start_server(flow, *, on_clients, host="0.0.0.0", port=80, fps=12):
+    """Share experiment windows after local approval; return close with decide()."""
     import tornado.httpserver
     import tornado.ioloop
     import tornado.netutil
@@ -57,15 +55,6 @@ def start_server(flow, *, host="0.0.0.0", port=18865, token=None,
 
     if not 0 <= int(port) <= 65535 or not 1 <= float(fps) <= 30:
         raise ValueError("sharing requires a valid port and 1–30 frames per second")
-    if bool(certfile) != bool(keyfile):
-        raise ValueError("share certificate and private key must be supplied together")
-    tls = None
-    if certfile:
-        tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        tls.load_cert_chain(certfile, keyfile)
-    token = token or secrets.token_urlsafe(32)
-    if not isinstance(token, str) or len(token) < 16:
-        raise ValueError("the sharing token must contain at least 16 characters")
     assets = {name: files("zlc_workbench").joinpath("web_share", name).read_bytes()
               for name in ("index.html", "client.js", "style.css")}
     sockets = tornado.netutil.bind_sockets(int(port), address=host)
@@ -122,7 +111,14 @@ def start_server(flow, *, host="0.0.0.0", port=18865, token=None,
     if host not in ("0.0.0.0", "::"):
         addresses = {"127.0.0.1" if host == "localhost" else host}
     allowed_hosts = addresses | {"localhost", socket.gethostname().lower(), socket.getfqdn().lower()}
-    scheme = "https" if tls else "http"
+
+    def notify_clients():
+        if not closed.is_set():
+            submit(on_clients, tuple(dict(
+                id=client.identity, address=client.request.remote_ip,
+                browser=client.request.headers.get("User-Agent", "Browser")[:256],
+                status="connected" if client.approved else "pending",
+            ) for client in sorted(clients, key=lambda item: item.identity)))
 
     def valid_host(request):
         return (urlsplit("//" + request.host).hostname or "").lower() in allowed_hosts
@@ -139,7 +135,7 @@ def start_server(flow, *, host="0.0.0.0", port=18865, token=None,
             self.set_header("X-Content-Type-Options", "nosniff")
             hostname = urlsplit("//" + self.request.host).hostname
             authority = f"[{hostname}]" if ":" in hostname else hostname
-            websocket_origin = f"{'wss' if tls else 'ws'}://{authority}:{actual_port}"
+            websocket_origin = f"ws://{authority}:{actual_port}"
             self.set_header("Content-Security-Policy",
                 "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob:; "
                 f"connect-src 'self' {websocket_origin}; frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
@@ -148,17 +144,18 @@ def start_server(flow, *, host="0.0.0.0", port=18865, token=None,
     class Browser(tornado.websocket.WebSocketHandler):
         def check_origin(self, origin):
             source = urlsplit(origin)
-            return valid_host(self.request) and source.scheme == scheme and source.netloc == self.request.host
+            return valid_host(self.request) and source.scheme == "http" and source.netloc == self.request.host
 
         def open(self):
             self.identity = secrets.token_hex(12)
-            self.authenticated = False
+            self.approved = False
             self.selected = None
             self.frame = None
             self.awaiting = None
             self.last_state = None
-            self.auth_deadline = tornado.ioloop.IOLoop.current().call_later(10, self.close, 1008, "authentication required")
             clients.add(self)
+            self.write_message(dict(type="pending", message="Waiting for approval on the experiment computer."))
+            notify_clients()
 
         async def on_message(self, raw):
             try:
@@ -166,15 +163,8 @@ def start_server(flow, *, host="0.0.0.0", port=18865, token=None,
                 if not isinstance(message, dict):
                     raise ValueError("expected an object")
                 kind = message.get("type")
-                if not self.authenticated:
-                    supplied = message.get("token")
-                    if kind != "hello" or not isinstance(supplied, str) or not secrets.compare_digest(supplied, token):
-                        self.close(1008, "invalid sharing token")
-                        return
-                    self.authenticated = True
-                    tornado.ioloop.IOLoop.current().remove_timeout(self.auth_deadline)
-                    await self.write_message(dict(type="hello", client=self.identity, controller=None,
-                                                  control_enabled=bool(allow_control)))
+                if not self.approved:
+                    await self.write_message(dict(type="pending", message="Waiting for approval on the experiment computer."))
                     return
                 if kind == "select":
                     selected = message.get("window")
@@ -189,8 +179,6 @@ def start_server(flow, *, host="0.0.0.0", port=18865, token=None,
                     if self.awaiting is not None and message.get("sequence") == self.awaiting:
                         self.awaiting = None
                 elif kind in ("control", "show", "input"):
-                    if not allow_control:
-                        raise ValueError("this shared experiment is read-only")
                     if kind == "control":
                         operation = surface.take_control if message.get("take") is True else surface.release_control
                         result = await owner(operation, self.identity)
@@ -220,13 +208,38 @@ def start_server(flow, *, host="0.0.0.0", port=18865, token=None,
 
         def on_close(self):
             clients.discard(self)
-            if getattr(self, "authenticated", False) and not closed.is_set():
+            if getattr(self, "approved", False) and not closed.is_set():
                 submit(surface.release_control, self.identity)
+            notify_clients()
+
+    async def decide_client(identity, allow):
+        client = next((item for item in clients if item.identity == identity), None)
+        if client is None or closed.is_set():
+            return
+        if allow:
+            if client.approved:
+                return
+            try:
+                await client.write_message(dict(type="hello", client=identity, controller=None,
+                                                control_enabled=True))
+            except tornado.websocket.WebSocketClosedError:
+                clients.discard(client)
+                notify_clients()
+                return
+            client.approved = True
+        else:
+            was_approved = client.approved
+            client.approved = False
+            await owner(surface.release_control, identity)
+            client.close(1000, "Disconnected by the experiment computer." if was_approved
+                         else "Connection rejected by the experiment computer.")
+            clients.discard(client)
+        notify_clients()
 
     async def stream(executor):
         while not closed.is_set():
             started = monotonic()
-            connected = [client for client in clients if client.authenticated]
+            connected = [client for client in clients if client.approved]
             watched = {client.selected for client in connected}
             for key in tuple(latest):
                 if key not in watched:
@@ -234,7 +247,7 @@ def start_server(flow, *, host="0.0.0.0", port=18865, token=None,
             if connected:
                 try:
                     catalog = await owner(surface.catalog)
-                    state = dict(type="state", control_enabled=bool(allow_control), **catalog)
+                    state = dict(type="state", control_enabled=True, **catalog)
                     visible = {item["id"] for item in catalog["windows"] if item["visible"]}
                     available = {item["id"] for item in catalog["windows"]}
                     for key in tuple(latest):
@@ -281,10 +294,10 @@ def start_server(flow, *, host="0.0.0.0", port=18865, token=None,
         executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="zlc-share-encode")
         try:
             application = tornado.web.Application([
-                (r"/", Page), (r"/(client\.js|style\.css|theme\.css)", Page), (r"/ws", Browser),
+                (r"/zlc/?", Page), (r"/zlc/(client\.js|style\.css|theme\.css)", Page), (r"/zlc/ws", Browser),
             ], websocket_max_message_size=65536, websocket_ping_interval=20,
                websocket_ping_timeout=20)
-            server = tornado.httpserver.HTTPServer(application, ssl_options=tls, xheaders=False)
+            server = tornado.httpserver.HTTPServer(application, xheaders=False)
             server.add_sockets(sockets)
             task = loop.asyncio_loop.create_task(stream(executor))
             network.update(loop=loop, server=server, task=task)
@@ -312,6 +325,10 @@ def start_server(flow, *, host="0.0.0.0", port=18865, token=None,
             network["task"].cancel()
             await asyncio.gather(network["task"], return_exceptions=True)
             await network["server"].close_all_connections()
+            pending = [task for task in asyncio.all_tasks() if task is not asyncio.current_task()]
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
             network["loop"].stop()
         if "loop" in network:
             network["loop"].add_callback(stop)
@@ -323,8 +340,11 @@ def start_server(flow, *, host="0.0.0.0", port=18865, token=None,
     if not ready.wait(3) or "error" in network:
         close()
         raise RuntimeError(f"could not start experiment sharing: {network.get('error', 'startup timed out')}")
-    urls = [f"{scheme}://{'[' + address + ']' if ':' in address else address}:{actual_port}/#{token}" for address in
-            sorted(addresses, key=lambda value: (value.startswith("127."), value))]
-    close.connection_info = dict(url=urls[0], urls=urls, token=token, port=actual_port,
-                                 addresses=sorted(addresses), encrypted=bool(tls))
+    suffix = "" if actual_port == 80 else f":{actual_port}"
+    visible_addresses = sorted(address for address in addresses
+                               if not address.startswith(("127.", "169.254."))) or ["127.0.0.1"]
+    urls = [f"http://{'[' + address + ']' if ':' in address else address}{suffix}/zlc" for address in
+            visible_addresses]
+    close.connection_info = dict(url=urls[0], urls=urls, port=actual_port)
+    close.decide = lambda identity, allow: network["loop"].add_callback(decide_client, identity, allow)
     return close

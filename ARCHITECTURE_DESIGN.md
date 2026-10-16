@@ -399,9 +399,9 @@ Node new chunk
 
 ## 6. UI与Lifecycle
 
-- 实验网页共享只由显式`--share`启动，默认关闭、`--check`不启动；`--share-host/port/read-only`控制监听与远端操作，`--share-cert/key`成对启用HTTPS/WSS。没有证书的HTTP仅用于可信隔离LAN，token不是链路加密，不改防火墙、不发布到互联网。它独立于MCP，不改变MCP协议、loopback或安全边界。Workbench仅组合当前`ExperimentGuiFlow`和Tornado网络传输，浏览器静态资源随产品安装，不建立第二Session或暴露driver。
+- 实验网页共享由Device Manager的`Browser sharing`区域随时Start/Stop，默认关闭，不需要启动参数。界面显示可复制的短LAN地址`http://IP/zlc`（优先HTTP默认端口80，占用或无权限时18865），无key、token或私密链接；只用于可信隔离LAN，不改防火墙、不发布到互联网。它独立于MCP，不改变MCP协议、loopback或安全边界。Workbench仅组合当前`ExperimentGuiFlow`和Tornado网络传输，浏览器静态资源随产品安装，不建立第二Session或暴露driver。
 - 共享画面与输入属于`zlc_ui`的窗口边界：只从当前Flow的Device Manager、Console、device controls及显式关联的派生窗取像素，Qt父子/菜单/模态窗沿同一归属处理，不抓桌面。FigureViewer及其归档Pulse Editor只登记逻辑归属，不改变Qt parent或关闭生命周期；共享期间文件选择使用Qt对话框，仍读写实验机文件。鼠标、触控、滚轮与键盘回到原Qt控件，参数、设备占用与任务执行继续走原owner；多个浏览器只共享当前界面状态，不拥有独立页签或科学数据副本。
-- 网页共享按token授权、多观察者单远端controller；本机真实点击、按键或滚轮立即收回远端控制，断连释放输入与控制但不停止实验、不重放命令。未观看窗口不持续抓图，慢客户端不积压帧，编码和网络传输不占Qt owner。共享失败独立报告且保留实验，退出停止监听并复用原关闭流程；没有开启共享时不安装抓图循环或输入监听。
+- 每次浏览器连接先等待本机批准；Device Manager列出来源IP、浏览器与Pending/Connected状态，本机逐个Allow/Reject并可随时Disconnect。批准前不提供实验窗口目录、画面或操作；批准仅属于当前连接，刷新/断线重连必须重新申请。共享权限控件仅能由本机操作，远端不能批准其他连接或开关共享。多个已批准连接可同时观看、共享一个远端controller；本机真实点击、按键或滚轮立即收回远端控制，断连释放输入与控制但不停止实验、不重放命令。未观看窗口不持续抓图，慢客户端不积压帧，编码和网络传输不占Qt owner。Stop断开所有连接、清空申请并停止监听，但不关闭实验；退出沿原关闭流程停止共享，没有开启共享时不安装抓图循环或输入监听。
 - 网页外壳使用英文，字体、字号、颜色、间距与控件尺寸从现有Fluent owner投影，不维护独立主题数值。实验内容由原Qt窗口绘制，传输仅更新变化区域；Fit只缩小、不放大小对话框。临时窗口关闭后退出共享目录，仍存活的独立伴随窗口归属于同一实验而不被其打开者的关闭撤走；控制权撤销后尚未分派的旧输入不得执行。
 
 - 实验 AI 的 MCP 随普通 experiment 启动默认提供本机接入及操作能力，`--no-mcp`显式关闭、`--mcp-read-only`显式限制只读，`--check`不启动服务。它不是第二个实验执行器，只连接当前`ExperimentGuiFlow`的Session/Console；请求交给原Qt owner，执行继续走原设备占用和worker。MCP SDK是正常安装依赖，不在启动时临时pip。每个实际监听实例写出自己的本机连接信息/凭据，AI可在实验启动之后连接；默认端口占用可分配空闲端口，显式端口冲突清楚报告且不关闭实验。服务仍限loopback、验证token、拒绝浏览器跨源访问；协议沿官方MCP SDK。

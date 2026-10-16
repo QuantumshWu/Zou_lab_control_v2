@@ -3,6 +3,7 @@ const $ = (id) => document.getElementById(id);
 const canvas = $("screen"), ctx = canvas.getContext("2d", {alpha: false});
 let socket, client, controller, selected = "", windows = [], frame = null;
 let incoming = Promise.resolve(), header = null, fitted = true, connected = false, controlEnabled = false;
+let connectionMessage = "Only the experiment application is shared, not the desktop. Connecting does not start or stop an experiment.";
 let move = null, moveRequest = 0, pointer = null, lastClick = null, composing = false;
 let wheel = null, scrolling = false, scrollOrigin = null;
 const touches = new Map();
@@ -55,7 +56,7 @@ function refreshControls() {
   const ready = connected && current?.visible && frame?.window === selected;
   canvas.hidden = !ready;
   $("placeholder").hidden = ready;
-  $("placeholder-text").textContent = !connected ? "Only the experiment application is shared, not the desktop. Connecting does not start or stop an experiment." : !current ? "No experiment windows are available to share." : !current.visible ? "This window is hidden on the experiment computer. Take control to show it." : "Receiving the window view…";
+  $("placeholder-text").textContent = !connected ? connectionMessage : !current ? "No experiment windows are available to share." : !current.visible ? "This window is hidden on the experiment computer. Take control to show it." : "Receiving the window view…";
   $("hint").textContent = current?.blocked ? "This window is waiting for an experiment dialog. Complete the dialog first." : current?.modal ? "Experiment dialog. Confirm or cancel to return to the previous window." : mine ? "Tap or drag with one finger; scroll with two. Select a field before typing. Disconnecting does not stop the experiment." : "Read-only viewing does not change the experiment computer's windows or experiment state.";
 }
 function selectWindow(id) {
@@ -87,9 +88,13 @@ async function receive(data, ws) {
   if (socket !== ws) return;
   if (typeof data === "string") {
     const message = JSON.parse(data);
-    if (message.type === "hello") {
+    if (message.type === "pending") {
+      connectionMessage = message.message;
+      $("connection").textContent = "Waiting for approval";
+      refreshControls();
+    } else if (message.type === "hello") {
       client = message.client; controller = message.controller; connected = true; controlEnabled = message.control_enabled === true;
-      $("connection-form").hidden = true; $("toolbar").hidden = false;
+      $("connection-request").hidden = true; $("toolbar").hidden = false;
       $("connection").textContent = "Connected"; $("connection").dataset.state = "connected";
       error(); refreshControls();
     } else if (message.type === "state") updateState(message);
@@ -116,28 +121,35 @@ async function receive(data, ws) {
     } finally { bitmap.close(); }
   } finally { if (socket === ws) send({type: "ack", sequence: patch.sequence}); }
 }
-function connect(token) {
+function connect() {
   if (socket) socket.close();
-  error(); $("connect").disabled = true;
+  error(); $("connect").textContent = "Cancel request";
+  connectionMessage = "Connecting to the experiment computer…";
   $("connection").textContent = "Connecting…"; $("connection").dataset.state = "";
-  const ws = new WebSocket(`${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/ws`);
+  const ws = new WebSocket(`${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/zlc/ws`);
   socket = ws; incoming = Promise.resolve(); header = null;
-  ws.onopen = () => { if (socket === ws) { send({type: "hello", token}); $("token").value = ""; } };
   ws.onmessage = (event) => {
     if (socket !== ws) return;
     incoming = incoming.then(() => receive(event.data, ws)).catch(cause => { if (socket === ws) error(String(cause.message || cause)); ws.close(); });
   };
-  ws.onerror = () => error("Cannot connect to the experiment computer. Check that sharing is enabled and the address and local network connection are correct.");
-  ws.onclose = () => {
+  ws.onerror = () => { if (socket === ws) error("Cannot connect to the experiment computer. Check that sharing is enabled in Device Manager and the address and local network connection are correct."); };
+  ws.onclose = event => {
     if (socket !== ws) return;
-    release(); connected = false; client = null; controller = null; frame = null; selected = ""; windows = [];
-    $("connect").disabled = false; $("connection-form").hidden = false; $("toolbar").hidden = true;
+    release(); connected = false; client = null; controller = null; frame = null; selected = ""; windows = []; controlEnabled = false;
+    $("connect").textContent = "Request connection"; $("connection-request").hidden = false; $("toolbar").hidden = true;
     $("text-tools").hidden = true; $("keyboard").setAttribute("aria-expanded", "false");
-    $("connection").textContent = "Disconnected"; $("connection").dataset.state = "error"; refreshControls();
+    connectionMessage = "Request a connection to ask for approval in Device Manager. Disconnecting does not stop the experiment.";
+    if (event.reason) error(event.reason);
+    $("connection").textContent = "Disconnected"; $("connection").dataset.state = ""; refreshControls();
   };
+  refreshControls();
 }
-$("connection-form").onsubmit = e => { e.preventDefault(); connect($("token").value.trim()); };
-$("disconnect").onclick = () => { release(); socket.close(); };
+function disconnect() { release(); error(); socket.onerror = null; socket.close(); }
+$("connect").onclick = () => {
+  if (socket && socket.readyState < WebSocket.CLOSING) disconnect();
+  else connect();
+};
+$("disconnect").onclick = disconnect;
 $("windows").onchange = () => selectWindow($("windows").value);
 $("control").onclick = () => { error(); if (ownsControl()) release(); send({type: "control", take: !ownsControl()}); };
 $("show-window").onclick = () => send({type: "show", window: selected});
@@ -244,9 +256,4 @@ $("text-input").addEventListener("beforeinput", e => {
   const key = {deleteContentBackward: "Backspace", deleteContentForward: "Delete", insertLineBreak: "Enter"}[e.inputType];
   if (key) { e.preventDefault(); tapKey(key); }
 });
-const fragment = location.hash.slice(1);
-if (fragment) {
-  history.replaceState(null, "", location.pathname + location.search);
-  const token = new URLSearchParams(fragment).get("token") || decodeURIComponent(fragment);
-  if (token) connect(token);
-}
+connect();

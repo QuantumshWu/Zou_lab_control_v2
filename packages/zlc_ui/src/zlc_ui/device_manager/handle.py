@@ -123,6 +123,8 @@ class DeviceManagerHandle(QtCore.QObject):
     save_requested = QtCore.pyqtSignal()
     save_as_requested = QtCore.pyqtSignal()
     lifecycle_requested = QtCore.pyqtSignal()
+    sharing_requested = QtCore.pyqtSignal()
+    sharing_decided = QtCore.pyqtSignal(str, bool)
 
     _FORWARDED = (
         "device_add_requested",
@@ -141,6 +143,8 @@ class DeviceManagerHandle(QtCore.QObject):
         "save_requested",
         "save_as_requested",
         "lifecycle_requested",
+        "sharing_requested",
+        "sharing_decided",
     )
 
     def __init__(self, window: Any, view: DeviceManagerView) -> None:
@@ -230,6 +234,15 @@ class DeviceManagerHandle(QtCore.QObject):
 
     def set_remoted(self, instance_ids) -> None:
         self._view.set_remoted(instance_ids)
+
+    def set_sharing(
+        self,
+        active: bool,
+        urls: tuple[str, ...] = (),
+        clients: tuple[dict, ...] = (),
+        error: str = "",
+    ) -> None:
+        self._view.set_sharing(active, urls, clients, error)
 
     def open_device_log(self, instance_id: str, snapshot, *, label: str) -> None:
         self._view.open_device_log(instance_id, snapshot, label=label)

@@ -57,24 +57,6 @@ def _parser() -> argparse.ArgumentParser:
         "--mcp-read-only", action="store_true",
         help="restrict MCP to observation (enabled MCP otherwise allows experiment actions)",
     )
-    parser.add_argument(
-        "--share", action="store_true",
-        help="share this experiment's windows with authenticated LAN browsers",
-    )
-    parser.add_argument(
-        "--share-host", default="0.0.0.0",
-        help="browser-sharing bind address (default: all local interfaces)",
-    )
-    parser.add_argument(
-        "--share-port", type=int, default=18865,
-        help="browser-sharing port (default 18865; 0 chooses an available port)",
-    )
-    parser.add_argument(
-        "--share-read-only", action="store_true",
-        help="allow viewing only, without browser mouse or keyboard control",
-    )
-    parser.add_argument("--share-cert", type=Path, help="HTTPS certificate PEM file")
-    parser.add_argument("--share-key", type=Path, help="HTTPS private-key PEM file")
     return parser
 
 
@@ -401,6 +383,7 @@ class ExperimentGuiFlow:
         self.catalog = None
         self.window_ratio = window_ratio
         self.devices = None
+        self._close_share = None
         self.session = None
         self.console = None
         self.console_presenter = None
@@ -491,7 +474,43 @@ class ExperimentGuiFlow:
             self._device_worker_close = None
             raise
         self.devices.set_close_guard(self._device_manager_close_guard)
+        self.devices.sharing_requested.connect(self._toggle_sharing)
+        self.devices.sharing_decided.connect(self._decide_sharing)
         return self
+
+    def _toggle_sharing(self) -> None:
+        if self._close_share is not None:
+            self._stop_sharing()
+            return
+        try:
+            import errno
+            from .share import start_server
+
+            try:
+                close = start_server(self, on_clients=self._sharing_clients)
+            except OSError as error:
+                if error.errno not in (errno.EADDRINUSE, errno.EACCES) and getattr(error, "winerror", None) not in (10048, 10013):
+                    raise
+                close = start_server(self, on_clients=self._sharing_clients, port=18865)
+            self._close_share = close
+            self.devices.set_sharing(True, urls=tuple(close.connection_info["urls"]))
+        except (ImportError, OSError, RuntimeError, ValueError) as error:
+            self.devices.set_sharing(False, error=f"Sharing could not start: {error}")
+
+    def _sharing_clients(self, clients) -> None:
+        if self._close_share is not None:
+            self.devices.set_sharing(True, urls=tuple(self._close_share.connection_info["urls"]), clients=clients)
+
+    def _decide_sharing(self, client_id: str, allow: bool) -> None:
+        if self._close_share is not None:
+            self._close_share.decide(client_id, allow)
+
+    def _stop_sharing(self) -> None:
+        close, self._close_share = self._close_share, None
+        if close is not None:
+            close()
+            if self.devices is not None:
+                self.devices.set_sharing(False)
 
     def _initialize_session(self, config: object):
         from ..session import ExperimentSession
@@ -1904,7 +1923,10 @@ class ExperimentGuiFlow:
         try:
             if self.devices is not None and not self.devices.presenter.close():
                 return False
-            return self._close_device_worker()
+            if not self._close_device_worker():
+                return False
+            self._stop_sharing()
+            return True
         except BaseException:
             self._closing_all = False
             return False
@@ -1932,6 +1954,7 @@ class ExperimentGuiFlow:
             self.devices.close()
         elif not self._close_device_worker():
             return False
+        self._stop_sharing()
         self.devices = None
         return True
 
@@ -2074,10 +2097,6 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--mcp-port must be between 0 and 65535")
     if arguments.no_mcp and (arguments.mcp_port is not None or arguments.mcp_read_only):
         parser.error("--no-mcp cannot be combined with other MCP options")
-    if not 0 <= arguments.share_port <= 65535:
-        parser.error("--share-port must be between 0 and 65535")
-    if (arguments.share_cert is None) != (arguments.share_key is None):
-        parser.error("--share-cert and --share-key must be supplied together")
 
     from zlc_ui import counted, ensure_qt_app
 
@@ -2141,7 +2160,6 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     print(f"workspace: {flow.space.root}")
     close_mcp = None
-    close_share = None
     connection_path = None
 
     def stop_mcp():
@@ -2156,33 +2174,6 @@ def main(argv: list[str] | None = None) -> int:
             connection_path = None
 
     try:
-        if arguments.share:
-            try:
-                from .share import start_server as start_share
-
-                close_share = start_share(
-                    flow, host=arguments.share_host, port=arguments.share_port,
-                    allow_control=not arguments.share_read_only,
-                    certfile=arguments.share_cert, keyfile=arguments.share_key,
-                )
-            except (ImportError, OSError, RuntimeError, ValueError) as error:
-                message = f"Browser sharing could not start: {error}. The experiment GUI remains available."
-                print(f"warning: {message}", file=sys.stderr)
-                flow.devices.show_status(message, "warning")
-            else:
-                application.aboutToQuit.connect(close_share)
-                connection = close_share.connection_info
-                mode = "view only" if arguments.share_read_only else "view and control"
-                print(f"Browser sharing ({mode}; trusted LAN only):", flush=True)
-                for url in connection.get("urls", (connection["url"],)):
-                    print(f"  {url}", flush=True)
-                print("Keep these links private. Browser actions affect this running experiment.", flush=True)
-                if arguments.share_cert is None:
-                    print("HTTP is unencrypted: use only a trusted isolated LAN, or supply --share-cert and --share-key.", flush=True)
-                flow.devices.show_status(
-                    f"Browser sharing: {mode}. Private connection links are in the launcher terminal.",
-                    "warning",
-                )
         if not arguments.no_mcp:
             try:
                 import errno
@@ -2228,7 +2219,6 @@ def main(argv: list[str] | None = None) -> int:
                 )
         return int(application.exec_())
     finally:
-        if close_share is not None:
-            close_share()
+        flow._stop_sharing()
         stop_mcp()
         flow.close()

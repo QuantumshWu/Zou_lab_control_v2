@@ -27,7 +27,7 @@ button:disabled { cursor: default; background: var(--disabled-bg); color: var(--
 :focus-visible { outline: none; }
 input, select, textarea { border: 1px solid var(--field-border); padding: 0 var(--field-pad); background: var(--surface); }
 input:focus, select:focus, textarea:focus { border-color: var(--focus); }
-#token { flex: 1; min-width: 15em; }
+#connection-request span { color: var(--muted); }
 #windows { min-width: 13em; max-width: min(30em, 100%); flex: 1; }
 .spacer { flex: 1; }
 .segmented { display: flex; border-radius: var(--radius); overflow: hidden; }

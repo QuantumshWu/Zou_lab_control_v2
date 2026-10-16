@@ -263,6 +263,13 @@ class SharedWindows(QtCore.QObject):
                        "Alt": QtCore.Qt.AltModifier, "Meta": QtCore.Qt.MetaModifier}.get(name, QtCore.Qt.NoModifier)
         return result
 
+    @staticmethod
+    def _require_remote_input(target: Any) -> None:
+        while target is not None:
+            if target.property("zlc_local_only"):
+                raise ValueError("Sharing permissions can only be changed on the experiment computer")
+            target = target.parent()
+
     def _post(self, target: Any, event: Any, *, guard: bool = True) -> None:
         if guard:
             event._zlc_shared_control = (self._controller, self._control_epoch)
@@ -300,6 +307,7 @@ class SharedWindows(QtCore.QObject):
                 target = (popups[-1][0] if popups else window).focusWidget()
             if target is None or not target.isVisible() or not target.isEnabled():
                 raise ValueError("no experimental input field has keyboard focus")
+            self._require_remote_input(target)
             if kind == "text":
                 event = QtGui.QInputMethodEvent()
                 event.setCommitString(str(message.get("text", "")))
@@ -350,6 +358,7 @@ class SharedWindows(QtCore.QObject):
             target = surface.childAt(local) or surface
         if not target.isEnabled():
             return {"accepted": False, "reason": "the control is disabled"}
+        self._require_remote_input(target)
         if kind == "move":
             if target is not self._hover:
                 if self._hover is not None and not sip.isdeleted(self._hover):
