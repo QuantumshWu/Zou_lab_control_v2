@@ -4149,8 +4149,10 @@ def _prepare_doublet(coords, observations, valid, seeds, lower, upper, context):
 
 @njit(cache=True)
 def _prepare_damped(coords, observations, valid, seeds, lower, upper, context):
+    if seeds.shape[0] < 3:
+        return 0
     compact, raw_values = _compact_observations(coords, observations, valid)
-    if raw_values.size == 0 or 0 < seeds.shape[0] < 3:
+    if raw_values.size == 0:
         return 0
     order = np.argsort(compact[0])
     x = compact[0, order]
@@ -4162,12 +4164,7 @@ def _prepare_damped(coords, observations, valid, seeds, lower, upper, context):
     spacing = _unique_step(x) if count > 1 else 1.0
     best_harmonic = 1
     best_power = -1.0
-    # Goertzel per harmonic: the same |DFT|^2 the naive scan computed,
-    # via one multiply-add recurrence per sample instead of a sine and a
-    # cosine call each -- the scan is O(N^2) either way, but the naive
-    # form spent ~60 ms of a damped-sine solve inside the trig calls at
-    # two thousand points, ten times the whole solve of every other
-    # curve model.
+    # Goertzel computes each DFT power with one multiply-add per sample.
     for harmonic in range(1, count // 2 + 1):
         angle = 2.0 * math.pi * harmonic / count
         coefficient = 2.0 * math.cos(angle)
@@ -4194,15 +4191,7 @@ def _prepare_damped(coords, observations, valid, seeds, lower, upper, context):
     )
     frequency = max(frequency, EPSILON)
     decay = _array_span(x)
-    lower[0] = max(lower[0], amplitude / 5.0); upper[0] = min(upper[0], amplitude * 5.0)
-    lower[1] = max(lower[1], low); upper[1] = min(upper[1], high)
-    lower[2] = max(lower[2], frequency / 5.0); upper[2] = min(upper[2], frequency * 5.0)
-    lower[3] = max(lower[3], decay / 5.0); upper[3] = min(upper[3], decay * 5.0)
-    if seeds.shape[0] == 0:
-        return 0
-    # Three blind phases on purpose: a measured DFT phase was tried and
-    # made the solve basin-sensitive (batch and single diverged on
-    # ordinary data); the third lane is robustness, priced in.
+    # Competing phases preserve distinct basins without constraining the fit domain.
     phases = (-0.5 * math.pi, 0.0, 0.5 * math.pi)
     for seed in range(3):
         seeds[seed, 0] = amplitude
