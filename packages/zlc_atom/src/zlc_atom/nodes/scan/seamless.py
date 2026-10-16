@@ -220,17 +220,11 @@ class SeamlessScanMeasurement:
         acquisition_logic: str = "",
         restart_logic: object = None,
         unapplied_api_values: Mapping[str, float] | None = None,
-        parked_axes: Sequence[Mapping[str, object]] = (),
     ) -> None:
         self.sequencer = sequencer
         #: API values the draft keeps for names this pulse does not declare:
         #: applied to nothing, and named in the run record as such.
         self.unapplied_api_values = dict(unapplied_api_values or {})
-        #: The plan rows the operator parked, as authored: kept for the run
-        #: record, scanned by nothing.
-        self.parked_axes = tuple(
-            {key: value for key, value in row.items() if key != "enabled"} for row in parked_axes
-        )
         self.sequencer_key = str(sequencer_key)
         self.source = source
         self.acquisition_logic = str(acquisition_logic).strip()
@@ -838,8 +832,6 @@ class SeamlessScanMeasurement:
             "acquisition_logic": self.acquisition_logic or None,
             **({"unapplied_api_values": dict(self.unapplied_api_values)}
                if self.unapplied_api_values else {}),
-            **({"parked_axes": [dict(row) for row in self.parked_axes]}
-               if self.parked_axes else {}),
         }
 
 

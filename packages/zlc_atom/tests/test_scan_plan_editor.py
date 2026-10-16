@@ -67,49 +67,28 @@ def test_a_manual_row_authors_a_name_and_the_values_a_hand_will_set() -> None:
         editor.deleteLater()
 
 
-def test_an_axis_switched_off_is_parked_not_deleted() -> None:
-    """Off keeps the row -- greyed all but its switch and its ×, "By hand"
-    too, its port and values written as ``"enabled": false`` -- scans
-    nothing, and takes its boxes' problems with it; on again, a greyed box
-    reads the last number it could read.  The summary counts it as kept,
-    the last axis switched off is the plan's one problem, and the draft
-    read back keeps the row parked."""
-
+def test_new_axis_mode_is_visible_and_removal_removes_the_scan_axis() -> None:
     editor = _editor()
     drafts: list[dict] = []
     editor.draft_changed.connect(drafts.append)
     try:
-        editor._add_manual_axis()
-        editor._add_axis()
+        editor.add_manual_button.click()
+        editor.add_button.click()
         hand, bias = editor._rows
-        bias.start_spin.setProperty("numericError", "the number does not fit the box")
-        bias.start_spin.valueNormalized.emit()
-        assert not bias.error_label.isHidden()
-        drafts.clear()
-        bias.enabled_switch.click()
-        assert bias.error_label.isHidden() and bias.error_label.text() == ""
-        axes = json.loads(drafts[-1]["values"]["plan"])["axes"]
-        assert "enabled" not in axes[0] and axes[1]["enabled"] is False
-        assert axes[1]["port"] == BIAS.port, "the row keeps its port"
-        assert not bias.port_combo.isEnabled() and not bias.input_stack.isEnabled()
-        assert bias.enabled_switch.isEnabled() and bias.remove_button.isEnabled()
+        assert all(row.mode_choice.current() == "range" for row in (hand, bias))
+        assert [axis.port for axis in _plan(editor).axes] == ["manual:manual 1", BIAS.port]
+        bias.mode_choice.button("values").click()
+        bias.values_edit.setText("0.1, 0.3")
+        bias.values_edit.editingFinished.emit()
+        assert bias.mode_choice.current() == "values"
+        assert _plan(editor).axes[1].values == (0.1, 0.3)
+        bias.remove_button.click()
+        assert editor._rows == [hand]
         assert [axis.port for axis in _plan(editor).axes] == ["manual:manual 1"]
-        assert "1 parked axis is kept and not scanned." in editor.summary.text()
-        drafts.clear()
-        bias.enabled_switch.click()
-        assert bias.error_label.isHidden() and bias.range_problem() == ""
-        assert "enabled" not in json.loads(drafts[-1]["values"]["plan"])["axes"][1]
-        bias.enabled_switch.click()
-        hand.enabled_switch.click()
-        assert not hand._kind.isEnabled() and not hand.name_edit.isEnabled()
-        assert hand.enabled_switch.isEnabled() and hand.remove_button.isEnabled()
-        assert editor.problem.text() == "every scan axis is parked; switch one on to scan it."
         editor.update_projection({"form_values": {"plan": drafts[-1]["values"]["plan"]}})
-        assert [row.scanned for row in editor._rows] == [False, False]
-        bias = editor._rows[1]
-        bias.enabled_switch.click()
-        assert editor.problem.text() == "" and bias.port_combo.isEnabled()
-        assert [axis.port for axis in _plan(editor).axes] == [BIAS.port]
+        assert len(editor._rows) == 1 and editor._rows[0].mode_choice.current() == "range"
+        editor._rows[0].remove_button.click()
+        assert editor._rows == [] and plan_input_rows(editor._plan_text) == ()
     finally:
         editor.deleteLater()
 
@@ -970,7 +949,7 @@ def test_a_label_two_fields_share_is_refused_at_the_draft_and_said_on_its_line()
     assert admitted({"axes": [hand]}, "p0.coil = 1") == (sentence,)
     assert admitted({"axes": [hand]}, "dac:p0:dac = 1\ngone = 2") == ()
     (unbound,) = admitted({"axes": [hand, {"port": "pulse:param:gone", "values": [1.0]}]}, "")
-    assert unbound.endswith("; switch that axis off to keep it without scanning it")
+    assert "offers no scan port named 'pulse:param:gone'" in unbound
 
     ensure_qt_app(["scan-editor-shared-label"])
     editor = ScanPlanEditor()

@@ -46,13 +46,13 @@ from zlc_atom.nodes.scan import (
     scan_ports_for_devices,
     unscannable_api_ports,
 )
-from zlc_atom.nodes.scan.plan import device_port_parts, plan_input_rows
+from zlc_atom.nodes.scan.plan import device_port_parts
 
 
 def _validate(values) -> None:
     """The plan and the API values read as the build reads them, while the
-    draft is still being edited: an empty Values list, an axis on one port
-    twice or every axis parked is said on the Edit page, not at Start."""
+    draft is still being edited: an empty Values list, an empty plan or a
+    duplicated port is said on the Edit page, not at Start."""
 
     plan_from_authored(values["plan"])
     api_overrides_from_authored(values.get("api_values"))
@@ -82,9 +82,7 @@ SEAMLESS_SCAN_SCHEMA = AuthoringSchema(
                 'Only authored axes are scanned; omitted Pulse scan slots retain their authored value. '
                 'The optional Values input bank uses mode="values" and value_text="500,501,502" '
                 'while values retains the independent Range bank. Manual axes require the human operator. '
-                'An axis with "enabled": false is parked: kept in the plan and the run record, never '
-                'bound, played or counted in the shape, its knob left as it is, whatever port it names. '
-                'Park an axis the operator wrote instead of deleting it; at least one axis must be enabled.'
+                'Every listed axis is scanned; remove an axis to stop scanning it.'
             ),
         ),
         AuthoringField(
@@ -135,12 +133,11 @@ SEAMLESS_SCAN_SCHEMA = AuthoringSchema(
 
 
 def _admit_resources(values, resources, installation) -> tuple[str, ...]:
-    """The API values and every enabled axis against the knobs this draft
+    """The API values and every listed axis against the knobs this draft
     can reach, so an API value the pulse cannot take (a label two of its
     fields answer to), an axis on a port its pulse does not offer, or one on
     a device not installed, is a draft issue the Edit page says and Start
-    waits on.  A parked axis is not asked: it binds nothing; nor is a kept
-    API value the pulse does not declare: it is applied to nothing.  A
+    waits on.  A kept API value the pulse does not declare is applied to nothing. A
     device field's range needs the device read, on its worker, so that one
     is still checked by the build."""
 
@@ -168,15 +165,14 @@ def _admit_resources(values, resources, installation) -> tuple[str, ...]:
                 *hardware_scan_ports_for(sequence), *api_scan_ports_for(sequence),
             ))
         except ValueError as error:
-            issues.append(f"{error}; switch that axis off to keep it without scanning it")
+            issues.append(str(error))
     installed = tunable_devices(installation)
     for axis in plan.axes:
         if axis.port.startswith(DEVICE_PARAM_FAMILY):
             key, _field = device_port_parts(axis.port)
             if key not in installed:
                 issues.append(
-                    f"device axis {axis.port!r} has no installed device {key!r} behind it; "
-                    "switch that axis off to keep it without scanning it"
+                    f"device axis {axis.port!r} has no installed device {key!r} behind it"
                 )
     return tuple(issues)
 
@@ -211,9 +207,6 @@ def _build(
         pulse_resource.value, api_overrides_from_authored(api_values)
     )
     parsed = plan_from_authored(plan)
-    # A parked axis is the draft's, not the run's: named in the run record,
-    # bound and played by nothing.
-    parked = tuple(row for row in plan_input_rows(plan) if not row.get("enabled", True))
     # An operator's axis binds to no port at all: the run stops and asks
     # for it.  A device axis binds to an installed knob the HOST moves
     # between fires, and an API axis to a parameter of the pulse the host
@@ -252,7 +245,6 @@ def _build(
         acquisition_logic=acquisition_logic,
         restart_logic=restart_logic,
         unapplied_api_values=unapplied,
-        parked_axes=parked,
     )
 
 
