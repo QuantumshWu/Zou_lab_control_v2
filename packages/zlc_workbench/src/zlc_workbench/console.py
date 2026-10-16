@@ -3690,6 +3690,13 @@ class ConsolePresenter:
                 )
                 or self._unbound_panel_parameters(candidate)
             )
+            # A first mount has no accepted record to go back to, so its
+            # history lease is taken before the candidate is projected: the
+            # first picture reads the indexed view, and the accept finds the
+            # lease current instead of re-hosting the panel on a cold child.
+            first_mount = binding.port is None
+            if first_mount:
+                self._resync_panel_history(binding)
             candidate_port = self._make_panel_port(
                 binding,
                 target=candidate,
@@ -3708,6 +3715,8 @@ class ConsolePresenter:
                 binding.vacancy = previous_vacancy
                 binding.parameter_surface = previous_surface
                 binding.interaction_viewport = previous_viewport
+                if first_mount:
+                    self._resync_panel_history(binding)
                 self._report(
                     f"{panel_id}: {_error_text(error)}",
                     severity="error",
