@@ -41,7 +41,7 @@ from zlc_ui.fluent import (
     set_status_ink,
     show_fluent_popup_for_anchor,)
 from zlc_ui.form.form import FormChoice, FormFieldProps, FormSpec
-from zlc_ui.form.qt_form import FluentParameterForm, _form_label_width, being_edited
+from zlc_ui.form.qt_form import FluentParameterForm, being_edited, share_label_column
 
 from ._panel_projection import (
     interval_form_field,
@@ -85,27 +85,6 @@ def panel_section(
         layout.addWidget(note)
     layout.addWidget(form)
     return layout, heading
-
-
-def share_label_column(forms, *, widths: tuple[int, ...] = ()) -> int:
-    """Give ``forms`` one label column, the widest any of their rows needs,
-    and answer it (0 when nothing needs one).
-
-    Each form sizes a column to its own words, so sections stacked down one
-    page would start their controls at as many x.  ``widths`` are the
-    columns the page's other rows need (Save figure's rows, a producer
-    contribution's labels); the caller gives those rows the answer.
-    """
-
-    forms = tuple(forms)
-    column = max(
-        (*widths, *(_form_label_width(form.spec.fields) for form in forms if form.spec.fields)),
-        default=0,
-    )
-    if column:
-        for form in forms:
-            form.set_label_width(column)
-    return column
 
 
 def _coordinate_text(value: object) -> str:
@@ -1442,7 +1421,8 @@ class PanelCardView(FluentGroupBox):
             header_layout = QtWidgets.QHBoxLayout(header)
             # The close x ends where the fields end: the body stops a pad
             # short of the scroll viewport, which stops the bar's gutter
-            # short of the frame's edge.
+            # short of the frame's edge.  The popup is a window of its own, so
+            # its bar is the style's, not one fluent_scrollbar_thickness() sizes.
             gutter = scroll.verticalScrollBar().sizeHint().width()
             header_layout.setContentsMargins(0, 0, pad + gutter, 0)
             header_layout.setSpacing(row_gap())

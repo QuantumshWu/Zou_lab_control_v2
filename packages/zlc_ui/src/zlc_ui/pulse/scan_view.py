@@ -6,13 +6,13 @@ from PyQt5 import QtCore, QtWidgets
 
 from zlc_ui.fluent import (
     ElidedLabel, FluentButton, FluentCodeEdit, FluentGroupBox, FluentLabel,
-    FluentSectionLabel, centred_line_top, fluent_count_box, retire_widget, set_muted, signals_blocked,
-    set_status_ink,
+    FluentSectionLabel, centred_line_top, fluent_count_box, muted_note_label, retire_widget, set_muted,
+    set_status_ink, signals_blocked,
 )
 from zlc_ui.form import being_edited
 
-from ._layout import count_box_width, quiet, row_height
-from zlc_ui.fluent import card_pad, row_gap, section_gap
+from ._layout import count_box_width
+from zlc_ui.fluent import card_pad, control_height, row_gap, section_gap
 from .models import BindingRecord, ScanPageRecord
 from .scan_line_edit import _SOURCES
 
@@ -55,8 +55,8 @@ class PulseScanView(QtWidgets.QWidget):
         self.scan_slots_label.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop)
         self.scan_slots_label.ensurePolished()
         self.scan_slots_label.setContentsMargins(
-            0, centred_line_top(0, row_height(), self.scan_slots_label.font()), 0, 0)
-        self.scan_slots_label.setMinimumHeight(row_height())
+            0, centred_line_top(0, control_height(), self.scan_slots_label.font()), 0, 0)
+        self.scan_slots_label.setMinimumHeight(control_height())
         # The bound fields, under a section title per group when there are
         # groups; rebuilt only when the list changes.  One line per field,
         # each as tall as a section title, so the list has one pitch.
@@ -90,18 +90,18 @@ class PulseScanView(QtWidgets.QWidget):
         self._minimum_repeats = 0
         self._committed_repeats = 0
         self.set_repeats_range(0, 0)
-        self.scan_repeats_spin.setFixedHeight(row_height())
+        self.scan_repeats_spin.setFixedHeight(control_height())
         self.scan_repeats_spin.editingFinished.connect(self._commit_repeats)
         run_row.addWidget(self.scan_repeats_spin)
 
         self.scan_hold_button = FluentButton("Hold current point")
-        self.scan_hold_button.setFixedHeight(row_height())
+        self.scan_hold_button.setFixedHeight(control_height())
         self.scan_hold_button.clicked.connect(self.hold_requested)
         run_row.addWidget(self.scan_hold_button)
         self.scan_step_back_button = FluentButton("◀ Step")
         self.scan_step_forward_button = FluentButton("Step ▶")
         for button, delta in ((self.scan_step_back_button, -1), (self.scan_step_forward_button, 1)):
-            button.setFixedHeight(row_height())
+            button.setFixedHeight(control_height())
             button.clicked.connect(lambda _checked=False, value=delta: self.step_requested.emit(value))
             run_row.addWidget(button)
         self.scan_progress_label = FluentLabel("")
@@ -125,7 +125,7 @@ class PulseScanView(QtWidgets.QWidget):
         self.scan_column_template_button.clicked.connect(lambda: self.template_requested.emit("columns"))
         self.scan_grid_template_button.clicked.connect(lambda: self.template_requested.emit("grid"))
         for button in (self.scan_load_program_button, self.scan_column_template_button, self.scan_grid_template_button):
-            button.setFixedHeight(row_height())
+            button.setFixedHeight(control_height())
             button.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
             template_buttons.addWidget(button, 1)
         editor_layout.addLayout(template_buttons)
@@ -140,14 +140,14 @@ class PulseScanView(QtWidgets.QWidget):
         self.scan_clear_array_button.setToolTip("Remove the current scan table; keep the Python draft")
         self.scan_load_array_button.clicked.connect(self.load_array_requested)
         self.scan_clear_array_button.clicked.connect(self.clear_array_requested)
-        self.scan_run_button.setFixedHeight(row_height())
-        self.scan_save_array_button.setFixedHeight(row_height())
+        self.scan_run_button.setFixedHeight(control_height())
+        self.scan_save_array_button.setFixedHeight(control_height())
         self.scan_run_button.clicked.connect(lambda: self.run_requested.emit())
         self.scan_save_array_button.clicked.connect(self.save_array_requested)
         self.scan_code.textChanged.connect(self._on_code_changed)
         for button in (self.scan_run_button, self.scan_load_array_button,
                        self.scan_save_array_button, self.scan_clear_array_button):
-            button.setFixedHeight(row_height())
+            button.setFixedHeight(control_height())
             button.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
             code_buttons.addWidget(button, 1)
         editor_layout.addLayout(code_buttons)
@@ -161,7 +161,7 @@ class PulseScanView(QtWidgets.QWidget):
         # ink, where the table's first line would start.  A label of its
         # own over the viewport -- the read-only edit does not paint a
         # placeholder.
-        self.table_note_label = quiet(FluentLabel(""))
+        self.table_note_label = muted_note_label("")
         self.table_note_label.setParent(self.scan_table_view.viewport())
         self.table_note_label.setWordWrap(True)
         self.table_note_label.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop)
@@ -274,7 +274,7 @@ class PulseScanView(QtWidgets.QWidget):
                     + (f" — {record.note}" if record.note else ""))
                 # A mark that plays nothing today reads as a kept one.
                 set_muted(line, bool(record.note))
-                line.setFixedHeight(row_height())
+                line.setFixedHeight(control_height())
                 self._bindings_layout.addWidget(line)
         self.bindings_box.setVisible(bool(records))
 

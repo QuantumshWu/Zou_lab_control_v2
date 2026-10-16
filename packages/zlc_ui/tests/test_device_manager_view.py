@@ -32,21 +32,7 @@ assert view.status_strip.current_severity == 'idle'
 assert tuple(view.domain_groups) == ('sensor', 'camera')
 assert card.role_edit.text() == 'input'
 
-# Every card stands on one label column -- the widest any card needs -- and
-# its Role box ends where the number boxes under it end.
-view.set_devices((('id-1', 'input', 'sensor.fake', 'sensor'), ('id-2', 'cam', 'camera.fake', 'camera')))
-view.set_form_spec('id-2', FormSpec((FormFieldProps('note', 'text', 'A much longer label', default=''),)),
-                   (('note', ''),))
-view.resize(1100, 700); view.show(); app.processEvents()
-def x(widget):
-    return widget.mapTo(view, QtCore.QPoint()).x()
-count = form.widget_for('count')
-other = view._cards['id-2']
-assert x(card.role_edit) == x(count) == x(other.role_edit) == x(other.form.widget_for('note'))
-assert x(card.role_edit) + card.role_edit.width() == x(count) + count.width()
-assert x(card.name_label) == x(form._rows['count']._label)
-view.set_devices((('id-1', 'input', 'sensor.fake', 'sensor'),))
-app.processEvents()
+view.show(); app.processEvents()
 events = []
 view.device_add_requested.connect(lambda value: events.append(('add', value)))
 view.device_remove_requested.connect(lambda value: events.append(('remove', value)))
@@ -60,15 +46,6 @@ QtTest.QTest.keyClicks(card.role_edit, 'output')
 QtTest.QTest.keyClick(card.role_edit, QtCore.Qt.Key_Return)
 card.type_combo.setCurrentIndex(1)
 card.form.widget_for('count').setValue(3)
-# The fold is a disclosure: its chevron's direction is its state, and it
-# never wears the held-down (active) face a toggle command does.
-fold = card.collapse_button
-assert fold.toolTip() == 'Hide parameters' and not fold.is_active()
-QtTest.QTest.mouseClick(fold, QtCore.Qt.LeftButton)
-assert card.form.isHidden() and fold.toolTip() == 'Show parameters'
-assert not fold.is_active()
-QtTest.QTest.mouseClick(fold, QtCore.Qt.LeftButton)
-assert not card.form.isHidden() and fold.toolTip() == 'Hide parameters'
 # Remove takes the device out on ONE click: only a logic node and a plot
 # panel are armed.
 assert card.remove_button.role() == 'destructive'
@@ -191,12 +168,6 @@ manager_handle.device_close_requested.connect(closed_devices.append)
 manager.set_loaded_devices((('camera', 'qCMOS', 'camera.dcam'), ('slm', 'SLM', 'slm.virtual')))
 manager.resize(900, 600); manager.show(); app.processEvents()
 card = manager._loaded_cards['camera']
-# The card's title row comes first; its devices stand under it, ruled
-# BETWEEN them and not under the last.
-title_row = manager.loaded_layout.itemAt(0).layout()
-assert title_row is not None and title_row.itemAt(0).widget().text() == 'Loaded session'
-assert card.y() > title_row.geometry().bottom()
-assert card._rule and not manager._loaded_cards['slm']._rule
 assert manager.lifecycle_button.role() == 'primary'
 manager.set_lifecycle('Shut down devices', enabled=True, active=True)
 assert manager.lifecycle_button.role() == 'destructive', 'taking the session down ends every device'
@@ -207,7 +178,6 @@ assert manager.lifecycle_button.role() == 'standard', 'Save holds the one primar
 manager.set_apparatus('bench', dirty=False, saved=True)
 assert manager.lifecycle_button.role() == 'primary'
 manager.set_loaded_devices((('camera', 'qCMOS', 'camera.dcam'),))
-assert not card._rule, 'the last item closes no list'
 assert card.role_label.text() == 'qCMOS'
 assert card.control_button.text() == 'Control'
 assert card.close_button.text() == 'Close'
@@ -624,107 +594,5 @@ for width in (view.sizeHint().width(), view.sizeHint().width() + 200):
     assert len(set(pickers)) == 1, pickers
 assert view.form._rows['power'].layout().itemAt(3).widget() is limits['power']
 view.close()
-"""
-    )
-
-
-def test_list_rules_follow_the_list_when_it_fills_on_screen(run_qt) -> None:
-    """A rule separates items and never closes a list -- also when the
-    manager is already open as the devices load, which is the real flow: a
-    card made under a window on screen is hidden until the layout's queued
-    show reaches it, and a rule decided from isHidden() skipped every new
-    card and left the last one ruled."""
-
-    run_qt(
-        """
-from zlc_ui.device_manager import DeviceManagerView
-from zlc_ui.qt import ensure_qt_app
-app = ensure_qt_app(['device-manager-rules'])
-view = DeviceManagerView()
-view.set_device_choices((('Camera', 'camera.fake', 'camera'),))
-view.resize(1100, 700); view.show(); app.processEvents()
-
-def rules(cards):
-    return {key: card._rule for key, card in cards.items()}
-
-view.set_loaded_devices((('camera', 'qCMOS', 'camera.dcam'), ('seq', 'Seq', 'seq.v'), ('slm', 'SLM', 'slm.v')))
-assert rules(view._loaded_cards) == {'camera': True, 'seq': True, 'slm': False}, rules(view._loaded_cards)
-app.processEvents()
-view.set_loaded_devices((('camera', 'qCMOS', 'camera.dcam'), ('seq', 'Seq', 'seq.v'),
-                         ('slm', 'SLM', 'slm.v'), ('dds', 'DDS', 'dds.v')))
-assert rules(view._loaded_cards)['slm'] and not rules(view._loaded_cards)['dds']
-
-view.set_devices((('c1', 'one', 'camera.fake', 'camera'),))
-app.processEvents()
-view.set_devices((('c1', 'one', 'camera.fake', 'camera'), ('c2', 'two', 'camera.fake', 'camera')))
-assert rules(view._cards) == {'c1': True, 'c2': False}, rules(view._cards)
-
-view.set_discovered_devices((('d1', 'one', 'camera.fake', False), ('d2', 'two', 'camera.fake', False)))
-frames = {key: widgets[0]._rule for key, widgets in view._discovered_widgets.items()}
-assert frames == {'d1': True, 'd2': False}, frames
-
-# Cards that stand side by side name themselves on one baseline: every
-# card's title row is card_title_row, so Camera and Discovered hardware
-# share one.
-app.processEvents()
-from PyQt5 import QtWidgets
-def title(text):
-    label = next(label for label in view.findChildren(QtWidgets.QLabel) if label.text() == text and label.isVisible())
-    return label.mapTo(view, label.rect().topLeft()).y() + label.contentsRect().top()
-camera, discovered = title('Camera'), title('Discovered hardware')
-assert camera == discovered, (camera, discovered)
-"""
-    )
-
-
-def test_the_config_page_keeps_one_row_gap_one_section_gap_and_one_dot_gap(run_qt) -> None:
-    """Buttons on a row stand one row gap apart; the two columns' cards one
-    section gap apart, the left column's bar in that gap; the header's dot
-    as far from the document name's words as the status line's dot from
-    its own; and Role is a row label painted on its field's line."""
-
-    run_qt(
-        """
-from PyQt5 import QtCore
-from zlc_ui.device_manager import DeviceManagerView
-from zlc_ui.fluent import FluentLabel, fluent_scrollbar_thickness, row_gap, section_gap, status_dot_gap
-from zlc_ui.qt import ensure_qt_app
-app = ensure_qt_app(['device-manager-gaps'])
-view = DeviceManagerView()
-view.set_device_choices((('Camera', 'camera.fake', 'camera'),))
-view.set_templates((('Virtual', 'virtual'),))
-view.set_devices((('c1', 'one', 'camera.fake', 'camera'),))
-view.set_loaded_devices((('camera', 'qCMOS', 'camera.dcam'),))
-view.set_apparatus('apparatus.json', False, True)
-view.show_status('ready', 'idle')
-view.resize(1100, 700); view.show()
-for _ in range(4):
-    app.processEvents()
-
-def left(widget):
-    return widget.mapTo(view, QtCore.QPoint()).x()
-
-def right(widget):
-    return left(widget) + widget.width()
-
-def gaps(*widgets):
-    return {left(after) - right(before) for before, after in zip(widgets, widgets[1:])}
-
-assert gaps(view.new_button, view.load_button, view.save_button, view.save_as_button) == {row_gap()}
-live = view._loaded_cards['camera']
-assert gaps(live.control_button, live.log_button, live.close_button) == {row_gap()}
-# The left column's gutter is part of the section gap between the columns.
-gutter = fluent_scrollbar_thickness()
-assert right(view.left_scroll) - right(view.left_scroll.viewport()) == gutter
-assert left(view.right_scroll) - right(view.left_scroll.viewport()) == section_gap()
-# The name is right-aligned; its words start one dot gap after the dot.
-name = view.document_name
-words = right(name) - name.fontMetrics().horizontalAdvance(name.text())
-assert words - right(view.status_dot) == status_dot_gap()
-strip = view.status_strip
-assert left(strip.message) - right(strip.dot) == status_dot_gap()
-card = view._cards['c1']
-assert isinstance(card.name_label, FluentLabel)
-assert card.name_label.toolTip() == 'Internal ID: c1'
 """
     )

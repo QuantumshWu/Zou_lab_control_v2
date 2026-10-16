@@ -11,7 +11,6 @@ from zlc_ui.fluent import (
     row_gap,
     section_gap,
     status_dot_gap,
-    CARD_PAD,
     FIELD_BORDER_PX,
     ElidedLabel,
     FluentLabel,
@@ -25,6 +24,7 @@ from zlc_ui.fluent import (
     FluentStatusDot,
     FluentSwitch,
     add_row_switch,
+    card_pad,
     card_title_row,
     FluentTabWidget,
     fluent_scrollbar_thickness,
@@ -32,7 +32,6 @@ from zlc_ui.fluent import (
     paint_chevron,
     popup_gap,
     retire_widget,
-    scaled_px,
     set_status_ink,
     setting_label_width,
     signals_blocked,
@@ -42,22 +41,9 @@ from zlc_ui.fluent.fluent import _FluentRoundedMenu
 from zlc_data.units import DEFAULT_UNITS, NO_PREFIX, UnitError, format_quantity
 
 from zlc_ui.form.form import FormSpec
-from zlc_ui.form.qt_form import (
-    _CAPPED_KINDS,
-    FluentParameterForm,
-    _form_label_width,
-    being_edited,
-)
+from zlc_ui.form.qt_form import FluentParameterForm, being_edited, share_label_column
 from zlc_ui.console.status_strip import StatusStrip
 from zlc_ui.status import name_words
-
-
-def _name_room() -> int:
-    """The room an eliding label sized to its text keeps beyond the text:
-    the scaled_px(2) ElidedLabel never writes into, and the pixel a
-    fractional advance rounds down."""
-
-    return scaled_px(2) + 1
 
 
 def _rule_gap() -> int:
@@ -256,28 +242,6 @@ class _DeviceCard(FluentFrame):
         if isinstance(value, str):
             self.type_picked.emit(self.instance_id, value)
 
-    def label_need(self) -> int:
-        """The label column this card's own rows need: Role and its form's."""
-
-        need = setting_label_width(("Role",))
-        if self.form is not None:
-            need = max(need, _form_label_width(self.form.spec.fields))
-        return need
-
-    def number_edge(self) -> int:
-        """How wide this card's form draws its number boxes; 0 with none."""
-
-        if self.form is None:
-            return 0
-        return max(
-            (
-                self.form.widget_for(field.key).maximumWidth()
-                for field in self.form.spec.fields
-                if field.kind in _CAPPED_KINDS
-            ),
-            default=0,
-        )
-
     def set_columns(self, label_width: int, number_edge: int) -> None:
         """Stand this card on the window's columns: its labels in the one
         label column, its Role box as wide as the number boxes (a share of
@@ -288,8 +252,6 @@ class _DeviceCard(FluentFrame):
 
         if self.name_label.width() != label_width:
             self.header_row.set_label("Role", width=label_width)
-        if self.form is not None:
-            self.form.set_label_width(label_width)
         cap = number_edge or QtWidgets.QWIDGETSIZE_MAX
         if self.role_edit.maximumWidth() != cap:
             self.role_edit.setMaximumWidth(cap)
@@ -923,9 +885,9 @@ class DeviceManagerView(QtWidgets.QWidget):
         )
         # The dot stands as far from the name's words as the status line's
         # dot from its own.  The name is right-aligned in a label that keeps
-        # a little room it never writes into (_name_room), and that room lies
-        # between the two, so the row's gap is short by it.
-        header.setSpacing(max(0, status_dot_gap() - _name_room()))
+        # a little room it never writes into (ElidedLabel.room), and that room
+        # lies between the two, so the row's gap is short by it.
+        header.setSpacing(max(0, status_dot_gap() - ElidedLabel.room()))
         header.setContentsMargins(0, 0, gutter, 0)
         self._fit_document_name()
         page.addLayout(header)
@@ -961,12 +923,12 @@ class DeviceManagerView(QtWidgets.QWidget):
         right.setContentsMargins(0, 0, 0, 0)
         right.setSpacing(row_gap())
 
-        card_pad = scaled_px(CARD_PAD)
+        inner = card_pad()
         self.discovered_group = FluentGroupBox(
             "Discovered hardware", self.right_body, title_strip_px=0
         )
         self.discovered_layout = QtWidgets.QVBoxLayout(self.discovered_group)
-        self.discovered_layout.setContentsMargins(card_pad, card_pad, card_pad, card_pad)
+        self.discovered_layout.setContentsMargins(inner, inner, inner, inner)
         self.discovered_layout.setSpacing(row_gap())
         self.discover_button = FluentButton("Scan hardware")
         self.discovered_layout.addLayout(
@@ -981,7 +943,7 @@ class DeviceManagerView(QtWidgets.QWidget):
 
         self.loaded_group = FluentGroupBox("Loaded session", self.right_body, title_strip_px=0)
         self.loaded_layout = QtWidgets.QVBoxLayout(self.loaded_group)
-        self.loaded_layout.setContentsMargins(card_pad, card_pad, card_pad, card_pad)
+        self.loaded_layout.setContentsMargins(inner, inner, inner, inner)
         self.loaded_layout.setSpacing(row_gap())
         self.loaded_layout.addLayout(card_title_row("Loaded session")[0])
         self.loaded_cards_layout = _ruled_list()
@@ -1039,7 +1001,7 @@ class DeviceManagerView(QtWidgets.QWidget):
         before its first letter."""
 
         label = self.document_name
-        need = label.fontMetrics().horizontalAdvance(label.text()) + _name_room()
+        need = label.fontMetrics().horizontalAdvance(label.text()) + label.room()
         width = min(need, window_pad(24))
         if label.minimumWidth() != width:
             label.setMinimumWidth(width)
@@ -1050,8 +1012,9 @@ class DeviceManagerView(QtWidgets.QWidget):
 
         if not self._cards:
             return
-        width = max(card.label_need() for card in self._cards.values())
-        edge = max(card.number_edge() for card in self._cards.values())
+        forms = [card.form for card in self._cards.values() if card.form is not None]
+        width = share_label_column(forms, widths=(setting_label_width(("Role",)),))
+        edge = max((form.number_edge_hint() for form in forms), default=0)
         for card in self._cards.values():
             card.set_columns(width, edge)
 
@@ -1350,7 +1313,7 @@ class DeviceManagerView(QtWidgets.QWidget):
         title = name_words(domain)
         group = FluentGroupBox(title, self.left_body, title_strip_px=0)
         group_layout = QtWidgets.QVBoxLayout(group)
-        pad = scaled_px(CARD_PAD)
+        pad = card_pad()
         # The title row is laid out the way every card of this window lays
         # its own: its name level with the neighbouring cards' names, one
         # row's gap above the first device's header row.

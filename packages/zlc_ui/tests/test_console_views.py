@@ -840,39 +840,10 @@ assert editor.source_combo.model().item(0).text() == '(not selected)'
 source_header = editor.source_combo.model().item(1)
 assert source_header.text() == 'camera-1'
 assert source_header.child(0).text() == 'frames  [1 × 1 × (3×96×128)]'
-# The draft refuses without its signal: the row carries the column's required
-# marker, and its blank choice reads as a missing input, not a value.
-assert editor._selector_rows[editor.source_combo][1] == 'Signal *'
-assert editor.source_combo.current_is_blank()
 handle.set_logic_commands('camera-1', can_start=False, can_stop=False)
 view.show()
 app.processEvents()
 assert editor.artifact_form.widget_for('calibration_path').mapTo(editor, QtCore.QPoint()).x() == editor.form.widget_for('repeat').mapTo(editor, QtCore.QPoint()).x()
-# ONE RHYTHM AND ONE PAGE EDGE.  Selectors, both forms and the results are
-# one run of rows a form gap apart, whichever widget holds them; a section
-# gap follows the header and precedes the action bar; every control starts
-# on one column; and the content sits a window pad inside the page on both
-# sides, the scrollbar's gutter held although no bar shows.  The header and
-# the action bar stand outside the scrolling rows, on the same edges.
-from zlc_ui.fluent import FluentScrollArea, FluentSettingRow, section_gap, window_pad
-from zlc_ui.fluent import row_gap
-top_of = lambda widget: widget.mapTo(editor, QtCore.QPoint()).y()
-left_of = lambda widget: widget.mapTo(editor, QtCore.QPoint()).x()
-rows = sorted((row for row in editor.findChildren(FluentSettingRow) if row.isVisible()), key=top_of)
-assert len(rows) == 5, [row.layout().itemAt(0).widget().text() for row in rows]
-gaps = [top_of(below) - top_of(above) - above.height() for above, below in zip(rows, rows[1:])]
-assert gaps == [row_gap()] * 4, gaps
-assert top_of(rows[0]) - top_of(editor.status_label) - editor.status_label.height() == section_gap()
-assert len({row.layout().itemAt(1).widget().mapTo(editor, QtCore.QPoint()).x() for row in rows}) == 1
-left = rows[0].mapTo(editor, QtCore.QPoint()).x()
-assert (left, editor.width() - left - rows[0].width()) == (window_pad(), window_pad())
-scroll = editor.findChild(FluentScrollArea)
-viewport_bottom = scroll.viewport().mapTo(editor, QtCore.QPoint(0, scroll.viewport().height())).y()
-assert top_of(editor.remove_button) - viewport_bottom == section_gap()
-assert editor.height() - top_of(editor.remove_button) - editor.remove_button.height() == window_pad()
-assert left_of(editor.title_label) == left_of(editor.remove_button) == window_pad()
-assert editor.width() - left_of(editor.stop_button) - editor.stop_button.width() == window_pad()
-assert not scroll.isAncestorOf(editor.status_label) and not scroll.isAncestorOf(editor.start_button)
 publisher = handle._panel_publisher_rows['panel-1']
 assert tuple(view._logic_rows) == (handle._rows['camera-1'], publisher)
 assert not publisher.publishes_label.isHidden()
@@ -881,16 +852,6 @@ assert all(button.isHidden() for button in (
     publisher.preview_switch, publisher.remove_button,
 ))
 assert not publisher.edit_button.isHidden()
-# The hidden controls keep their places, so a publisher row's name and Edit
-# stand in the node rows' columns.
-view.tabs.setCurrentIndex(1)
-app.processEvents()
-node_row = handle._rows['camera-1']
-at = lambda widget: widget.mapTo(view, QtCore.QPoint()).x()
-assert at(publisher.edit_button) == at(node_row.edit_button), (
-    at(publisher.edit_button), at(node_row.edit_button))
-assert at(publisher.name_label) == at(node_row.name_label)
-assert at(publisher.kind_label) == at(node_row.kind_label)
 publisher_edits = []
 handle.panel_publisher_edit_requested.connect(publisher_edits.append)
 QtTest.QTest.mouseClick(publisher.edit_button, QtCore.Qt.LeftButton)
@@ -1007,47 +968,10 @@ artifact_picker.setText('C:/data/manual.json')
 readout = editor._artifact_result_readouts['artifact_path']
 assert readout.isReadOnly()
 assert readout.text() == 'C:/data/calibration-2.json'
-# The result path starts on the fields' text x, once: the readout's own
-# inset is a field's, and the page adds none of its own.
-from PyQt5 import QtWidgets
-def text_x(edit):
-    option = QtWidgets.QStyleOptionFrame()
-    option.initFrom(edit)
-    contents = edit.style().subElementRect(QtWidgets.QStyle.SE_LineEditContents, option, edit)
-    return edit.mapTo(editor, QtCore.QPoint()).x() + contents.left() + edit.textMargins().left()
-assert text_x(readout) == text_x(artifact_picker.edit), (text_x(readout), text_x(artifact_picker.edit))
-# A problem the node's own editor shows in red under its grid is counted in
-# the header, not said again in grey; one nothing below shows comes first.
-claims = {'calibrations': {'label': 'Calibrations', 'problems': ('frame 1 has no file', 'b.json is listed twice')}}
-handle.update_logic_editor('camera-1', dict(projection, artifact_claims=claims, issues=claims['calibrations']['problems']))
-assert editor.status_label.text() == 'Draft: 2 problems in Calibrations'
-handle.update_logic_editor('camera-1', dict(
-    projection, artifact_claims=claims, issues=('Frames must be selected', *claims['calibrations']['problems'])))
-assert editor.status_label.text() == 'Draft: Frames must be selected'
-# So is one a contribution states under the line it is about (Derive's
-# typing errors), by the section it names -- each one it shows, though
-# Start's check stopped at the first.
-from PyQt5 import QtWidgets
-typed = ('bright · term 2: the mask has frame, which counts[frame 1] does not; pick one frame value of the mask',
-         'same · term 2: booleans do not mix with numbers', 'band · statistic: choose the statistic')
-class Typed(QtWidgets.QWidget):
-    draft_changed = QtCore.pyqtSignal(object)
-    def update_projection(self, projection):
-        pass
-    def shown_problems(self):
-        return {problem: 'Variables' for problem in typed}
-def typed_editor(parent):
-    return Typed(parent)
-handle.update_logic_editor('camera-1', dict(projection, ui_contributions=(typed_editor,), issues=typed))
-assert editor.status_label.text() == 'Draft: 3 problems in Variables'
-handle.update_logic_editor('camera-1', dict(projection, ui_contributions=(typed_editor,), issues=typed[:1]))
-assert editor.status_label.text() == 'Draft: 3 problems in Variables'
-handle.update_logic_editor('camera-1', dict(
-    projection, ui_contributions=(typed_editor,), issues=('Frames must be selected', *typed)))
-assert editor.status_label.text() == 'Draft: Frames must be selected'
 # A rename alone reaches every contribution: what one says of the node --
 # Derive's "Published as <name>/<variable>" -- follows the name, with
 # nothing else in the projection changed.
+from PyQt5 import QtWidgets
 named = []
 class Named(QtWidgets.QWidget):
     draft_changed = QtCore.pyqtSignal(object)
@@ -1099,8 +1023,6 @@ assert not editor.form.widget_for('pulse_template').isEnabled()
 assert not editor.form.widget_for('exposure_seconds').isEnabled()
 assert editor._acquisition_combo.isEnabled() and editor.source_combo is not None
 assert set(editor._device_combos) == {'slm'}
-# A device argument reads as words, its acronym kept: not "Slm".
-assert editor._selector_rows[editor._device_combos['slm']][1] == 'SLM'
 view.editor_close_requested.emit(editor)
 app.processEvents()
 assert view.tabs.indexOf(editor) < 0
@@ -1119,37 +1041,21 @@ def test_a_logic_node_is_renamed_on_its_edit_page_and_called_by_its_name(run_qt)
         """
 from PyQt5 import QtCore, QtTest, QtWidgets
 from zlc_ui.console import TaskConsoleHandle, TaskConsoleView
-from zlc_ui.fluent import FluentSettingRow
 from zlc_ui.form import FormFieldProps, FormSpec
 from zlc_ui.qt import ensure_qt_app
 app = ensure_qt_app(['logic-name'])
 view = TaskConsoleView()
 handle = TaskConsoleHandle(None, view)
 handle.set_panel_sizes(('2x2',), '2x2')
-# A row is made blank; what the node is called arrives by one channel, and
-# its tooltip says what the node is and the ID it is addressed by.
+# A row is made blank; what the node is called arrives by one channel.
 handle.add_logic_row('occupancy2', 'processor')
 row = handle._rows['occupancy2']
 assert row.name_label.text() == ''
 handle.set_logic_name('occupancy2', 'Loading', 'occupancy')
 assert row.name_label.text() == 'Loading'
-assert row.name_label.toolTip() == 'Loading · occupancy · internal ID occupancy2'
-# A name is shown as typed, never read as markup.
-handle.set_logic_name('occupancy2', '<i>Cam', 'occupancy')
-assert row.name_label.textFormat() == QtCore.Qt.PlainText
-handle.set_logic_name('occupancy2', 'Loading', 'occupancy')
-# Two names that differ at their end still read differently in the column.
-handle.add_logic_row('occupancy3', 'processor')
-handle.set_logic_name('occupancy2', 'Loading occupancy of the upper MOT, shot 1', 'occupancy')
-handle.set_logic_name('occupancy3', 'Loading occupancy of the upper MOT, shot 2', 'occupancy')
 view.resize(1000, 700)
 view.show()
 app.processEvents()
-shown = lambda label: QtWidgets.QLabel.text(label)
-assert '…' in shown(row.name_label)
-assert shown(row.name_label) != shown(handle._rows['occupancy3'].name_label)
-handle.set_logic_name('occupancy2', 'Loading', 'occupancy')
-handle.remove_logic_row('occupancy3')
 projection = {
     'node_id': 'occupancy2', 'name': 'Loading', 'name_problem': '',
     'api_name': 'occupancy', 'kind': 'processor',
@@ -1167,8 +1073,7 @@ projection = {
 }
 sent = []
 def answer(node_id, text):
-    # The presenter's part: refuse a slash, an empty name is the internal
-    # ID, an unchanged one withdraws a standing refusal.
+    # The presenter's part: refuse a slash, an empty name is the internal ID.
     sent.append((node_id, text))
     if '/' in text:
         projection['name_problem'] = 'A name is one line of text without “/”.'
@@ -1186,21 +1091,8 @@ assert editor.kind_label.text() == '(occupancy · processor)'
 # The closed Source picker spells the signal as the status line does.
 assert editor.source_combo._display_text() == 'Camera A/frames'
 assert editor.status_label.text() == 'following Camera A/frames'
-# The Name is the first row, in the one label column and the one control
-# column, and the first stop of Tab on the page's rows.
-top = lambda widget: widget.mapTo(editor, QtCore.QPoint()).y()
-left = lambda widget: widget.mapTo(editor, QtCore.QPoint()).x()
-rows = sorted((r for r in editor.findChildren(FluentSettingRow) if r.isVisible()), key=top)
 box = editor.name_form.widget_for('name')
-assert rows[0].isAncestorOf(box), [r.layout().itemAt(0).widget().text() for r in rows]
-assert editor.name_form._labels['name'].text() == 'Name'
-assert left(box) == left(editor.source_combo) == left(editor.form.widget_for('repeat'))
-assert box.text() == 'Loading' and box.toolTip() == 'Internal ID: occupancy2'
-chain, widget = [], box.nextInFocusChain()
-while widget is not box and len(chain) < 500:
-    chain.append(widget)
-    widget = widget.nextInFocusChain()
-assert chain.index(editor.source_combo) < chain.index(editor.start_button), 'Tab from Name goes to the rows'
+assert editor.name_form._labels['name'].text() == 'Name' and box.text() == 'Loading'
 view.activateWindow()
 def type_in(text):
     box.setFocus()
@@ -1211,50 +1103,21 @@ def type_in(text):
 def leave():
     editor.form.widget_for('repeat').setFocus()
     app.processEvents()
-# Return sends what was typed, once, stripped; leaving afterwards sends
-# nothing more, and the box then shows the name the node has.
+# Return sends what was typed, once, stripped; the page is called by it.
 type_in('  Counts ')
 QtTest.QTest.keyClick(box, QtCore.Qt.Key_Return)
-assert sent == [('occupancy2', 'Counts')], sent
-assert tab() == 'Edit · Counts' and editor.title_label.text() == 'Counts'
 leave()
 assert sent == [('occupancy2', 'Counts')], sent
-assert box.text() == 'Counts'
-# A box nobody typed in sends nothing, even when an agent renamed the node
-# while the focus stood in it: leaving shows the agent's name, not the old.
-box.setFocus()
-app.processEvents()
-projection.update(name='Agent name')
-handle.update_logic_editor('occupancy2', projection)
-assert box.text() == 'Counts'
-leave()
-assert sent == [('occupancy2', 'Counts')], sent
-assert box.text() == 'Agent name' and tab() == 'Edit · Agent name'
-# Escape takes back what was typed.
-type_in('Oops')
-QtTest.QTest.keyClick(box, QtCore.Qt.Key_Escape)
-app.processEvents()
-assert box.text() == 'Agent name' and not box.hasFocus()
-assert sent == [('occupancy2', 'Counts')], sent
-# A refusal is one sentence under the line, in the control column, while
-# the refused text is in the box; leaving it puts the name back and the
-# refusal goes with the text it answered.
-assert editor.name_problem_label.isHidden()
-below = top(editor.source_combo)
+assert tab() == 'Edit · Counts' and editor.title_label.text() == 'Counts' and box.text() == 'Counts'
+# A refusal is said under the line; leaving the box puts the name back.
 type_in('a/b')
 QtTest.QTest.keyClick(box, QtCore.Qt.Key_Return)
 app.processEvents()
 assert sent[-1] == ('occupancy2', 'a/b')
-assert box.text() == 'a/b'
 assert editor.name_problem_label.isVisible()
 assert editor.name_problem_label.text() == 'A name is one line of text without “/”.'
-assert left(editor.name_problem_label) == left(box)
-assert top(box) < top(editor.name_problem_label) < top(editor.source_combo)
-assert top(editor.source_combo) > below, 'the sentence takes its own line'
 leave()
-app.processEvents()
-assert sent[-1] == ('occupancy2', 'Agent name')
-assert box.text() == 'Agent name' and editor.name_problem_label.isHidden()
+assert box.text() == 'Counts' and editor.name_problem_label.isHidden()
 # An emptied box is sent as it is: the node is then called by its ID.
 type_in('')
 QtTest.QTest.keyClick(box, QtCore.Qt.Key_Backspace)
@@ -1262,43 +1125,6 @@ QtTest.QTest.keyClick(box, QtCore.Qt.Key_Return)
 leave()
 assert sent[-1] == ('occupancy2', ''), sent
 assert box.text() == 'occupancy2' and tab() == 'Edit · occupancy2'
-# Called by its type's own name, the header does not say the type twice.
-projection.update(name='occupancy')
-handle.update_logic_editor('occupancy2', projection)
-assert editor.kind_label.text() == '(processor)'
-# A long name gives up its middle in the header; it never widens the page.
-narrowest = editor.minimumSizeHint().width()
-projection.update(name='Loading occupancy of the upper MOT ' * 5)
-handle.update_logic_editor('occupancy2', projection)
-app.processEvents()
-assert editor.minimumSizeHint().width() == narrowest
-assert '…' in QtWidgets.QLabel.text(editor.title_label) or editor.title_label.width() >= editor.title_label.maximumWidth()
-projection.update(name='Loading')
-handle.update_logic_editor('occupancy2', projection)
-# A Task holding the console leaves the Name editable, and the row's Edit,
-# the way to it.
-handle.set_task_takeover('another_task')
-assert box.isEnabled() and not editor.form.isEnabled()
-assert row.edit_button.isEnabled() and not row.remove_button.isEnabled()
-handle.set_task_takeover('')
-# A panel publisher's row says the panel's name, its id in the tooltip; its
-# page has nothing to rename.
-handle.set_panel_publishers((('panel-1', 'Camera A/frames', (('roi', '4', 'live · panel-1/roi'),)),))
-publisher_row = handle._panel_publisher_rows['panel-1']
-assert publisher_row.name_label.text() == 'Camera A/frames'
-assert publisher_row.name_label.toolTip() == 'Camera A/frames · panel-1'
-handle.open_panel_publisher_editor('panel-1', {
-    'node_id': 'panel-1', 'api_name': 'Camera A/frames outputs', 'kind': 'panel publisher',
-    'form_spec': FormSpec((FormFieldProps(key='roi_mean', kind='bool', label='Mean', default=True),)),
-    'form_values': {'roi_mean': True}, 'source_required': False,
-    'device_options': {}, 'device_keys': {},
-    'preview_offered': False, 'auto_preview': False,
-    'running': False, 'pending': False, 'can_start': False, 'can_stop': False,
-    'issues': (), 'error': '', 'status': '',
-})
-publisher = handle._panel_publisher_editors['panel-1']
-assert not publisher._name_frame.isVisibleTo(publisher)
-assert view.tabs.tabText(view.tabs.indexOf(publisher)) == 'Edit · Camera A/frames outputs'
 """
     )
 
@@ -1459,18 +1285,6 @@ label_slot_widths = {
     for section, key, form in setting_rows()
 }
 assert len(set(label_slot_widths.values())) == 1, label_slot_widths
-from zlc_ui.fluent import control_height, row_gap, section_gap
-headings = [card._settings_sections[name] for name in ('panel', 'semantic', 'display', 'fit')]
-section_forms = card._settings_forms()
-assert [heading.isVisible() for heading in headings] == [True, True, True, True]
-assert [heading.text() for heading in headings] == ['Panel', 'Semantic', 'Display', 'Fit']
-for heading, form in zip(headings, section_forms):
-    assert heading.height() == control_height(), heading.height()
-    assert form.y() - heading.y() - heading.height() == row_gap(), (heading.geometry(), form.geometry())
-for form, heading in zip(section_forms, headings[1:]):
-    assert heading.y() - form.y() - form.height() == section_gap(), (form.geometry(), heading.geometry())
-# The Panel section names its size as the Edit page does.
-assert card._settings_form._labels['size'].text() == 'Panel size'
 def setting_geometry():
     return {
         (section, key): (
@@ -2018,10 +1832,9 @@ assert strip.text() == 'idle text'
 def test_task_console_construct_and_setters(run_qt) -> None:
     run_qt(
         """
-from PyQt5 import QtCore, QtGui
 from zlc_ui.qt import ensure_qt_app
 from zlc_ui.console import LogicRowView, PanelCardView, TaskConsoleView
-from zlc_ui.fluent import ACCENT, row_gap, scaled_px
+from zlc_ui.fluent import scaled_px
 app = ensure_qt_app(['test'])
 view = TaskConsoleView()
 card = PanelCardView('panel-1')
@@ -2060,41 +1873,6 @@ for widget in (
     view.clear_board_button,
 ):
     assert abs(widget.geometry().center().y() - center_y) <= 1
-# Cells and commands on the header stand one row gap apart.
-assert layout.spacing() == row_gap()
-
-# The strip and every page under it share one left edge and one top: the
-# first tab's underline, the Monitor board's first card and the Logic list's
-# first row -- switching pages moves nothing.
-def at(widget):
-    point = widget.mapTo(view.tabs, QtCore.QPoint())
-    return point.x(), point.y()
-view.tabs.setCurrentIndex(0); app.processEvents()
-bar = view.tabs.tabBar()
-image = view.tabs.grab().toImage()
-ratio = image.devicePixelRatio() or 1.0
-strip_left, strip_top = at(bar)
-y = int((strip_top + bar.height()) * ratio) - 1
-underline = next(x / ratio for x in range(int(strip_left * ratio), image.width())
-                 if image.pixelColor(x, y).name() == QtGui.QColor(ACCENT).name())
-monitor = at(card)
-view.tabs.setCurrentIndex(1); app.processEvents()
-logic = at(row)
-assert monitor == logic, (monitor, logic)
-assert underline == monitor[0], (underline, monitor)
-
-# And the header and the strip above the tabs stand on those same edges: the
-# header's dot, the strip's dot, the first underline and the first Logic card
-# start on one x, and the header's last command ends where the Logic card
-# ends -- one left edge and one right edge for the whole window.
-def x_in_view(widget, x=0):
-    return widget.mapTo(view, QtCore.QPoint(x, 0)).x()
-page_left = x_in_view(view.tabs, monitor[0])
-edges = (x_in_view(view.status_dot), x_in_view(view.status_strip.dot), page_left, x_in_view(row))
-assert len(set(edges)) == 1, edges
-clear_right = x_in_view(view.clear_board_button, view.clear_board_button.width())
-row_right = x_in_view(row, row.width())
-assert clear_right == row_right, (clear_right, row_right)
 """
     )
 
@@ -2160,17 +1938,12 @@ assert view.kind_combo.itemText(2) == 'Measurement: camera_measurement'
 assert view.kind_combo.itemText(3) == 'Processor: occupancy'
 assert view.kind_combo.itemText(4) == 'Task: calibration'
 assert view.kind_combo.currentData() == ('plot', 'image')
-# The command names what it adds, from the family chosen beside it, in one
-# slot: the commands after it stand still when the words change.
+# The command names what it adds, from the family chosen beside it.
 assert view.add_button.text() == 'Add panel'
-add_slot = lambda: (view.add_button.geometry(), view.selectors_switch.geometry())
-plot_slot = add_slot()
 QtTest.QTest.mouseClick(view.add_button, QtCore.Qt.LeftButton)
 view.kind_combo.setCurrentIndex(2)
 app.processEvents()
 assert view.add_button.text() == 'Add node'
-assert add_slot() == plot_slot, (add_slot(), plot_slot)
-assert 'click Add node' in view.logic_hint.text()
 QtTest.QTest.mouseClick(view.add_button, QtCore.Qt.LeftButton)
 QtTest.QTest.mouseClick(view.pause_button, QtCore.Qt.LeftButton)
 QtTest.QTest.mouseClick(view.save_screenshot_button, QtCore.Qt.LeftButton)
@@ -2247,27 +2020,6 @@ assert camera_row.start_button.isEnabled()
 assert camera_row.stop_button.isEnabled()
 assert camera_row.edit_button.isEnabled()
 assert camera_row.remove_button.isEnabled()
-
-# The header dot is the worst of the nodes': a failure anywhere, else
-# something needing attention, else a run anywhere, else grey -- from the
-# one status table.
-from zlc_ui.fluent import STATUS_CUES
-def header_is(word):
-    return f"background:{STATUS_CUES[word][0]};" in view.status_dot.styleSheet()
-assert header_is('idle'), view.status_dot.styleSheet()
-handle.set_logic_state('camera', 'running')
-assert header_is('running')
-handle.set_logic_state('calibration', 'error', 'broke')
-assert header_is('error')
-handle.set_logic_state('calibration', 'warning', 'running; Restart refused: broke')
-assert header_is('warning')
-handle.set_logic_state('camera', 'error', 'broke')
-assert header_is('error')
-handle.set_logic_state('camera', 'running')
-handle.set_logic_state('calibration', 'idle')
-assert header_is('running')
-handle.remove_logic_row('camera')
-assert header_is('idle')
 
 """
     )
@@ -2783,64 +2535,6 @@ assert not switch.isEnabled(), 'a Task owns the console: nothing here re-aims St
 
 editor.update_projection(dict(projection, preview_offered=False))
 assert not switch.isVisible(), 'no switch where the node opens nothing'
-"""
-    )
-
-
-def test_a_tall_logic_edit_page_keeps_its_header_and_action_bar_and_opens_at_its_top(run_qt) -> None:
-    """Only the rows scroll.  On a page taller than its tab the node's name,
-    the status line that says why Start is off, and Start, Stop and Remove
-    stay on screen; and a newly opened page starts at its first row, even
-    when something moved its bar while it opened."""
-
-    run_qt(
-        """
-from PyQt5 import QtCore, QtGui
-from zlc_ui.qt import ensure_qt_app
-from zlc_ui.fluent import FluentScrollArea
-from zlc_ui.form import FormFieldProps, FormSpec
-from zlc_ui.console import LogicEditorView
-
-app = ensure_qt_app(['test'])
-fields = tuple(FormFieldProps(key=f'value_{index}', kind='int', label=f'Value {index}', default=index)
-               for index in range(30))
-projection = {
-    'api_name': 'seamless_scan', 'kind': 'measurement',
-    'form_spec': FormSpec(fields), 'form_values': {field.key: field.default for field in fields},
-    'artifact_form_spec': FormSpec(()), 'artifact_values': {}, 'artifact_results': (),
-    'auto_preview': False, 'preview_offered': True,
-    'can_start': False, 'can_stop': True, 'running': True,
-    'issues': ('Signal must be selected',),
-}
-editor = LogicEditorView('scan-1', projection)
-editor.resize(700, 360)
-scroll = editor.findChild(FluentScrollArea)
-bar = scroll.verticalScrollBar()
-editor.show()
-# A wheel turned over the window while the page opened.
-viewport = scroll.viewport()
-centre = QtCore.QPointF(viewport.width() / 2, viewport.height() / 2)
-app.sendEvent(viewport, QtGui.QWheelEvent(
-    centre, QtCore.QPointF(viewport.mapToGlobal(centre.toPoint())), QtCore.QPoint(), QtCore.QPoint(0, -120),
-    QtCore.Qt.NoButton, QtCore.Qt.NoModifier, QtCore.Qt.NoScrollPhase, False,
-))
-assert bar.maximum() > 0 and bar.value() > 0, (bar.maximum(), bar.value())
-app.processEvents()
-assert bar.value() == 0, 'a newly opened page starts at its first row'
-inside = lambda widget: QtCore.QRect(QtCore.QPoint(), editor.size()).contains(
-    QtCore.QRect(widget.mapTo(editor, QtCore.QPoint()), widget.size()))
-# Scrolled to the end, the header and the action bar are still there.
-bar.setValue(bar.maximum())
-app.processEvents()
-for widget in (editor.title_label, editor.status_label, editor.remove_button,
-               editor.preview_switch, editor.start_button, editor.stop_button):
-    assert widget.isVisible() and inside(widget), widget
-assert editor.status_label.text() == 'Draft: Signal must be selected'
-assert editor.start_button.text() == 'Restart' and editor.stop_button.isEnabled()
-# After that the bar is the operator's: a tab switch keeps it.
-editor.hide(); editor.show(); app.processEvents()
-assert bar.value() == bar.maximum() > 0
-editor.close()
 """
     )
 

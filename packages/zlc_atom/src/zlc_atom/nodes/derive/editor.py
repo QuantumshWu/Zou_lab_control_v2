@@ -31,16 +31,15 @@ from zlc_runtime import stable_signal_key
 from zlc_ui.fluent import (
     AXIS_GROUP_COLORS, FluentButton, FluentColumnLine, FluentColumnSet,
     FluentComboBox, FluentFrame, FluentLabel, FluentLineEdit, FluentSegmentedButtons, FluentSwitch, card_pad,
-    error_note_label, field_text_inset, hold_place, muted_note_label, retire_widget, row_gap,
+    card_title_row, error_note_label, field_text_inset, hold_place, muted_note_label, retire_widget, row_gap,
     scaled_px, section_gap, set_status_ink, show_problem, signals_blocked, status_cue,
 )
-from zlc_ui.fluent.column_set import section_header
 from zlc_workbench.topology import signal_text
 
 from zlc_atom.nodes._framework.frames import FIRST, LAST
 
 from .expression import (
-    CATEGORIES, DOMAINS, NO_PUBLISHED, OPERATORS, STATISTICS, TERM_DEFAULTS, axis_groups,
+    CATEGORIES, DOMAINS, NO_PUBLISHED, OPERATORS, STATISTICS, STATISTICS_FOR, TERM_DEFAULTS, axis_groups,
     changing_axes, compact_variable, describe_schema, error_stage, frames_kept, pick_values, term_text,
     typed_variables, where_notes,
 )
@@ -843,11 +842,9 @@ class _VariableCard(FluentFrame):
         _visible(self.add["statistic"], not shown, hold=False)
         strip = line["strip"]
         strip.set_current(row["statistic"] or None)
-        boolean = reducible is not None and _boolean(reducible)
         for name in STATISTICS:
-            withheld = reducible is not None and (
-                name in ("min", "max", "std") if boolean else name in ("any", "all"))
-            strip.button(name).setEnabled(not withheld or name == row["statistic"])
+            fits = reducible is None or name in STATISTICS_FOR[_boolean(reducible)]
+            strip.button(name).setEnabled(fits or name == row["statistic"])
         items = []
         for word, _domain, axes in (() if reducible is None else axis_groups(reducible)):
             items.append(_header(word, _COLOURS[word], None, True))
@@ -963,7 +960,7 @@ class DeriveEditor(QtWidgets.QWidget):
 
         self.add_variable = FluentButton("Add variable", self)
         self.add_variable.clicked.connect(self._add)
-        self.variables_title, header = section_header("Variables", actions=(self.add_variable,))
+        header, self.variables_title = card_title_row("Variables", self.add_variable)
         # A new section under the Inputs row: the section gap above its title.
         layout.addSpacing(section_gap() - row_gap())
         layout.addLayout(header)

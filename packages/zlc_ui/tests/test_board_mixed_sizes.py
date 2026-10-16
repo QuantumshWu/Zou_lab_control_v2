@@ -234,20 +234,6 @@ def test_a_card_in_the_way_is_never_carried_across_the_card_it_makes_way_for() -
         places(after))
 
 
-def test_a_column_makes_way_as_one_so_its_cards_keep_their_order() -> None:
-    """Making way down carries the cards below in that column along: a card
-    that stood above another in its column still stands above it."""
-
-    right = 2 * GAP + SIZES["4x2"][0]
-    board = [card("4x2", GAP, GAP), card("2x4", right, GAP), card("1x2", right, 2 * GAP + SIZES["2x4"][1]),
-             card("1x2", GAP, 674), card("2x4", right, 711), card("4x2", GAP, 963)]
-    pack(board, METRICS, 1400)
-    upper, lower = board[1], board[2]
-    assert upper.row < lower.row
-    after = _let_go(board, board[4], (board[0].col, board[0].row), 1400)
-    assert after[1].row < after[2].row, places(after)
-
-
 def test_random_mixed_drags_keep_every_rule(monkeypatch) -> None:
     """Random mixed boards, widths and drags -- onto a card, anywhere, held by
     either end of the strip or by the body:

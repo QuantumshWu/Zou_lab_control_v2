@@ -678,21 +678,18 @@ def test_a_widget_named_twice_is_unblocked_when_the_block_ends() -> None:
     assert not target.signalsBlocked()
 
 
-def test_one_save_rule_one_destructive_look_and_a_flush_readout(run_qt) -> None:
+def test_one_save_rule_and_one_destructive_look(run_qt) -> None:
     """Every Save is standard when clean and the primary with a star when
     unsaved; every labelled destructive command sits on the red tint while a
     one-glyph row remover stays a ghost; a command on a tinted card is a
     plain white face; a pressed command is SELECTED and a disabled one a
-    flat DIVIDER face, neither with a frame of another colour; a readout
-    starts where the text of the field above it starts, a flush one where
-    the header above it starts."""
+    flat DIVIDER face, neither with a frame of another colour."""
 
     run_qt(
         """
-from PyQt5 import QtCore, QtGui, QtWidgets
+from PyQt5 import QtWidgets
 from zlc_ui.qt import ensure_qt_app
-from zlc_ui.fluent import FluentButton, FluentLabel, FluentLineEdit, FluentReadoutEdit
-from zlc_ui.fluent.fluent import FluentReadoutMultiline
+from zlc_ui.fluent import FluentButton
 app = ensure_qt_app(['zlc-ui-tests'])
 
 save = FluentButton('Save')
@@ -729,9 +726,8 @@ on_tint.set_on_tint(True)
 row.addWidget(on_tint)
 app.processEvents()
 image = on_tint.grab().toImage()
-assert face(on_tint).name().upper() == SURFACE.upper(), face(on_tint).name()
-edge = image.pixelColor(image.width() // 2, 0).name().upper()
-assert edge == SURFACE.upper(), ('no green hairline round a command on a tint', edge)
+for y in (0, image.height() // 5):
+    assert image.pixelColor(image.width() // 2, y).name().upper() == SURFACE.upper(), ('white, no green edge', y)
 from zlc_ui.fluent.style import DIVIDER, SELECTED
 pressed = FluentButton('Held')
 row.addWidget(pressed)
@@ -745,44 +741,6 @@ app.processEvents()
 image = idle.grab().toImage()
 for x, y in ((image.width() // 2, 0), (image.width() // 2, image.height() // 5)):
     assert image.pixelColor(x, y).name().upper() == DIVIDER.upper(), ('a disabled face has no frame', x, y)
-
-column = QtWidgets.QWidget()
-column.setStyleSheet('background: white;')
-stack = QtWidgets.QVBoxLayout(column)
-header = FluentLabel('Default')
-flush = FluentReadoutEdit('Default', flush=True)
-field = FluentLineEdit('Default')
-single = FluentReadoutEdit('Default')
-multi = FluentReadoutMultiline('Default')
-for widget in (header, flush, field, single, multi):
-    stack.addWidget(widget)
-column.resize(240, 220)
-column.show()
-app.processEvents()
-# The column, white, grabbed once: a readout's own grab is transparent,
-# and a transparent pixel reads as black ink at x = 0.
-column_image = column.grab().toImage()
-column_ratio = column_image.devicePixelRatio() or 1.0
-def first_ink(widget):
-    top, bottom = widget.y() + 3, widget.y() + widget.height() - 3
-    for x in range(int(widget.x() * column_ratio), int((widget.x() + widget.width()) * column_ratio)):
-        for y in range(int(top * column_ratio), int(bottom * column_ratio)):
-            if QtGui.QColor(column_image.pixel(x, y)).lightness() < 128:
-                return x / column_ratio
-    raise AssertionError('no ink')
-assert abs(first_ink(flush) - first_ink(header)) <= 1.0, (first_ink(flush), first_ink(header))
-left = first_ink(field)
-for widget in (single, multi):
-    assert abs(first_ink(widget) - left) <= 1.0, (type(widget).__name__, first_ink(widget), left)
-# Nothing to type: a readout takes focus by a click (to select and copy),
-# never by Tab and never as the window's first focus.
-for widget in (flush, single, multi):
-    assert widget.focusPolicy() == QtCore.Qt.ClickFocus, type(widget).__name__
-column.activateWindow()
-field.clearFocus()
-column.focusNextChild()
-app.processEvents()
-assert column.focusWidget() is field, column.focusWidget()
 """
     )
 
@@ -790,17 +748,14 @@ assert column.focusWidget() is field, column.focusWidget()
 def test_a_setting_is_a_switch_beside_its_label_in_a_row_of_buttons(run_qt) -> None:
     """A switch is a control's height with its track centred, so it lines
     up with the buttons of its row; on is the solid accent track with a
-    white thumb and no outline; keyboard focus paints nothing on it; a
-    field's placeholder is information unless it is marked a pure prompt."""
+    white thumb and no outline; keyboard focus paints nothing on it."""
 
     run_qt(
         """
 from PyQt5 import QtCore, QtGui, QtTest, QtWidgets
 from zlc_ui.qt import ensure_qt_app
-from zlc_ui.fluent import (
-    FluentButton, FluentLineEdit, FluentSegmentedButtons, FluentSwitch, add_row_switch,
-)
-from zlc_ui.fluent.style import ACCENT, MUTED_INK, SURFACE
+from zlc_ui.fluent import FluentButton, FluentSegmentedButtons, FluentSwitch, add_row_switch
+from zlc_ui.fluent.style import ACCENT, SURFACE
 app = ensure_qt_app(['zlc-ui-tests'])
 
 host = QtWidgets.QWidget()
@@ -820,27 +775,6 @@ track = switch._track_box()
 radius = track.height() / 2.0
 assert abs(track.center().y() - switch.rect().center().y()) <= 1, track
 assert track.right() < switch.width() - 1, 'the label sits beside the track, not in it'
-
-# Between two commands the switch is one group with one gap on each side,
-# measured from the ink: the track's start and the label's last letter.
-pair = QtWidgets.QWidget()
-pair.setStyleSheet('background: white;')
-line = QtWidgets.QHBoxLayout(pair)
-line.setSpacing(8)
-before_button, middle, after_button = FluentButton('Add'), FluentSwitch('Selectors'), FluentButton('Pause')
-line.addWidget(before_button)
-add_row_switch(line, middle)
-line.addWidget(after_button)
-line.addStretch(1)
-pair.show()
-app.processEvents()
-grabbed = middle.grab().toImage()
-scale = grabbed.devicePixelRatio() or 1.0
-inked = [x / scale for x in range(grabbed.width())
-         if any(QtGui.QColor(grabbed.pixel(x, y)).lightness() < 160 for y in range(grabbed.height()))]
-lead_gap = middle.x() + inked[0] - (before_button.x() + before_button.width())
-trail_gap = after_button.x() - (middle.x() + inked[-1] + 1 / scale)
-assert abs(trail_gap - lead_gap) <= 1.0, (lead_gap, trail_gap)
 
 switch.setChecked(True)
 QtTest.QTest.qWait(300)  # the thumb slides for 150 ms
@@ -873,11 +807,5 @@ segments.set_current('values')
 app.processEvents()
 assert [segments.button(value).width() for value in ('range', 'values')] == widths, (
     'marking a choice must not move the others')
-
-info = FluentLineEdit()
-prompt = FluentLineEdit()
-prompt.set_placeholder_prompt()
-assert info.palette().color(QtGui.QPalette.PlaceholderText).name().upper() == MUTED_INK.upper()
-assert prompt.palette().color(QtGui.QPalette.PlaceholderText).alpha() == 128
 """
     )

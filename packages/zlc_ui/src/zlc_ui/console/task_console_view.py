@@ -13,7 +13,6 @@ from zlc_ui.fluent import (
     retire_widget,
     detach_widget,
     ElidedLabel,
-    MUTED_LABEL_STYLE,
     FluentButton,
     FluentComboBox,
     FluentFrame,
@@ -29,13 +28,14 @@ from zlc_ui.fluent import (
     muted_note_label,
     row_gap,
     scaled_px,
+    set_status_ink,
     window_pad,
 )
 
 from zlc_ui.status import name_words
 
 from .board_view import ConsoleBoardView
-from .logic_row_view import LogicRowView, mount_logic_page
+from .logic_row_view import LogicRowView
 from .panel_card_view import PanelCardView
 from .status_strip import StatusStrip
 
@@ -116,7 +116,7 @@ class TaskConsoleView(QtWidgets.QWidget):
         # here), at its own width so the summary follows the word.
         self.name_label = FluentLabel("task")
         self.summary_label = ElidedLabel("")
-        self.summary_label.setStyleSheet(MUTED_LABEL_STYLE)
+        set_status_ink(self.summary_label, "idle")
 
         self.kind_combo = FluentComboBox()
         self._task_takeover = False
@@ -176,9 +176,9 @@ class TaskConsoleView(QtWidgets.QWidget):
         outer.addWidget(self.status_strip)
 
         # Every page of the tabs starts its content a window pad in -- the
-        # Logic list and every Edit page (mount_logic_page), and the board,
-        # whose own card-pad edge makes up the rest -- and the first tab's
-        # underline starts there too, so switching pages moves nothing.
+        # Logic list and every Edit page, and the board, whose own card-pad
+        # edge makes up the rest -- and the first tab's underline starts
+        # there too, so switching pages moves nothing.
         page = window_pad()
         lead = page - card_pad()
         self.tabs = FluentTabWidget()
@@ -221,8 +221,7 @@ class TaskConsoleView(QtWidgets.QWidget):
         self.logic_body = QtWidgets.QWidget()
         self.logic_body.setStyleSheet("background: transparent;")
         self.logic_layout = QtWidgets.QVBoxLayout(self.logic_body)
-        # Cards stack a form gap apart, like rows; the page edges are every
-        # Logic page's (mount_logic_page).
+        # Cards stack a form gap apart, like rows.
         self.logic_layout.setSpacing(row_gap())
         # Says how a node arrives, in the words of the header it arrives by,
         # as the Monitor's note does for a panel.
@@ -235,7 +234,7 @@ class TaskConsoleView(QtWidgets.QWidget):
         self.logic_layout.addWidget(self.logic_hint)
         self.logic_layout.addStretch(1)
         self._logic_rows: tuple[LogicRowView, ...] = ()
-        mount_logic_page(self.logic_scroll, self.logic_body)
+        self.logic_scroll.set_width_bounded_widget(self.logic_body, inset=window_pad())
         logic_outer.addWidget(self.logic_scroll, 1)
         self.tabs.add_permanent_tab(logic_page, "Logic")
         outer.addWidget(self.tabs, 1)

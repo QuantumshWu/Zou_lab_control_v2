@@ -10,13 +10,11 @@ from zlc_ui.fluent import (
     API_VIOLET, API_VIOLET_DARK, CONFIG_GREEN, CONFIG_GREEN_DARK, CONFIG_GREEN_TINT,
     EDIT_PADDING_H, FIELD_BORDER_PX, FONT, ORANGE, ORANGE_DARK, PADDING_V, PLACEHOLDER,
     RADIUS, SURFACE, FluentComboBox, FluentDoubleSpinBox, FluentLabel, FluentLineEdit,
-    FluentPopup, FluentSegmentedButtons, FluentSettingsPopupAnchor, FluentSwitch,
+    FluentPopup, FluentSegmentedButtons, FluentSettingsPopupAnchor, FluentSwitch, card_pad, control_height,
     device_snap, field_room_end, field_text_inset, fluent_font_size, fluent_inner_edit_stylesheet,
-    frame_inner_rect, line_edit_text_right, paint_centred_ink, scaled_even_px, scaled_px,
-    setting_label_width, signals_blocked, read_editable_combo, show_fluent_popup_for_anchor,
+    frame_inner_rect, line_edit_text_right, paint_centred_ink, row_gap, scaled_even_px, scaled_px,
+    setting_label_width, signals_blocked, fill_editable_combo, read_editable_combo, show_fluent_popup_for_anchor,
 )
-
-from ._layout import row_height
 
 #: Where a value comes from, in the order the popup offers them, by the
 #: words every surface says them in (the popup, a badge's tooltip, the Scan
@@ -247,13 +245,13 @@ class FluentScanLineEdit(FluentLineEdit):
             self._popup = FluentPopup(self)
             self._popup_anchor = FluentSettingsPopupAnchor(self._popup, self.binding_button)
             layout = QtWidgets.QGridLayout(self._popup)
-            margin = scaled_px(10)
-            layout.setContentsMargins(margin, margin, margin, margin)
-            layout.setSpacing(scaled_px(6))
+            pad = card_pad()
+            layout.setContentsMargins(pad, pad, pad, pad)
+            layout.setSpacing(row_gap())
             # Every row is a control's height, so the five rows keep one
             # pitch and each label reads level with what it names.
             for row in range(5):
-                layout.setRowMinimumHeight(row, row_height())
+                layout.setRowMinimumHeight(row, control_height())
             # One label column, as every form sizes its own (the widest
             # label and a pad), not the labels' own widths.
             label_width = popup_label_width()
@@ -283,7 +281,7 @@ class FluentScanLineEdit(FluentLineEdit):
             for widget in (self.config_name, self.default_value, self.effective_value):
                 widget.setFixedWidth(content_width)
             for widget in (self.default_value, self.effective_value):
-                widget.setFixedHeight(row_height())
+                widget.setFixedHeight(control_height())
                 # The values read in the column of the Config name's TEXT,
                 # not from the edge of its box.
                 widget.setIndent(field_text_inset())
@@ -325,18 +323,10 @@ class FluentScanLineEdit(FluentLineEdit):
             self.source_switch.button("api").setEnabled(can_api)
             self.source_switch.setEnabled(binding_editable)
         named = source == "config"
-        combo = self.config_name
-        draft = combo.currentText() if named and combo.lineEdit().hasFocus() and combo.lineEdit().isModified() else None
-        with signals_blocked(combo, combo.lineEdit()):
-            if tuple(combo.itemText(index) for index in range(combo.count())) != self._config_names:
-                combo.clear()
-                combo.addItems(self._config_names)
-            # Under Default or API a kept name still shows, disabled: it is
-            # the name Config switches back to, and it is not applied.
-            combo.setCurrentIndex(combo.findText(config_key))
-            combo.setEditText(config_key if draft is None else draft)
-            combo.lineEdit().setModified(draft is not None)
-            combo.setEnabled(named and binding_editable)
+        # Under Default or API a kept name still shows, disabled: it is the
+        # name Config switches back to, and it is not applied.
+        fill_editable_combo(self.config_name, self._config_names, config_key, keep_draft=named)
+        self.config_name.setEnabled(named and binding_editable)
         self.config_name.setToolTip(config_key)
         if not source_text:
             if named:

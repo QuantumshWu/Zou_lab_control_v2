@@ -69,6 +69,10 @@ CATEGORIES = (
 #: On booleans, as in a plot: ``sum`` is the number true, ``mean`` the
 #: fraction true; ``count`` is the number of valid samples of any dtype.
 STATISTICS = ("sum", "mean", "count", "min", "max", "std", "any", "all")
+#: The statistics a dtype takes, by "is boolean": the rule a reduction is
+#: refused by, and the editor greys the rest of the strip by.
+STATISTICS_FOR = {True: ("sum", "mean", "count", "any", "all"),
+                  False: ("sum", "mean", "count", "min", "max", "std")}
 #: The one draft-level problem that belongs to no variable.
 NO_PUBLISHED = "switch Publish on for at least one variable"
 
@@ -658,10 +662,9 @@ def _reduce_plan(schema, operation, names):
             raise ValueError(f"{axis.name} is chosen twice")
         found.append((d, axis))
     boolean = _is_boolean(schema)
-    if operation in ("all", "any") and not boolean:
-        raise TypeError(f"{operation} needs booleans")
-    if operation in ("min", "max", "std") and boolean:
-        raise TypeError(f"{operation} needs numbers; for booleans use sum, mean, count, any or all")
+    if operation not in STATISTICS_FOR[boolean]:
+        raise TypeError(f"{operation} needs numbers; for booleans use sum, mean, count, any or all" if boolean
+                        else f"{operation} needs booleans")
     source = _domains(schema)
     # Alternate coordinates reduce with their primary.
     ids = {member.axis_id for d, axis in found for member in source[d].coordinate_axes(axis.axis_id)}
@@ -1380,7 +1383,7 @@ def error_stage(text: str) -> tuple[str, str, str] | None:
 
 __all__ = [
     "CATEGORIES", "DOMAINS", "DeriveError", "NO_PUBLISHED", "OPERATORS", "Operand", "STATISTICS",
-    "TERM_COLUMNS", "TERM_DEFAULTS", "VARIABLE_COLUMNS", "axes_text", "axis_groups", "changing_axes",
-    "checked_variables", "compact_variable", "describe_schema", "error_stage", "evaluate", "frames_kept",
-    "input_members", "pick_values", "published", "term_text", "typed_variables", "where_notes",
+    "STATISTICS_FOR", "TERM_COLUMNS", "TERM_DEFAULTS", "VARIABLE_COLUMNS", "axes_text", "axis_groups",
+    "changing_axes", "checked_variables", "compact_variable", "describe_schema", "error_stage", "evaluate",
+    "frames_kept", "input_members", "pick_values", "published", "term_text", "typed_variables", "where_notes",
 ]

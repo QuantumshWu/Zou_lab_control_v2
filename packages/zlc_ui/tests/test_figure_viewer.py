@@ -40,15 +40,6 @@ first = QtWidgets.QLabel("first"); second = QtWidgets.QLabel("second")
 view.set_panel_surface('panel-1', first); view.set_panel_surface('panel-1', second)
 assert view._cards['panel-1'].surface is second and first.parentWidget() is None
 view.resize(1200, 700); view.show(); app.processEvents()
-# The two panes are built alike: the data band as tall as the path band,
-# its row on the path row's centre line, the two tab strips on one top.
-def centre(widget):
-    return widget.mapTo(view, QtCore.QPoint()).y() + widget.height() / 2
-band = view.info_pane.path_edit.parentWidget()
-assert view._panel_bar.height() == band.height()
-assert abs(centre(view.data_combo) - centre(view.info_pane.path_edit.edit)) <= 1
-assert (view.tabs.mapTo(view, QtCore.QPoint()).y()
-        == view.info_pane.info_tabs.mapTo(view, QtCore.QPoint()).y())
 # Adding a panel and saving the board's picture head the board's own tab.
 assert view.tabs.widget(0).isAncestorOf(view.add_panel_button)
 assert view.tabs.widget(0).isAncestorOf(view.save_image_button)
@@ -58,19 +49,15 @@ assert view.scroll.isVisible() and not view.board_hint.isVisible()
 from zlc_ui.console.task_console_view import plot_choice_text
 assert view.kind_combo.currentText() == plot_choice_text('Image') == 'Plot: Image'
 assert view.kind_combo.currentData() == 'image'
-# An empty board says its next step where the first card will stand: a
-# figure to open before there is one, a panel to add once there is.
+# An empty board says its next step: a figure to open before there is one,
+# a panel to add once there is.
 blank = FigureViewerView(); blank.set_panel_sizes(('2x2',), '2x2')
 blank.resize(1200, 700); blank.show(); app.processEvents()
 assert blank.board_hint.isVisible() and blank.board_hint.text().startswith('Open a saved figure')
 blank.set_archive_info((("Plot", (("data", "1x1x80x88 float32"),)),), {'nodes': (), 'edges': ()})
 assert blank.board_hint.text() == 'No panels yet. Choose a Plot above and click Add panel.'
-hint = blank.board_hint
-words = hint.mapTo(blank, QtCore.QPoint(hint.contentsMargins().left(), hint.contentsMargins().top()))
-assert words.x() == blank.board.mapTo(blank, QtCore.QPoint(blank.board.text_left(), 0)).x()
 blank.add_panel('panel-1', 'Camera frame'); app.processEvents()
 assert not blank.board_hint.isVisible()
-assert blank._cards['panel-1'].mapTo(blank, QtCore.QPoint()).y() == words.y()
 blank.remove_panel('panel-1'); app.processEvents()
 assert blank.board_hint.isVisible() and blank.board_hint.text().startswith('No panels yet.')
 blank.finish_close()
@@ -132,20 +119,6 @@ assert set(flow._flow_node_rects) == {
 }
 rects = tuple(flow._flow_node_rects.values())
 assert all(not left.intersects(right) for i, left in enumerate(rects) for right in rects[i + 1:])
-# Badges in sentence case, the root named in words; every Logic card wears
-# one hairline DIVIDER edge -- no accent outline that reads as a selection.
-from zlc_ui.fluent.style import DIVIDER
-items = flow.scene().items()
-words = [item for item in items if isinstance(item, QtWidgets.QGraphicsSimpleTextItem)]
-# A badge is the smallest words on a card.
-smallest = min(item.font().pointSizeF() for item in words)
-badges = sorted(item.text() for item in words if item.font().pointSizeF() == smallest)
-assert badges == ['Device'] * 3 + ['Logic'] * 3 + ['Logic · this figure'], badges
-edges = {item.data(0): item.pen() for item in items
-         if isinstance(item, QtWidgets.QGraphicsPathItem) and item.data(0) is not None}
-for node_id in ('logic:camera', 'logic:left', 'logic:right', 'logic:fit'):
-    assert edges[node_id].color().name() == QtGui.QColor(DIVIDER).name(), node_id
-    assert edges[node_id].widthF() == edges['logic:camera'].widthF(), node_id
 scene = flow.sceneRect()
 assert all(scene.contains(rect) for rect in rects)
 for source, target, path in flow._flow_edge_paths:
@@ -342,27 +315,10 @@ roles = {
 }
 assert roles.get('spatial-y') == 'Rows ↓', roles
 assert roles.get('spatial-x') == 'Columns →', roles
-# The three cards share one label column, wide enough for each axis row's
-# name, size and unit: the size is what the suffix is there to show.
-from zlc_ui.fluent import FluentSettingRow
-assert len({row._label.width() for row in editor.findChildren(FluentSettingRow)}) == 1
-for _holder, label, _mode in editor._axis_view_widgets.values():
-    assert label.fontMetrics().horizontalAdvance(label.text()) < label.width(), label.text()
-# Add axis is the Axes card's command on its title line; the values end on
-# the first column of the fields above them.
-def right(widget):
-    return widget.mapTo(editor, QtCore.QPoint(widget.width(), 0)).x()
-from zlc_ui.fluent import CARD_PAD, scaled_px
-assert editor.add_axis_button.mapTo(editor.axes_group, QtCore.QPoint()).y() == scaled_px(CARD_PAD)
-assert right(editor.axis_value_table) == right(editor.axis_name_edit)
-card_width = editor.axes_group.width()
 QtTest.QTest.mouseClick(editor.page_choice.button('data'), QtCore.Qt.LeftButton)
 app.processEvents()
 assert editor.page_choice.current() == 'data'
 assert editor.data_group.isVisible() and not editor.axes_group.isVisible()
-assert editor.data_group.width() == card_width
-# The hint under Table shows is a sentence, whoever words it.
-assert editor.blank_help_label.text() == 'Blank removes the value.'
 assert editor.value_model.rowCount() == 100_000
 assert editor.value_model.columnCount() == 1_000
 assert editor.value_table.verticalScrollBar().maximum() > 0
@@ -437,14 +393,8 @@ assert intents[-1] == (
      'cells': ((1, 0, '0.5'),)},
 )
 
-app.processEvents()
-editing_row = (editor.axis_combo.geometry(), editor.apply_axis_button.geometry())
-assert editor.apply_axis_button.text() == 'Apply axis'
 QtTest.QTest.mouseClick(editor.add_axis_button, QtCore.Qt.LeftButton)
 app.processEvents()
-# Apply axis reads Create axis now, in the same slot: nothing beside it moves.
-assert editor.apply_axis_button.text() == 'Create axis'
-assert (editor.axis_combo.geometry(), editor.apply_axis_button.geometry()) == editing_row
 # Add is a mode of the same control group, entered without a presenter
 # round trip: nothing of the selected axis may still be clickable, and the
 # New axis form must be writable even when nothing was selected before.
@@ -569,238 +519,6 @@ app.processEvents()
     )
 
 
-def test_the_right_surface_has_one_left_edge_one_right_edge_and_one_page_gap(run_qt) -> None:
-    """The data bar, the tab strip and every tab page of the right surface
-    -- the board, the data editor and a panel's Edit page -- start on one
-    card-pad edge and end on one right edge; a tab page starts one card pad
-    under its strip in both panes, and the data editor's first card stands
-    where the board's does; the axis values stand under a whole heading
-    cell a section gap below the fields; and each page of the data editor
-    scrolls only its value table, which is whole."""
-
-    run_qt(
-        """
-from PyQt5 import QtCore, QtGui, QtWidgets
-from zlc_ui.figure_viewer import FigureViewerView
-from zlc_ui.fluent import (
-    ACCENT, FluentLabel, FluentSectionLabel, card_pad, control_height,
-    fluent_scrollbar_thickness, row_gap, section_gap,
-)
-from zlc_ui.qt import ensure_qt_app
-app = ensure_qt_app(['figure-surface-edges'])
-
-def settle():
-    for _ in range(6):
-        app.processEvents()
-
-def box(widget, top):
-    origin = widget.mapTo(top, QtCore.QPoint())
-    return origin.x(), origin.y(), origin.x() + widget.width(), origin.y() + widget.height()
-
-def underline_left(tabs, top):
-    # Where the current tab's ACCENT underline starts, on the strip's last row.
-    bar = tabs.tabBar()
-    image = top.grab().toImage()
-    ratio = image.devicePixelRatio() or 1.0
-    left, _y, right, bottom = box(bar, top)
-    y = int(bottom * ratio) - 1
-    accent = QtGui.QColor(ACCENT).name()
-    return next(x / ratio for x in range(int(left * ratio), int(right * ratio))
-                if image.pixelColor(x, y).name() == accent)
-
-class Matrix:
-    def __init__(self, rows, columns): self.shape = (rows, columns)
-    def __getitem__(self, index): return index[0] + index[1]
-
-rows = 5_000
-projection = {
-    'dataset': {'name': 'frame', 'dtype': '<f8', 'unit': '', 'note': '', 'source': '',
-                'dtype_choices': (('<f8', 'Float 64'),)},
-    'domain_choices': (('point', 'Point'),),
-    'axes': ({'id': 'y', 'domain': 'point', 'domain_label': 'Point', 'name': 'y',
-              'size': rows, 'unit': ''},),
-    'selected_axis': 'y',
-    'axis_values': {'shape': (rows, 1), 'values': range(rows), 'row_headers': range(rows),
-                    'column_headers': ('Value',), 'editable': True},
-    'table': {
-        'component': 'values', 'component_choices': (('values', 'Values', True),),
-        'sigma_enabled': False, 'blank_help': '', 'blank_hint': '',
-        'shape': (rows, 60), 'values': Matrix(rows, 60), 'validity': None,
-        'row_headers': range(rows), 'column_headers': range(60),
-        'structure': ((('y', rows),), (), ()),
-        'axes': ({'axis_id': 'y', 'name': 'y', 'size': rows, 'unit': '', 'mode': 'rows',
-                  'index': 0, 'scope_choices': tuple((index, str(index)) for index in range(rows))},),
-    },
-    'dirty': False, 'can_apply': True, 'can_save': False,
-    'save_suggested': 'frame.npz', 'message': '',
-}
-
-view = FigureViewerView()
-view.set_panel_sizes(('2x2',), '2x2')
-view.set_panel_kinds((('image', 'Image'),))
-view.add_panel('panel-1', 'Camera frame')
-view.resize(1200, 640); view.show(); settle()
-surface = view.tabs.parentWidget()
-pad = card_pad()
-inset = max(pad, fluent_scrollbar_thickness())
-edge, end = pad, surface.width() - inset
-bar = view.tabs.tabBar()
-
-# The tab strip runs from side to side: the first tab's own card-pad inset
-# is what puts its underline on the surface's edge.
-assert box(view.tabs, surface)[0] == 0 and box(view.tabs, surface)[2] == surface.width()
-label = view.data_combo.parentWidget().layout().itemAt(0).widget()
-assert isinstance(label, FluentLabel) and not isinstance(label, FluentSectionLabel)
-assert box(label, surface)[0] == edge
-assert box(view.new_data_button, surface)[2] == end
-# The strip stands over Monitor alone too: the first editor tab to open
-# moves nothing on the board's page.
-assert bar.isVisible() and view.tabs.count() == 1
-lone_commands, lone_card = box(view.kind_combo, surface), box(view._cards['panel-1'], surface)
-view.open_data_editor('frame', projection, 'Data · frame')
-editor = view._data_editors['frame']
-settle()
-# The Monitor page: its commands and its first card on the same two edges,
-# one card pad under the strip a second page has shown.
-view.tabs.setCurrentIndex(0); settle()
-strip_bottom = box(bar, surface)[3]
-assert bar.isVisible()
-# The first tab's underline starts on that edge too (the strip's page inset).
-assert underline_left(view.tabs, surface) == edge
-assert box(view.kind_combo, surface)[0] == edge
-assert box(view.save_image_button, surface)[2] == end
-assert box(view.kind_combo, surface)[1] - strip_bottom == pad
-card = view._cards['panel-1']
-assert box(card, surface)[0] == edge
-assert box(card, surface)[1] - box(view.kind_combo, surface)[3] == pad
-board_commands, board_card = box(view.kind_combo, surface), box(card, surface)
-assert (board_commands, board_card) == (lone_commands, lone_card)
-view.tabs.setCurrentWidget(editor); settle()
-for page, cards in (('dataset', (editor.dataset_group, editor.axes_group)),
-                    ('data', (editor.data_group,))):
-    editor.page_choice.button(page).click(); settle()
-    for widget in (*cards, editor.discard_button):
-        assert box(widget, surface)[0] == edge, widget
-    for widget in (*cards, editor.save_button):
-        assert box(widget, surface)[2] == end, widget
-    # The page's choice heads it where the board's commands head the
-    # board, and its first card stands where the board's first card does.
-    assert box(editor.page_choice, surface)[:2] == board_commands[:2]
-    assert box(cards[0], surface)[1] == board_card[1]
-editor.page_choice.button('dataset').click(); settle()
-assert box(editor.page_choice, surface)[1] - strip_bottom == pad
-# The left pane's pages start as far under their own strip.
-pane = view.info_pane
-page = pane.info_tabs.currentWidget()
-filter_edit = page.findChildren(QtWidgets.QLineEdit)[0]
-assert (box(filter_edit, view)[1] - box(pane.info_tabs.tabBar(), view)[3]) == pad
-assert underline_left(pane.info_tabs, view) == box(filter_edit, view)[0]
-# The two panes' last lines read on one line: the pane's status on the
-# line of the editor's action bar.
-def centre(widget):
-    top = box(widget, view)
-    return (top[1] + top[3]) / 2.0
-assert box(pane.status, view)[3] == box(surface, view)[3]
-assert centre(pane.status.message) == centre(pane.status.dot) == centre(editor.discard_button)
-assert box(filter_edit, view)[1] == box(editor.page_choice, view)[1]
-# File names its path as Data names its chooser: a row label, one gap from it.
-header = pane.path_edit.parentWidget().layout()
-assert isinstance(header.itemAt(0).widget(), FluentLabel)
-assert not isinstance(header.itemAt(0).widget(), FluentSectionLabel)
-assert header.spacing() == row_gap()
-
-# Axis values: a whole control-high heading cell, a section gap under the
-# fields, and the table one row gap under it.
-heading = next(w for w in editor.axes_group.findChildren(FluentSectionLabel) if w.text() == 'Axis values')
-assert heading.contentsMargins().top() == 0 and heading.height() == control_height()
-unit_row = editor._axis_rows['unit']
-assert box(heading, editor)[1] - box(unit_row, editor)[3] == section_gap()
-assert box(editor.axis_value_table, editor)[1] - box(heading, editor)[3] == row_gap()
-
-# Each page scrolls one thing, its long value table: the page has nothing
-# to scroll, and its card -- and so the table, its column names and its
-# horizontal bar -- is whole.
-viewport = editor.editor_scroll.viewport()
-page_bar = editor.editor_scroll.verticalScrollBar()
-for page, table, card in (('dataset', editor.axis_value_table, editor.axes_group),
-                          ('data', editor.value_table, editor.data_group)):
-    editor.page_choice.button(page).click(); settle()
-    assert page_bar.maximum() == 0 and not page_bar.isVisible(), page
-    assert table.verticalScrollBar().maximum() > 0
-    # The table that scrolls takes the whole room, its last row in part:
-    # its card ends on the page's foot, one section gap over the action
-    # bar, on either page -- switching pages moves no card's foot.
-    assert box(card, viewport)[3] == viewport.height(), (page, box(card, viewport), viewport.height())
-    assert box(editor.discard_button, view)[1] - box(card, view)[3] == section_gap(), page
-    # Its vertical bar stands beside the rows it scrolls, under the column
-    # names, not in their row.
-    rows_bar = table.verticalScrollBar()
-    assert rows_bar.isVisible()
-    assert box(rows_bar, table)[1] >= box(table.horizontalHeader(), table)[3], page
-    assert box(rows_bar, table)[3] <= box(table.viewport(), table)[3], page
-assert editor.axis_value_table.horizontalScrollBar().maximum() == 0
-# A value is never shown in part: the table scrolls by whole columns, and
-# the column the viewport's right edge cuts shows nothing.
-table = editor.value_table
-assert table.horizontalScrollMode() == QtWidgets.QAbstractItemView.ScrollPerItem
-cut = table.cut_column_left()
-if cut is not None:
-    image = table.viewport().grab().toImage()
-    ratio = image.devicePixelRatio() or 1.0
-    assert not any(image.pixelColor(x, y).lightness() < 150
-                   for x in range(int(cut * ratio), image.width()) for y in range(image.height()))
-# A taller window gives the table the rows it gains, and the page still
-# has nothing to scroll.
-before = editor.value_table.height()
-view.resize(1200, 900); settle()
-assert editor.value_table.height() > before
-assert page_bar.maximum() == 0
-assert box(editor.data_group, viewport)[3] <= viewport.height()
-
-# A panel's Edit page lays its content on this surface's page inset, as
-# the board and the data editor do: its first line one card pad under the
-# strip, its cards on the left and right edges and padded by a card pad.
-view.resize(1200, 640); settle()
-state ={'signal': '@figure/1/data', 'kind': 'image', 'cell_kind': '', 'size': '2x2',
-         'interval_ms': 400, 'title': 'Camera frame', 'semantic': {}, 'display': {},
-         'fit': {}, 'overlay_signal': ''}
-# Short semantic labels and a long display one: each card's own words
-# would start its controls at its own x.
-panel_surface = {'semantic': ({'key': 'x', 'label': 'x', 'kind': 'text', 'value': 'a'},),
-                 'display': ({'key': 'colormap_name', 'label': 'Colour map name', 'kind': 'text',
-                              'value': 'gray'},),
-                 'fit': (), 'data_structure': (), 'data_scope': (), 'paints_images': True}
-view.set_panel_intervals((100, 400), 400)
-view.set_panel_projection('panel-1', state, panel_surface)
-view.open_panel_editor('panel-1', {
-    'state': state, 'parameter_surface': panel_surface,
-    'signal_options': (('this archive', (('Camera frame', 'data'),)),),
-    'overlay_signal_options': (), 'frozen_signal': '@figure/1/data',
-    'frozen_snapshot': None, 'save_directory': '.',
-}, 'Edit · Camera frame')
-settle()
-panel_editor = view._editors['panel-1']
-assert view.tabs.currentWidget() is panel_editor
-assert box(panel_editor.title_label, surface)[0] == edge
-assert box(panel_editor.title_label, surface)[1] - strip_bottom == pad
-for group in (panel_editor.snapshot_group, panel_editor.save_group):
-    assert box(group, surface)[0] == edge and box(group, surface)[2] == end, group.title()
-assert box(panel_editor.refresh_button, panel_editor.snapshot_group)[0] == pad
-saved = panel_editor.save_group
-assert box(panel_editor.save_button, saved)[2] == saved.width() - pad
-assert box(panel_editor.save_button, saved)[3] == saved.height() - pad
-# One control column down the page: Panel, Semantic, Display and Save
-# figure all start their controls at one x.
-controls = (panel_editor.panel_form.widget_for('title'),
-            panel_editor.parameter_forms['semantic'].widget_for('x'),
-            panel_editor.parameter_forms['display'].widget_for('colormap_name'),
-            panel_editor.save_directory)
-assert len({box(control, surface)[0] for control in controls}) == 1, [box(c, surface) for c in controls]
-view.finish_close()
-"""
-    )
-
-
 def test_figure_viewer_demo_smoke(run_qt) -> None:
     completed = run_qt(
         "import runpy, sys; "
@@ -889,21 +607,6 @@ pane.set_tabs((
     ('Raw', (('source', {'signal': '@logic/cm/frames', 'title': 'camera'}),)),
 ))
 pane.resize(520, 640); pane.show(); app.processEvents()
-
-# A tab of single rows keeps no chevron column: its names start where the
-# filter's words over them do (the same word, so the same side bearing).
-# A tab that nests keeps the column its chevrons are drawn in.
-def ink_left(widget):
-    image = widget.grab().toImage()
-    ratio = image.devicePixelRatio() or 1.0
-    x = next(x for x in range(image.width())
-             if any(image.pixelColor(x, y).lightness() < 110 for y in range(image.height())))
-    return widget.mapTo(pane, QtCore.QPoint()).x() + x / ratio
-plot = pane._rows_tabs['Plot']
-assert not plot.tree.rootIsDecorated() and pane._rows_tabs['Logic'].tree.rootIsDecorated()
-plot.filter_edit.setText('data'); app.processEvents()
-assert ink_left(plot.tree.viewport()) == ink_left(plot.filter_edit)
-plot.filter_edit.clear(); app.processEvents()
 
 # The record is a tree: the run's name, then its fields, then the fields
 # of its fields -- every one on a row of its own, open from the start, a

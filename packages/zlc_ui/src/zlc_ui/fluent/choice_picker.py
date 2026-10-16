@@ -184,6 +184,25 @@ def fill_grouped_choice_combo(
         combo.setCurrentIndex(0 if index < 0 and none_label is not None else index)
 
 
+def fill_editable_combo(combo, names, key: str, *, keep_draft: bool = True) -> None:
+    """Show ``key`` in an editable combo that offers ``names`` (refilled only
+    when they change), as its ``accepted_key``.  A draft being typed in it
+    stays in its edit while ``keep_draft``: a projection never takes the
+    words out from under the operator's cursor."""
+
+    edit = combo.lineEdit()
+    draft = combo.currentText() if keep_draft and edit.hasFocus() and edit.isModified() else None
+    combo.setProperty("accepted_key", key)
+    with _signals_blocked(combo, edit):
+        if tuple(combo.itemData(index) for index in range(combo.count())) != tuple(names):
+            combo.clear()
+            for name in names:
+                combo.addItem(name, name)
+        combo.setCurrentIndex(combo.findData(key))
+        combo.setEditText(key if draft is None else draft)
+        edit.setModified(draft is not None)
+
+
 def read_editable_combo(combo) -> str:
     """Read an opaque key or current free-text draft from an editable combo."""
 
@@ -210,6 +229,7 @@ __all__ = [
     "choice_state",
     "choice_tree_groups",
     "coerce_choice_labels",
+    "fill_editable_combo",
     "fill_grouped_choice_combo",
     "grouped_choice_items",
     "read_editable_combo",

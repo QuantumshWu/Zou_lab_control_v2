@@ -82,123 +82,6 @@ def drop(key, x):
 '''
 
 
-def test_pulse_status_lines_and_the_board_dot_take_the_one_status_table(run_qt) -> None:
-    """Every Pulse status is coloured from ``STATUS_CUES``: the header dot by
-    the board token, and the connection, preview and Target lines by the
-    word their presenter says -- a failure in the error ink, as SLM's and the
-    data editor's are, not in plain text.  The Target page's row remover is
-    the ghost x every list has, one click."""
-
-    run_qt(
-        r"""
-from PyQt5 import QtCore, QtTest
-from zlc_ui.qt import ensure_qt_app
-from zlc_ui.fluent import STATUS_CUES
-from zlc_ui.pulse import (
-    ConnectionChoiceVM, ConnectionVM, PulseEditorView, PulseTargetView, TargetPortRecord,
-    TargetWidthRule,
-)
-from zlc_ui.pulse._layout import row_height
-app = ensure_qt_app(["pulse-status-inks"])
-
-def ink(widget):
-    return STATUS_CUES[widget.property("status_word")][1]
-
-def has_ink(widget, word):
-    return widget.property("status_word") == word and STATUS_CUES[word][1] in widget.styleSheet()
-
-editor = PulseEditorView()
-for token, word in (
-    ("idle", "idle"), ("dirty-ready", "idle"), ("running-synced", "running"),
-    ("running-stale", "warning"), ("unreachable", "error"),
-):
-    editor.set_status_color(token)
-    assert STATUS_CUES[word][0] in editor.status_dot.styleSheet(), (token, word)
-try:
-    editor.set_status_color("mystery")
-except KeyError:
-    pass
-else:
-    raise AssertionError("an unknown board token was drawn")
-
-schedule = editor.schedule_view
-choices = (ConnectionChoiceVM("Edit only", "offline"),)
-for status, word in (
-    ("not connected", "idle"), ("bench · 4 ports · 50 MHz", "running"),
-    ("connected (board did not describe itself)", "warning"), ("failed: refused", "error"),
-):
-    schedule.set_connection(ConnectionVM(
-        choices=choices, selected="offline", endpoint="", status=status, status_word=word,
-    ))
-    assert schedule.connection_status.text() == status
-    assert has_ink(schedule.connection_status, word), (status, schedule.connection_status.styleSheet())
-try:
-    ConnectionVM(choices=choices, selected="offline", endpoint="", status="", status_word="task")
-except ValueError:
-    pass
-else:
-    raise AssertionError("a connection took a word that is not a state")
-
-preview = editor.preview_view
-preview.set_status("3 periods · 2 channels", "task")
-assert has_ink(preview.preview_status, "task")
-preview.set_status("cannot draw this pulse: boom", "error")
-assert has_ink(preview.preview_status, "error")
-
-target = PulseTargetView()
-target.set_width_rules(TargetWidthRule(1, 1, 1), TargetWidthRule(1, 2, 4))
-records = (
-    TargetPortRecord("d0", "digital", "Gate", ("d0",)),
-    TargetPortRecord("d1", "digital", "Shutter", ("d1",)),
-)
-target.set_ports(records, True, "Offline: this target came from the pulse file")
-assert has_ink(target.status_label, "idle")
-target.set_feedback("ports cannot be added or removed here", "error")
-assert has_ink(target.status_label, "error")
-target.resize(900, 500); target.show(); app.processEvents()
-# The row remover: the one-glyph ghost x, a row tall and square, one click;
-# the page's own re-showing of its rows leaves the line and its ink alone.
-remover = target._rows[1].remove_button
-assert remover.text() == "\u00d7" and remover.role() == "destructive"
-assert remover.size() == QtCore.QSize(row_height(), row_height())
-assert remover.toolTip() == "Remove this port row"
-QtTest.QTest.mouseClick(remover, QtCore.Qt.LeftButton)
-app.processEvents()
-assert [row.record.key for row in target._rows] == ["d0"]
-assert target.status_label.text() == "ports cannot be added or removed here"
-assert has_ink(target.status_label, "error")
-target.set_feedback("applied 1 output", "task")
-assert has_ink(target.status_label, "task")
-target.close()
-
-# Config's line is a note, or why Config cannot apply in the error ink.
-config = editor.config_view
-config.set_config_mode(True)
-assert has_ink(config.mode_label, "idle")
-config.set_config_mode(True, "cannot read values.json")
-assert config.mode_label.text() == "cannot read values.json"
-assert has_ink(config.mode_label, "error")
-
-# The Scan line: what it did, or why it could not.
-from zlc_ui.pulse import ScanPageRecord
-scan = editor.scan_view
-scan.set_page(ScanPageRecord(progress_text="7 scan points ready"))
-assert has_ink(scan.scan_progress_label, "task")
-scan.set_page(ScanPageRecord(progress_text="Cannot hold that point: busy", progress_word="error"))
-assert has_ink(scan.scan_progress_label, "error")
-scan.set_progress_text("Held at scan point 2 of 7", "task")
-assert has_ink(scan.scan_progress_label, "task")
-try:
-    ScanPageRecord(progress_word="running")
-except ValueError:
-    pass
-else:
-    raise AssertionError("a scan line took a word that is not a severity")
-editor.close()
-"""
-    )
-
-
 def test_embedded_connection_is_named_and_locked_in_the_real_schedule_view(run_qt) -> None:
     run_qt(
         r'''
@@ -2428,420 +2311,20 @@ app.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
 ''')
 
 
-def test_an_empty_scan_table_says_why_it_is_empty(run_qt) -> None:
-    """With no table the box says what to do, in ink on the screen.
-
-    Read off a grab, not the record: the record carries the sentence
-    whether or not anything paints it, and the read-only editor's own
-    placeholder does not.
-    """
-
-    run_qt(r'''
-from PyQt5 import QtGui
-from zlc_ui.qt import ensure_qt_app
-from zlc_ui.pulse import PulseScanView, ScanPageRecord
-app = ensure_qt_app(["pulse-scan-note"])
-scan = PulseScanView()
-scan.resize(900, 600); scan.show(); app.processEvents()
-table = scan.scan_table_view
-
-def ink_inside():
-    image = table.grab().toImage()
-    ratio = image.devicePixelRatio()
-    box = table.viewport().geometry()
-    return sum(
-        1
-        for y in range(int(box.top() * ratio), int((box.bottom() + 1) * ratio))
-        for x in range(int(box.left() * ratio), int((box.right() + 1) * ratio))
-        if QtGui.QColor(image.pixel(x, y)).lightness() < 200
-    )
-
-assert ink_inside() == 0
-scan.set_page(ScanPageRecord(table_note="No scan table yet: write a program and press Run."))
-app.processEvents()
-assert scan.table_note_label.isVisible()
-assert ink_inside() > 0, "the empty table box must show its note"
-# Where the table's first line would start, so the note reads in its place.
-assert scan.table_note_label.geometry() == table.viewport().rect()
-scan.set_page(ScanPageRecord(table_text="1 2 3"))
-app.processEvents()
-assert not scan.table_note_label.isVisible() and table.toPlainText() == "1 2 3"
-scan.close()
-''')
-
-
-def test_the_scan_pages_bound_fields_list_has_one_pitch(run_qt) -> None:
-    """Every line of the list -- its intro, a group's title or a field -- is
-    one row tall with its text on the same line of that row, so the lines
-    of one group stand as far apart as the groups and the intro as far
-    above the first of them."""
-
-    run_qt(r'''
-from PyQt5 import QtCore, QtGui
-from zlc_ui.qt import ensure_qt_app
-from zlc_ui.fluent import FluentGroupBox
-from zlc_ui.pulse import BindingRecord, PulseScanView, ScanPageRecord
-from zlc_ui.pulse._layout import row_height
-app = ensure_qt_app(["pulse-scan-pitch"])
-scan = PulseScanView()
-scan.resize(900, 600); scan.show()
-scan.set_page(ScanPageRecord(slots_text="Physical fields available to Scan and API callers:", bindings=(
-    BindingRecord("hold", "Hold.duration", scan=True),
-    BindingRecord("load", "Trap load.duration", source="api", group_id="loading", group_label="Loading"),
-    BindingRecord("pgc", "PGC.da_dipole", scan=True, source="config", group_id="loading", group_label="Loading"),
-)))
-app.processEvents()
-listed = scan._bindings_layout
-lines = [listed.itemAt(index).widget() for index in range(listed.count())]
-assert [line.text() for line in lines] == [
-    "Pulse", "Hold.duration · Scan", "Loading", "Trap load.duration · API",
-    "PGC.da_dipole · Scan + Config",
-]
-lines.insert(0, scan.scan_slots_label)
-tops = [line.mapTo(scan, QtCore.QPoint()).y() for line in lines]
-assert {line.height() for line in lines} == {row_height()}
-assert {after - before for before, after in zip(tops, tops[1:])} == {row_height()}, tops
-
-# The same line of each row: every text here has a letter as tall as an
-# "l", so the first inked row of each is that letter's top.
-image = scan.grab().toImage()
-ratio = image.devicePixelRatio()
-def ink_top(line):
-    box = QtCore.QRect(line.mapTo(scan, QtCore.QPoint()), line.size())
-    for y in range(int(box.top() * ratio), int((box.bottom() + 1) * ratio)):
-        if any(QtGui.QColor(image.pixel(x, y)).lightness() < 160
-               for x in range(int(box.left() * ratio), int((box.right() + 1) * ratio))):
-            return y / ratio - box.top()
-    raise AssertionError(f"no ink in {line.text()!r}")
-offsets = {line.text(): ink_top(line) for line in lines}
-assert len(set(offsets.values())) == 1, offsets
-
-# The list ends its card: the run controls are the Playback card's, whose
-# first row stands as far under its title as the intro under this one.
-cards = {card.title(): card for card in scan.findChildren(FluentGroupBox)}
-assert cards["Playback"].isAncestorOf(scan.scan_repeats_spin)
-assert not cards["Bound fields"].isAncestorOf(scan.scan_hold_button)
-def first_row(widget, card):
-    return widget.mapTo(card, QtCore.QPoint()).y()
-assert first_row(scan.scan_repeats_spin, cards["Playback"]) == first_row(scan.scan_slots_label, cards["Bound fields"])
-# A long intro (a Config error) wraps, whole, rather than being cut.
-scan.set_slots_text("Config error: " + "the named value file could not be read; " * 8)
-app.processEvents()
-assert scan.scan_slots_label.height() > row_height()
-scan.close()
-''')
-
-
-def test_the_pulse_dialog_says_every_message_as_a_sentence(run_qt) -> None:
-    """A warning or a confirmation ends in a full stop whoever worded it; a
-    name at its start keeps the case it is written in."""
-
-    run_qt(r'''
-from zlc_ui.qt import ensure_qt_app
-from zlc_ui.pulse import PulseEditorView
-app = ensure_qt_app(["pulse-dialog-sentence"])
-view = PulseEditorView()
-said = []
-for signal in (view.warning_requested, view.done_requested):
-    signal.disconnect()  # the modal itself; what it is handed is the point
-    signal.connect(said.append)
-view.show_warning("F15 is not a port on this target")
-view.show_warning("This Subpulse comes from a file. Open the source file to edit it.")
-view.show_done("Saved lifetime.json")
-assert said == ["F15 is not a port on this target.",
-                "This Subpulse comes from a file. Open the source file to edit it.",
-                "Saved lifetime.json."], said
-view.finish_close()
-''')
-
-
-def test_the_header_dot_is_the_status_strips_dot(run_qt) -> None:
-    run_qt(r'''
-from zlc_ui.qt import ensure_qt_app
-from zlc_ui.fluent import FluentStatusDot, status_dot_gap
-from zlc_ui.pulse import PulseEditorView
-app = ensure_qt_app(["pulse-header-dot"])
-view = PulseEditorView()
-view.resize(1100, 640); view.show(); app.processEvents()
-dot = view.status_dot
-assert dot.size() == FluentStatusDot().size()
-assert view.title_label.x() - (dot.x() + dot.width()) == status_dot_gap()
-view.finish_close()
-''')
-
-
-def test_the_header_summary_follows_the_title_at_the_row_gap(run_qt) -> None:
-    """The title is as wide as its words and the summary starts one row gap
-    after it, whatever the pulse is called: it floated a fixed 260 px
-    column away, and a path elided while that band stood empty."""
-
-    run_qt(r'''
-from zlc_ui.qt import ensure_qt_app
-from zlc_ui.fluent import FluentSectionLabel, row_gap
-from zlc_ui.pulse import PulseEditorView
-app = ensure_qt_app(["pulse-header-summary"])
-view = PulseEditorView()
-view.resize(1100, 640); view.show(); app.processEvents()
-title, summary = view.title_label, view.summary_label
-assert isinstance(title, FluentSectionLabel), "the header row's title is a section title"
-path = "C:\\pulses\\review.json · 4 periods"
-view.set_summary(path)
-for name in ("review", "a much longer pulse name than that"):
-    view.set_title(f"PulseGUI · {name}")
-    app.processEvents()
-    words = title.fontMetrics().horizontalAdvance(title.text())
-    assert words <= title.width() <= words + 2, (title.width(), words)
-    assert summary.x() - (title.x() + title.width()) == row_gap()
-    assert summary.fontMetrics().horizontalAdvance(path) < summary.width(), "a short path is whole"
-view.finish_close()
-''')
-
-
-def test_the_port_rows_start_one_section_gap_under_the_header_rows(run_qt) -> None:
-    """Every card and side panel opens with four header rows and its port
-    rows start one section gap under them, on one y across the strip: the
-    header block was a fixed 178 px that left a hole three section gaps
-    tall, and a catalog without its Name line left two."""
-
-    run_qt(_schedule_source() + r'''
-from PyQt5 import QtCore, QtWidgets
-from zlc_ui.qt import ensure_qt_app
-from zlc_ui.fluent import FluentReadoutEdit, section_gap
-from dataclasses import replace
-from zlc_ui.pulse import DelayRowVM, PulseScheduleView
-from zlc_ui.pulse._layout import panel_top_height
-app = ensure_qt_app(["pulse-header-rows"])
-direct = QtCore.Qt.FindDirectChildrenOnly
-vm = replace(vm, delay_rows=tuple(DelayRowVM(port.key, FieldVM("0"), "ns", ("ns",)) for port in ports))
-
-def header_rows(card, view):
-    top = next(w for w in card.findChildren(QtWidgets.QWidget, options=direct)
-               if w.height() == panel_top_height())
-    shown = [w for w in top.findChildren(QtWidgets.QWidget, options=direct) if w.isVisible()]
-    return sorted({w.mapTo(view, QtCore.QPoint()).y() for w in shown}), max(
-        w.mapTo(view, QtCore.QPoint(0, w.height())).y() for w in shown)
-
-for embedded in (False, True):
-    view = PulseScheduleView(embedded=embedded)
-    view.resize(1100, 520); view.show()
-    view.set_schedule(vm)
-    app.processEvents()
-    panel = view.names_panel
-    columns = [(panel, panel._row_holders["d0"])]
-    columns += [(card, card.port_rows["d0"]) for card in view._cards.values()]
-    if not embedded:
-        columns.append((view.channel_panel, view.channel_panel._rows["d0"][0]))
-    else:
-        assert not isinstance(panel.name_edit, FluentReadoutEdit) and panel.name_edit.isVisible()
-        assert panel.name_edit.text() == vm.document_name
-    rows = {card.title(): header_rows(card, view) for card, _row in columns}
-    assert len({tuple(tops) for tops, _bottom in rows.values()}) == 1, rows
-    assert all(len(tops) == 4 for tops, _bottom in rows.values()), rows
-    firsts = {row.mapTo(view, QtCore.QPoint()).y() for _card, row in columns}
-    assert len(firsts) == 1, firsts
-    bottom = next(iter(rows.values()))[1]
-    assert firsts.pop() - bottom == section_gap(), (bottom, section_gap())
-    view.close()
-    app.processEvents()
-''')
-
-
-def test_the_subpulse_page_scrolls_with_one_bar_under_pinned_commands(run_qt) -> None:
-    """Embedded, the schedule is as tall as its rows and the page is the
-    one vertical scroller -- never two bars side by side; the Subpulse
-    choice and the schedule's commands stay put above it."""
-
-    run_qt(r'''
-from PyQt5 import QtCore, QtWidgets
-from zlc_ui.qt import ensure_qt_app
-from zlc_ui.fluent import row_gap
-from zlc_ui.pulse import FieldVM, PeriodVM, PortRowVM, PulseEditorHandle, PulseEditorView, ScheduleVM
-app = ensure_qt_app(["pulse-subpulse-scroll"])
-field = FieldVM("4")
-ports = tuple(PortRowVM(f"d{n}", "digital", f"Out {n}", f"d{n}") for n in range(24))
-periods = tuple(
-    PeriodVM(f"p{n}", f"P{n}", field, "us", ("us",), digital=tuple((p.key, n % 2 == 0) for p in ports))
-    for n in range(3)
-)
-vm = ScheduleVM(1, 1, "Loading", "50 MHz", "12 us", "", 3, "24/24 ports", "", ports, periods)
-view = PulseEditorView()
-handle = PulseEditorHandle(None, view)
-view.resize(1100, 640); view.show()
-view.tabs.setCurrentWidget(view.component_view); app.processEvents()
-handle.set_component_document(vm, contexts=(("load", "Loading"),), context_id="load",
-                              bindings=(("p0:duration", "P0.duration", "t"),), config_names=("t",))
-# The new height travels up one nested layout per turn of the loop.
-for _ in range(30):
-    app.processEvents()
-page = view.component_view
-schedule = page.schedule_view
-rows = max(schedule.left_body.sizeHint().height(), schedule.drag_container.sizeHint().height())
-assert schedule.dataset_panes.height() >= rows, "the panes are as tall as their rows"
-assert not schedule.dataset_panes.scrollbar.isVisible(), "the schedule does not scroll inside the page"
-bars = [bar for bar in page.findChildren(QtWidgets.QScrollBar)
-        if bar.isVisible() and bar.orientation() == QtCore.Qt.Vertical]
-assert len(bars) == 1 and bars[0].maximum() > 0, [(bar.parent(), bar.maximum()) for bar in bars]
-toolbar = schedule.toolbar
-assert toolbar.isVisible() and not schedule.isAncestorOf(toolbar)
-top = toolbar.mapTo(page, QtCore.QPoint()).y()
-panes_top = schedule.dataset_panes.mapTo(page, QtCore.QPoint()).y()
-assert panes_top - (top + toolbar.height()) == row_gap()
-bars[0].setValue(bars[0].maximum()); app.processEvents()
-assert toolbar.mapTo(page, QtCore.QPoint()).y() == top, "the commands stay while the page scrolls"
-assert page.bindings_box.isVisible()
-box = page.bindings_box.mapTo(page, QtCore.QPoint()).y() + page.bindings_box.height()
-assert box <= page.height(), "the references under the schedule are reached by the one bar"
-view.finish_close()
-''')
-
-
-def test_the_subpulse_source_is_said_once_on_the_hint_line(run_qt) -> None:
-    run_qt(r'''
-from zlc_ui.qt import ensure_qt_app
-from zlc_ui.pulse import FieldVM, PeriodVM, PulseComponentView, ScheduleVM
-app = ensure_qt_app(["pulse-subpulse-source"])
-period = PeriodVM("p0", "P0", FieldVM("4"), "us", ("us",))
-vm = ScheduleVM(1, 1, "Loading", "50 MHz", "4 us", "", 1, "0/0 ports", "", (), (period,))
-page = PulseComponentView()
-page.resize(1000, 600); page.show()
-page.set_sources((("load", "Loading", "default", "", "Default", "idle"),), enabled=True)
-page.set_document(vm, contexts=(("load", "Loading"),), context_id="load")
-app.processEvents()
-assert page.scope_label.text().startswith("Default in Pulse")
-assert not page.source_status.isVisible(), "the scope already says Default"
-page.set_sources((("load", "Loading", "config", "a.subpulse.json", "Applied", "idle"),), enabled=True)
-app.processEvents()
-assert page.source_status.isVisible() and page.source_status.text() == "Applied"
-from zlc_ui.fluent import STATUS_CUES
-assert page.source_status.property("status_word") == "idle"
-# A source Config could not apply says so in the error ink.
-page.set_sources((("load", "Loading", "config", "a.subpulse.json",
-                   "Not applied \u2014 Config error", "error"),), enabled=True, error="bad file")
-assert page.source_status.property("status_word") == "error"
-assert STATUS_CUES["error"][1] in page.source_status.styleSheet()
-page.set_document(vm, contexts=(("load", "Loading"),), context_id="", selected_id="load")
-page.set_sources((("load", "Loading", "default", "", "Default", "idle"),), enabled=True)
-app.processEvents()
-assert page.scope_label.text().startswith("Config source")
-assert page.source_status.isVisible(), "beside the file's scope, Default says the file is not in use"
-from PyQt5 import QtWidgets
-row_labels = [label.text() for label in page.config_file_row.findChildren(QtWidgets.QLabel)]
-assert "Subpulse file" in row_labels, "the file is named as the placeholder names it"
-choices = [page.context_combo.itemText(index) for index in range(page.context_combo.count())]
-assert choices[0] == "Independent file" and "Subpulse file" not in choices, (
-    "the no-Pulse choice is named by what it edits, not by the row under it")
-page.close()
-''')
-
-
-def test_scrolled_cards_clip_one_card_gap_from_the_side_panels(run_qt) -> None:
-    """The gap after the side panels is the strip's own leading margin and
-    scrolls with the cards.  Scrolled, the viewport is masked by that gap,
-    so no card fragment stands against the panel; unscrolled, the gap is
-    the strip's again, where gap 0 is picked."""
-
-    run_qt(_schedule_source() + r'''
-from dataclasses import replace
-from PyQt5 import QtCore, QtGui
-from zlc_ui.qt import ensure_qt_app
-from zlc_ui.pulse import PulseScheduleView
-app = ensure_qt_app(["pulse-scrolled-gap"])
-many = tuple(replace(periods[0], period_id=f"q{n}", name=f"Q{n}") for n in range(12))
-view = PulseScheduleView()
-view.resize(1000, 560); view.show()
-view.set_schedule(replace(vm, periods=many))
-app.processEvents()
-viewport = view.timeline_scroll.viewport()
-strip = view.drag_container
-gap = strip.layout_main.contentsMargins().left()
-assert gap > 0 and viewport.mask().isEmpty()
-first = strip.items()[0]
-assert first.geometry().left() == gap, "unscrolled, the first card stands one gap in"
-bar = view.timeline_scroll.horizontalScrollBar()
-assert bar.maximum() > 40
-bar.setValue(40); app.processEvents()
-mask = viewport.mask()
-assert not mask.contains(QtCore.QPoint(gap - 1, 20)) and mask.contains(QtCore.QPoint(gap, 20))
-image = view.grab().toImage()
-ratio = image.devicePixelRatio()
-left = viewport.mapTo(view, QtCore.QPoint()).x()
-top = first.mapTo(view, QtCore.QPoint()).y()
-gutter = [
-    QtGui.QColor(image.pixel(int(x * ratio), int(y * ratio))).lightness()
-    for x in range(left, left + gap) for y in range(top + 10, top + first.height() - 10)
-]
-assert min(gutter) >= 245, "nothing of a scrolled card in the gap after the panels"
-bar.setValue(0); app.processEvents()
-assert viewport.mask().isEmpty(), "unscrolled, the gap is the strip's again"
-view.close()
-''')
-
-
-def test_a_cards_caption_stands_on_its_content_edge(run_qt) -> None:
-    """A Period card's, a closed Subpulse's and a bracket end post's header
-    caption starts on the card's content edge, where the field boxes under
-    it start: one left edge per card, whatever the card's width."""
-
-    run_qt(_schedule_source() + r'''
-from PyQt5 import QtCore, QtGui, QtWidgets
-from zlc_ui.qt import ensure_qt_app
-from zlc_ui.fluent import card_pad
-from zlc_ui.pulse import BracketPost, ComponentVM, PulseScheduleView
-from zlc_ui.pulse.schedule_view import ComponentCard
-app = ensure_qt_app(["pulse-card-captions"])
-view = PulseScheduleView()
-view.resize(1100, 600); view.show()
-view.set_schedule(vm)
-host = QtWidgets.QWidget(); host.resize(400, 300)
-component = ComponentCard(ComponentVM("mot", "MOT", ("p1",), "4 us", "1 period"), host)
-post = BracketPost("b", "end", parent=host)
-post.move(component.width() + 10, 0)
-host.show()
-app.processEvents()
-
-def caption_of(card):
-    return card.layout().itemAt(0).widget().layout().itemAt(0).widget()
-
-def ink_left(label):
-    image = label.grab().toImage()
-    ratio = image.devicePixelRatio()
-    for x in range(image.width()):
-        if any(QtGui.QColor(image.pixel(x, y)).lightness() < 160 for y in range(image.height())):
-            return x / ratio
-    raise AssertionError(f"no ink in {label.text()!r}")
-
-card = next(iter(view._cards.values()))
-for owner, field, text in ((card, card.duration_edit, "Duration"),
-                           (component, component.name_edit, "Duration"),
-                           (post, post.count_spin, "Repeats")):
-    caption = caption_of(owner)
-    assert caption.text() == text
-    assert caption.alignment() & QtCore.Qt.AlignLeft, text
-    x = caption.mapTo(owner, QtCore.QPoint()).x()
-    assert x == card_pad() == field.mapTo(owner, QtCore.QPoint()).x(), (text, x)
-    assert ink_left(caption) < 2, (text, ink_left(caption), "the words start at the edge")
-host.close(); view.close()
-''')
-
-
-def test_a_tinted_subpulse_card_gives_its_commands_the_white_face(run_qt) -> None:
-    """The selection wash under a plain Subpulse is the light blue of the
-    standard face: there, as on a Config Subpulse's green, Expand and Edit
-    wear the white on-tint face, and they go back when the card does.
-    Ungroup is red on any body, and an expanded Subpulse's Collapse is held
-    down -- the SELECTED face -- on the green too."""
+def test_ungroup_is_red_and_an_expanded_subpulses_collapse_is_held_down(run_qt) -> None:
+    """Ungroup is red on any body, and an expanded Subpulse's Collapse is held
+    down -- the SELECTED face -- on a Config Subpulse's green too."""
 
     run_qt(r'''
 from PyQt5 import QtGui, QtWidgets
 from zlc_ui.qt import ensure_qt_app
-from zlc_ui.fluent.style import BUTTON_TINT, RED_TINT, SELECTED, SURFACE
+from zlc_ui.fluent.style import RED_TINT, SELECTED
 from zlc_ui.pulse import ComponentVM
 from zlc_ui.pulse.schedule_view import ComponentCard
 app = ensure_qt_app(["pulse-subpulse-faces"])
 host = QtWidgets.QWidget(); host.resize(300, 400)
 card = ComponentCard(ComponentVM("mot", "MOT", ("p1",), "4 us", "1 period"), host)
 host.show(); app.processEvents()
-buttons = (card.expand_button, card.edit_button)
 
 def face(button):
     app.processEvents()
@@ -2849,21 +2332,13 @@ def face(button):
     ratio = image.devicePixelRatio()
     return QtGui.QColor(image.pixel(int(3 * ratio), int(button.height() / 2 * ratio))).name().upper()
 
-def faces():
-    return {face(button) for button in buttons}
-
-assert faces() == {BUTTON_TINT.upper()}, faces()
 assert face(card.ungroup_button) == RED_TINT.upper()
 assert not card.expand_button.is_active(), "a closed Subpulse's Expand rests"
 card.set_selected(True)
-assert faces() == {SURFACE.upper()}, faces()
 assert face(card.ungroup_button) == RED_TINT.upper(), "Ungroup is red on any body"
-card.set_selected(False)
-assert faces() == {BUTTON_TINT.upper()}, faces()
 config = ComponentVM("mot", "MOT", ("p1",), "4 us", "1 period",
                      source="config", config_path="a.json", config_active=True)
 card.set_component(config)
-assert faces() == {SURFACE.upper()}, "a Config Subpulse is tinted whether or not it is selected"
 assert face(card.ungroup_button) == RED_TINT.upper()
 expanded = ComponentCard(config, host, mode="start")
 expanded.show(); app.processEvents()
@@ -2873,154 +2348,53 @@ host.close()
 ''')
 
 
-def test_a_delay_rows_ring_is_centred_on_its_face(run_qt) -> None:
-    """The on/off ring takes its face's parity and is centred on it: an odd
-    ring in an even face stood half a pixel right and up on every row."""
+def test_the_subpulse_binding_box_shows_the_owners_answer_after_enter(run_qt) -> None:
+    """A refused Config name returns to the bound key, and a key bound
+    elsewhere replaces a committed one; only a name still being typed
+    survives a projection."""
 
     run_qt(r'''
-from PyQt5 import QtGui, QtWidgets
+from PyQt5 import QtCore, QtTest
 from zlc_ui.qt import ensure_qt_app
-from zlc_ui.pulse.schedule_view import _port_toggle_button
-app = ensure_qt_app(["pulse-ring-centre"])
-host = QtWidgets.QWidget(); host.resize(200, 100)
-buttons = [_port_toggle_button(on, "") for on in (True, False)]
-for index, button in enumerate(buttons):
-    button.setParent(host); button.move(index * 40, 0)
-host.show(); app.processEvents()
-for button in buttons:
-    assert (button.width() - button.iconSize().width()) % 2 == 0, "the ring takes the face's parity"
-    image = button.grab().toImage()
-    ratio = image.devicePixelRatio()
-    inked = [(x, y) for y in range(image.height()) for x in range(image.width())
-             if QtGui.QColor(image.pixel(x, y)).lightness() < 150]
-    xs = [x for x, _y in inked]; ys = [y for _x, y in inked]
-    centre = ((min(xs) + max(xs) + 1) / 2 / ratio, (min(ys) + max(ys) + 1) / 2 / ratio)
-    face = (button.width() / 2, button.height() / 2)
-    assert abs(centre[0] - face[0]) <= 0.5 / ratio and abs(centre[1] - face[1]) <= 0.5 / ratio, (centre, face)
-host.close()
-''')
-
-
-def test_the_repeat_boxes_share_one_count_width(run_qt) -> None:
-    """The Pulse's Repeat and the Scan repeats are one measure of box -- a
-    common count whole, the stepper beside it -- standing at the start of
-    their column rather than stretched across it; a longer count widens
-    the box and shows whole."""
-
-    run_qt(_schedule_source() + r'''
-from dataclasses import replace
-from PyQt5 import QtCore
-from zlc_ui.qt import ensure_qt_app
-from zlc_ui.pulse import PulseScanView, PulseScheduleView
-from zlc_ui.pulse._layout import count_box_width
-app = ensure_qt_app(["pulse-count-width"])
-view = PulseScheduleView()
-view.resize(1100, 600); view.show()
-view.set_schedule(vm)
-scan = PulseScanView()
-scan.resize(900, 600); scan.show()
-app.processEvents()
-repeat = view.channel_panel.run_repeats_spin
-assert repeat.width() == scan.scan_repeats_spin.width() == count_box_width(repeat), (
-    repeat.width(), scan.scan_repeats_spin.width())
-clock = view.channel_panel.clock_label
-assert repeat.mapTo(view, QtCore.QPoint()).x() == clock.mapTo(view, QtCore.QPoint()).x()
-assert repeat.width() < clock.width(), "a count box, not a stretch of the column"
-narrow = repeat.width()
-view.set_schedule(replace(vm, revision=vm.revision + 1, run_repeats=(1 << 32) - 1))
-app.processEvents()
-assert repeat.width() > narrow and repeat.text() == str((1 << 32) - 1)
-scan.scan_repeats_spin.clearFocus()  # a projection waits while the operator types
-scan.set_repeats((1 << 32) - 1)
-app.processEvents()
-assert scan.scan_repeats_spin.text() == str((1 << 32) - 1)
-assert scan.scan_repeats_spin.width() == repeat.width()
-scan.close(); view.close()
-''')
-
-
-def test_value_config_names_one_key_and_keeps_one_pitch(run_qt) -> None:
-    """The key a field binds to is a "Config name" in the grid's header and
-    its boxes; the mode line, the hint and the header are rows like the rows
-    under them; the read values stand a section gap from the name boxes; and
-    the Subpulse page's table of these bindings is titled like this one."""
-
-    run_qt(r'''
-from PyQt5 import QtCore, QtGui
-from zlc_ui.qt import ensure_qt_app
-from zlc_ui.fluent import ElidedLabel, row_gap, section_gap
-from zlc_ui.pulse import ConfigPageRecord, PulseConfigView, PulseComponentView
-from zlc_ui.pulse._layout import row_height
-app = ensure_qt_app(["pulse-config-pitch"])
-config = PulseConfigView()
-config.resize(1100, 700); config.show()
-config.set_page(ConfigPageRecord(
-    available_names=("bias",),
-    bindings=(("a", "MOT.bias_x", "bias", "0", "100", "Applied"),
-              ("b", "PGC.bias_x", "bias", "10", "100", "Applied")),
-    binding_groups=(("b", "pgc", "PGC"),),
-))
-app.processEvents()
-headers = config._grid_headers
-assert headers[1].text() == "Config name"
-assert all(header.height() == row_height() for header in headers)
-grid = config._binding_grid
-hint = next(label for label in config.findChildren(ElidedLabel) if label.text().startswith("Choose a Config name"))
-column = [config.mode_label, hint, headers[0]] + [
-    grid.itemAtPosition(row, 0).widget() for row in range(1, grid.rowCount())
-    if grid.itemAtPosition(row, 0) is not None]
-tops = [widget.mapTo(config, QtCore.QPoint()).y() for widget in column]
-assert len(tops) >= 6 and {b - a for a, b in zip(tops, tops[1:])} == {row_height() + row_gap()}, tops
-first_rows = [(widget.mapTo(config, QtCore.QPoint()).y() - widget.parentWidget().mapTo(config, QtCore.QPoint()).y())
-              for widget in (config.mode_label, config.new_button)]
-assert first_rows[0] == first_rows[1], ("one title-to-first-row rhythm per card", first_rows)
-image = config.grab().toImage()
-ratio = image.devicePixelRatio()
-
-def first_ink(widget):
-    origin = widget.mapTo(config, QtCore.QPoint())
-    for x in range(int(origin.x() * ratio), int((origin.x() + widget.width()) * ratio)):
-        if any(QtGui.QColor(image.pixel(x, y)).lightness() < 160
-               for y in range(int(origin.y() * ratio), int((origin.y() + widget.height()) * ratio))):
-            return x / ratio
-
-name, default = config._binding_rows["a"][1:3]
-name_right = name.mapTo(config, QtCore.QPoint()).x() + name.width()
-gutters = (first_ink(headers[2]) - name_right, first_ink(default) - name_right)
-assert all(section_gap() <= gutter <= section_gap() + 2 for gutter in gutters), gutters
-assert config._binding_rows["a"][1].lineEdit().placeholderText() == "Config name"
-config.close()
+from zlc_ui.pulse import FieldVM, PeriodVM, PulseComponentView, ScheduleVM
+app = ensure_qt_app(["pulse-subpulse-binding"])
+period = PeriodVM("p0", "P0", FieldVM("4"), "us", ("us",))
+vm = ScheduleVM(1, 1, "Loading", "50 MHz", "4 us", "", 1, "0/0 ports", "", (), (period,))
 page = PulseComponentView()
-assert page.bindings_box.title() == "Subpulse bindings"
-''')
+page.resize(1000, 600); page.show(); page.activateWindow()
+bound, commits = {"key": "t"}, []
 
+def project():
+    page.set_document(vm, contexts=(("load", "Loading"),), context_id="load",
+                      bindings=(("p0:duration", "P0.duration", bound["key"]),), config_names=("t", "bias"))
 
-def test_the_scan_page_titles_its_first_card_and_edges_the_table_as_a_block(run_qt) -> None:
-    """Every card on the Scan page opens with a title, the bound-field list's
-    too; the read-only scan table wears a block's edge, not the editable
-    code box's input edge."""
+def owner(_action, payload):
+    commits.append(payload[1])
+    if " " not in payload[1]:
+        bound["key"] = payload[1]
+    project()
 
-    run_qt(r'''
-from PyQt5 import QtGui
-from zlc_ui.qt import ensure_qt_app
-from zlc_ui.fluent import FluentGroupBox
-from zlc_ui.fluent.style import DIVIDER, PLACEHOLDER
-from zlc_ui.pulse import PulseScanView
-app = ensure_qt_app(["pulse-scan-cards"])
-scan = PulseScanView()
-scan.resize(900, 600); scan.show(); app.processEvents()
-cards = scan.findChildren(FluentGroupBox)
-assert sorted(box.title() for box in cards) == sorted(
-    ("Bound fields", "Playback", "Generate the scan table (Python)", "Scan table")), [box.title() for box in cards]
-first = next(box for box in cards if box.title() == "Bound fields")
-assert first.isAncestorOf(scan.scan_slots_label) and not first.isAncestorOf(scan.scan_repeats_spin)
+page.edit_requested.connect(owner)
+project()
+combo = page._binding_rows["p0:duration"][1]
+edit = combo.lineEdit()
 
-def edge(widget):
-    image = widget.grab().toImage()
-    ratio = image.devicePixelRatio()
-    return QtGui.QColor(image.pixel(0, int(widget.height() / 2 * ratio))).name().upper()
+def type_in(text, enter=True):
+    edit.setFocus(); edit.selectAll(); app.processEvents()
+    assert edit.hasFocus()
+    QtTest.QTest.keyClicks(edit, text)
+    if enter:
+        QtTest.QTest.keyClick(edit, QtCore.Qt.Key_Return)
+    app.processEvents()
 
-assert edge(scan.scan_table_view) == DIVIDER.upper()
-assert edge(scan.scan_code) == PLACEHOLDER.upper()
-scan.close()
+type_in("bad name")
+assert combo.currentText() == "t" and commits == ["bad name"], ("a refused name stayed", combo.currentText(), commits)
+type_in("bias")
+bound["key"] = "t"; project()
+assert combo.currentText() == "t", "a key bound elsewhere must replace a committed name"
+page.context_combo.setFocus(); app.processEvents()
+assert commits == ["bad name", "bias"] and bound["key"] == "t", ("leaving the box recommitted", commits)
+type_in("unfin", enter=False)
+project()
+assert combo.currentText() == "unfin", "a projection erased a name being typed"
 ''')

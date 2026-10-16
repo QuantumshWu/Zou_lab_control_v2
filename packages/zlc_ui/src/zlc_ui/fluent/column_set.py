@@ -29,11 +29,6 @@ starts at the operand's x and runs on through the columns after it.
 column), and :meth:`follow` keeps a row under the lines -- an error, a
 result -- starting at a column's x, so a long message adds lines below
 instead of squeezing into what is left beside the controls.
-
-:func:`section_header` is the line a section of such an editor opens with:
-its title, the section's own control, and at the right end its summary and
-the commands that add a row to it -- the same shape in every editor, so
-"Add …" is found at one end of the page whichever editor is open.
 """
 
 from __future__ import annotations
@@ -43,40 +38,7 @@ from collections.abc import Sequence
 from PyQt5 import QtCore, QtWidgets, sip
 
 from ..status import sentence
-from .fluent import FluentLabel, FluentSectionLabel, control_height, row_gap, set_status_ink
-
-
-def section_header(
-    title: str,
-    *,
-    lead: Sequence[QtWidgets.QWidget] = (),
-    summary: QtWidgets.QWidget | None = None,
-    actions: Sequence[QtWidgets.QWidget] = (),
-) -> tuple[FluentSectionLabel, QtWidgets.QHBoxLayout]:
-    """THE header line of a section inside an editor, and its title.
-
-    The title comes first; ``lead`` -- the section's own control, such as a
-    preset strip -- follows it, on the form's field edge once the owner holds
-    the title to the editor's label column.  The right end belongs to the
-    section's ``summary`` and then its ``actions``, the commands that add a
-    row to the section, so the last command ends on the page's right edge
-    in every editor.  The title is centred on what stands beside it; the
-    section gap above the line is the gap of the layout it stands in.
-    """
-
-    label = FluentSectionLabel(title)
-    line = QtWidgets.QHBoxLayout()
-    line.setContentsMargins(0, 0, 0, 0)
-    line.setSpacing(row_gap())
-    line.addWidget(label)
-    for widget in lead:
-        line.addWidget(widget)
-    line.addStretch(1)
-    if summary is not None:
-        line.addWidget(summary)
-    for widget in actions:
-        line.addWidget(widget)
-    return label, line
+from .fluent import FluentLabel, control_height, row_gap, set_status_ink
 
 
 def error_note_label(text: str = "") -> QtWidgets.QLabel:
@@ -335,7 +297,6 @@ __all__ = [
     "FluentColumnSet",
     "error_note_label",
     "hold_place",
-    "section_header",
     "show_note",
     "show_problem",
 ]

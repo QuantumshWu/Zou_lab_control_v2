@@ -1716,15 +1716,7 @@ class PulseEditorPresenter:
             if error is not None:
                 self._warn(f"Cannot compile this pulse: {error}", present=False)
 
-        if self._run_device_work is not None:
-            return self._run_device_command(work, delivered, summary="Validating pulse...", always_deliver=True)
-        try:
-            result = work(0)
-        except Exception as error:
-            delivered(None, error)
-            return False
-        delivered(result, None)
-        return True
+        return self._device_or_inline(work, delivered, "Validating pulse...", always_deliver=True)
 
     def _accept_state(self, candidate: PulseEditorState) -> None:
         """Replace current authoring atomically and invalidate derived views."""
@@ -2491,17 +2483,7 @@ class PulseEditorPresenter:
             self._digest_revision = -1
             self.refresh()
 
-        if self._run_device_work is not None:
-            return self._run_device_command(
-                work, delivered, summary="Updating Config...", always_deliver=True
-            )
-        try:
-            values = work(0)
-        except Exception as error:
-            delivered(None, error)
-            return False
-        delivered(values, None)
-        return True
+        return self._device_or_inline(work, delivered, "Updating Config...", always_deliver=True)
 
     def load_config_values(self, path: str | None = None, *, present: bool = True,
                            discard_changes: bool = False) -> bool:
@@ -3902,6 +3884,21 @@ class PulseEditorPresenter:
             return False
         return True
 
+    def _device_or_inline(self, work, delivered, summary: str, *, always_deliver: bool = False) -> bool:
+        """Run ``work`` on the device worker when one is attached
+        (:meth:`_run_device_command`), else here and now; its outcome is
+        delivered either way.  Whether it was accepted."""
+
+        if self._run_device_work is not None:
+            return self._run_device_command(work, delivered, summary=summary, always_deliver=always_deliver)
+        try:
+            result = work(0)
+        except Exception as error:
+            delivered(None, error)
+            return False
+        delivered(result, None)
+        return True
+
     def _run_device_command(
         self,
         work: Callable[[int], object],
@@ -5187,15 +5184,7 @@ class PulseEditorPresenter:
             self._done(self._scan_progress, present=present)
             self._refresh_scan_page()
 
-        if self._run_device_work is not None:
-            return self._run_device_command(work, delivered, summary="Loading scan array...")
-        try:
-            table = work(0)
-        except Exception as error:
-            delivered(None, error)
-            return False
-        delivered(table, None)
-        return True
+        return self._device_or_inline(work, delivered, "Loading scan array...")
 
     def load_scan_program(self, path: str | None = None, *, present: bool = True) -> bool:
         """Load explicit Python source into the same draft as typing, without running it.
@@ -5228,15 +5217,7 @@ class PulseEditorPresenter:
             self._done(self._scan_progress, present=present)
             self._refresh_scan_page()
 
-        if self._run_device_work is not None:
-            return self._run_device_command(work, delivered, summary="Loading scan program...")
-        try:
-            source = work(0)
-        except Exception as error:
-            delivered(None, error)
-            return False
-        delivered(source, None)
-        return True
+        return self._device_or_inline(work, delivered, "Loading scan program...")
 
     def save_scan_array(self, path: str | None = None, *, present: bool = True) -> str | bool:
         """Save authored fractional scan values to an explicit .npy path.
