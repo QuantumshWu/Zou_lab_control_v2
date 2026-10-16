@@ -119,10 +119,9 @@ def _build(*, source_signal: str, **values: object) -> FrameSurvivalProcessor:
 def _editor_factory(parent=None):
     from PyQt5 import QtCore, QtWidgets
     from zlc_ui.fluent import (
-        FluentSegmentedButtons, FluentSelectionGrid, error_note_label, muted_note_label, row_gap,
+        FluentSegmentedButtons, FluentSelectionGrid, card_title_row, error_note_label, muted_note_label, row_gap,
         set_status_ink, show_note, show_problem,
     )
-    from zlc_ui.fluent.column_set import section_header
     from zlc_ui.status import sentence
 
     labels = {choice.value: choice.label for choice in _SELECTIONS}
@@ -181,7 +180,7 @@ def _editor_factory(parent=None):
                 self)
             self.presets.activated.connect(self._preset)
             self.summary = muted_note_label("")
-            self.title, header = section_header("Pairs", lead=(self.presets,), summary=self.summary)
+            header, self.title = card_title_row("Pairs", self.summary, lead=(self.presets,))
             layout.addLayout(header)
             self.table = FluentSelectionGrid(self)
             self.table.selection_edited.connect(self._marked)

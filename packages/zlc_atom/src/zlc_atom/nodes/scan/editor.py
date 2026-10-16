@@ -52,6 +52,7 @@ from zlc_ui.fluent import (
     FluentLabel,
     FluentSectionLabel,
     FluentSegmentedButtons,
+    card_title_row,
     error_note_label,
     field_text_inset,
     fill_grouped_choice_combo,
@@ -64,7 +65,6 @@ from zlc_ui.fluent import (
     show_problem,
     signals_blocked,
 )
-from zlc_ui.fluent.column_set import section_header
 from zlc_ui.form import FluentParameterForm, FormFieldProps, FormSpec, being_edited, decimal_number_width
 from zlc_ui.status import counted
 
@@ -640,8 +640,7 @@ class ScanPlanEditor(QtWidgets.QWidget):
         column.setSpacing(row_gap())
         self.add_button = FluentButton("Add axis")
         self.add_manual_button = FluentButton("Add manual axis")
-        self.plan_title, header = section_header(
-            "Scan plan", actions=(self.add_button, self.add_manual_button))
+        header, self.plan_title = card_title_row("Scan plan", self.add_button, self.add_manual_button)
         column.addLayout(header)
         self.rows_layout = QtWidgets.QVBoxLayout()
         self.rows_layout.setSpacing(row_gap())

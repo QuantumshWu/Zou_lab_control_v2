@@ -21,11 +21,10 @@ from __future__ import annotations
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 from zlc_ui.fluent import (
-    FONT, FluentButton, FluentLabel, FluentSegmentedButtons, FluentSelectionGrid,
+    FONT, FluentButton, FluentLabel, FluentSegmentedButtons, FluentSelectionGrid, card_title_row,
     error_note_label, fluent_font_size, fluent_open_path, muted_note_label, retire_widget, row_gap, scaled_px,
     set_status_ink, setting_label_width, show_problem,
 )
-from zlc_ui.fluent.column_set import section_header
 
 from zlc_atom.nodes._framework.frames import (
     FIRST, LAST, REST, canonical_frames, claim_names, parked_entries, reach_frames,
@@ -57,7 +56,7 @@ class CalibrationsEditor(QtWidgets.QWidget):
         self.summary = muted_note_label("")
         self.add_button = FluentButton("Add calibration…")
         self.add_button.clicked.connect(self._browse_new)
-        _title, header = section_header("Calibrations", summary=self.summary, actions=(self.add_button,))
+        header = card_title_row("Calibrations", self.summary, self.add_button)[0]
         layout.addLayout(header)
         self.grid = FluentSelectionGrid(
             self, toggle=True,
