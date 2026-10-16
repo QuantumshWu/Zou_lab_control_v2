@@ -5883,24 +5883,26 @@ class MatplotlibRenderer:
         # and compose.  Re-entering here copied the full rcParams mapping for
         # every frame without changing a property on any existing artist.
         if not reusable:
-            # Replayed TEXT is faded for the background draw, not hidden:
-            # Matplotlib positions a title during Axes.draw from the title's
-            # own extent, and a hidden Text reports a unit box, so hiding it
-            # sent the title off the canvas and the next recording drew it
-            # there.  Fully transparent, it lays out where it always does
-            # and leaves the background untouched.  Its bbox patch is not
-            # faded with it -- Text.draw paints the patch with the patch's
-            # own alpha, before the text's is even set -- so the patch is
-            # hidden as a patch is: the pulse timeline's slot badges were
-            # baked into the background at the press and stood still,
-            # discs without numbers, while the pan moved the badges.
+            # An Axes TITLE is faded for the background draw, not hidden:
+            # Axes.draw positions a title from the title's own extent, and a
+            # hidden Text reports a unit box, which sends it off the canvas.
+            # Fully transparent, it lays out where it always does and leaves
+            # the background untouched.  Every other text is hidden like any
+            # dynamic artist, so it is not laid out and rasterized at alpha
+            # 0.  A bbox patch is never faded -- Text.draw paints it with the
+            # patch's own alpha -- so the patch is hidden as a patch is.
             from matplotlib.text import Text
 
             withheld = []
             for _key, artist in dynamics:
                 is_text = isinstance(artist, Text)
+                owner = getattr(artist, "axes", None) if is_text else None
+                is_title = owner is not None and any(
+                    artist is getattr(owner, slot, None)
+                    for slot in ("title", "_left_title", "_right_title")
+                )
                 withheld.append(
-                    (artist, is_text, artist.get_visible(), artist.get_alpha())
+                    (artist, is_title, artist.get_visible(), artist.get_alpha())
                 )
                 patch = artist.get_bbox_patch() if is_text else None
                 if patch is not None:
@@ -5921,8 +5923,8 @@ class MatplotlibRenderer:
                     )
             empty_cells: list[Any] = []
             try:
-                for artist, is_text, _visible, _alpha in withheld:
-                    if is_text:
+                for artist, faded, _visible, _alpha in withheld:
+                    if faded:
                         artist.set_alpha(0.0)
                     else:
                         artist.set_visible(False)
@@ -5935,8 +5937,8 @@ class MatplotlibRenderer:
             finally:
                 for axes in empty_cells:
                     axes.set_visible(True)
-                for artist, is_text, visible, alpha in withheld:
-                    if is_text:
+                for artist, faded, visible, alpha in withheld:
+                    if faded:
                         artist.set_alpha(alpha)
                     else:
                         artist.set_visible(visible)
