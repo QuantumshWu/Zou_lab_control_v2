@@ -20,7 +20,7 @@ from zlc_data import owned_snapshot_from_arrays
 
 from zlc_atom.authoring import AuthoringChoice, AuthoringField, AuthoringSchema
 from zlc_atom.nodes._framework.descriptor import LogicNodeDescriptor, NodeKind
-from zlc_atom.nodes._framework.frames import FIRST, LAST, REST, absent_notes, frame_token, resolve_frame
+from zlc_atom.nodes._framework.frames import FIRST, LAST, REST, absent_notes, canonical_frames, resolve_frame
 from zlc_atom.nodes.derive.expression import CATEGORIES, OPERATORS, Operand, evaluate
 from zlc_atom.nodes.derive.logic_node import DERIVE_SCHEMA
 from zlc_atom.nodes.occupancy.logic_node import LOGIC_NODE as OCCUPANCY, OCCUPANCY_SCHEMA
@@ -61,15 +61,15 @@ CONDITION_FIELDS = (FRAME_A, FRAME_B, MODE, RELATION, VALUE_A, VALUE_B)
 
 
 def _frame(field: AuthoringField, text: object) -> int | str:
-    """One slot's frame claim; frame 0 is written "first", as a claim is."""
+    """One slot's frame, in its claim spelling (frame 0 is "first")."""
 
     try:
-        token = frame_token(text)
+        (token,) = canonical_frames((text,))
     except ValueError:
         token = REST
     if token == REST:
         raise ValueError(f"{field.label} must be first, last or a middle frame number, not {text!r}")
-    return FIRST if token == 0 else token
+    return token
 
 
 def _frame_words(token: int | str) -> str:
@@ -97,6 +97,13 @@ def _used(kept: Mapping[str, object]) -> tuple[bool, bool]:
     """Which slots the condition reads: both for a relation, the ones not Any for values."""
 
     return (True, True) if kept["mode"] == "relation" else tuple(value != ANY for value in kept["values"])
+
+
+def _read_frames(kept: Mapping[str, object], count: int) -> tuple[int | None, ...]:
+    """The frame each slot reads in a ``count``-frame cycle; None for a slot
+    the condition does not read, or a middle number the cycle lacks."""
+
+    return tuple(resolve_frame(token, count) if read else None for token, read in zip(kept["frames"], _used(kept)))
 
 
 def source_problem(kept: Mapping[str, object], count: int) -> str:
@@ -143,8 +150,7 @@ def _post_selected(result: OccupancyResult, axis, *, kept: Mapping[str, object])
     if problem:
         raise ValueError(problem)
     labels = axis.labels()
-    picks = tuple(labels[resolve_frame(token, count)] if read else None
-                  for token, read in zip(kept["frames"], _used(kept)))
+    picks = tuple(None if frame is None else labels[frame] for frame in _read_frames(kept, count))
     how = kept["relation"] if kept["mode"] == "relation" else kept["values"]
     snapshots = {member: result.artifacts[member].materialize() for member in _MASKED}
     masked = evaluate(_rows(axis.name, picks, kept["mode"], how), {
@@ -159,11 +165,7 @@ def _post_selected(result: OccupancyResult, axis, *, kept: Mapping[str, object])
     }})
 
 
-def _validate(values: Mapping[str, object]) -> None:
-    condition(values)
-
-
-POST_SELECTED_OCCUPANCY_SCHEMA = AuthoringSchema((*OCCUPANCY_SCHEMA.fields, *CONDITION_FIELDS), validator=_validate)
+POST_SELECTED_OCCUPANCY_SCHEMA = AuthoringSchema((*OCCUPANCY_SCHEMA.fields, *CONDITION_FIELDS), validator=condition)
 
 
 def _build(*, calibrations, source_signal: str, **values: object):
@@ -171,9 +173,11 @@ def _build(*, calibrations, source_signal: str, **values: object):
 
     authored = POST_SELECTED_OCCUPANCY_SCHEMA.project_values(values)
     kept = condition(authored)
+    # Recorded as Occupancy records its claims: what was asked beside what it came to.
     return OCCUPANCY.build(
         calibrations=calibrations, source_signal=source_signal,
-        post_select=functools.partial(_post_selected, kept=kept), post_select_record=kept,
+        post_select=functools.partial(_post_selected, kept=kept),
+        post_select_record=lambda count: {**kept, "read_frames": _read_frames(kept, count)},
         **{name: authored[name] for name in OCCUPANCY_SCHEMA.field_names},
     )
 

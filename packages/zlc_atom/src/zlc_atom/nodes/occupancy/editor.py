@@ -27,13 +27,12 @@ from zlc_ui.fluent import (
 )
 
 from zlc_atom.nodes._framework.frames import (
-    FIRST, LAST, REST, canonical_frames, claim_names, parked_entries, reach_frames,
+    FIRST, LAST, REST, FrameToken, canonical_frames, claim_names, parked_entries, reach_frames,
 )
 from zlc_atom.nodes.calibration import DEFAULT_READOUT_MODEL_CHOICE, READOUT_MODEL_CHOICES
 
 #: The artifact input this editor manages.
 CALIBRATIONS = "calibrations"
-_NAMED = ((FIRST, "First"), (LAST, "Last"), (REST, "Rest"))
 #: Design px of label column a calibration file name gets (see label_width_floor).
 _FILE_NAME_ROOM = 150
 _GAP = None
@@ -156,22 +155,13 @@ class CalibrationsEditor(QtWidgets.QWidget):
         count = None if frames is None else len(frames)
         # A file with no frame is kept and not read: muted, never red.
         parked = parked_entries(tuple(entry["frames"] for entry in entries))
-        claimed = sorted({
-            token for entry in entries for token in entry["frames"] if isinstance(token, int)
-        })
+        named = frame_names(frames, (
+            token for entry in entries for token in entry["frames"] if isinstance(token, int)))
         # The numbered columns are the middle frames; the ends are First and Last.
         middle = () if count is None else tuple(range(1, count - 1))
-        # A middle number the source does not carry between its ends keeps a
-        # column of its own, so the claim stays visible -- kept for a cycle
-        # that has it, and one click away from being removed.
-        ghosts = tuple(number for number in claimed if number not in middle)
-        self._columns = (*(token for token, _label in _NAMED), _GAP, *middle, *ghosts)
+        self._columns = (FIRST, LAST, REST, _GAP, *(token for token in named if isinstance(token, int)))
         ends = {FIRST: 0, LAST: None if count is None else count - 1}
-        labels = (
-            *(label if count is None else f"{label} · {frames[ends[token]]}"
-              if token in ends else label for token, label in _NAMED), "",
-            *(frames[number] for number in middle), *(str(number) for number in ghosts),
-        )
+        labels = tuple("Rest" if token == REST else named.get(token, "") for token in self._columns)
         reach = None if count is None or not entries else reach_frames(
             tuple(entry["frames"] for entry in entries), count)
         cells: dict[tuple[int, int], str] = {}
@@ -192,7 +182,7 @@ class CalibrationsEditor(QtWidgets.QWidget):
                     if count is not None:
                         states[(row, column)] = "kept"
                         tips[(row, column)] = (
-                            f"kept: middle frame {token} is not in this source; click to drop it")
+                            f"kept: middle frame {token} is not between this source's ends; click to drop it")
                 elif frame is not None and reach is not None:
                     readers = reach.readers[frame]
                     mine = next((how for reader, how in readers if reader == row), None)
@@ -333,6 +323,22 @@ class CalibrationsEditor(QtWidgets.QWidget):
         self.setEnabled(bool(enabled))
 
 
+def frame_names(frames, claimed) -> dict[FrameToken, str]:
+    """The frames a claim can name, as the columns call them: First and Last
+    (with the source's label once its ``frames`` are known), each middle frame
+    by its label, then each ``claimed`` middle number the source does not carry
+    between its ends by its number, so the claim stays visible."""
+
+    count = None if frames is None else len(frames)
+    middle = () if count is None else range(1, count - 1)
+    return {
+        FIRST: "First" if count is None else f"First · {frames[0]}",
+        LAST: "Last" if count is None else f"Last · {frames[-1]}",
+        **{number: frames[number] for number in middle},
+        **{number: str(number) for number in sorted(set(claimed)) if number not in middle},
+    }
+
+
 def _parked_tip(index: int, files, names) -> str:
     """What a row reading no frame is: kept -- and a copy of another row, if it is one."""
 
@@ -393,4 +399,4 @@ def _fitted(name: str, width: int | None) -> str:
     return name if advance <= room else metrics.elidedText(name, QtCore.Qt.ElideMiddle, room)
 
 
-__all__ = ["CalibrationsEditor"]
+__all__ = ["CalibrationsEditor", "frame_names"]

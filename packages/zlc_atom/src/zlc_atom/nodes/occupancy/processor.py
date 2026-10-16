@@ -115,7 +115,7 @@ class OccupancyProcessor:
     run record only.  ``post_select`` is Post-selected occupancy's step
     (``nodes/post_selected_occupancy``): every result passes it, with the
     cycle's frame axis (None: one frame), before it is returned, and the
-    run record keeps ``post_select_record`` as ``post_selection``.
+    run record keeps ``post_select_record(frame count)`` as ``post_selection``.
     """
 
     def __init__(
@@ -126,7 +126,7 @@ class OccupancyProcessor:
         source_signal: str | None = None,
         model_kind: ReadoutModelKind | None = None,
         post_select: Callable[[OccupancyResult, AxisSpec | None], OccupancyResult] | None = None,
-        post_select_record: Mapping[str, object] | None = None,
+        post_select_record: Callable[[int], Mapping[str, object]] | None = None,
     ) -> None:
         self._post_select = post_select
         self._post_select_record = post_select_record
@@ -528,7 +528,8 @@ class OccupancyProcessor:
     def describe_run(self, inputs: Mapping[str, SignalValue]) -> dict[str, object]:
         source = next(iter(inputs.values()))
         axis = self._frame_axis(source.canonical_schema or source.snapshot.block.schema)
-        entries = self.entries_for(1 if axis is None else int(axis.size))
+        count = 1 if axis is None else int(axis.size)
+        entries = self.entries_for(count)
         # The overlay draws the sites where the calibration reading the
         # first frame places them.
         overlay = self.placed[entries[0]].site_map
@@ -561,7 +562,7 @@ class OccupancyProcessor:
                 ],
                 "model_kind": self._model_kind.value,
                 **({} if self._post_select_record is None
-                   else {"post_selection": dict(self._post_select_record)}),
+                   else {"post_selection": dict(self._post_select_record(count))}),
             },
         }
 

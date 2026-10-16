@@ -1676,14 +1676,14 @@ def test_an_occupancys_frame_claims_survive_its_camera_changing_frame_count(pres
     editor = presenter.view.logic_editors[node_id]["artifact_claims"]["calibrations"]
     assert editor["problems"] == ()
     assert editor["notes"] == (
-        "load's middle frame 2 is not in this source (frames 0–2); it is kept for a cycle that has it",)
+        "load's middle frame 2 is not between this source's ends (frames 0–2); it is kept for a cycle that has it",)
     assert editor["reads"] == ((), (2,), (0, 1))
     presenter.view.logic_draft_changed.emit(camera_id, {"values": {"frames_per_cycle": 2}})
     assert presenter.view.logic_editors[survival_id]["source_frames"] == ("0", "1")
     editor = presenter.view.logic_editors[node_id]["artifact_claims"]["calibrations"]
     assert editor["problems"] == ()
     assert editor["notes"] == (
-        "load's middle frame 2 is not in this source (frames 0–1); it is kept for a cycle that has it",)
+        "load's middle frame 2 is not between this source's ends (frames 0–1); it is kept for a cycle that has it",)
     assert editor["reads"] == ((), (1,), (0,))
     assert presenter.logic[node_id].draft.artifact_inputs == {"calibrations": claims}, (
         "a frame count never edits the draft"
@@ -1930,7 +1930,7 @@ def test_post_selected_occupancy_is_occupancy_then_derives_post_selection(presen
     assert 0 < outputs["occupied"].snapshot.expanded_validity().sum() < (
         occupancy["occupied"].snapshot.expanded_validity().sum()), "some sites are post-selected away"
     assert node.describe_run({"frames": twelve})["parameters"]["post_selection"] == {
-        "frames": ("first", "last"), "mode": "relation", "relation": "=="}
+        "frames": ("first", "last"), "mode": "relation", "relation": "==", "read_frames": (0, 11)}
     for changes, mask in (
         ({"relation": ">"}, (frame("first"), frame("last", ">"))),
         ({"relation": "<="}, (frame("first"), frame("last", "<="))),
@@ -1942,7 +1942,7 @@ def test_post_selected_occupancy_is_occupancy_then_derives_post_selection(presen
         same(post_selected(twelve, **changes)[1], derived(twelve, *mask)[1])
     ten = camera(10, 8)
     same(post_selected(ten)[1], derived(ten, frame("first"), frame("9", "=="))[1])
-    with pytest.raises(ValueError, match=r"Frame B's middle frame 10 is not in this source \(frames 0–9\)"):
+    with pytest.raises(ValueError, match=r"Frame B's middle frame 10 is not between this source's ends \(frames 0–9\)"):
         post_selected(ten, frame_b="10")
     with pytest.raises(ValueError, match="needs at least two frames per cycle and this source carries 1"):
         post_selected(camera(1, 9))

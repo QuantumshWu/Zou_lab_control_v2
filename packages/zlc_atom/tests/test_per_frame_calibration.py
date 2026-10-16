@@ -432,12 +432,12 @@ def test_the_calibrations_editor_gives_frames_to_files_by_clicking(monkeypatch) 
         assert header(5) == "2" and state(0, 5) == "kept"
         assert problems() == []
         assert problems(editor.notes) == [
-            "load's middle frame 2 is not in this source (frames 0–2); it is kept for a cycle that has it."]
+            "load's middle frame 2 is not between this source's ends (frames 0–2); it is kept for a cycle that has it."]
         assert state(1, 1) == "derived", "the new last frame is read as rest, not as middle 2"
         assert click(0, 5)[0] == {"path": load["path"], "frames": ("first",)}
         project((middle, readout), frames=("0",))
         assert problems(editor.notes) == [
-            "load's middle frame 2 is not in this source (only frame 0); it is kept for a cycle that has it."]
+            "load's middle frame 2 is not between this source's ends (only frame 0); it is kept for a cycle that has it."]
         # Each row ends, after a gap, with its own remove cell: never a claim.
         project((load, readout))
         remove = grid.model().columnCount() - 1
@@ -467,7 +467,7 @@ def test_the_calibrations_editor_gives_frames_to_files_by_clicking(monkeypatch) 
         assert problems() == [
             "frame 1 has no file: give it to one, or let one read the rest."]
         assert problems(editor.notes) == [
-            "load's middle frame 4 is not in this source (frames 0–2); it is kept for a cycle that has it."]
+            "load's middle frame 4 is not between this source's ends (frames 0–2); it is kept for a cycle that has it."]
         # Every collision at once, each in its own block.
         project(({"path": load["path"], "frames": ("first", "last")},
                  {"path": readout["path"], "frames": ("first", "last")}))
