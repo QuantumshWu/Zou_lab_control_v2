@@ -1073,17 +1073,16 @@ class _RemoteRasterPlotHost:
 _INPUT_FREE_BLOCKS = 4
 
 #: How many children stand warm and unused before anything is drawing, so
-#: a panel never waits for one.  Four, because a board is four cards: the
-#: console's own layouts and the saved boards sit at or under four, so a
-#: whole board opened at once finds every panel a warm child of its own.
-DEFAULT_RENDER_SPARES = 4
+#: a whole board opened at once finds every panel a warm child of its own.
+#: Six, because the operator's scan board is six cards (camera, occupancy,
+#: rolling, facet, curve, scan image): a panel that lands on a cold child
+#: paints 2.5 s late, and the same-shot cohort holds the board for it.
+DEFAULT_RENDER_SPARES = 6
 
 #: How many stand warm once a board IS drawing.  A board arrives all at
-#: once and then GROWS one panel at a time, so the opening count answers a
-#: question nobody asks twice: holding four more idle renderers for the
-#: rest of the session is most of a gigabyte against an operator who adds
-#: one panel.  Two covers that, and the same number is the mark of a board
-#: having arrived -- more than this many drawing is no longer an opening.
+#: once and then GROWS one panel at a time, so holding the opening reserve
+#: for the rest of the session is most of a gigabyte against an operator
+#: who adds one panel.  Two covers that.
 DEFAULT_RENDER_SETTLED_SPARES = 2
 
 
@@ -1126,9 +1125,9 @@ class RenderProcessPool:
     WHAT IT COSTS is memory, and only memory: about two hundred megabytes per
     child, whether or not a panel ever lands on it.  The warm count steps
     down to bound that: a board arrives all at once, which is what
-    ``spares`` is sized for, and then grows one panel at a time -- so once
-    more than ``settled_spares`` children are drawing, the opening count has
-    answered its question and ``settled_spares`` stand warm instead.
+    ``spares`` is sized for, and spends that reserve panel by panel down to
+    ``settled_spares``, which then stand warm for a board that grows one
+    panel at a time.
 
     ONE PANEL, ONE CHILD, WITHOUT EXCEPTION.  Two panels in one child put
     their Python -- artist updates, chrome, the pickle of every front --
@@ -1212,13 +1211,15 @@ class RenderProcessPool:
     def _warm_count(self, drawing: int) -> int:
         """How many stand warm while ``drawing`` children have a panel on them.
 
-        The opening count answers "a whole board at once"; past that the
-        board grows one panel at a time and the answer is the smaller one.
-        Asked on every change of shape, so a board whose panels all close
-        comes back up to the opening count for the next one.
+        A board spends the opening reserve: each panel it mounts lowers the
+        count by one, so while it arrives nothing is started for it and no
+        warm child is retired under it -- a step straight down to the settled
+        count retired a spare mid-mount and left the last panels to cold
+        children.  Asked on every change of shape, so a board whose panels
+        all close comes back up to the opening count for the next one.
         """
 
-        return self._spares if drawing <= self._settled_spares else self._settled_spares
+        return max(self._settled_spares, self._spares - drawing)
 
     def _keep_warm(self) -> None:
         """Start whatever is missing, retire whatever is spare or spent.
@@ -3443,12 +3444,12 @@ def _render_process_main(connection: Connection, name: str) -> None:
     #: Set by the first create request: from then on the warming below
     #: stops before its next picture, so a panel never queues behind it.
     requested = Event()
-    #: The panel this child was given -- its spec and its storage, appended
-    #: by the create that builds it -- and the moment its first front went
-    #: out.  What the warming goes on to after that is that panel's own fit,
-    #: in the first gap of the parent's requests, whose last arrival the
-    #: service loop stamps here.
-    panel: list[tuple[object, object]] = []
+    #: The panel this child was given -- its spec, its storage and the fit
+    #: model it opens with, appended by the create that builds it -- and the
+    #: moment its first front went out.  What the warming goes on to after
+    #: that is that panel's own fit, in the first gap of the parent's
+    #: requests, whose last arrival the service loop stamps here.
+    panel: list[tuple[object, object, object]] = []
     shown = Event()
     last_request = [monotonic()]
 
@@ -3508,9 +3509,12 @@ def _render_process_main(connection: Connection, name: str) -> None:
             stopping.wait(_FIT_WARM_QUIET_SECONDS - quiet)
         if stopping.is_set():
             return
-        spec, storage = panel[0]
+        spec, storage, model = panel[0]
         try:
-            warm_fit(spec, storage=storage, proceed=lambda: not stopping.is_set())
+            warm_fit(
+                spec, storage=storage, model=model,
+                proceed=lambda: not stopping.is_set(),
+            )
         except Exception:  # noqa: BLE001 -- reported, never fatal
             traceback.print_exc()
         # Temporary fit surfaces have the same ordinary lifetime as any
@@ -3754,7 +3758,8 @@ def _render_process_main(connection: Connection, name: str) -> None:
             if isinstance(snapshot, OwnedSnapshot)
             else None
         )
-        panel.append((spec, storage))
+        fit = (initial_configuration or {}).get("fit") or {}
+        panel.append((spec, storage, fit.get("model")))
         with state_lock:
             hosts[host_id] = host
             last_front_sequence[host_id] = -1

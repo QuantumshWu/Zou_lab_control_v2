@@ -213,12 +213,15 @@ def _install_text_raster_memo(renderer: Any) -> None:
             entry = memo[key]
         except KeyError:
             entry = _text_raster_entry(renderer, s, prop, angle, antialiased)
-            if len(memo) >= _TEXT_RASTER_MEMO_LIMIT:
-                memo.clear()
-            # The font properties are the artist's live object; the key
-            # keeps its own copy so a later edit of the artist cannot
-            # rewrite a stored key underneath the dictionary.
-            memo[(s, prop.copy(), angle, antialiased)] = entry
+            # A live value (a fit's headline number) is a new string every
+            # frame: stored, it would only churn the memo and the collector.
+            if not getattr(mtext, "_zlc_live_value", False):
+                if len(memo) >= _TEXT_RASTER_MEMO_LIMIT:
+                    memo.clear()
+                # The font properties are the artist's live object; the key
+                # keeps its own copy so a later edit of the artist cannot
+                # rewrite a stored key underneath the dictionary.
+                memo[(s, prop.copy(), angle, antialiased)] = entry
         if entry is None:
             return None
         mask, offset_x, offset_y, shift_x, shift_y = entry
@@ -2872,7 +2875,11 @@ class MatplotlibRenderer:
         self._boundary_chrome_commands: dict[
             int, tuple[tuple[str, Any, tuple[Any, ...], dict[str, Any]], ...]
         ] = {}
-        self._foreground_batches: dict[str, tuple[tuple[Any, ...], list[Any]]] = {}
+        #: Per compose phase: its artists, its paint plan, and the text
+        #: slots that plan captured, by artist id (``_paint_foreground``).
+        self._foreground_batches: dict[
+            str, tuple[tuple[Any, ...], list[Any], dict[int, list[Any]]]
+        ] = {}
         #: Agg's masks of each distinct chrome stamp and frame side, keyed
         #: by snapped shape (``_facet_chrome_masks``); the exemplar artists
         #: they are drawn with, keyed by style; and the recorder they draw on.
@@ -3645,27 +3652,25 @@ class MatplotlibRenderer:
                 np.concatenate((drawn_x, extra_x)),
                 np.concatenate((drawn_y, extra_y)),
             )
-            line.set_marker("_")
-            line.set_markersize(self.style.artists.curve_marker_size_pt)
+            wanted = "_"
             line.set_markeredgewidth(line.get_linewidth())
             line.set_markevery(
                 np.arange(marker_start, marker_start + extra_x.size, 2)
             )
         else:
             line.set_data(drawn_x, drawn_y)
-            # The marker is the style's, and the style is not what moved:
-            # a facet grid re-set three properties on three lines in every
-            # one of sixty-four cells, every frame, to the values they
-            # already held.
             marker = self.style.artists.curve.marker
             wanted = "None" if marker is None else marker
-            if line.get_marker() != wanted:
-                line.set_marker(wanted)
-            size = self.style.artists.curve_marker_size_pt
-            if line.get_markersize() != size:
-                line.set_markersize(size)
             if line.get_markevery() is not None:
                 line.set_markevery(None)
+        # Set only what changed: a grid redraws every cell's lines every
+        # frame, and each ``set_marker`` builds a MarkerStyle holding a bound
+        # method of itself -- a cycle only the collector frees.
+        if line.get_marker() != wanted:
+            line.set_marker(wanted)
+        size = self.style.artists.curve_marker_size_pt
+        if line.get_markersize() != size:
+            line.set_markersize(size)
 
     def _refresh_enveloped_lines(self, axis: Any) -> None:
         for line_id, (line, owner, x, y, isolated_glyphs) in tuple(
@@ -4447,6 +4452,12 @@ class MatplotlibRenderer:
         artists = tuple(entry[1][1] for entry in entries)
         cached = self._foreground_batches.get(phase)
         if cached is None or cached[0] != artists:
+            # A plan rebuilt because its artists changed -- a cell's fit
+            # changing family -- keeps the glyphs it captured for the texts
+            # it still holds; only forgetting the plan (a moved background
+            # or chrome group) drops them.
+            held = {} if cached is None else cached[2]
+            slots: dict[int, list[Any]] = {}
             plan, masks, texts, order, group = [], [], [], [], []
 
             def flush() -> None:
@@ -4464,14 +4475,22 @@ class MatplotlibRenderer:
                         else []
                     )
                 elif isinstance(artist, Text) and commands is None:
+                    slot = held.get(id(artist))
+                    if slot is not None and slot[0] is not artist:
+                        slot = None
                     if id(artist) in self._facet_chrome_owners:
                         # A grid title changes only when the group is
                         # refreshed, which drops this plan: its glyphs are
                         # as static here as a recorded stroke's masks.
-                        layers = self._foreground_text(artist, renderer) if artist.get_visible() else []
+                        visible = artist.get_visible()
+                        if slot is None or slot[1] != visible:
+                            slot = [artist, visible, self._foreground_text(artist, renderer) if visible else []]
+                        slots[id(artist)] = slot
+                        layers = slot[2]
                     elif artist.get_rotation() == 0.0 and not artist.get_usetex() and not artist.get_path_effects():
+                        slot = slots[id(artist)] = slot or [artist, None, ()]
                         order.append((1, len(texts)))
-                        texts.append([artist, None, ()])
+                        texts.append(slot)
                         group.append(artist)
                         continue
                     else:
@@ -4489,7 +4508,7 @@ class MatplotlibRenderer:
                     masks.extend(layers)
                     group.append(artist)
             flush()
-            self._foreground_batches[phase] = (artists, plan)
+            self._foreground_batches[phase] = (artists, plan, slots)
         else:
             plan = cached[1]
         target = np.asarray(canvas.buffer_rgba())
@@ -5885,24 +5904,26 @@ class MatplotlibRenderer:
         # and compose.  Re-entering here copied the full rcParams mapping for
         # every frame without changing a property on any existing artist.
         if not reusable:
-            # Replayed TEXT is faded for the background draw, not hidden:
-            # Matplotlib positions a title during Axes.draw from the title's
-            # own extent, and a hidden Text reports a unit box, so hiding it
-            # sent the title off the canvas and the next recording drew it
-            # there.  Fully transparent, it lays out where it always does
-            # and leaves the background untouched.  Its bbox patch is not
-            # faded with it -- Text.draw paints the patch with the patch's
-            # own alpha, before the text's is even set -- so the patch is
-            # hidden as a patch is: the pulse timeline's slot badges were
-            # baked into the background at the press and stood still,
-            # discs without numbers, while the pan moved the badges.
+            # An Axes TITLE is faded for the background draw, not hidden:
+            # Axes.draw positions a title from the title's own extent, and a
+            # hidden Text reports a unit box, which sends it off the canvas.
+            # Fully transparent, it lays out where it always does and leaves
+            # the background untouched.  Every other text is hidden like any
+            # dynamic artist, so it is not laid out and rasterized at alpha
+            # 0.  A bbox patch is never faded -- Text.draw paints it with the
+            # patch's own alpha -- so the patch is hidden as a patch is.
             from matplotlib.text import Text
 
             withheld = []
             for _key, artist in dynamics:
                 is_text = isinstance(artist, Text)
+                owner = getattr(artist, "axes", None) if is_text else None
+                is_title = owner is not None and any(
+                    artist is getattr(owner, slot, None)
+                    for slot in ("title", "_left_title", "_right_title")
+                )
                 withheld.append(
-                    (artist, is_text, artist.get_visible(), artist.get_alpha())
+                    (artist, is_title, artist.get_visible(), artist.get_alpha())
                 )
                 patch = artist.get_bbox_patch() if is_text else None
                 if patch is not None:
@@ -5923,8 +5944,8 @@ class MatplotlibRenderer:
                     )
             empty_cells: list[Any] = []
             try:
-                for artist, is_text, _visible, _alpha in withheld:
-                    if is_text:
+                for artist, faded, _visible, _alpha in withheld:
+                    if faded:
                         artist.set_alpha(0.0)
                     else:
                         artist.set_visible(False)
@@ -5937,8 +5958,8 @@ class MatplotlibRenderer:
             finally:
                 for axes in empty_cells:
                     axes.set_visible(True)
-                for artist, is_text, visible, alpha in withheld:
-                    if is_text:
+                for artist, faded, visible, alpha in withheld:
+                    if faded:
                         artist.set_alpha(alpha)
                     else:
                         artist.set_visible(visible)
@@ -12514,9 +12535,6 @@ class MatplotlibRenderer:
                 axis.grid(show_grid)
 
     def _remove_artists(self, artists: Iterable[Any]) -> None:
-        artists = tuple(artists)
-        if artists:
-            self._foreground_batches.clear()
         for artist in artists:
             self._line_sources.pop(id(artist), None)
             try:
@@ -13293,7 +13311,6 @@ class MatplotlibRenderer:
     ) -> None:
         from matplotlib.patches import Ellipse
 
-        self._foreground_batches.clear()
         self._fit_slots["detail"] = annotation
         if family == "failure":
             if annotation is _FitAnnotationDetail.NONE:
@@ -13393,7 +13410,8 @@ class MatplotlibRenderer:
             # The symbol and the value are two artists; see
             # _fit_parameter_parts for why.  The value's anchor follows
             # the symbol's width, set when the symbol is.
-            self._fit_slots["annotation_value"] = label_text()
+            value = self._fit_slots["annotation_value"] = label_text()
+            value._zlc_live_value = True
 
     def _update_fit_annotation(
         self,
