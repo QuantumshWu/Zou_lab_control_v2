@@ -1311,21 +1311,8 @@ class FigureViewerView(QtWidgets.QWidget):
         self._cards = {key: self._cards[key] for key in wanted}
         self.board.set_cards(tuple(self._cards.values()))
 
-    def set_panel_signal_choices(
-        self,
-        panel_id: str,
-        groups: object,
-        *,
-        current: str = "",
-        overlay_groups: object = (),
-        overlay_current: str = "",
-    ) -> None:
-        self._cards[str(panel_id)].set_signal_choices(
-            groups,
-            current=str(current),
-            overlay_groups=overlay_groups,
-            overlay_current=str(overlay_current),
-        )
+    def set_panel_signal_choices(self, panel_id: str, *args: object, **kwargs: object) -> None:
+        self._cards[str(panel_id)].set_signal_choices(*args, **kwargs)
 
     def set_panel_publishers(self, _publishers: object) -> None:
         """FigureViewer has no Logic-row chrome; signals remain in Setting."""
