@@ -5,7 +5,7 @@ let socket, client, controller, selected = "", windows = [], frame = null;
 let incoming = Promise.resolve(), header = null, fitted = true, connected = false, controlEnabled = false;
 let connectionMessage = "Only the experiment application is shared, not the desktop. Connecting does not start or stop an experiment.";
 let immersive = false;
-let move = null, moveRequest = 0, pointer = null, lastClick = null, composing = false;
+let move = null, moveRequest = 0, pointer = null, composing = false;
 let gesture = null;
 let editor = null, editing = null;
 const touches = new Map();
@@ -53,7 +53,7 @@ function release() {
   cancelAnimationFrame(moveRequest); moveRequest = 0; move = null;
   if (ownsControl() && frame) send({type: "input", window: frame.window, epoch: frame.epoch, event: "cancel"});
   const captured = [pointer?.id, ...touches.keys()];
-  pointer = null; lastClick = null; keys.clear();
+  pointer = null; keys.clear();
   touches.clear(); gesture = null;
   for (const id of captured) if (id != null && canvas.hasPointerCapture(id)) canvas.releasePointerCapture(id);
 }
@@ -271,7 +271,7 @@ canvas.onpointerdown = e => {
       if (!gesture) {
         closeInput();
         cancelAnimationFrame(moveRequest); moveRequest = 0; move = null;
-        input("cancel"); pointer = null; lastClick = null; keys.clear();
+        input("cancel"); pointer = null; keys.clear();
         const start = touchPair();
         gesture = {start, last: start, mode: null, updated: false, ended: false, event: e};
       }
@@ -280,14 +280,13 @@ canvas.onpointerdown = e => {
   }
   if (pointer && e.pointerId !== pointer.id) return;
   e.preventDefault(); flushMove();
-  const p = point(e), now = performance.now();
+  const p = point(e);
   const target = [...(frame.inputs || [])].reverse().find(item => !item.readonly && p.x >= item.rect[0] && p.y >= item.rect[1] && p.x < item.rect[0]+item.rect[2] && p.y < item.rect[1]+item.rect[3]);
   if (editing?.id !== target?.id) closeInput();
   if (!target) canvas.focus({preventScroll: true});
-  const twice = lastClick && now - lastClick.time < 400 && e.button === lastClick.button && Math.hypot(e.clientX - lastClick.x, e.clientY - lastClick.y) < 5;
-  pointer = {id: e.pointerId, x: e.clientX, y: e.clientY, moved: false, double: twice, field: target};
+  pointer = {id: e.pointerId, field: target};
   canvas.setPointerCapture(e.pointerId);
-  input(twice ? "double" : "down", p); if (twice) lastClick = null;
+  input("down", p);
 };
 canvas.onpointermove = e => {
   if (touches.has(e.pointerId)) {
@@ -302,7 +301,6 @@ canvas.onpointermove = e => {
   }
   if (!canInput() || (pointer && e.pointerId !== pointer.id)) return;
   const p = point(e);
-  if (pointer && Math.hypot(e.clientX - pointer.x, e.clientY - pointer.y) > 2) pointer.moved = true;
   move = p; if (!moveRequest) moveRequest = requestAnimationFrame(flushMove);
 };
 canvas.onpointerup = e => {
@@ -317,7 +315,7 @@ canvas.onpointerup = e => {
   if (!pointer || e.pointerId !== pointer.id || !canInput()) return;
   e.preventDefault(); flushMove(); const p = point(e); input("up", p);
   const field = pointer.field;
-  lastClick = pointer.moved || pointer.double ? null : {x: e.clientX, y: e.clientY, button: e.button, time: performance.now()}; pointer = null;
+  pointer = null;
   if (canvas.hasPointerCapture(e.pointerId)) canvas.releasePointerCapture(e.pointerId);
   if (field) openInput(field);
 };
@@ -352,7 +350,7 @@ for (const edit of [$("direct-input"), $("direct-multiline")]) {
   edit.onblur = () => { if (editor === edit) release(); };
   edit.addEventListener("compositionstart", () => { composing = true; });
   edit.addEventListener("compositionupdate", event => { if (editing) input("text", {preedit: event.data}); });
-  edit.addEventListener("compositionend", () => { composing = false; queueMicrotask(sendText); });
+  edit.addEventListener("compositionend", () => { composing = false; if (editing) input("text", {preedit: ""}); queueMicrotask(sendText); });
   edit.oninput = event => { if (!event.isComposing) sendText(); };
   edit.onpaste = event => {
     if (!editing) return;
