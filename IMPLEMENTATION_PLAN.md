@@ -10,6 +10,8 @@
 
 ## 1. 当前实施范围
 
+- Windows捕获可选属性（2026-10-17）：PyWinRT3.2.1在系统缺少属性时抛AttributeError，原optional设置只处理OSError，造成整个视频启动失败。现在只在光标/边框/刷新间隔的既有设置入口处理两类异常，核心捕获错误不吞、无新依赖或OS版本分支。正式Qt＋浏览器入口注入用户原文异常：未修版立即复现同一Window capture failed（switch-ehcmocv3）；修复版三项缺失均继续，真实2160×1224首帧呈现且可输入、关闭无残留线程（switch-7w0own7_）。这是精确故障注入，不冒充旧Windows实机验收；未重跑性能矩阵或新增持久测试。
+
 - Pulse remote超时与诊断（2026-10-17，worktree）：确认command socket没有idle timeout，∞observer的阻塞读不持设备状态锁，finite完成只释放lease，不关闭连接。原client30秒与JTAG单次120秒/启动180秒预算不匹配：缩放假AXI的0.6秒合法写入被0.3秒RPC主动断连，已复现这一类风险，但未证明实验机实际走JTAG或这是唯一断连根因。现同socket预告完整操作预算并透传绝对deadline；默认auto、显式finite硬上限、原UART/命令预算和Stop旁路保留，两个安装器不再暗中强制30秒。直接本地TCP＋假硬件验证合法慢LOAD保持连接、显式超时仍结束、pending Load/Fire可Stop、takeover与∞→Stop→1→∞；20轮切换同socket/owner零RPC错误。日志区分EOF/正常Close后EOF/socket errno/协议/handler故障，带最后请求阶段、耗时、成功Fire计数与owner，异常因果有界。未连接实验板、未改FPGA、未调大UART重试或承诺现场问题已全部复现。
 
 - 网页文件选择/单图查看（2026-10-17，worktree）：原捕获目录取到Win32不可见的Qt文件框代理，真实系统文件框另有HWND，已本机复现CreateForWindow的0x80070057；强制Qt文件框开关也改变了本机样式。现移除该开关，仅沿授权根的同进程Win32 owner链捕获真实native dialog，ComboLBox通过GetComboBoxInfo归属，输入仍回原控件。模态交接的旧输入丢弃，不转投其它窗口。当前新视频路线实际Open→立即move→文件类型下拉→Cancel→Open→输入路径→Enter→返回父页通过（media-_75oecby）；单图长按零误selector、双tap focus、crop ROI与Back保留ROI通过（media-2_kpz3ze），无第二Plot或本机布局变化。真实host窗口缩小/恢复同时命中ContentSize/Recreate和目录select刷新，两次新RTP帧坐标正确，旧crop不扩展，网页字段输入成功（media-fspuw6ll）。截图已查看，所有窗口/服务/worker关闭，错误为空；这些是正式Qt＋本机Chromium，不冒充实体Safari验收。

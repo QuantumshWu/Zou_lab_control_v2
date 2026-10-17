@@ -174,7 +174,8 @@ class WindowCapture:
                                 ("min_update_interval", timedelta(seconds=1 / (2 * self.fps)))):
                 try:
                     setattr(self.session, name, value)
-                except OSError as error:
+                except (AttributeError, OSError) as error:
+                    # PyWinRT reports an absent optional property as AttributeError.
                     logging.getLogger(__name__).warning("Windows capture option %s is unavailable: %s", name, error)
             self.session.start_capture()
         except BaseException:
