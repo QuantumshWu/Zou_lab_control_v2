@@ -405,7 +405,7 @@ Node new chunk
 
 - 白色页面的滚动内容统一复用`FluentPageBody`：它实际绘制SURFACE并向Qt声明不透明，使滚动沿Qt backing store复用已绘制像素，而不是重画整个祖先树。自绘内容先调用该背景绘制再画自身覆盖物。ScrollArea、圆角外框、透明子行不强设opaque；滚动背景只有原Fluent owner一份，不为网页共享另建绘制路径。
 - 实验网页共享由Device Manager的`Browser sharing`区域随时Start/Stop，默认关闭，不需要启动参数。界面显示可复制的短LAN地址`http://IP/zlc`（优先HTTP默认端口80，占用或无权限时18865），无key、token或私密链接；只用于可信隔离LAN，不改防火墙、不发布到互联网。它独立于MCP，不改变MCP协议、loopback或安全边界。Workbench仅组合当前`ExperimentGuiFlow`和Tornado网络传输，浏览器静态资源随产品安装，不建立第二Session或暴露driver。
-- 共享画面与输入属于`zlc_ui`的窗口边界：只从当前Flow的Device Manager、Console、device controls及显式关联的派生窗取像素，Qt父子/菜单/模态窗沿同一归属处理，不抓桌面。FigureViewer及其归档Pulse Editor只登记逻辑归属，不改变Qt parent或关闭生命周期；共享期间文件选择使用Qt对话框，仍读写实验机文件。鼠标、触控、滚轮与键盘回到原Qt控件，参数、设备占用与任务执行继续走原owner；多个浏览器只共享当前界面状态，不拥有独立页签或科学数据副本。
+- 共享画面与输入属于`zlc_ui`的窗口边界：只从当前Flow的Device Manager、Console、device controls及显式关联的派生窗取像素，Qt父子/菜单/模态窗沿同一归属处理，不抓桌面。FigureViewer及其归档Pulse Editor只登记逻辑归属，不改变Qt parent或关闭生命周期；文件选择保留本机系统样式，SharedWindows按同进程且回到共享root的Win32 owner链识别真实native dialog HWND，不把隐藏Qt代理作为画面，native Edit复用同一输入区域/焦点投影；文件仍读写实验机。鼠标、触控、滚轮与键盘回到原控件，参数、设备占用与任务执行继续走原owner；多个浏览器只共享当前界面状态，不拥有独立页签或科学数据副本。
 - 每次浏览器连接先等待本机批准；Device Manager列出来源IP、浏览器与Pending/Connected状态，本机逐个Allow/Reject并可随时Disconnect。批准前不提供实验窗口目录、画面或操作；批准仅属于当前连接，刷新/断线重连必须重新申请。共享权限控件仅能由本机操作，远端不能批准其他连接或开关共享。多个已批准连接可同时观看、共享一个远端controller；本机真实输入立即收回远端控制，自有原生注入标记不冒充本机操作。断连或撤权先取消进行中的拖动，再仅释放远端实际持有的鼠标按钮与按键，不提交Drop、不释放本机持有的其它键、不停止实验、不重放命令。未观看窗口不持续抓图，慢客户端不积压帧，编码和网络传输不占Qt owner。Stop断开所有连接、清空申请并停止监听，但不关闭实验；退出沿原关闭流程停止共享，没有开启共享时不安装抓图循环或输入监听。
 - 网页外壳使用英文，字体、字号、颜色、间距与控件尺寸从现有Fluent owner投影，不维护独立主题数值。实验内容由原Qt窗口绘制，传输仅更新变化区域；普通Fit只缩小，全屏的非模态窗口等比填满可用区域，小对话框不放大。临时窗口关闭后退出共享目录，仍存活的独立伴随窗口归属于同一实验而不被其打开者的关闭撤走；控制权撤销后尚未分派的旧输入不得执行。
 - 网页Full screen隐藏工具栏与页脚，只留小Controls按钮展开窗口选择和退出命令；支持原生全屏的浏览器进入原生全屏，否则以沉浸布局显示。应用沉浸模式只由显式按钮退出，浏览器/系统结束原生全屏仅重算尺寸，不展开应用工具栏；网页禁止滚动串联/overscroll，不冒充能禁止系统安全退出。
@@ -416,6 +416,8 @@ Node new chunk
 - 网页直接点击原窗口的可编辑字段即可输入，不设第二个文字输入工具栏。共享状态投影可见字段的区域、只读/密码/多行、原生input-method hints与焦点，不传字段内容；像素未变化但字段重建或焦点变化时，沿JSON状态通道更新inputs，不伪造图像帧。浏览器的透明原位输入只接系统键盘/IME，已提交文字与控制键按上述原生路径进入原焦点，preedit由同一Qt控件处理。Tab后输入不等待画面回传，也不把浏览器字段ID变成第二个focus authority；只读字段不唤键盘，切窗、撤权、双指手势收起输入。撤权先接纳新authority再清本地状态，不继续向已撤权会话发cancel；桌面键盘、触屏键盘、粘贴和IME均不得重复提交。
 - 输入权限在实际Qt控件接收时裁决，不使用尚未执行的鼠标/Tab之前的旧焦点。Win32窗口过程到Qt事件之间只保留最多512条在途来源元数据（窗口、输入类型、原控制者/epoch与触控click语义），正式事件消费、窗口关闭与共享停止清理；不保存输入内容或会话历史，不建立第二命令队列。Qt丢失extra-info或撤权不把已入队的远端按键变成本机输入；未知来源也不能激活local-only控件。
 - 模态文件框出现/退出、窗口几何变化或本机撤权后，仍在途的旧画面输入沿原admission返回未接受，不注入、不转投新窗口，也不误报为文件选择被禁止；不同控制者、local-only及外部应用的真实权限拒绝保留。
+- Windows共享沿同一浏览器的常驻D3D设备、CPU H.264 encoder和WebRTC sender切换授权HWND；原生捕获与GPU裁剪/缩放由`zlc_ui`持有，不启动外部FFmpeg进程。GPU视频转换不可用时使用同一编码路径的CPU格式转换，不要求独立显卡。PyWinRT及媒体依赖随普通安装器安装，不另下载媒体runtime。每次切源都从新捕获帧开始，resize沿真实ContentSize重建frame pool，裁剪始终以授权client区域为准。
+- 每个浏览器至多有一个在途媒体启动和一个待交付帧；初始化不得阻塞输入与切窗消息。切窗只更新观看目标与控制权，实际有效输入才聚焦，避免观看切换触发无关前台绘制。浏览器selection拒绝旧请求响应，server source标识实际HWND/crop/size，复用同一stream/peer；新source首帧IDR的实际RTP时间戳随metadata发送，浏览器确认呈现该帧后才启用对应坐标。关闭或切源取消旧启动，错误仅归属原source，不转投新窗口，不用旧画面冒充新源。
 
 - 实验 AI 的 MCP 随普通 experiment 启动默认提供本机接入及操作能力，`--no-mcp`显式关闭、`--mcp-read-only`显式限制只读，`--check`不启动服务。它不是第二个实验执行器，只连接当前`ExperimentGuiFlow`的Session/Console；请求交给原Qt owner，执行继续走原设备占用和worker。MCP SDK是正常安装依赖，不在启动时临时pip。每个实际监听实例写出自己的本机连接信息/凭据，AI可在实验启动之后连接；默认端口占用可分配空闲端口，显式端口冲突清楚报告且不关闭实验。服务仍限loopback、验证token、拒绝浏览器跨源访问；协议沿官方MCP SDK。
 - MCP通用handle发现/描述/调用直接指向当前流程和原业务owner，不维护另一份每功能白名单作为能力上限：公开API的签名/文档直接来自对象，GUI intent来自现有Handle信号；不递归暴露底层driver或任意Qt内部方法，不增加第二设备会话。常用快捷工具只是便捷入口。文件操作的公开API接受显式路径，交互提示与异步错误由原owner提供机器可读结果；反射工具只属于developer工具档，默认operator档只给原生工具（`lab_guide`、`lab_catalog`与原生动作）；缺少快捷工具时developer可用同一公开API，必要时用实际GUI，不把缺MCP动作当作系统没有能力。连接器可以代理当前MCP传输，但不得启动/重放实验或伪造设备成功。
@@ -541,10 +543,11 @@ Node new chunk
 ### 7.3 Remote
 
 - 无密码、认证、TLS或权限UI。
-- `open`携带client的`command_protocol`；与server不同的open在claim之前就被拒绝（错误回复，连接不claim，不接管也不SAFE），所以旧版本client不会把正在运行的owner踢掉。协议相同的second client默认last-client-wins；旧handler立即失效，takeover前旧active command必须成功Stop/SAFE。旧socket由server主动shutdown并close，不等待旧client再次发话；其退出不对新owner执行SAFE，日志明确标记已被替换的连接。
+- `open`只携带`board_protocol`和`operation_budget=true`，回执确认同一能力与completion_notifications；不接受旧`command_protocol`字段或缺失预算能力。新server在claim和预算预告前拒绝不匹配请求；新client不发送旧字段，旧server同样在claim前按缺失协议拒绝。两端软件须一起更新，FPGA ABI值不因此变化。协议相同的second client默认last-client-wins；旧handler立即失效，takeover前旧active command必须成功Stop/SAFE。旧socket由server主动shutdown并close，不等待旧client再次发话；其退出不对新owner执行SAFE，日志明确标记已被替换的连接。
 - 同一client的Stop不排队：其command lane正在等LOAD/FIRE的回复时，client用`open`回复里的cancel token在另一条自己的连接上发一次`cancel`，server执行与takeover/disconnect相同的第一步——command lane旁的SAFE，其stop event打断pending transport——而owner、epoch与command lane都不变；最终SAFE readback仍来自command lane上串行的`safe`。cancel连接一问一答后关闭、从不claim；token不是当前owner的按名拒绝且不碰板子；任何socket始终只有一个线程读写，timeout不因此缩短。
 - 完成等待同样走不claim的旁路连接，以现有owner token和本次FIRE command_id绑定；server等待本run既有DONE Event，完成即回复，不占command lane或owner锁等待。有限timeout到期不消费结果；长等待以最长1秒的Event等待续接，不加客户端轮询sleep。Stop/Close唤醒旧Event，下一Fire更换Event；旧等待不能消费或覆盖下一run。两端握手确认completion_notifications，删除旧poll_interval参数。Pulse Editor复用独立后台worker在FIRE返回后立即发起等待，Qt仅通过完成投递更新；状态定时器不再取走有限run报告，Sync不取消本run等待，旧snapshot不得重新显示RUNNING。
 - 正常连接无idle timeout；控制进程/socket/连接真正断开时自动SAFE。server关闭时的SAFE只属于真正serve过的server：bind被拒、或占住端口后板子没能打开的server关闭时不SAFE，也不记AUTO-SAFE；CLI server的Ctrl+C与其他退出都只经关闭SAFE一次。
+- Remote请求默认`request_timeout=None`：普通网络静默等待30秒；JTAG长操作在claim/硬件I/O前由同一handler、同request id预告`budget_seconds`，它不是成功回执。预算按既有startup、逐次read/write、命令与Stop上限求和；server把一个绝对deadline传入命令锁、设备锁和实际I/O，每次命令仍不超过原5秒，AXI每次事务仍不超过原120秒。客户端只有auto等待可接受预告并留30秒网络回传余量；显式有限`request_timeout`是从发请求开始的总上限，分段回包不得续命。无heartbeat线程、额外命令连接或自动重放；Stop保持独立cancel通道。正常snapshot不增加预告或日志。断连日志只持当前handler的最后请求/阶段/耗时、成功Fire次数、owner及有界异常因果，不保存payload或历史诊断表。
 - UART auto枚举COM、优先USB VID/PID，并只在word-63 fingerprint匹配后选用；
   显式port把探测限制为该端口。auto探测失败才回退JTAG，显式UART失败则报错。
 - 只有server process持hardware transport；不保留假的进程内Interprocess lease。

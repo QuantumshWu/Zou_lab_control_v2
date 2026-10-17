@@ -17,7 +17,7 @@ from .binding import apply_config_values, resolve_subpulse_sources
 from .compile import CompiledProgram, compile_sequence
 from .model import FIELD_DURATION, MAXIMUM_REPEAT_COUNT, PORT_DAC, PulseSequence, PulseTarget
 from .schedule import bus_action_ticks, trigger_edge_ticks
-from .transport.base import DEFAULT_OBSERVER_INTERVAL, RegisterTransport
+from .transport.base import DEFAULT_OBSERVER_INTERVAL, RegisterTransport, _deadline_lock
 from .wire import (
     CMD_FIRE,
     CMD_LOAD,
@@ -39,6 +39,7 @@ from .wire import (
 # Loader and SAFE handshakes share the same five-second action budget.
 LOAD_TIMEOUT = 5.0
 SAFE_TIMEOUT = 5.0
+OBSERVER_STOP_TIMEOUT = 2.0
 
 
 def _repeat_count(value: int, name: str) -> int:
@@ -451,14 +452,17 @@ class PulseStreamer(ConfigValueHolder):
         self._init_config_values()
 
     def open(self) -> None:
-        with self._lock:
+        self._open()
+
+    def _open(self, *, deadline: float | None = None) -> None:
+        with _deadline_lock(self._lock, deadline):
             if self._opened:
                 return
             start = getattr(self.transport, "start", None)
             if callable(start):
-                start()
+                start(**({} if deadline is None else {"deadline": deadline}))
             try:
-                self._check_register_layout_locked()
+                self._check_register_layout_locked(deadline=deadline)
             except BaseException:
                 close = getattr(self.transport, "close", None)
                 if callable(close): close()
@@ -466,12 +470,15 @@ class PulseStreamer(ConfigValueHolder):
             self._opened = True
             self._command_id = None
     def close(self) -> None:
-        with self._lock:
+        self._close()
+
+    def _close(self, *, deadline: float | None = None) -> None:
+        with _deadline_lock(self._lock, deadline):
             if not self._opened:
                 return
-        self._stop_worker()
-        with self._lock:
-            self.safe()
+        self._stop_worker(deadline=deadline)
+        with _deadline_lock(self._lock, deadline):
+            self.safe() if deadline is None else self._safe(deadline=deadline)
             close = getattr(self.transport, "close", None)
             if callable(close):
                 close()
@@ -499,6 +506,7 @@ class PulseStreamer(ConfigValueHolder):
         source: PulseSequence | None,
         authored_source: PulseSequence | None,
         rows: Sequence[Sequence[int]],
+        deadline: float | None = None,
     ) -> None:
         if not isinstance(prog, CompiledProgram):
             raise TypeError("prog must be CompiledProgram")
@@ -527,19 +535,19 @@ class PulseStreamer(ConfigValueHolder):
             raise ValueError("a slotted program requires a non-empty value table")
         if not prog.slot_count and normalized:
             raise ValueError("an unslotted program does not accept value rows")
-        with self._lock:
+        with _deadline_lock(self._lock, deadline):
             self._require_open()
             self._require_idle()
             self._stop.clear()
             if self._program == prog and self._scan_rows == normalized:
-                self.safe()
+                self.safe() if deadline is None else self._safe(deadline=deadline)
                 self._stop.clear()
                 assert self._applied is not None
                 self._applied = replace(self._applied, source=source, authored_source=authored_source)
                 return
             self._validate_application(prog, normalized)
             words = pack_program(prog, self.geom, target=self._target)
-            self.safe()
+            self.safe() if deadline is None else self._safe(deadline=deadline)
             self._stop.clear()
             self._loaded = False; self._program = None; self._applied = None
             self._validated_execution = None
@@ -553,8 +561,9 @@ class PulseStreamer(ConfigValueHolder):
                 tuple(sorted(words.items()))
                 + ((CtrlWords.BANK_READY, 0b11),),
                 stop=self._stop,
+                deadline=deadline,
             )
-            status, _cursor = self._command(CMD_LOAD, stop=self._stop)
+            status, _cursor = self._command(CMD_LOAD, stop=self._stop, deadline=deadline)
             if status != STATUS_LOADED:
                 raise RuntimeError(f"LOAD did not complete successfully (STATUS=0x{status:08X})")
             self._safe_readback = SafeReadback(status, self._command_id)
@@ -592,10 +601,10 @@ class PulseStreamer(ConfigValueHolder):
                     )
             return self._fire_program(run_repeats=run_repeats, scan_repeats=scan_repeats)
 
-    def _fire_program(self, *, run_repeats: int, scan_repeats: int = 1) -> AppliedState:
+    def _fire_program(self, *, run_repeats: int, scan_repeats: int = 1, deadline: float | None = None) -> AppliedState:
         run_repeats = _repeat_count(run_repeats, "run_repeats")
         scan_repeats = _repeat_count(scan_repeats, "scan_repeats")
-        with self._lock:
+        with _deadline_lock(self._lock, deadline):
             self._require_open()
             self._require_loaded()
             self._require_idle()
@@ -627,7 +636,7 @@ class PulseStreamer(ConfigValueHolder):
             if arming:
                 self._write(((CtrlWords.SCAN_COUNT, self._scan_count),
                              (CtrlWords.SCAN_ENABLE, int(bool(self._scan_rows))),
-                             *arming), stop=self._stop)
+                             *arming), stop=self._stop, deadline=deadline)
                 self._scan_armed = True
             self._safe_readback = None
             self._done = threading.Event()
@@ -642,7 +651,7 @@ class PulseStreamer(ConfigValueHolder):
             self._fire_acknowledged = self._fire_started
             self._fire_finished = self._fire_started
             status, _cursor = self._command(CMD_FIRE, run_repeats=run_repeats,
-                                            scan_repeats=scan_repeats, stop=self._stop)
+                                            scan_repeats=scan_repeats, stop=self._stop, deadline=deadline)
             self._fire_acknowledged = time.monotonic()
             if not status & STATUS_RUNNING or status & STATUS_ERROR:
                 # What this host believes the board holds is no longer
@@ -697,20 +706,26 @@ class PulseStreamer(ConfigValueHolder):
                 self._safe_readback = SafeReadback(report.status, report.command_id)
             return report
     def cursor(self) -> int | None:
-        with self._lock:
+        return self._cursor()
+
+    def _cursor(self, *, deadline: float | None = None) -> int | None:
+        with _deadline_lock(self._lock, deadline):
             if self._firing:
                 return self._cursor_value
-        return self._read(CtrlWords.CURSOR) if self._opened else None
+        return self._read(CtrlWords.CURSOR, deadline=deadline) if self._opened else None
     def safe(self) -> SafeReadback:
+        return self._safe()
+
+    def _safe(self, *, deadline: float | None = None) -> SafeReadback:
         caller = threading.get_ident()
         self._stopping.add(caller)
         try:
-            self._stop_worker()
-            with self._lock:
+            self._stop_worker(deadline=deadline)
+            with _deadline_lock(self._lock, deadline):
                 self._stopping.discard(caller)
                 self._require_open()
                 if self._safe_readback is None or not self._safe_readback.stable:
-                    status, _cursor = self._command(CMD_SAFE)
+                    status, _cursor = self._command(CMD_SAFE, deadline=deadline)
                     readback = SafeReadback(status, self._command_id)
                     if status != 0:
                         raise RuntimeError(f"SAFE did not complete (STATUS=0x{status:08X})")
@@ -738,7 +753,10 @@ class PulseStreamer(ConfigValueHolder):
             )
 
     def snapshot(self) -> dict[str, object]:
-        with self._lock:
+        return self._snapshot()
+
+    def _snapshot(self, *, deadline: float | None = None) -> dict[str, object]:
+        with _deadline_lock(self._lock, deadline):
             return {
                 "opened": self._opened,
                 "loaded": self._loaded,
@@ -856,17 +874,19 @@ class PulseStreamer(ConfigValueHolder):
             self._fire_finished = time.monotonic()
 
     def _command(self, code: int, *, run_repeats: int = 1,
-                 scan_repeats: int = 1, stop: threading.Event | None = None) -> tuple[int, int]:
+                 scan_repeats: int = 1, stop: threading.Event | None = None,
+                 deadline: float | None = None) -> tuple[int, int]:
         # One identity is reused by transport retries. It is not a new FIRE.
         # A pending LOAD must still be interrupted by SAFE: a previous safe
         # acknowledgement does not prove that this newer command has retired.
         self._safe_readback = None
         if self._command_id is None:
-            self._command_id = self._read(CtrlWords.ACK_ID, stop=stop)
+            self._command_id = self._read(CtrlWords.ACK_ID, stop=stop, deadline=deadline)
         self._command_id = (self._command_id + 1) & MAXIMUM_REPEAT_COUNT or 1
+        command_deadline = time.monotonic() + (SAFE_TIMEOUT if code == CMD_SAFE else LOAD_TIMEOUT)
         return self.transport.command(
             code, self._command_id, run_repeats=run_repeats, scan_repeats=scan_repeats,
-            stop=stop, deadline=time.monotonic() + (SAFE_TIMEOUT if code == CMD_SAFE else LOAD_TIMEOUT),
+            stop=stop, deadline=command_deadline if deadline is None else min(command_deadline, deadline),
         )
 
     def _validate_application(
@@ -1148,7 +1168,7 @@ class PulseStreamer(ConfigValueHolder):
             self._write(((chunk_reg, table_chunk),), stop=self._stop)
             self._scan_next_chunk += 1
 
-    def _stop_worker(self) -> None:
+    def _stop_worker(self, *, deadline: float | None = None) -> None:
         """Stop the observer, and refuse to go on if it will not stop.
 
         This runs BEFORE CMD_SAFE in ``safe`` and that order is deliberate,
@@ -1171,10 +1191,11 @@ class PulseStreamer(ConfigValueHolder):
         if worker is None:
             return
         if worker is not threading.current_thread():
-            worker.join(timeout=2.0)
+            remaining = OBSERVER_STOP_TIMEOUT if deadline is None else min(OBSERVER_STOP_TIMEOUT, max(0.0, deadline - time.monotonic()))
+            worker.join(timeout=remaining)
         if worker.is_alive():
             raise RuntimeError("pulse observer did not stop")
-        with self._lock:
+        with _deadline_lock(self._lock, deadline):
             if self._worker is worker:
                 self._worker = None
 
@@ -1230,8 +1251,8 @@ class PulseStreamer(ConfigValueHolder):
         if self._firing:
             raise RuntimeError("the streamer is already firing")
 
-    def _check_register_layout_locked(self) -> None:
-        layout = self._read(CtrlWords.LAYOUT_ID)
+    def _check_register_layout_locked(self, *, deadline: float | None = None) -> None:
+        layout = self._read(CtrlWords.LAYOUT_ID, deadline=deadline)
         expected = build_fingerprint(self.geom)
         if layout != expected:
             raise RuntimeError(

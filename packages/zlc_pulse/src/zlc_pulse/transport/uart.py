@@ -11,7 +11,7 @@ from typing import Protocol
 
 from ..wire import DEFAULT_UART_BAUD
 from . import uart_frame as framing
-from .base import UART_OBSERVER_INTERVAL, TransportAborted
+from .base import UART_OBSERVER_INTERVAL, TransportAborted, _deadline_lock
 
 
 class UartError(RuntimeError):
@@ -296,8 +296,8 @@ class UartRegisterTransport:
         self._sequence = 0
         self._closed = True
 
-    def start(self) -> None:
-        with self._lock:
+    def start(self, *, deadline: float | None = None) -> None:
+        with _deadline_lock(self._lock, deadline):
             if self._closed:
                 self._link.open()
                 self._closed = False

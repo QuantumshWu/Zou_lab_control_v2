@@ -3,7 +3,8 @@ const $ = (id) => document.getElementById(id);
 const stage = $("screen"), video = $("video"), popups = $("popups");
 let socket, client, controller, selected = "", windows = [], frame = null;
 let incoming = Promise.resolve(), fitted = true, connected = false, controlEnabled = false;
-let peer = null, media = null, mediaReady = false, videoCallback = 0, viewportSignature = "";
+let peer = null, peerStream = null, media = null, mediaReady = false, videoCallback = 0, viewportSignature = "";
+let selection = 0, lastPresented = null;
 let connectionMessage = "Only the experiment application is shared, not the desktop. Connecting does not start or stop an experiment.";
 let immersive = false;
 let panel = null, holdMs = 0, dragDistance = 0;
@@ -18,7 +19,7 @@ const canView = () => connected && mediaReady && frame?.window === selected && f
 const canInput = () => ownsControl() && canView();
 const viewRect = scene => scene.view || [0, 0, scene.width, scene.height];
 function send(message) {
-  if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
+  if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({selection, ...message}));
 }
 function error(message = "") {
   $("error").textContent = message;
@@ -56,10 +57,11 @@ function flushMove() {
   }
 }
 function release() {
+  const held = pointer !== null || touches.size > 0 || keys.size > 0 || gesture !== null;
   cancelHold();
   closeInput();
   cancelAnimationFrame(moveRequest); moveRequest = 0; move = null;
-  if (ownsControl() && frame) send({type: "input", window: frame.window, epoch: frame.epoch, event: "cancel"});
+  if (held && ownsControl() && frame) send({type: "input", window: frame.window, epoch: frame.epoch, event: "cancel"});
   const captured = [pointer?.id, ...touches.keys()];
   pointer = null; keys.clear();
   touches.clear(); gesture = null;
@@ -75,20 +77,31 @@ function resize(report = true) {
   const width = Math.max(1, viewWidth * scale), height = Math.max(1, viewHeight * scale);
   stage.style.width = `${width}px`; stage.style.height = `${height}px`;
   positionInput();
+  const pixel_width = Math.max(1, Math.round(width * devicePixelRatio)), pixel_height = Math.max(1, Math.round(height * devicePixelRatio));
+  const signature = `${selected}/${panel?.id ?? ""}/${pixel_width}/${pixel_height}`;
   if (report && connected && !editing) {
-    const pixel_width = Math.max(1, Math.round(width * devicePixelRatio)), pixel_height = Math.max(1, Math.round(height * devicePixelRatio));
-    const signature = `${selected}/${panel?.id ?? ""}/${pixel_width}/${pixel_height}`;
     if (signature !== viewportSignature) {
       viewportSignature = signature;
       send({type: "viewport", window: selected, panel: panel?.id ?? null, pixel_width, pixel_height});
     }
   }
+  return {signature, pixels: [pixel_width, pixel_height]};
 }
 function clearMedia(closePeer = true) {
-  if (closePeer) { const previous = peer; peer = null; previous?.close(); }
-  if (videoCallback) video.cancelVideoFrameCallback(videoCallback);
-  videoCallback = 0; mediaReady = false; frame = media = null;
-  video.srcObject = null; video.load(); popups.replaceChildren();
+  if (closePeer) {
+    const previous = peer; peer = peerStream = null; previous?.close();
+    if (videoCallback) video.cancelVideoFrameCallback(videoCallback);
+    videoCallback = 0; video.srcObject = null; video.load();
+  }
+  mediaReady = false; frame = media = null; lastPresented = null;
+  stage.classList.add("pending"); popups.replaceChildren();
+}
+function acceptMedia() {
+  if (!media?.prepared || media.source == null || media.selection !== selection || media.window !== selected
+      || media.panel !== (panel?.id ?? null) || frame === media) return;
+  if (frame?.source !== media.source && (lastPresented === null || !Number.isInteger(media.rtp_timestamp)
+      || ((lastPresented - media.rtp_timestamp) >>> 0) >= 0x80000000)) return;
+  frame = media; mediaReady = true; stage.classList.remove("pending"); syncInput(); refreshControls();
 }
 function place(element, rect, scene) {
   const [x, y, width, height] = viewRect(scene);
@@ -97,20 +110,27 @@ function place(element, rect, scene) {
 }
 async function startMedia(scene, ws) {
   if (!window.RTCPeerConnection || !video.requestVideoFrameCallback) throw new Error("This browser does not support the experiment video stream.");
-  const current = new RTCPeerConnection({iceServers: []}); peer = current;
+  const current = new RTCPeerConnection({iceServers: []}); peer = current; peerStream = scene.stream;
   const receiver = current.addTransceiver("video", {direction: "recvonly"});
   const codecs = RTCRtpReceiver.getCapabilities("video").codecs.filter(codec => codec.mimeType === "video/H264");
   if (!codecs.length) throw new Error("This browser does not support H264 experiment video.");
   receiver.setCodecPreferences(codecs);
-  const active = () => peer === current && socket === ws && media?.stream === scene.stream;
+  const active = () => peer === current && socket === ws;
   current.ontrack = event => {
     if (!active()) return;
     video.srcObject = new MediaStream([event.track]);
-    videoCallback = video.requestVideoFrameCallback(() => {
+    const presented = (_now, metadata) => {
       if (!active()) return;
       videoCallback = 0;
-      mediaReady = true; frame = media; syncInput(); refreshControls();
-    });
+      if (!Number.isInteger(metadata.rtpTimestamp)) {
+        release(); clearMedia();
+        error("This browser cannot identify displayed video frames for safe window switching. Use a browser with WebRTC RTP timestamp support.");
+        refreshControls(); return;
+      }
+      lastPresented = metadata.rtpTimestamp; acceptMedia();
+      videoCallback = video.requestVideoFrameCallback(presented);
+    };
+    videoCallback = video.requestVideoFrameCallback(presented);
     video.play().catch(cause => { if (active()) error(String(cause.message || cause)); });
   };
   current.onconnectionstatechange = () => {
@@ -130,10 +150,15 @@ async function startMedia(scene, ws) {
   offer();
 }
 async function showMedia(message, ws) {
-  if (message.window !== selected || message.panel !== (panel?.id ?? null) || !windows.some(window => window.id === selected && window.visible)) return;
+  if (message.selection !== selection || message.window !== selected || message.panel !== (panel?.id ?? null)
+      || !windows.some(window => window.id === selected && window.visible)) return;
   if (message.stream == null) { release(); clearMedia(); refreshControls(); return; }
-  const changed = media?.stream !== message.stream;
-  if (changed) { release(); clearMedia(); refreshControls(); }
+  const changed = peerStream !== message.stream;
+  const boundary = media?.source === message.source ? media.rtp_timestamp : undefined;
+  if (changed || media?.source !== message.source) { release(); clearMedia(changed); }
+  if (message.source == null) { clearMedia(false); refreshControls(); return; }
+  const pending = {...message, rtp_timestamp: message.rtp_timestamp ?? boundary, prepared: false};
+  media = pending;
   const shown = new Map([...popups.children].map(image => [image.dataset.id, image]));
   const images = await Promise.all((message.popups || []).map(async popup => {
     let image = shown.get(String(popup.id));
@@ -143,16 +168,18 @@ async function showMedia(message, ws) {
     }
     return image;
   }));
-  if (socket !== ws || message.window !== selected || message.panel !== (panel?.id ?? null) || !windows.some(window => window.id === selected && window.visible)) return;
+  if (socket !== ws || media !== pending || message.selection !== selection || message.window !== selected
+      || message.panel !== (panel?.id ?? null) || !windows.some(window => window.id === selected && window.visible)) return;
   images.forEach((image, index) => place(image, message.popups[index].rect, message));
-  media = message; popups.replaceChildren(...images); place(video, message.root, message); resize(false);
+  popups.replaceChildren(...images); place(video, message.root, message); resize(false); pending.prepared = true;
   if (changed) {
     startMedia(message, ws).catch(cause => {
-      if (socket === ws && media?.stream === message.stream) {
+      if (socket === ws && peerStream === message.stream) {
         release(); clearMedia(); error(String(cause.message || cause)); refreshControls();
       }
     });
-  } else if (mediaReady) { frame = media; syncInput(); }
+  }
+  acceptMedia();
   refreshControls();
 }
 function refreshControls() {
@@ -165,7 +192,7 @@ function refreshControls() {
   $("panel-back").hidden = panel === null;
   const ready = connected && current?.visible && media?.window === selected;
   stage.hidden = !ready;
-  $("placeholder").hidden = ready;
+  $("placeholder").hidden = ready && mediaReady;
   $("placeholder-text").textContent = !connected ? connectionMessage : !current ? "No experiment windows are available to share." : !current.visible ? "This window is hidden on the experiment computer. Take control to show it." : "Receiving the window view…";
   $("hint").textContent = current?.blocked ? "This window is waiting for an experiment dialog. Complete the dialog first." : current?.modal ? "Experiment dialog. Confirm or cancel to return to the previous window." : mine ? "Tap a field to type. Drag with one finger; scroll with two, or pinch to zoom a plot. Disconnecting does not stop the experiment." : "Read-only viewing does not change the experiment computer's windows or experiment state.";
 }
@@ -184,16 +211,21 @@ function selectPanel(next, notify = true) {
     $("fit").setAttribute("aria-pressed", "true"); $("actual").setAttribute("aria-pressed", "false");
     fullscreen(true, false);
   } else leavePanel();
-  if (notify) send({type: "select", window: selected, panel: panel?.id ?? null});
-  resize(); refreshControls();
+  if (notify) {
+    selection++;
+    const viewport = resize(false); viewportSignature = viewport?.signature || "";
+    send({type: "select", window: selected, panel: panel?.id ?? null, viewport: viewport?.pixels});
+  } else resize();
+  refreshControls();
 }
 function selectWindow(id) {
   if (windows.find(w => w.id === id)?.blocked) id = windows.find(w => w.modal && w.visible && !w.blocked)?.id || id;
   if (id === selected) return;
-  release(); leavePanel(); clearMedia(!id); selected = id; viewportSignature = "";
+  release(); leavePanel(); clearMedia(false); selected = id; viewportSignature = "";
+  selection++;
   $("windows").value = id;
-  if (id) send({type: "select", window: id, panel: null});
-  resize();
+  const viewport = resize(false); viewportSignature = viewport?.signature || "";
+  if (id) send({type: "select", window: id, panel: null, viewport: viewport?.pixels});
   refreshControls();
 }
 function updateState(message) {
@@ -217,13 +249,14 @@ function updateState(message) {
   selectWindow(next); $("windows").value = selected;
   const current = windows.find(window => window.id === selected);
   if (!current?.visible && panel) selectPanel(null);
-  if (!current?.visible && media) { release(); clearMedia(); }
+  if (!current?.visible && media) { release(); clearMedia(false); }
   if (current?.width !== prior?.width || current?.height !== prior?.height) resize();
   refreshControls();
 }
 async function receive(data, ws) {
   if (socket !== ws) return;
   const message = JSON.parse(data);
+  if (["media", "result", "error"].includes(message.type) && message.selection !== selection) return;
   if (message.type === "pending") {
     connectionMessage = message.message;
     $("connection").textContent = "Waiting for approval";
@@ -235,7 +268,7 @@ async function receive(data, ws) {
     error(); refreshControls();
   } else if (message.type === "state") updateState(message);
   else if (message.type === "media") await showMedia(message, ws);
-  else if (message.type === "answer" && peer && media?.stream === message.stream) {
+  else if (message.type === "answer" && peer && peerStream === message.stream) {
     await peer.setRemoteDescription({type: message.description_type, sdp: message.sdp});
   } else if (message.type === "result" && "return_panel" in message) {
     if (message.window === selected && message.panel === panel?.id) {
@@ -243,14 +276,15 @@ async function receive(data, ws) {
     }
   } else if (message.type === "error" || (message.type === "result" && message.ok === false)) {
     if ("stream" in message) {
-      if (message.window !== selected || message.stream !== media?.stream) return;
-      release(); clearMedia(); refreshControls();
+      if (message.window !== selected || message.stream !== peerStream
+          || ("source" in message && message.source !== media?.source)) return;
+      release(); clearMedia(message.source == null); refreshControls();
     }
     error(message.message || message.error || "The operation did not complete.");
   }
 }
 function connect() {
-  release(); leavePanel(); clearMedia(); connected = false; selected = ""; windows = []; viewportSignature = "";
+  release(); leavePanel(); clearMedia(); connected = false; selected = ""; windows = []; viewportSignature = ""; selection = 0;
   if (socket) socket.close();
   error(); $("connect").textContent = "Cancel request";
   connectionMessage = "Connecting to the experiment computer…";

@@ -13,7 +13,7 @@ from zlc_atom.devices.sequencer.binding import (
 )
 from zlc_atom.devices.sequencer.device import SequencerDevice
 from zlc_atom.install.descriptors import DeviceTypeDescriptor, InstalledLeaf
-from zlc_pulse import DEFAULT_PORT, DEFAULT_REQUEST_TIMEOUT
+from zlc_pulse import DEFAULT_PORT
 
 
 #: Where the in-process server narrates, and where this leaf says what
@@ -71,9 +71,7 @@ def _local_factory(context, key: str, values: dict) -> InstalledLeaf:
     )
     device = None
     try:
-        streamer = dial(
-            "127.0.0.1", service.port, request_timeout=DEFAULT_REQUEST_TIMEOUT
-        )
+        streamer = dial("127.0.0.1", service.port)
         device = SequencerDevice(streamer)
         leaf = bind_sequencer(
             context, key, device,

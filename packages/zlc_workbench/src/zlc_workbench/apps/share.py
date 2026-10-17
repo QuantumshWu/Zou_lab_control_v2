@@ -4,56 +4,22 @@ from __future__ import annotations
 
 import asyncio
 import base64
-from collections import deque
 from concurrent.futures import Future
-import hashlib
 from importlib.resources import files
 from io import BytesIO
 import json
 import logging
 import math
-import os
-from pathlib import Path
 from queue import Empty, Queue
 import secrets
 import socket
-import subprocess
+import struct
 import sys
-from threading import Event, Thread
+from threading import Condition, Event, Thread
 from time import monotonic
-from types import SimpleNamespace
 from urllib.parse import urlsplit
-from urllib.request import urlopen
-from zipfile import ZipFile
 
 from PIL import Image
-
-
-def _media_executable():
-    return Path(os.environ["LOCALAPPDATA"]) / "ZouLabControl" / "media" / "ffmpeg-9.0.2" / "ffmpeg.exe"
-
-
-def install_media_runtime():
-    """Install the pinned Windows media executable during product installation."""
-    if sys.platform != "win32":
-        return
-    executable = _media_executable()
-    if executable.is_file():
-        print(f"Browser media runtime: {executable}", flush=True)
-        return
-    url = "https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-9.0.2-essentials_build.zip"
-    digest = "60f467265b1e312373dbcd92200c2618a74850f98d3d078e94296bb3fa2047ba"
-    print("Downloading the browser media runtime...", flush=True)
-    with urlopen(url, timeout=60) as response:
-        archive = response.read()
-    if hashlib.sha256(archive).hexdigest() != digest:
-        raise ValueError("Browser media runtime download failed its SHA256 check")
-    executable.parent.mkdir(parents=True, exist_ok=True)
-    with ZipFile(BytesIO(archive)) as bundle:
-        temporary = executable.with_suffix(".tmp")
-        temporary.write_bytes(bundle.read("ffmpeg-9.0.2-essentials_build/bin/ffmpeg.exe"))
-        temporary.replace(executable)
-    print(f"Browser media runtime installed: {executable}", flush=True)
 
 
 def _popup_images(description):
@@ -82,9 +48,9 @@ def start_server(flow, *, on_clients, host="0.0.0.0", port=80, fps=60):
 
     if not 0 <= int(port) <= 65535 or not 1 <= float(fps) <= 60:
         raise ValueError("sharing requires a valid port and 1–60 frames per second")
-    executable = _media_executable() if sys.platform == "win32" else None
-    if executable is not None and not executable.is_file():
-        raise RuntimeError("Browser media runtime is missing. Run bin/install_requirements.bat, then start sharing again.")
+    if sys.platform == "win32":
+        import winrt.windows.graphics.capture.interop
+        import winrt.windows.graphics.directx.direct3d11.interop
     assets = {name: files("zlc_workbench").joinpath("web_share", name).read_bytes()
               for name in ("index.html", "client.js", "style.css")}
     sockets = tornado.netutil.bind_sockets(int(port), address=host)
@@ -100,123 +66,168 @@ def start_server(flow, *, on_clients, host="0.0.0.0", port=80, fps=60):
     clients = set()
     network = {}
     frame_ready = asyncio.Event()
-    encoders = ["h264_nvenc", "h264_qsv", "libx264"]
 
     class WindowVideoTrack(MediaStreamTrack):
-        """Pull encoded frames without a second unbounded media queue."""
+        """One capture device, one latest raw frame and one sender per browser."""
 
         kind = "video"
 
-        def __init__(self, description, rect, size, encoder):
+        def __init__(self):
             super().__init__()
-            self.description, self.rect, self.size, self.encoder = description, rect, size, encoder
-            self.process = self.container = self.reading = self.stderr_task = None
-            self.closing = None
-            self.errors = deque(maxlen=12)
-            self.packets = None
+            self.loop = asyncio.get_running_loop()
+            self.condition = Condition()
+            self.target = self.request = self.capture = self.delivered = None
+            self.failure = None
+            self.worker = None
+            self.changed = asyncio.Event()
+
+        def configure(self, description, rect, size, source, available):
+            with self.condition:
+                self.target = None if description is None else (description, rect, size, source, available)
+                self.failure = None
+                self.condition.notify()
+            if self.capture is not None:
+                self.capture.interrupt()
+            self.changed.set()
 
         async def open(self):
-            root, dpr = self.description["root_rect"], self.description["native_dpr"]
-            left, top = (round((self.rect[i] - root[i]) * dpr) for i in (0, 1))
-            right, bottom = (round((root[i] + root[i + 2] - self.rect[i] - self.rect[i + 2]) * dpr)
-                             for i in (0, 1))
-            # Capture above the output cadence; retain original frames in phase-aligned time buckets.
-            capture = (f"gfxcapture=hwnd={self.description['hwnd']}:max_framerate={2 * float(fps):g}"
-                       f":crop_left={left}:crop_top={top}:crop_right={right}:crop_bottom={bottom}"
-                       f":capture_cursor=0:width={self.size[0]}:height={self.size[1]}:resize_mode=scale_aspect,"
-                       f"select='isnan(prev_selected_t)+gt(floor((t-start_t)*{float(fps):g}+0.5),"
-                       f"floor((prev_selected_t-start_t)*{float(fps):g}+0.5))'")
-            command = [str(executable), "-hide_banner", "-nostdin", "-nostats", "-loglevel", "warning"]
-            if self.encoder == "h264_nvenc":
-                command += ["-init_hw_device", "d3d11va=cap:,vendor_id=0x10de", "-filter_hw_device", "cap"]
-                options = ["-preset", "p1", "-tune", "ull", "-rc", "cbr"]
-            elif self.encoder == "h264_qsv":
-                command += ["-init_hw_device", "d3d11va=cap:,vendor_id=0x8086", "-filter_hw_device", "cap"]
-                capture += ",hwmap=derive_device=qsv,format=qsv,vpp_qsv=format=nv12:async_depth=0"
-                options = ["-preset", "veryfast", "-async_depth", "1", "-look_ahead", "0"]
-            else:
-                capture += ",hwdownload,format=bgra,format=yuv420p"
-                options = ["-preset", "ultrafast", "-tune", "zerolatency", "-pix_fmt", "yuv420p"]
-            command += ["-filter_complex", capture, "-an", "-c:v", self.encoder, *options,
-                        "-profile:v", "baseline", "-bf", "0", "-g", str(max(1, int(fps) // 2)),
-                        "-b:v", "20M", "-maxrate", "20M", "-bufsize", "2M",
-                        "-flags", "-global_header", "-bsf:v", "dump_extra", "-fps_mode", "passthrough",
-                        "-flush_packets", "1", "-f", "nut", "pipe:1"]
-            self.process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                            creationflags=subprocess.CREATE_NO_WINDOW)
-            def errors():
-                for line in self.process.stderr:
-                    self.errors.append(line.decode("utf-8", errors="replace").strip())
-            self.stderr_task = asyncio.create_task(asyncio.to_thread(errors))
-            reading = self.reading = asyncio.create_task(asyncio.to_thread(av.open,
-                SimpleNamespace(read=self.process.stdout.read1), format="nut", mode="r",
-                options={"probesize": "32", "analyzeduration": "0"}))
+            if sys.platform == "win32":
+                self.worker = Thread(target=self._run, name="zlc-window-video", daemon=True)
+                self.worker.start()
+
+        def _finish(self, future, packet, source):
+            if not future.done():
+                future.set_result((packet, source))
+
+        def _run(self):
+            from fractions import Fraction
+            from zlc_ui._window_capture import WindowCapture
+
+            capture = codec = None
+            active = failed = None
+            codec_size = None
+            first = False
+            previous_pts = -1
             try:
-                container = await asyncio.wait_for(asyncio.shield(reading), 4.)
-                if self.readyState != "live":
-                    raise MediaStreamError
-                self.container = container
-                self.packets = self.container.demux(video=0)
+                capture = self.capture = WindowCapture(fps=fps)
+                while self.readyState == "live":
+                    with self.condition:
+                        while (self.readyState == "live" and self.target is active
+                               and (self.target is None or self.request is None or self.target is failed)):
+                            self.condition.wait()
+                        if self.readyState != "live":
+                            break
+                        target, future = self.target, self.request
+                    try:
+                        if target is not active:
+                            active, failed, first = target, None, True
+                            if target is None:
+                                capture.clear()
+                                continue
+                            description, rect, size, source, available = target
+                            root, dpr = description["root_rect"], description["native_dpr"]
+                            crop = tuple(round((rect[i] - root[i]) * dpr) for i in (0, 1))
+                            crop += tuple(round(value * dpr) for value in rect[2:])
+                            capture.select(description["id"], description["hwnd"], crop, available, size)
+                            if size != codec_size:
+                                codec = av.CodecContext.create("libx264", "w")
+                                codec.width, codec.height = size
+                                codec.pix_fmt = "nv12"
+                                codec.time_base = Fraction(1, 90000)
+                                codec.framerate = Fraction(int(fps), 1)
+                                codec.bit_rate = 20_000_000
+                                codec.gop_size, codec.max_b_frames = max(1, int(fps) // 2), 0
+                                codec.options = {"preset": "ultrafast", "tune": "zerolatency",
+                                                 "profile": "baseline", "x264-params": "repeat-headers=1"}
+                                codec.colorspace, codec.color_range = 1, 1
+                                codec.color_primaries, codec.color_trc = 1, 1
+                                codec.open()
+                                codec_size = size
+                        if future is None:
+                            continue
+                        with capture.frame() as captured:
+                            if captured is None or target is not self.target:
+                                continue
+                            pixels, pts, pixel_format = captured
+                            if not first and pts // (90000 / float(fps)) <= previous_pts // (90000 / float(fps)):
+                                continue
+                            image = av.VideoFrame.from_numpy_buffer(pixels, format=pixel_format, width=size[0] if pixel_format == "nv12" else pixels.shape[1])
+                            if pixel_format == "nv12":
+                                image.colorspace, image.color_range = 1, 1
+                            image = image.reformat(width=size[0], height=size[1], format="nv12",
+                                                   dst_colorspace="ITU709", dst_color_range="MPEG")
+                            image.colorspace, image.color_range = 1, 1
+                            image.pts, image.time_base = max(previous_pts + 1, pts), Fraction(1, 90000)
+                            if first:
+                                image.pict_type = av.video.frame.PictureType.I
+                            packets = codec.encode(image)
+                            if len(packets) != 1:
+                                raise RuntimeError("The zero-latency video encoder did not return one complete frame")
+                            packet = packets[0]
+                            previous_pts, first = image.pts, False
+                        with self.condition:
+                            if self.request is future:
+                                self.request = None
+                        self.loop.call_soon_threadsafe(self._finish, future, packet, source)
+                    except Exception as error:
+                        self.failure, failed = (target[3], str(error)), target
+                        capture.clear()
+            except Exception as error:
+                source = self.target[3] if self.target is not None else None
+                self.failure = (source, str(error))
+                self.loop.call_soon_threadsafe(self.stop)
             finally:
-                if self.reading is reading and reading.done() and self.readyState == "live":
-                    self.reading = None
+                self.capture = None
+                if capture is not None:
+                    capture.close()
+                codec = None
 
         async def recv(self):
-            if self.readyState != "live":
-                raise MediaStreamError
-            if executable is None:
+            if sys.platform != "win32":
                 import numpy as np
                 from fractions import Fraction
+                while self.target is None and self.readyState == "live":
+                    self.changed.clear()
+                    await self.changed.wait()
+                if self.readyState != "live":
+                    raise MediaStreamError
+                description, rect, size, source, _available = self.target
                 await asyncio.sleep(1 / float(fps))
-                scale = min(self.description["native_dpr"], self.size[0] / self.rect[2], self.size[1] / self.rect[3])
-                snapshot = await owner(surface.capture, self.description["id"], math.ceil(self.description["width"] * scale), True)
+                scale = min(description["native_dpr"], size[0] / rect[2], size[1] / rect[3])
+                snapshot = await owner(surface.capture, description["id"], math.ceil(description["width"] * scale), True)
                 pixels = np.frombuffer(snapshot["rgba"], np.uint8).reshape(snapshot["pixel_height"], snapshot["pixel_width"], 4)
                 scale = snapshot["pixel_width"] / snapshot["width"]
-                x, y = (round((self.rect[i] + self.description["origin"][i] - snapshot["origin"][i]) * scale)
-                        for i in (0, 1))
-                width, height = (round(value * scale) for value in self.rect[2:])
-                image = av.VideoFrame.from_ndarray(pixels[y:y + height, x:x + width], format="rgba")
-                image = image.reformat(width=self.size[0], height=self.size[1])
+                x, y = (round((rect[i] + description["origin"][i] - snapshot["origin"][i]) * scale) for i in (0, 1))
+                width, height = (round(value * scale) for value in rect[2:])
+                image = av.VideoFrame.from_ndarray(pixels[y:y + height, x:x + width], format="rgba").reformat(width=size[0], height=size[1])
                 image.pts, image.time_base = int(monotonic() * 90000), Fraction(1, 90000)
+                self.delivered = (source, image.pts)
                 return image
-            reading = self.reading = asyncio.create_task(asyncio.to_thread(next, self.packets, None))
-            packet = await asyncio.shield(reading)
-            if self.reading is reading:
-                self.reading = None
-            if self.readyState != "live" or packet is None or not packet.size:
-                self.stop()
+            if self.readyState != "live":
                 raise MediaStreamError
+            future = self.loop.create_future()
+            with self.condition:
+                self.request = future
+                self.condition.notify()
+            packet, source = await future
+            self.delivered = (source, int(packet.pts * packet.time_base * 90000))
             return packet
 
         def stop(self):
-            if self.process is not None and self.process.poll() is None:
-                self.process.terminate()
             super().stop()
+            with self.condition:
+                if self.request is not None and not self.request.done():
+                    self.request.set_exception(MediaStreamError())
+                self.condition.notify()
+            if self.capture is not None:
+                self.capture.interrupt()
+            self.changed.set()
 
         async def close(self):
-            if self.closing is None:
-                self.closing = asyncio.create_task(self._close())
-            await asyncio.shield(self.closing)
-
-        async def _close(self):
             self.stop()
-            if self.process is not None:
-                await asyncio.to_thread(self.process.wait)
-            reading = self.reading
-            if reading is not None:
-                outcome = await asyncio.gather(reading, return_exceptions=True)
-                if self.container is None and outcome and isinstance(outcome[0], av.container.InputContainer):
-                    self.container = outcome[0]
-                if self.reading is reading:
-                    self.reading = None
-            if self.container is not None:
-                await asyncio.to_thread(self.container.close)
-                self.container = None
-            if self.stderr_task is not None:
-                await self.stderr_task
-            if self.process is not None:
-                self.process.stdout.close()
-                self.process.stderr.close()
+            if self.worker is not None:
+                await asyncio.to_thread(self.worker.join)
+                self.worker = None
 
     def drain():
         while True:
@@ -312,17 +323,31 @@ def start_server(flow, *, on_clients, host="0.0.0.0", port=80, fps=60):
             self.set_nodelay(True)
             self.identity = secrets.token_hex(12)
             self.approved = False
+            self.selection = 0
             self.selected = None
             self.panel = None
             self.viewport = None
             self.peer = self.track = None
+            self.opening = None
             self.media_id = self.source_key = self.media_description = self.media_rect = self.media_size = None
+            self.source = self.boundary = self.media_message = None
+            self.available = ()
             self.last_media = None
             self.writing = None
             self.last_state = None
             clients.add(self)
             self.write_message(dict(type="pending", message="Waiting for approval on the experiment computer."))
             notify_clients()
+
+        def write_message(self, message, binary=False):
+            if isinstance(message, dict) and message.get("type") in {"media", "result", "error"}:
+                message = {"selection": self.selection, **message}
+            return super().write_message(message, binary=binary)
+
+        def clear_source(self):
+            self.source_key = self.source = self.boundary = self.last_media = self.media_message = None
+            if self.track is not None:
+                self.track.configure(None, None, None, None, ())
 
         def send_stream(self, message, *, binary=False):
             self.writing = self.write_message(message, binary=binary)
@@ -340,16 +365,22 @@ def start_server(flow, *, on_clients, host="0.0.0.0", port=80, fps=60):
 
         async def stop_media(self, *, failed=False):
             peer, track = self.peer, self.track
+            opening, self.opening = self.opening, None
             self.peer = self.track = None
             self.media_id = self.last_media = None
             if not failed:
                 self.source_key = None
+            if opening is not None:
+                opening.cancel()
             if track is not None:
                 track.stop()
+            if opening is not None:
+                await asyncio.gather(opening, return_exceptions=True)
             if peer is not None:
                 await peer.close()
             if track is not None:
                 await track.close()
+            self.clear_source()
 
         async def offer(self, message):
             identity = message.get("stream")
@@ -357,30 +388,13 @@ def start_server(flow, *, on_clients, host="0.0.0.0", port=80, fps=60):
                 return
             track = peer = None
             try:
-                attempts = encoders if executable is not None else ["software"]
-                failures = []
-                for encoder in tuple(attempts):
-                    track = WindowVideoTrack(self.media_description, self.media_rect, self.media_size, encoder)
-                    self.track = track
-                    try:
-                        if executable is not None:
-                            await track.open()
-                        break
-                    except Exception as error:
-                        await track.close()
-                        failures.append(f"{encoder}: {'; '.join(track.errors) or str(error)}")
-                        track = None
-                        if identity != self.media_id:
-                            return
-                if track is None:
-                    self.track = None
-                    raise RuntimeError("Could not start window video: " + " | ".join(failures))
+                track = self.track = WindowVideoTrack()
+                track.configure(self.media_description if self.source is not None else None,
+                                self.media_rect, self.media_size, self.source, self.available)
+                await track.open()
                 if identity != self.media_id:
                     await track.close()
                     return
-                if executable is not None:
-                    encoders.remove(track.encoder)
-                    encoders.insert(0, track.encoder)
                 peer = RTCPeerConnection(configuration=RTCConfiguration(iceServers=[]))
                 self.peer = peer
                 @peer.on("connectionstatechange")
@@ -394,13 +408,38 @@ def start_server(flow, *, on_clients, host="0.0.0.0", port=80, fps=60):
                 transceiver = peer.addTransceiver(track, direction="sendonly")
                 transceiver.setCodecPreferences([codec for codec in RTCRtpSender.getCapabilities("video").codecs
                                                  if codec.mimeType == "video/H264"])
+                sender = transceiver.sender
+                send_rtp = sender.transport._send_rtp
+                offset = None
+
+                async def sent(data):
+                    nonlocal offset
+                    delivered = track.delivered
+                    await send_rtp(data)
+                    # aiortc's RTP origin is private; use the actual sender header, not Packet.pts.
+                    if delivered is None or len(data) < 12 or 192 <= data[1] <= 223 or not data[1] & 0x80:
+                        return
+                    timestamp, ssrc = struct.unpack_from("!II", data, 4)
+                    if ssrc != sender._ssrc:
+                        return
+                    source, pts = delivered
+                    if offset is None:
+                        offset = (timestamp - pts) & 0xffffffff
+                    if (timestamp - offset) & 0xffffffff != pts & 0xffffffff:
+                        return
+                    if (self.media_id == identity and self.source == source and self.boundary is None
+                            and self.media_message is not None and self.ws_connection is not None):
+                        self.boundary = timestamp
+                        await self.write_message(dict(self.media_message, rtp_timestamp=timestamp))
+
+                sender.transport._send_rtp = sent
                 await peer.setRemoteDescription(RTCSessionDescription(type=message["description_type"], sdp=message["sdp"]))
                 await peer.setLocalDescription(await peer.createAnswer())
                 if identity == self.media_id and self.approved:
                     await self.write_message(dict(type="answer", stream=identity,
                         description_type=peer.localDescription.type, sdp=peer.localDescription.sdp))
-                    logging.getLogger(__name__).info("Shared window video: %s %sx%s", track.encoder, *self.media_size)
-            except Exception:
+                    logging.getLogger(__name__).info("Shared window video: persistent capture, H264")
+            except BaseException as error:
                 if track is not None:
                     track.stop()
                 if peer is not None:
@@ -409,7 +448,93 @@ def start_server(flow, *, on_clients, host="0.0.0.0", port=80, fps=60):
                     await track.close()
                 if identity == self.media_id:
                     self.peer = self.track = None
+                    if isinstance(error, Exception) and self.ws_connection is not None:
+                        await self.write_message(dict(type="error", window=self.selected,
+                                                      stream=identity, message=str(error)))
+                if isinstance(error, asyncio.CancelledError):
                     raise
+
+        async def update_view(self, description, available, encoded_popups=None):
+            if encoded_popups is None:
+                encoded_popups = {}
+            if description is None:
+                if self.source is not None:
+                    self.clear_source()
+                    self.send_stream(dict(type="media", window=self.selected, panel=self.panel,
+                                            stream=self.media_id, source=None))
+                return
+            panel, selection = self.panel, self.selection
+            root = description["root_rect"]
+            view = [0, 0, description["width"], description["height"]]
+            if panel is not None:
+                item = next((item for item in description["panels"] if item["id"] == panel), None)
+                if item is None or not item["available"]:
+                    self.panel, self.viewport = None, None
+                    self.clear_source()
+                    self.send_stream(dict(type="result", window=description["id"], panel=panel,
+                        return_panel=None, message=item["reason"] if item else
+                        "The plot is no longer visible. Returning to the whole window."))
+                    return
+                root = item["rect"]
+                rectangles = [root, *(popup["rect"] for popup in description["popups"])]
+                x, y = (min(rect[i] for rect in rectangles) for i in (0, 1))
+                view = [x, y, max(rect[0] + rect[2] for rect in rectangles) - x,
+                        max(rect[1] + rect[3] for rect in rectangles) - y]
+            if self.viewport is None:
+                return
+            if sys.platform != "win32":
+                root = view
+            local_rect = (root[0] - description["root_rect"][0], root[1] - description["root_rect"][1], *root[2:])
+            key = (description["id"], description["hwnd"], local_rect, description["native_dpr"], self.viewport)
+            new_source = False
+            if self.source_key != key:
+                scale = min(description["native_dpr"], self.viewport[0] / view[2], self.viewport[1] / view[3])
+                size = tuple(max(2, math.ceil(value * scale / 2) * 2) for value in root[2:])
+                new_source = self.source_key is None or self.source_key[:4] != key[:4] or size != self.media_size
+                if new_source:
+                    self.source, self.boundary = secrets.token_hex(12), None
+                    self.media_id = self.media_id or secrets.token_hex(12)
+                self.source_key = key
+            else:
+                size = self.media_size
+            track = self.track
+            if track is not None and track.failure is not None and track.failure[0] == self.source:
+                source, detail = track.failure
+                self.clear_source()
+                self.source_key = key
+                self.send_stream(dict(type="error", window=self.selected, stream=self.media_id,
+                                        source=source, message="Window capture failed: " + detail))
+                return
+            if self.source is None:
+                return
+            self.media_description, self.media_rect, self.media_size = description, root, size
+            self.available = available
+            source = self.source
+            popup_key = tuple((popup["id"], tuple(popup["rect"]), id(popup["rgba"])) for popup in description["popups"])
+            signature = (self.source, description["epoch"], description["inputs"],
+                         description["panels"], panel, root, view, popup_key)
+            if signature == self.last_media:
+                return
+            if popup_key not in encoded_popups:
+                encoded_popups[popup_key] = (await asyncio.to_thread(_popup_images, description)
+                                            if sys.platform == "win32" else [])
+            if self not in clients or not self.approved or self.selection != selection or self.source != source:
+                return
+            metadata = {key: description[key] for key in ("epoch", "width", "height", "origin", "inputs")}
+            metadata.update(type="media", selection=selection, window=self.selected, stream=self.media_id,
+                            source=self.source, root=root, panel=panel, view=view,
+                            panels=description["panels"], popups=encoded_popups[popup_key])
+            if self.boundary is not None:
+                metadata["rtp_timestamp"] = self.boundary
+            self.media_message = metadata
+            self.send_stream(metadata)
+            self.last_media = signature
+            if new_source and self.track is not None:
+                await self.writing
+                if self.selection == selection and self.source == metadata["source"]:
+                    self.track.configure(description, root, size, self.source, available)
+                    if self.peer is not None and sys.platform != "win32":
+                        self.peer.getSenders()[0]._send_keyframe()
 
         async def on_message(self, raw):
             try:
@@ -420,28 +545,45 @@ def start_server(flow, *, on_clients, host="0.0.0.0", port=80, fps=60):
                 if not self.approved:
                     await self.write_message(dict(type="pending", message="Waiting for approval on the experiment computer."))
                     return
+                if kind != "select" and message.get("selection") != self.selection and kind != "offer":
+                    return
                 if kind == "select":
+                    selection = message.get("selection")
+                    if type(selection) is not int or selection <= self.selection:
+                        return
+                    self.selection = selection
                     selected = message.get("window")
                     panel = message.get("panel")
-                    catalog = await owner(surface.catalog)
-                    if selected not in {window["id"] for window in catalog["windows"]}:
-                        raise ValueError("unknown experiment window")
+                    width, height = (int(value) for value in message["viewport"])
+                    if width <= 0 or height <= 0:
+                        raise ValueError("viewport dimensions must be positive")
+                    self.selected, self.panel, self.viewport = selected, panel, None
+                    self.clear_source()
+
+                    def choose():
+                        catalog = surface.catalog()
+                        window = next((window for window in catalog["windows"] if window["id"] == selected), None)
+                        if window is None:
+                            raise ValueError("unknown experiment window")
+                        if not window["visible"]:
+                            return catalog, None
+                        if catalog["controller"] == self.identity:
+                            surface.take_control(self.identity, selected, activate=False)
+                        return catalog, surface.describe(selected)
+
+                    catalog, description = await owner(choose)
                     rejection = None
-                    if panel is not None:
-                        description = await owner(surface.describe, selected)
+                    if panel is not None and description is not None:
                         item = next((item for item in description["panels"] if item["id"] == panel), None)
                         if item is None or not item["available"]:
                             rejection = (item["reason"] if item else "The plot is no longer visible. Returning to the whole window.")
-                    if self.selected != selected or self.panel != panel or rejection:
-                        self.selected = selected
-                        self.panel = None if rejection else panel
-                        self.viewport = None
-                        await self.stop_media()
-                        if catalog["controller"] == self.identity:
-                            await owner(surface.take_control, self.identity, selected)
+                    self.panel = None if rejection else panel
                     if rejection:
                         await self.write_message(dict(type="result", window=selected, panel=panel,
                                                       return_panel=None, message=rejection))
+                    else:
+                        self.viewport = (width, height)
+                        await self.update_view(description, tuple(window["id"] for window in catalog["windows"]))
                     frame_ready.set()
                 elif kind == "viewport":
                     if message.get("window") != self.selected or message.get("panel") != self.panel:
@@ -452,7 +594,9 @@ def start_server(flow, *, on_clients, host="0.0.0.0", port=80, fps=60):
                     self.viewport = (width, height)
                     frame_ready.set()
                 elif kind == "offer":
-                    await self.offer(message)
+                    if self.media_id is not None and self.peer is None and message.get("stream") == self.media_id and (self.opening is None or self.opening.done()):
+                        # Media startup must not hold this connection's input and window-selection messages.
+                        self.opening = asyncio.create_task(self.offer(message))
                 elif kind in ("control", "show", "input"):
                     if kind == "control":
                         result = (await owner(surface.take_control, self.identity, self.selected)
@@ -479,7 +623,7 @@ def start_server(flow, *, on_clients, host="0.0.0.0", port=80, fps=60):
                 pass
             except Exception as error:
                 if self.ws_connection is not None:
-                    await self.write_message(dict(type="error", message=str(error)))
+                    await self.write_message(dict(type="error", selection=message.get("selection", self.selection), message=str(error)))
 
         def on_close(self):
             clients.discard(self)
@@ -523,80 +667,13 @@ def start_server(flow, *, on_clients, host="0.0.0.0", port=80, fps=60):
                     requested = {client.selected for client in writable if client.selected is not None}
                     catalog, descriptions = await owner(poll_windows, requested)
                     state = dict(type="state", control_enabled=surface.control_enabled, **catalog)
+                    available = tuple(window["id"] for window in catalog["windows"])
                     encoded_popups = {}
                     for client in writable:
                         if client.last_state != state:
                             client.send_stream(state)
                             client.last_state = state
-                        description = descriptions.get(client.selected)
-                        if description is None:
-                            if client.media_id is not None:
-                                selected = client.selected
-                                await client.stop_media()
-                                client.send_stream(dict(type="media", window=selected, stream=None))
-                            continue
-                        panel = client.panel
-                        root = description["root_rect"]
-                        view = [0, 0, description["width"], description["height"]]
-                        if panel is not None:
-                            item = next((item for item in description["panels"] if item["id"] == panel), None)
-                            if item is None or not item["available"]:
-                                client.panel, client.viewport = None, None
-                                await client.stop_media()
-                                client.send_stream(dict(type="result", window=description["id"], panel=panel,
-                                    return_panel=None, message=item["reason"] if item else
-                                    "The plot is no longer visible. Returning to the whole window."))
-                                continue
-                            root = item["rect"]
-                            rectangles = [root, *(popup["rect"] for popup in description["popups"])]
-                            x, y = (min(rect[i] for rect in rectangles) for i in (0, 1))
-                            view = [x, y, max(rect[0] + rect[2] for rect in rectangles) - x,
-                                    max(rect[1] + rect[3] for rect in rectangles) - y]
-                        if client.viewport is None:
-                            continue
-                        if executable is None:
-                            root = view
-                        local_rect = (root[0] - description["root_rect"][0], root[1] - description["root_rect"][1], *root[2:])
-                        key = (description["hwnd"], local_rect, description["native_dpr"], client.viewport)
-                        if client.source_key != key:
-                            scale = min(description["native_dpr"], client.viewport[0] / view[2], client.viewport[1] / view[3])
-                            size = tuple(max(2, math.ceil(value * scale / 2) * 2) for value in root[2:])
-                            if client.source_key is None or client.source_key[:3] != key[:3] or size != client.media_size:
-                                viewport = client.viewport
-                                await client.stop_media()
-                                if client.selected != description["id"] or client.panel != panel or client.viewport != viewport:
-                                    continue
-                                client.media_id = secrets.token_hex(12)
-                            client.source_key = key
-                        elif client.peer is not None and client.track is not None and client.track.readyState == "ended":
-                            identity, selected, track = client.media_id, client.selected, client.track
-                            await client.stop_media(failed=True)
-                            detail = "; ".join(track.errors)
-                            client.send_stream(dict(type="error", window=selected, stream=identity,
-                                message="Window video stopped. Reconnect to start a new stream."
-                                        + (" " + detail if detail else "")))
-                            continue
-                        else:
-                            size = client.media_size
-                        client.media_description, client.media_rect, client.media_size = description, root, size
-                        if client.media_id is None:
-                            continue
-                        popup_key = tuple((popup["id"], tuple(popup["rect"]), id(popup["rgba"])) for popup in description["popups"])
-                        signature = (client.media_id, description["epoch"], description["inputs"],
-                                     description["panels"], panel, root, view, popup_key)
-                        if signature == client.last_media:
-                            continue
-                        if popup_key not in encoded_popups:
-                            encoded_popups[popup_key] = (await asyncio.to_thread(_popup_images, description)
-                                                        if executable is not None else [])
-                        if client not in clients or not client.approved or client.selected != description["id"] or client.panel != panel:
-                            continue
-                        metadata = {key: description[key] for key in ("epoch", "width", "height", "origin", "inputs")}
-                        metadata.update(type="media", window=client.selected, stream=client.media_id,
-                                        root=root, panel=panel, view=view, panels=description["panels"],
-                                        popups=encoded_popups[popup_key])
-                        client.send_stream(metadata)
-                        client.last_media = signature
+                        await client.update_view(descriptions.get(client.selected), available, encoded_popups)
                 except tornado.websocket.WebSocketClosedError:
                     pass
                 except Exception as error:

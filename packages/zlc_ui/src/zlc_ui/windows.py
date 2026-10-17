@@ -51,7 +51,7 @@ def associate_window(parent_handle: Any, child_handle: Any) -> None:
 
 
 class SharedWindows(QtCore.QObject):
-    """Mirror only one experiment's Qt trees; its existing owners still handle input."""
+    """Mirror one experiment's windows and their native dialogs."""
 
     input_failed = QtCore.pyqtSignal(str, str)
     owner_turn_requested = QtCore.pyqtSignal()
@@ -60,18 +60,18 @@ class SharedWindows(QtCore.QObject):
         app = ensure_qt_app()
         super().__init__(app)
         self._app, self._roots = app, roots
-        self._ids: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+        self._ids: dict[QtWidgets.QWidget | int, str] = {}
         self._next_id = 0
-        self._windows: dict[str, QtWidgets.QWidget] = {}
-        self._owners: dict[QtWidgets.QWidget, QtWidgets.QWidget] = {}
-        self._dirty: set[QtWidgets.QWidget] = set()
+        self._windows: dict[str, QtWidgets.QWidget | int] = {}
+        self._owners: dict[QtWidgets.QWidget | int, QtWidgets.QWidget | int] = {}
+        self._dirty: set[QtWidgets.QWidget | int] = set()
         self._frames: dict[str, dict[str, Any]] = {}
         self._capture_image = QtGui.QImage()
         self._capturing = False
         self._closed = False
         self._controller: str | None = None
         self._control_epoch = 0
-        self._pressed: QtWidgets.QWidget | None = None
+        self._pressed: QtWidgets.QWidget | int | None = None
         self._press_source: tuple[Any, ...] | None = None
         self._buttons = 0
         self._keys: set[int] = set()
@@ -85,8 +85,6 @@ class SharedWindows(QtCore.QObject):
         self._touch_press: Any = None
         if self.control_enabled:
             self._init_native_input()
-        self._native_dialogs = app.testAttribute(QtCore.Qt.AA_DontUseNativeDialogs)
-        app.setAttribute(QtCore.Qt.AA_DontUseNativeDialogs, True)
         app.installEventFilter(self)
 
     def _init_native_input(self) -> None:
@@ -101,6 +99,23 @@ class SharedWindows(QtCore.QObject):
             "ClientToScreen": (wintypes.BOOL, (wintypes.HWND, ctypes.POINTER(wintypes.POINT))),
             "ScreenToClient": (wintypes.BOOL, (wintypes.HWND, ctypes.POINTER(wintypes.POINT))),
             "GetClientRect": (wintypes.BOOL, (wintypes.HWND, ctypes.POINTER(wintypes.RECT))),
+            "GetWindowRect": (wintypes.BOOL, (wintypes.HWND, ctypes.POINTER(wintypes.RECT))),
+            "GetWindow": (wintypes.HWND, (wintypes.HWND, wintypes.UINT)),
+            "GetAncestor": (wintypes.HWND, (wintypes.HWND, wintypes.UINT)),
+            "GetWindowThreadProcessId": (wintypes.DWORD, (wintypes.HWND, ctypes.POINTER(wintypes.DWORD))),
+            "GetWindowTextW": (ctypes.c_int, (wintypes.HWND, wintypes.LPWSTR, ctypes.c_int)),
+            "GetClassNameW": (ctypes.c_int, (wintypes.HWND, wintypes.LPWSTR, ctypes.c_int)),
+            "GetWindowLongPtrW": (ctypes.c_ssize_t, (wintypes.HWND, ctypes.c_int)),
+            "GetDpiForWindow": (wintypes.UINT, (wintypes.HWND,)),
+            "GetGUIThreadInfo": (wintypes.BOOL, (wintypes.DWORD, pointer)),
+            "GetComboBoxInfo": (wintypes.BOOL, (wintypes.HWND, pointer)),
+            "IsWindowVisible": (wintypes.BOOL, (wintypes.HWND,)),
+            "IsWindowEnabled": (wintypes.BOOL, (wintypes.HWND,)),
+            "IsIconic": (wintypes.BOOL, (wintypes.HWND,)),
+            "ShowWindow": (wintypes.BOOL, (wintypes.HWND, ctypes.c_int)),
+            "EnumWindows": (wintypes.BOOL, (pointer, ctypes.c_ssize_t)),
+            "EnumChildWindows": (wintypes.BOOL, (wintypes.HWND, pointer, ctypes.c_ssize_t)),
+            "PrintWindow": (wintypes.BOOL, (wintypes.HWND, pointer, wintypes.UINT)),
             "GetSystemMetrics": (ctypes.c_int, (ctypes.c_int,)),
             "RegisterWindowMessageW": (wintypes.UINT, (wintypes.LPCWSTR,)),
             "PostMessageW": (wintypes.BOOL, (wintypes.HWND, wintypes.UINT, ctypes.c_size_t, ctypes.c_ssize_t)),
@@ -111,6 +126,16 @@ class SharedWindows(QtCore.QObject):
         }
         for name, (restype, argtypes) in signatures.items():
             function = getattr(self._win, name)
+            function.restype, function.argtypes = restype, argtypes
+        self._gdi = ctypes.WinDLL("gdi32", use_last_error=True)
+        for name, restype, argtypes in (
+            ("CreateCompatibleDC", pointer, (pointer,)),
+            ("CreateDIBSection", pointer, (pointer, pointer, wintypes.UINT, ctypes.POINTER(pointer), pointer, wintypes.DWORD)),
+            ("SelectObject", pointer, (pointer, pointer)),
+            ("DeleteObject", wintypes.BOOL, (pointer,)),
+            ("DeleteDC", wintypes.BOOL, (pointer,)),
+        ):
+            function = getattr(self._gdi, name)
             function.restype, function.argtypes = restype, argtypes
         self._wide_input = ctypes.sizeof(pointer) == 8
         # Windows can retain only the low DWORD; keep private tags below its pointer signatures.
@@ -176,8 +201,15 @@ class SharedWindows(QtCore.QObject):
                 raise OSError("Windows could not deliver shared input; check the experiment window's privilege level")
 
     def _allowed_native_target(self, hwnd: int, point: Any = None) -> Any:
-        target = QtWidgets.QWidget.find(hwnd) if hwnd else None
         selected = self._windows.get(self._input_window)
+        if isinstance(selected, int):
+            current = self._win.GetAncestor(hwnd, 2) if hwnd else None
+            while current and current != selected:
+                current = self._owners.get(current) if isinstance(self._owners.get(current), int) else self._win.GetWindow(current, 4)
+            if current != selected or not self._win.IsWindowVisible(selected):
+                raise ValueError("input is outside the selected experiment window")
+            return hwnd
+        target = QtWidgets.QWidget.find(hwnd) if hwnd else None
         if target is None or selected is None or sip.isdeleted(target) or not selected.isVisible():
             raise ValueError("input is outside the selected experiment window")
         current = target.window()
@@ -237,6 +269,8 @@ class SharedWindows(QtCore.QObject):
             if not self._closed:
                 self.owner_turn_requested.emit()
             return 0
+        if not self._capturing and hwnd in self._owners and message in (0xF, 0x5, 0x18, 0x47):
+            self._dirty.add(hwnd)
         if message in (0x100, 0x101, 0x104, 0x105, 0x201, 0x203):
             extra = self._win.GetMessageExtraInfo() & 0xFFFFFFFF
             origin = None
@@ -296,7 +330,8 @@ class SharedWindows(QtCore.QObject):
         roots = {window for value in self._roots() if (window := _handle_window(value)) is not None}
         retained = set(getattr(self._app, "_zlc_retained_windows", ())) | roots
         candidates = set(self._app.topLevelWidgets()) | retained
-        owners: dict[QtWidgets.QWidget, QtWidgets.QWidget] = {}
+        owners: dict[QtWidgets.QWidget | int, QtWidgets.QWidget] = {}
+        native_dialog = False
         for window in candidates:
             if (sip.isdeleted(window) or window.windowType() == QtCore.Qt.ToolTip
                     or getattr(window, "_zlc_close_committed", False)
@@ -306,18 +341,56 @@ class SharedWindows(QtCore.QObject):
             while current is not None and current not in visited:
                 visited.add(current)
                 if current in roots:
-                    owners[window] = current
+                    if window.testAttribute(QtCore.Qt.WA_DontShowOnScreen):
+                        native_dialog = True
+                    else:
+                        owners[window] = current
                     break
                 current = self._parent(current)
+        if self.control_enabled and native_dialog:
+            handles = {int(window.winId()): root for window, root in owners.items()}
+            process = wintypes.DWORD()
+            self._win.GetWindowThreadProcessId(self._dispatch_hwnd, ctypes.byref(process))
+            def native(hwnd, _context):
+                pid = wintypes.DWORD()
+                self._win.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                if (pid.value == process.value and hwnd not in handles and self._win.IsWindowVisible(hwnd)
+                        and self._win.GetWindowLongPtrW(hwnd, -16) & 0xC00000 == 0xC00000):
+                    parent = self._win.GetWindow(hwnd, 4)
+                    while parent and parent not in handles:
+                        parent = self._win.GetWindow(parent, 4)
+                    if parent in handles:
+                        owners[int(hwnd)] = handles[parent]
+                return True
+            callback = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, ctypes.c_ssize_t)(native)
+            self._win.EnumWindows(callback, 0)
+            for window in tuple(owners):
+                if not isinstance(window, int):
+                    continue
+                def combo_popup(hwnd, _context):
+                    name = ctypes.create_unicode_buffer(64)
+                    self._win.GetClassNameW(hwnd, name, len(name))
+                    if name.value == "ComboBox":
+                        info = ctypes.create_string_buffer(64 if self._wide_input else 52)
+                        struct.pack_into("<I", info, 0, len(info))
+                        if self._win.GetComboBoxInfo(hwnd, info):
+                            popup = struct.unpack_from("<Q" if self._wide_input else "<I", info, 56 if self._wide_input else 48)[0]
+                            if popup and self._win.IsWindowVisible(popup):
+                                owners[popup] = window
+                    return True
+                callback = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, ctypes.c_ssize_t)(combo_popup)
+                self._win.EnumChildWindows(window, callback, 0)
+        self._ids = {window: identity for window, identity in self._ids.items() if window in owners}
         for window in owners:
             if window not in self._ids:
                 self._next_id += 1
                 self._ids[window] = f"w{self._next_id}"
                 self._dirty.add(window)
         self._owners = owners
-        self._windows = {self._ids[w]: w for w in owners if w.windowType() != QtCore.Qt.Popup}
+        self._windows = {self._ids[w]: w for w in owners
+                         if (not isinstance(owners[w], int) if isinstance(w, int) else w.windowType() != QtCore.Qt.Popup)}
         if self.control_enabled:
-            handles = {int(window.winId()) for window in owners}
+            handles = {window if isinstance(window, int) else int(window.winId()) for window in owners}
             for hwnd in handles - self._native_windows:
                 if not self._controls.SetWindowSubclass(hwnd, self._window_proc, id(self), 0):
                     raise OSError("Windows could not attach an experiment input window")
@@ -337,6 +410,15 @@ class SharedWindows(QtCore.QObject):
         modal = self._app.activeModalWidget()
         records = []
         for identity, window in self._windows.items():
+            if isinstance(window, int):
+                bounds, _dpr = self._native_geometry(window)
+                title = ctypes.create_unicode_buffer(1024)
+                self._win.GetWindowTextW(window, title, len(title))
+                parent = self._win.GetWindow(window, 4)
+                records.append(dict(id=identity, title=title.value, width=bounds.width(), height=bounds.height(),
+                    visible=True, modal=True, parent=self._ids.get(parent) or self._ids[self._owners[window]],
+                    blocked=not self._win.IsWindowEnabled(window)))
+                continue
             parent = self._parent(window)
             while parent is not None and parent.windowType() == QtCore.Qt.Popup:
                 parent = self._parent(parent)
@@ -344,7 +426,8 @@ class SharedWindows(QtCore.QObject):
                 id=identity, title=window.windowTitle(), width=window.width(),
                 height=window.height(), visible=window.isVisible() and not window.isMinimized(),
                 modal=window.isModal(), parent=None if parent is None else self._ids.get(parent),
-                blocked=modal is not None and modal is not window and not modal.isAncestorOf(window),
+                blocked=(modal is not None and modal is not window and not modal.isAncestorOf(window))
+                        or (self.control_enabled and not self._win.IsWindowEnabled(int(window.winId()))),
             ))
         hints = self._app.styleHints()
         return {"windows": sorted(records, key=lambda item: int(item["id"][1:])), "controller": self._controller,
@@ -353,13 +436,27 @@ class SharedWindows(QtCore.QObject):
     def _surface(self, identity: str) -> tuple[Any, Any, Any]:
         self._refresh()
         window = self._windows.get(str(identity))
+        if isinstance(window, int):
+            bounds, _dpr = self._native_geometry(window)
+            origin = wintypes.POINT()
+            self._win.ClientToScreen(window, ctypes.byref(origin))
+            popups = []
+            for popup, parent in self._owners.items():
+                if parent == window:
+                    rect = wintypes.RECT()
+                    self._win.GetWindowRect(popup, ctypes.byref(rect))
+                    placed = QtCore.QRectF((rect.left-origin.x)/_dpr, (rect.top-origin.y)/_dpr,
+                                          (rect.right-rect.left)/_dpr, (rect.bottom-rect.top)/_dpr)
+                    bounds = bounds.united(placed)
+                    popups.append((popup, placed))
+            return window, bounds, popups
         if window is None or not window.isVisible() or window.isMinimized():
             raise ValueError("the experiment window is no longer visible")
         origin = window.mapToGlobal(QtCore.QPoint())
         bounds = window.rect()
         popups = []
         for candidate in self._owners:
-            if candidate.windowType() != QtCore.Qt.Popup or not candidate.isVisible():
+            if isinstance(candidate, int) or candidate.windowType() != QtCore.Qt.Popup or not candidate.isVisible():
                 continue
             parent = self._parent(candidate)
             while parent is not None and parent.windowType() == QtCore.Qt.Popup:
@@ -375,9 +472,48 @@ class SharedWindows(QtCore.QObject):
 
     @staticmethod
     def _geometry(window: Any, bounds: Any, popups: Any) -> tuple[Any, ...]:
+        if isinstance(window, int):
+            return (window, bounds.getRect(), tuple((popup, rect.getRect()) for popup, rect in popups))
         return (window.width(), window.height(), bounds.getRect(), tuple(
             (id(popup), rect.getRect()) for popup, rect in popups
         ))
+
+    def _native_geometry(self, hwnd: int) -> tuple[Any, float]:
+        rect = wintypes.RECT()
+        if (not self._win.IsWindowVisible(hwnd) or self._win.IsIconic(hwnd)
+                or not self._win.GetClientRect(hwnd, ctypes.byref(rect)) or rect.right <= 0 or rect.bottom <= 0):
+            raise ValueError("the experiment window is no longer visible")
+        dpr = self._win.GetDpiForWindow(hwnd) / 96.
+        if not dpr:
+            raise ValueError("the experiment window is no longer visible")
+        return QtCore.QRectF(0., 0., rect.right / dpr, rect.bottom / dpr), dpr
+
+    def _native_image(self, hwnd: int, *, client: bool = True) -> Any:
+        rect = wintypes.RECT()
+        (self._win.GetClientRect if client else self._win.GetWindowRect)(hwnd, ctypes.byref(rect))
+        width, height = rect.right - rect.left, rect.bottom - rect.top
+        info = ctypes.create_string_buffer(struct.pack("<IiiHHIIiiII", 40, width, -height, 1, 32, 0, 0, 0, 0, 0, 0))
+        pixels = ctypes.c_void_p()
+        dc = self._gdi.CreateCompatibleDC(None)
+        bitmap = self._gdi.CreateDIBSection(dc, info, 0, ctypes.byref(pixels), None, 0)
+        original = None
+        self._capturing = True
+        try:
+            if not dc or not bitmap:
+                raise ctypes.WinError(ctypes.get_last_error())
+            original = self._gdi.SelectObject(dc, bitmap)
+            if not self._win.PrintWindow(hwnd, dc, 3 if client else 2):
+                raise OSError("Windows could not capture the selected system dialog")
+            data = ctypes.string_at(pixels, width * height * 4)
+            return QtGui.QImage(data, width, height, width * 4, QtGui.QImage.Format_RGB32).convertToFormat(QtGui.QImage.Format_RGBA8888)
+        finally:
+            self._capturing = False
+            if original:
+                self._gdi.SelectObject(dc, original)
+            if bitmap:
+                self._gdi.DeleteObject(bitmap)
+            if dc:
+                self._gdi.DeleteDC(dc)
 
     def _focused_input(self, window: Any, popups: Any) -> Any:
         target = self._app.focusWidget()
@@ -387,6 +523,32 @@ class SharedWindows(QtCore.QObject):
 
     def _input_targets(self, window: Any, bounds: Any, popups: Any) -> list[dict[str, Any]]:
         """Expose visible native text-input geometry, never field contents."""
+        if isinstance(window, int):
+            origin = wintypes.POINT()
+            self._win.ClientToScreen(window, ctypes.byref(origin))
+            dpr = self._win.GetDpiForWindow(window)/96.
+            thread = self._win.GetWindowThreadProcessId(window, None)
+            info = ctypes.create_string_buffer(72 if self._wide_input else 48)
+            struct.pack_into("<I", info, 0, len(info))
+            focused = 0
+            if self._win.GetGUIThreadInfo(thread, info):
+                focused = struct.unpack_from("<Q" if self._wide_input else "<I", info, 16 if self._wide_input else 12)[0]
+            targets = []
+            def visit(hwnd, _context):
+                name = ctypes.create_unicode_buffer(64)
+                self._win.GetClassNameW(hwnd, name, len(name))
+                if name.value == "Edit" and self._win.IsWindowVisible(hwnd) and self._win.IsWindowEnabled(hwnd):
+                    rect = wintypes.RECT()
+                    self._win.GetWindowRect(hwnd, ctypes.byref(rect))
+                    style = self._win.GetWindowLongPtrW(hwnd, -16)
+                    targets.append(dict(id=f"native-{hwnd}",
+                        rect=[(rect.left-origin.x)/dpr-bounds.x(), (rect.top-origin.y)/dpr-bounds.y(), (rect.right-rect.left)/dpr, (rect.bottom-rect.top)/dpr],
+                        inputmode="numeric" if style & 0x2000 else "text", multiline=bool(style & 4),
+                        readonly=bool(style & 0x800), password=bool(style & 0x20), focused=hwnd == focused))
+                return True
+            callback = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, ctypes.c_ssize_t)(visit)
+            self._win.EnumChildWindows(window, callback, 0)
+            return targets
         origin = window.mapToGlobal(bounds.topLeft())
         focused = self._focused_input(window, popups)
         targets = []
@@ -433,6 +595,22 @@ class SharedWindows(QtCore.QObject):
         popup_redrawn = False
         for popup, rect in popups:
             key = self._ids[popup]
+            if isinstance(popup, int):
+                dpr = self._win.GetDpiForWindow(popup)/96.
+                physical = wintypes.RECT()
+                self._win.GetWindowRect(popup, ctypes.byref(physical))
+                width, height = physical.right-physical.left, physical.bottom-physical.top
+                pixel_geometry = (width, height, dpr)
+                image = cached.get(key)
+                if image is None or image[0] != pixel_geometry or popup in self._dirty:
+                    pixels = self._native_image(popup, client=False)
+                    image = (pixel_geometry, width, height, pixels.constBits().asstring(pixels.sizeInBytes()))
+                    self._dirty.discard(popup)
+                    popup_redrawn = True
+                images[key] = image
+                overlays.append(dict(id=key, rect=list(rect.translated(-bounds.topLeft()).getRect()), native_dpr=dpr,
+                                     pixel_width=width, pixel_height=height, rgba=image[3]))
+                continue
             dpr = float(popup.devicePixelRatioF())
             pixel_geometry = (popup.width(), popup.height(), dpr, popup.logicalDpiX(), popup.logicalDpiY())
             image = cached.get(key)
@@ -458,11 +636,12 @@ class SharedWindows(QtCore.QObject):
             overlays.append(dict(id=key, rect=list(placed.getRect()), native_dpr=dpr,
                                  pixel_width=image[1], pixel_height=image[2], rgba=image[3]))
         covered = QtGui.QRegion()
-        for overlay in window.findChildren(FluentOverlayFrame):
+        native = isinstance(window, int)
+        for overlay in (() if native else window.findChildren(FluentOverlayFrame)):
             if overlay.isVisible() and overlay.window() is window:
                 covered |= overlay.visibleRegion().translated(overlay.mapTo(window, QtCore.QPoint()))
         panels = []
-        for card in window.findChildren(PanelCardView):
+        for card in (() if native else window.findChildren(PanelCardView)):
             surface = card.surface
             if surface is None or sip.isdeleted(surface) or surface.window() is not window or not surface.isVisible():
                 continue
@@ -477,12 +656,14 @@ class SharedWindows(QtCore.QObject):
                                           for part in visible.rects()],
                                available=available, reason="" if available else
                                "Show the whole panel in the experiment window before opening its full-screen view."))
+        root_bounds, native_dpr = self._native_geometry(window) if native else (window.rect(), float(window.devicePixelRatioF()))
         record = dict(
             id=identity, epoch=previous.get("epoch", 0) + int(previous.get("geometry") != geometry),
             width=bounds.width(), height=bounds.height(), origin=[bounds.x(), bounds.y()],
-            inputs=self._input_targets(window, bounds, popups), hwnd=int(window.winId()),
-            root_rect=[-bounds.x(), -bounds.y(), window.width(), window.height()],
-            native_dpr=float(window.devicePixelRatioF()), popups=tuple(overlays), panels=panels,
+            inputs=self._input_targets(window, bounds, popups), hwnd=window if native else int(window.winId()),
+            root_rect=[-bounds.x(), -bounds.y(), root_bounds.width(), root_bounds.height()],
+            native_dpr=native_dpr,
+            popups=tuple(overlays), panels=panels,
         )
         self._frames[identity] = {**previous, **record, "geometry": geometry, "popup_images": images}
         if popup_redrawn:
@@ -498,20 +679,26 @@ class SharedWindows(QtCore.QObject):
         if max_width is not None:
             scale = min(scale, max(1, int(max_width)) / description["width"])
         unchanged = previous.get("capture") == (description["epoch"], scale)
-        if not force and unchanged and window not in self._dirty:
+        if not isinstance(window, int) and not force and unchanged and window not in self._dirty:
             return None
         width, height = math.ceil(description["width"] * scale), math.ceil(description["height"] * scale)
         frame = self._capture_image
         if frame.width() != width or frame.height() != height:
             frame = self._capture_image = QtGui.QImage(width, height, QtGui.QImage.Format_RGBA8888)
         frame.setDevicePixelRatio(scale)
-        frame.setDotsPerMeterX(round(window.logicalDpiX() / .0254))
-        frame.setDotsPerMeterY(round(window.logicalDpiY() / .0254))
+        if not isinstance(window, int):
+            frame.setDotsPerMeterX(round(window.logicalDpiX() / .0254))
+            frame.setDotsPerMeterY(round(window.logicalDpiY() / .0254))
         frame.fill(QtCore.Qt.white)
+        root = self._native_image(window) if isinstance(window, int) else None
         painter = QtGui.QPainter(frame)
         self._capturing = True
         try:
-            window.render(painter, -QtCore.QPoint(*description["origin"]))
+            if root is not None:
+                root.setDevicePixelRatio(description["native_dpr"])
+                painter.drawImage(-QtCore.QPointF(*description["origin"]), root)
+            else:
+                window.render(painter, -QtCore.QPoint(*description["origin"]))
             for popup in description["popups"]:
                 image = QtGui.QImage(popup["rgba"], popup["pixel_width"], popup["pixel_height"],
                                      popup["pixel_width"] * 4, QtGui.QImage.Format_RGBA8888)
@@ -527,21 +714,30 @@ class SharedWindows(QtCore.QObject):
         record["rgba"] = frame.constBits().asstring(frame.sizeInBytes())
         return record
 
-    def take_control(self, client_id: str, identity: str) -> dict[str, Any]:
+    def _focus_window(self, window: Any, popups: Any) -> None:
+        hwnd = window if isinstance(window, int) else int(window.winId())
+        foregrounds = {hwnd, *(popup if isinstance(popup, int) else int(popup.winId()) for popup, _ in popups)}
+        if self._win.GetForegroundWindow() in foregrounds or not self._win.IsWindowEnabled(hwnd):
+            return
+        if not isinstance(window, int):
+            window.raise_()
+            window.activateWindow()
+        self._win.SetForegroundWindow(hwnd)
+        if self._win.GetForegroundWindow() not in foregrounds:
+            raise ValueError("Windows could not focus the experiment window; activate it on the experiment computer")
+
+    def take_control(self, client_id: str, identity: str, *, activate: bool = True) -> dict[str, Any]:
         self._check_thread()
         if not self.control_enabled:
             raise ValueError("Native shared input requires Windows; this host is view-only")
         if self._controller not in (None, client_id):
             raise ValueError("another browser controls the experiment")
-        window, _bounds, _popups = self._surface(identity)
+        window, _bounds, popups = self._surface(identity)
         if self._controller != client_id or self._input_window != identity:
             self._release_inputs(cancel=True)
             self._control_epoch += 1
-        window.raise_()
-        window.activateWindow()
-        self._win.SetForegroundWindow(int(window.winId()))
-        if self._win.GetForegroundWindow() != int(window.winId()):
-            raise ValueError("Windows could not focus the experiment window; activate it on the experiment computer")
+        if activate:
+            self._focus_window(window, popups)
         self._input_window = identity
         self._controller = client_id
         return {"controller": self._controller}
@@ -561,7 +757,10 @@ class SharedWindows(QtCore.QObject):
         window = self._windows.get(str(identity))
         if window is None:
             raise ValueError("the experiment window is no longer available")
-        window.showNormal()
+        if isinstance(window, int):
+            self._win.ShowWindow(window, 9)
+        else:
+            window.showNormal()
         return {"accepted": True}
 
     def _release_inputs(self, *, cancel: bool = True) -> None:
@@ -571,9 +770,9 @@ class SharedWindows(QtCore.QObject):
         target = self._pressed
         buttons, keys = self._buttons, self._keys
         self._pressed, self._press_source, self._buttons, self._keys = None, None, 0, set()
-        if cancel and target is not None:
+        if cancel and isinstance(target, QtWidgets.QWidget):
             QtGui.QDrag.cancel()
-        if target is not None and not sip.isdeleted(target):
+        if isinstance(target, QtWidgets.QWidget) and not sip.isdeleted(target):
             if isinstance(target, QtWidgets.QAbstractButton):
                 target.setDown(False)
             if cancel:
@@ -646,7 +845,8 @@ class SharedWindows(QtCore.QObject):
             window, bounds, popups = self._surface(identity)
         except ValueError:
             current = self._windows.get(identity)
-            if current is not None and current.isVisible() and not current.isMinimized():
+            if current is not None and (self._win.IsWindowVisible(current) if isinstance(current, int)
+                                        else current.isVisible() and not current.isMinimized()):
                 raise
             self._release_inputs(cancel=True)
             return {"accepted": False, "reason": "the selected window is no longer visible"}
@@ -657,21 +857,35 @@ class SharedWindows(QtCore.QObject):
                 or frame["geometry"] != self._geometry(window, bounds, popups)):
             self._release_inputs(cancel=True)
             return {"accepted": False, "reason": "window geometry changed; wait for its current image"}
+        native = isinstance(window, int)
         modal = self._app.activeModalWidget()
-        if modal is not None and modal is not window and not modal.isAncestorOf(window):
+        hwnd = window if native else int(window.winId())
+        if not self._win.IsWindowEnabled(hwnd) or (
+                not native and modal is not None and modal is not window and not modal.isAncestorOf(window)):
             self._release_inputs(cancel=True)
             return {"accepted": False, "reason": "a modal dialog must be answered first"}
         kind, modifiers = str(message["type"]), self._modifiers(message)
         if kind in ("key_down", "text"):
-            self._allowed_native_target(self._win.GetForegroundWindow())
             if modifiers & QtCore.Qt.MetaModifier:
                 raise ValueError("Desktop-switching keys are not part of experiment-window sharing")
+            target = None
+            if kind == "text" and "preedit" in message and not native:
+                target = self._focused_input(window, popups)
+                if target is None or not target.isVisible() or not target.isEnabled():
+                    raise ValueError("no experimental input field has keyboard focus")
+                self._require_remote_input(target)
+            if kind == "key_down":
+                key = str(message.get("key", ""))
+                if key == "Meta" or (modifiers & QtCore.Qt.AltModifier and key in ("Tab", "Escape")) or (
+                        modifiers & QtCore.Qt.ControlModifier and key == "Escape"):
+                    raise ValueError("Desktop-switching keys are not part of experiment-window sharing")
+                code = self._virtual_key(key)
+                if not code and len(key) != 1:
+                    raise ValueError("unsupported keyboard key")
+            self._focus_window(window, popups)
+            self._allowed_native_target(self._win.GetForegroundWindow())
             if kind == "text":
-                if "preedit" in message:
-                    target = self._focused_input(window, popups)
-                    if target is None or not target.isVisible() or not target.isEnabled():
-                        raise ValueError("no experimental input field has keyboard focus")
-                    self._require_remote_input(target)
+                if target is not None:
                     event = QtGui.QInputMethodEvent(str(message["preedit"]), [])
                     event._zlc_shared_control = (self._controller, self._control_epoch)
                     self._app.sendEvent(target, event)
@@ -680,15 +894,8 @@ class SharedWindows(QtCore.QObject):
                 for (unit,) in struct.iter_unpack("<H", text):
                     records.extend(((1, (0, unit, 0x4)), (1, (0, unit, 0x6))))
             else:
-                key = str(message.get("key", ""))
-                if key == "Meta" or (modifiers & QtCore.Qt.AltModifier and key in ("Tab", "Escape")) or (
-                        modifiers & QtCore.Qt.ControlModifier and key == "Escape"):
-                    raise ValueError("Desktop-switching keys are not part of experiment-window sharing")
-                code = self._virtual_key(key)
                 records = self._sync_modifiers(modifiers)
                 if not code:
-                    if len(key) != 1:
-                        raise ValueError("unsupported keyboard key")
                     for (unit,) in struct.iter_unpack("<H", key.encode("utf-16-le")):
                         records.extend(((1, (0, unit, 0x4)), (1, (0, unit, 0x6))))
                 elif code not in (0xA0, 0xA2, 0xA4):
@@ -701,28 +908,33 @@ class SharedWindows(QtCore.QObject):
             raise ValueError("pointer coordinates must be finite")
         canvas_origin = self._press_source[2] if releasing else bounds.topLeft()
         point = QtCore.QPoint(round(x), round(y)) + canvas_origin
-        position = window.mapToGlobal(point)
+        position = point if native else window.mapToGlobal(point)
         surface = window
+        native_popup_rect = None
         for popup, rect in reversed(popups):
             if rect.contains(point):
                 surface = popup
+                native_popup_rect = rect if native else None
                 break
-        local = surface.mapFromGlobal(position)
-        if not surface.rect().contains(local):
+        local = (point if native_popup_rect is None else point-native_popup_rect.topLeft()) if native else surface.mapFromGlobal(position)
+        size = (self._native_geometry(window)[0] if native_popup_rect is None else
+                QtCore.QRectF(0., 0., native_popup_rect.width(), native_popup_rect.height())) if native else surface.rect()
+        if not size.contains(local):
             self._release_inputs(cancel=True)
             return {"accepted": False, "reason": "pointer left the experiment window; gesture cancelled"}
-        target = surface.childAt(local) or surface
-        if kind == "wheel" and message.get("touch") and self._pressed is not None and not self._buttons:
+        target = surface if native else surface.childAt(local) or surface
+        if not native and kind == "wheel" and message.get("touch") and self._pressed is not None and not self._buttons:
             if sip.isdeleted(self._pressed):
                 self._release_inputs()
                 return {"accepted": False, "reason": "the scrolling control was closed"}
             target = self._pressed
-        if not target.isEnabled() and kind not in ("move", "up"):
+        if not native and not target.isEnabled() and kind not in ("move", "up"):
             return {"accepted": False, "reason": "the control is disabled"}
-        self._require_remote_input(target)
-        if kind in ("move", "down", "up"):
+        if not native:
+            self._require_remote_input(target)
+        if kind in ("move", "down", "up") or native and kind == "wheel":
             touch_click = None
-            touch = message.get("pointerType") == "touch"
+            touch = not native and message.get("pointerType") == "touch"
             hints = self._app.styleHints()
             last = self._touch_press
             if last is not None and (not touch or max(abs(position.x() - last[1].x()),
@@ -735,18 +947,31 @@ class SharedWindows(QtCore.QObject):
                 touch_click = bool(last is not None and last[0]() is target
                                    and 0 < timestamp - last[2] < hints.mouseDoubleClickInterval())
                 self._touch_press = None if touch_click else (weakref.ref(target), position, timestamp)
-            rect, hwnd = wintypes.RECT(), int(surface.winId())
-            self._win.GetClientRect(hwnd, ctypes.byref(rect))
-            physical = wintypes.POINT(round(local.x() * rect.right / surface.width()),
-                                     round(local.y() * rect.bottom / surface.height()))
-            self._win.ClientToScreen(hwnd, ctypes.byref(physical))
+            rect, hwnd = wintypes.RECT(), surface if native else int(surface.winId())
+            if native_popup_rect is not None:
+                self._win.GetWindowRect(hwnd, ctypes.byref(rect))
+                physical = wintypes.POINT(rect.left+round(local.x()*(rect.right-rect.left)/size.width()),
+                                         rect.top+round(local.y()*(rect.bottom-rect.top)/size.height()))
+            else:
+                self._win.GetClientRect(hwnd, ctypes.byref(rect))
+                physical = wintypes.POINT(round(local.x() * rect.right / size.width()),
+                                         round(local.y() * rect.bottom / size.height()))
+                self._win.ClientToScreen(hwnd, ctypes.byref(physical))
+            self._focus_window(window, popups)
             self._allowed_native_target(self._win.WindowFromPoint(physical), physical)
             get = self._win.GetSystemMetrics
             px = round((physical.x - get(76)) * 65535 / max(1, get(78) - 1))
             py = round((physical.y - get(77)) * 65535 / max(1, get(79) - 1))
             records = self._sync_modifiers(modifiers)
             records.append((0, (px, py, 0, 0xC001)))  # absolute virtual-desktop move
-            if kind != "move":
+            if kind == "wheel":
+                for key, flag, sign in (("delta_y", 0x800, -1), ("delta_x", 0x1000, 1)):
+                    amount = float(message.get(key, 0))
+                    if not math.isfinite(amount):
+                        raise ValueError("wheel displacement must be finite")
+                    if amount:
+                        records.append((0, (0, 0, round(sign * amount) & 0xFFFFFFFF, flag)))
+            elif kind != "move":
                 button, down, up = {0: (1, 0x2, 0x4), 1: (4, 0x20, 0x40), 2: (2, 0x8, 0x10)}[message.get("button", 0)]
                 if kind == "down":
                     self._pressed = target
@@ -760,6 +985,8 @@ class SharedWindows(QtCore.QObject):
                         self._pressed = self._press_source = None
             self._send_native(records, touch_click=touch_click)
         elif kind in ("wheel", "pinch"):
+            if native:
+                return {"accepted": False, "reason": "system dialogs have no plot zoom gesture"}
             delta = QtCore.QPoint(round(-float(message.get("delta_x", 0))), round(-float(message.get("delta_y", 0))))
             pixel_delta = delta if message.get("deltaMode", 0) == 0 else QtCore.QPoint()
             scale = float(message.get("scale", 1.0))
@@ -767,6 +994,7 @@ class SharedWindows(QtCore.QObject):
                 raise ValueError("pinch scale must be positive and finite")
             phase = {"begin": QtCore.Qt.ScrollBegin, "update": QtCore.Qt.ScrollUpdate,
                      "end": QtCore.Qt.ScrollEnd}.get(message.get("phase"), QtCore.Qt.NoScrollPhase)
+            self._focus_window(window, popups)
             while target is not None:
                 local = QtCore.QPointF(target.mapFromGlobal(position))
                 if kind == "pinch":
@@ -889,7 +1117,6 @@ class SharedWindows(QtCore.QObject):
             self._win.UnhookWindowsHookEx(handle)
         # A native callback may be executing this close; retain its ctypes trampoline until it returns.
         QtCore.QTimer.singleShot(0, self._hooks.clear)
-        self._app.setAttribute(QtCore.Qt.AA_DontUseNativeDialogs, self._native_dialogs)
         self._windows.clear()
         self._owners.clear()
         self._frames.clear()

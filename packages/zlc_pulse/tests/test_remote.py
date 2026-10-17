@@ -368,7 +368,7 @@ def test_remote_replays_device_path_with_short_done_poll(monkeypatch, tmp_path) 
             return answer
         with monkeypatch.context() as legacy:
             legacy.setattr(server, "dispatch", old_open)
-            with pytest.raises(ConnectionError, match="command protocol differs"):
+            with pytest.raises(ConnectionError, match="contract differs"):
                 _client(server)
         client = _client(server)
         try:
@@ -570,6 +570,9 @@ def test_remote_safe_interrupts_forever_fire_on_the_same_connection(monkeypatch)
             assert not waiter.is_alive() and len(reports) == 1
             assert reports[0].command_id == command_id
             assert waits == [(1.0, command_id)], "one Event wait must deliver DONE without client polling"
+            client.fire(run_repeats=0)
+            assert client.snapshot()["firing"] is True
+            assert client.safe().stable
 
             # An old waiter returning after Stop and the next FIRE cannot
             # consume that next run's completed report.
@@ -877,6 +880,9 @@ def test_remote_logs_lifecycle_events_without_payload_dump(capsys) -> None:
             assert client.wait_done(1.0) is not None
             safe = client.safe()
             assert safe.stable
+            with pytest.raises(RemoteError, match="run_repeats"):
+                client.fire(run_repeats=-1)
+            assert client.snapshot()["opened"] is True
         finally:
             client.close()
 
@@ -899,6 +905,12 @@ def test_remote_logs_lifecycle_events_without_payload_dump(capsys) -> None:
     assert "stable=True" in output
     assert "ZLC CLOSE" in output
     assert "ZLC CLIENT DISCONNECTED" in output
+    assert 'reason="client EOF after close"' in output
+    assert "method=close phase=receive" in output
+    assert "last_run_repeats=1 last_scan_repeats=1" in output
+    assert "request_ms=" in output
+    assert "error_type=ValueError" in output
+    assert "method=fire phase=dispatch" in output
     assert "AnalogStep" not in output
 
 
@@ -940,6 +952,7 @@ def test_a_new_client_takes_the_board_and_the_old_connection_is_dropped(capsys) 
     output = capsys.readouterr().out
     assert "ZLC CLIENT REPLACED" in output
     assert "by=127.0.0.1:" in output
+    assert "was_owner=False" in output
 
 
 def test_closing_a_client_whose_board_was_taken_is_not_an_error() -> None:
@@ -1000,6 +1013,46 @@ def test_a_completion_wait_the_server_does_not_answer_is_late_not_ended() -> Non
             assert not isinstance(caught.value, ConnectionResetError)
         finally:
             late.disconnect()
+
+
+def test_long_axi_load_negotiates_budget_without_extending_an_explicit_timeout(monkeypatch, tmp_path) -> None:
+    from zlc_pulse.transport import axi
+
+    monkeypatch.setattr(remote_module, "DEFAULT_REQUEST_TIMEOUT", 0.06)
+    monkeypatch.setattr(axi, "ACTION_TIMEOUT_SECONDS", 0.4)
+    monkeypatch.setattr(axi, "STARTUP_TIMEOUT_SECONDS", 0.4)
+    completed = threading.Event()
+    def execute(_lines, _action, remaining):
+        assert 0.16 < remaining <= 0.4
+        time.sleep(0.16)
+        completed.set()
+        return ""
+    source = _sequence()
+    geom = _sequence_geometry()
+    memory = MemoryRegisterTransport(geom=geom)
+    transport = axi.VivadoAxiRegisterTransport(state_dir=tmp_path, tcl_executor=execute)
+    for name in ("read_word", "read_words", "command"):
+        monkeypatch.setattr(transport, name, getattr(memory, name))
+    write = transport.write_words
+    def write_words(rows, **options):
+        write(rows, **options)
+        memory.write_words(rows, **options)
+    monkeypatch.setattr(transport, "write_words", write_words)
+    streamer = PulseStreamer(transport, geom, 50e6, target=source.target)
+    with _server(streamer) as server:
+        automatic = _client(server)
+        connection = automatic._socket
+        automatic.load(compile_sequence(source, geom, 50e6), source=source)
+        assert completed.is_set() and automatic._socket is connection
+        assert automatic.snapshot()["loaded"] is True
+        automatic.close()
+        completed.clear()
+        limited = RemotePulseStreamer("127.0.0.1", server.server_address[1], request_timeout=0.06)
+        limited.open()
+        with pytest.raises(ConnectionError, match="did not answer"):
+            limited.load(compile_sequence(source, geom, 50e6), source=source)
+        assert limited._socket is None
+        assert completed.wait(1.0)
 
 
 def test_client_endpoint_display_separates_bind_from_connect_host(monkeypatch, capsys) -> None:
@@ -1450,10 +1503,16 @@ def test_client_that_drops_its_socket_is_not_a_server_error(capsys) -> None:
         )
         client._socket.close()
         deadline = time.monotonic() + 5.0
-        while "CLIENT DISCONNECTED" not in capsys.readouterr().out and time.monotonic() < deadline:
+        output = ""
+        while "CLIENT DISCONNECTED" not in output and time.monotonic() < deadline:
+            output += capsys.readouterr().out
             time.sleep(0.01)
 
     assert seen == [], f"a dropped client reached handle_error: {seen}"
+    assert "error_type=ConnectionResetError" in output
+    assert "error_errno=" in output
+    assert "method=open phase=receive" in output
+    assert "was_owner=True" in output
 
 
 def test_a_poll_is_logged_only_when_its_answer_changes(capsys) -> None:
@@ -1524,17 +1583,27 @@ def test_a_payload_the_server_cannot_read_costs_the_client_its_answer_only() -> 
             ("127.0.0.1", server.server_address[1]), timeout=5.0
         )
         try:
-            _send_raw(connection, {"id": 1, "method": "open", "params": {"command_protocol": LAYOUT_STRUCT_VERSION}})
+            _send_raw(connection, {"id": 1, "method": "open", "params": {
+                "board_protocol": LAYOUT_STRUCT_VERSION, "operation_budget": True,
+            }})
             assert _receive_raw(connection)["ok"] is True
             safed.clear()
 
             # A client of another protocol is turned away before it can take
             # the board: the owner keeps it and nothing is safed.
             owner = server.owner_status()[0]
-            with socket.create_connection(("127.0.0.1", server.server_address[1]), timeout=5.0) as stale:
-                _send_raw(stale, {"id": 1, "method": "open", "params": {"command_protocol": LAYOUT_STRUCT_VERSION - 1}})
-                assert _receive_raw(stale)["ok"] is False
-            assert server.owner_status()[0] == owner and not safed
+            for incompatible in (
+                {"command_protocol": LAYOUT_STRUCT_VERSION},
+                {"board_protocol": LAYOUT_STRUCT_VERSION - 1, "operation_budget": True},
+                {"board_protocol": LAYOUT_STRUCT_VERSION, "operation_budget": False},
+                {"board_protocol": LAYOUT_STRUCT_VERSION, "operation_budget": True,
+                 "command_protocol": LAYOUT_STRUCT_VERSION},
+            ):
+                with socket.create_connection(("127.0.0.1", server.server_address[1]), timeout=5.0) as stale:
+                    _send_raw(stale, {"id": 1, "method": "open", "params": incompatible})
+                    answer = _receive_raw(stale)
+                    assert answer["ok"] is False and "update both" in answer["error"]["message"]
+                assert server.owner_status()[0] == owner and not safed
 
             # A payload naming a type this server cannot read.
             _send_raw(connection, {

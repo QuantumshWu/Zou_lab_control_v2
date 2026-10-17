@@ -12,7 +12,6 @@ from zlc_atom.devices.sequencer.device import SequencerDevice
 from zlc_atom.install.descriptors import DeviceTypeDescriptor, InstalledLeaf
 from zlc_pulse import (
     DEFAULT_PORT,
-    DEFAULT_REQUEST_TIMEOUT,
     PulseStreamer,
     RemotePulseStreamer,
 )
@@ -52,7 +51,6 @@ def _hardware_factory(context, key: str, values: dict) -> InstalledLeaf:
     streamer = dial(
         str(authored["host"]),
         int(authored["port"]),
-        request_timeout=DEFAULT_REQUEST_TIMEOUT,
     )
     if not isinstance(streamer, (PulseStreamer, RemotePulseStreamer)):
         raise TypeError("sequencer.hardware needs a zlc_pulse device")

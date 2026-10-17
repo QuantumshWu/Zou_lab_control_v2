@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from contextlib import contextmanager
 from typing import Protocol
 import threading
+import time
 
 
 #: How long the pulse observer sleeps between two STATUS/CURSOR reads while
@@ -24,10 +26,24 @@ class TransportAborted(RuntimeError):
     """A pending register action was cancelled by the owning session."""
 
 
+@contextmanager
+def _deadline_lock(lock, deadline: float | None):
+    remaining = None if deadline is None else deadline - time.monotonic()
+    if remaining is not None and remaining <= 0:
+        raise TimeoutError("pulse operation deadline expired before acquiring its I/O owner")
+    acquired = lock.acquire() if remaining is None else lock.acquire(timeout=remaining)
+    if not acquired:
+        raise TimeoutError("pulse operation deadline expired waiting for its I/O owner")
+    try:
+        yield
+    finally:
+        lock.release()
+
+
 class RegisterTransport(Protocol):
     observer_interval: float
 
-    def start(self) -> None: ...
+    def start(self, *, deadline: float | None = None) -> None: ...
 
     def close(self) -> None: ...
 

@@ -42,6 +42,9 @@ from .device import (
     DoneReport,
     PulseStreamer,
     SafeReadback,
+    LOAD_TIMEOUT,
+    SAFE_TIMEOUT,
+    OBSERVER_STOP_TIMEOUT,
 )
 from .manifest import DEFAULT_XDC_PATH, pulse_target_from_xdc
 from .model import (
@@ -64,6 +67,7 @@ from .wire import (
     load_streamer_config,
     require_streamer_config,
 )
+from .transport.base import _deadline_lock
 
 
 MAX_FRAME_BYTES = 8 * 1024 * 1024
@@ -146,7 +150,7 @@ def _log_fields(**values: object) -> str:
 _LOG = logging.getLogger(__name__)
 
 
-def _server_log(event: str, *, client: str | None = None, detail: str = "") -> None:
+def _server_log(event: str, *, client: str | None = None, detail: str = "", error: BaseException | None = None) -> None:
     """Narrate one lifecycle event, without dumping payload contents.
 
     stdout is the CLI console's sink; the ``zlc_pulse.remote`` logger carries
@@ -157,6 +161,17 @@ def _server_log(event: str, *, client: str | None = None, detail: str = "") -> N
     fields = _log_fields(client=client)
     if detail:
         fields = f"{fields} {detail}" if fields else detail
+    seen = set()
+    for depth in range(4):
+        if error is None or id(error) in seen:
+            break
+        seen.add(id(error))
+        key = "error" if depth == 0 else f"cause{depth}"
+        fields += " " + _log_fields(**{
+            f"{key}_type": type(error).__name__, f"{key}_errno": getattr(error, "errno", None),
+            key: str(error).replace("\n", " ")[:1024],
+        })
+        error = error.__cause__ or (None if error.__suppress_context__ else error.__context__)
     suffix = f" {fields}" if fields else ""
     line = f"ZLC {event}{suffix}"
     now = time.time()
@@ -272,8 +287,7 @@ def _print_client_endpoints(bind_host: str, port: int) -> None:
     _server_log(
         "CLIENT CONNECT EXAMPLE",
         detail=(
-            f'same_computer=RemotePulseStreamer("{same_computer_host}", {port}, '
-            f"request_timeout={DEFAULT_REQUEST_TIMEOUT:g})"
+            f'same_computer=RemotePulseStreamer("{same_computer_host}", {port})'
         ),
     )
     if other_computer_hosts:
@@ -283,8 +297,7 @@ def _print_client_endpoints(bind_host: str, port: int) -> None:
         _server_log(
             "CLIENT CONNECT EXAMPLE",
             detail=(
-                f'other_computer=RemotePulseStreamer("{other_computer_hosts[0]}", {port}, '
-                f"request_timeout={DEFAULT_REQUEST_TIMEOUT:g})"
+                f'other_computer=RemotePulseStreamer("{other_computer_hosts[0]}", {port})'
             ),
         )
     else:
@@ -556,9 +569,14 @@ def decode_tree(value: Any) -> Any:
     return {str(key): decode_tree(item) for key, item in value.items()}
 
 
-def _recv_exact(connection: socket.socket, size: int) -> bytes | None:
+def _recv_exact(connection: socket.socket, size: int, *, deadline: float | None = None) -> bytes | None:
     chunks = bytearray()
     while len(chunks) < size:
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("remote response deadline expired")
+            connection.settimeout(remaining)
         chunk = connection.recv(size - len(chunks))
         if not chunk:
             if not chunks:
@@ -568,21 +586,26 @@ def _recv_exact(connection: socket.socket, size: int) -> bytes | None:
     return bytes(chunks)
 
 
-def _send_frame(connection: socket.socket, value: Any) -> None:
+def _send_frame(connection: socket.socket, value: Any, *, deadline: float | None = None) -> None:
     payload = json.dumps(encode_tree(value), separators=(",", ":"), allow_nan=False).encode("utf-8")
     if len(payload) > MAX_FRAME_BYTES:
         raise ValueError("remote frame exceeds the maximum size")
+    if deadline is not None:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("remote request deadline expired before send")
+        connection.settimeout(remaining)
     connection.sendall(_FRAME_HEADER.pack(len(payload)) + payload)
 
 
-def _recv_frame(connection: socket.socket) -> Any | None:
-    header = _recv_exact(connection, _FRAME_HEADER.size)
+def _recv_frame(connection: socket.socket, *, deadline: float | None = None) -> Any | None:
+    header = _recv_exact(connection, _FRAME_HEADER.size, deadline=deadline)
     if header is None:
         return None
     (size,) = _FRAME_HEADER.unpack(header)
     if size > MAX_FRAME_BYTES:
         raise ValueError("remote frame exceeds the maximum size")
-    payload = _recv_exact(connection, size)
+    payload = _recv_exact(connection, size, deadline=deadline)
     if payload is None:
         raise ConnectionError("remote connection closed before frame payload")
 
@@ -635,13 +658,23 @@ class _RemoteHandler(socketserver.BaseRequestHandler):
         server = self.server
         assert isinstance(server, PulseRemoteServer)
         client = f"{self.client_address[0]}:{self.client_address[1]}"
-        disconnect_reason = "client disconnect"
+        disconnect_reason = "client EOF"
         claimed = False
+        request_id, method, phase = None, "<none>", "receive"
+        phase_started = time.monotonic()
+        request_started, request_ms = None, None
+        run_repeats = scan_repeats = None
+        disconnect_error = None
+        closed = False
         try:
             while True:
+                phase, phase_started = "receive", time.monotonic()
                 request = _recv_frame(self.request)
                 if request is None:
+                    disconnect_reason = "client EOF after close" if closed else "client EOF"
                     return
+                request_started = time.monotonic()
+                phase, phase_started = "dispatch", request_started
                 request_id = request.get("id") if isinstance(request, dict) else None
                 method = "<invalid>"
                 try:
@@ -696,19 +729,26 @@ class _RemoteHandler(socketserver.BaseRequestHandler):
                     else:
                         if (
                             method == "open"
-                            and params.get("command_protocol") != LAYOUT_STRUCT_VERSION
+                            and (set(params) != {"board_protocol", "operation_budget"}
+                                 or params.get("board_protocol") != LAYOUT_STRUCT_VERSION
+                                 or params.get("operation_budget") is not True)
                         ):
-                            # Refused before the claim: a client speaking
-                            # another protocol must not evict the owner and
-                            # SAFE its running board on the way to being
-                            # turned away.
+                            # RPC capability and board ABI are both admitted before ownership changes.
                             raise ValueError(
-                                f"client command protocol {params.get('command_protocol')!r} "
-                                f"differs from this server's {LAYOUT_STRUCT_VERSION}; update "
-                                "the older side and restart it"
+                                f"Pulse RPC open requires board_protocol={LAYOUT_STRUCT_VERSION} "
+                                "and operation_budget=true; update both Pulse client and server software"
                             )
+                        budget = server.request_budget(method, taking=not claimed)
+                        deadline = None
+                        if budget > DEFAULT_REQUEST_TIMEOUT:
+                            deadline = time.monotonic() + budget
+                            _send_frame(self.request, {"id": request_id, "budget_seconds": budget})
+                            _server_log("RPC BUDGET", client=client,
+                                        detail=_log_fields(request_id=request_id, method=method, seconds=f"{budget:g}",
+                                                           deadline_monotonic=f"{deadline:.6f}"))
+                        options = {} if deadline is None else {"deadline": deadline}
                         if not claimed:
-                            server.claim_client(client, self.request)
+                            server.claim_client(client, self.request, **options)
                             claimed = True
                             _server_log(
                                 "CLIENT CONNECTED", client=client, detail="status=OWNER"
@@ -718,16 +758,19 @@ class _RemoteHandler(socketserver.BaseRequestHandler):
                             params,
                             client=client,
                             connection=self.request,
+                            **options,
                         )
+                        if method == "fire":
+                            run_repeats, scan_repeats = params["run_repeats"], params["scan_repeats"]
+                        closed = method == "close"
                     response = {"id": request_id, "ok": True, "result": result}
                 except Exception as exc:
                     _server_log(
                         "RPC ERROR",
                         client=client,
-                        detail=_log_fields(
-                            method=method,
-                            error=f"{type(exc).__name__}: {str(exc).replace(chr(10), ' ')}",
-                        ),
+                        detail=_log_fields(request_id=request_id, method=method, phase=phase,
+                                           elapsed_ms=f"{(time.monotonic() - request_started) * 1000:.3f}"),
+                        error=exc,
                     )
                     response = {
                         "id": request_id,
@@ -735,6 +778,7 @@ class _RemoteHandler(socketserver.BaseRequestHandler):
                         "error": {"type": type(exc).__name__, "message": str(exc)},
                     }
                 try:
+                    phase, phase_started = "reply", time.monotonic()
                     _send_frame(self.request, response)
                 except (TypeError, ValueError) as exc:
                     # THE ANSWER, NOT THE CONNECTION.  A result the frame
@@ -751,11 +795,8 @@ class _RemoteHandler(socketserver.BaseRequestHandler):
                     _server_log(
                         "RPC REPLY ERROR",
                         client=client,
-                        detail=_log_fields(
-                            method=method,
-                            error=f"{type(exc).__name__}: "
-                            f"{str(exc).replace(chr(10), ' ')}",
-                        ),
+                        detail=_log_fields(request_id=request_id, method=method, phase=phase),
+                        error=exc,
                     )
                     _send_frame(
                         self.request,
@@ -771,22 +812,24 @@ class _RemoteHandler(socketserver.BaseRequestHandler):
                             },
                         },
                     )
+                request_ms = (time.monotonic() - request_started) * 1000
                 if not claimed:
                     return
         except OSError as exc:
-            # Closed, reset, or dropped by a newer client taking the board.
-            # Each of those ends this session; none is a server defect.
-            disconnect_reason = f"client connection dropped: {type(exc).__name__}"
+            disconnect_error = exc
+            disconnect_reason = "socket timeout" if isinstance(exc, TimeoutError) else "client connection dropped"
         except ValueError as exc:
-            # A frame that is not strict JSON (or claims more than the frame
-            # cap) leaves the stream at an unknown position, so the session
-            # ends -- said as what it is, not as the client going away.
-            disconnect_reason = (
-                f"unreadable request frame: {type(exc).__name__}: "
-                f"{str(exc).replace(chr(10), ' ')}"
-            )
-            _server_log("RPC ERROR", client=client, detail=_log_fields(error=disconnect_reason))
+            disconnect_error = exc
+            disconnect_reason = "unreadable request frame"
+        except Exception as exc:
+            disconnect_error = exc
+            disconnect_reason = "handler failure"
+            raise
         finally:
+            stopped_at = time.monotonic()
+            with server._client_lock:
+                owner, owner_epoch = server._owner_client, server._owner_epoch
+                owner_connection = server._owner_connection is self.request
             outputs_safe = (
                 server.client_disconnected(
                     client=client,
@@ -810,8 +853,19 @@ class _RemoteHandler(socketserver.BaseRequestHandler):
                 _server_log(
                     "CLIENT DISCONNECTED",
                     client=client,
-                    detail=_log_fields(outputs=status, reason=disconnect_reason),
+                    detail=_log_fields(outputs=status, reason=disconnect_reason, owner=owner or "none",
+                        owner_epoch=owner_epoch, was_owner=owner_connection, request_id=request_id,
+                        method=method, phase=phase, phase_ms=f"{(stopped_at - phase_started) * 1000:.3f}",
+                        request_ms=(f"{request_ms:.3f}" if phase == "receive" and request_ms is not None else
+                                    f"{(stopped_at - request_started) * 1000:.3f}" if request_started is not None else None),
+                        last_run_repeats=run_repeats, last_scan_repeats=scan_repeats),
+                    error=disconnect_error,
                 )
+            elif disconnect_error is not None:
+                _server_log("RPC ERROR", client=client,
+                    detail=_log_fields(reason=disconnect_reason, request_id=request_id, method=method,
+                                       phase=phase, elapsed_ms=f"{(stopped_at - phase_started) * 1000:.3f}"),
+                    error=disconnect_error)
 
 
 class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
@@ -928,7 +982,7 @@ class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         dropped = drop_peer_connections(connections)
         _server_log("PEERS REFUSED", detail=_log_fields(dropped=dropped))
 
-    def _safe_beside_the_lane(self) -> None:
+    def _safe_beside_the_lane(self, *, deadline: float | None = None) -> None:
         """Put the pins down beside whatever the command lane is doing.
 
         The first half of taking the board away from a client, and the only
@@ -940,13 +994,13 @@ class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         """
 
         try:
-            result = self.streamer.safe()
+            result = self.streamer.safe() if deadline is None else self.streamer._safe(deadline=deadline)
             if not result.stable:
                 raise RuntimeError("SAFE readback was not stable")
         except Exception:
             pass
 
-    def _safe_on_the_lane(self) -> tuple[Any, Exception | None]:
+    def _safe_on_the_lane(self, *, deadline: float | None = None) -> tuple[Any, Exception | None]:
         """The SAFE that decides it, taken on the command lane.
 
         Returns the readback and the failure, if any.  A board that is no
@@ -956,18 +1010,19 @@ class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         """
 
         try:
-            result = self.streamer.safe()
+            result = self.streamer.safe() if deadline is None else self.streamer._safe(deadline=deadline)
             if not result.stable:
                 raise RuntimeError("SAFE readback was not stable")
             return result, None
         except Exception as exc:
             try:
-                opened = bool(self.streamer.snapshot().get("opened"))
+                state = self.streamer.snapshot() if deadline is None else self.streamer._snapshot(deadline=deadline)
+                opened = bool(state.get("opened"))
             except Exception:
                 opened = True
             return None, exc if opened else None
 
-    def claim_client(self, client: str, connection: socket.socket) -> None:
+    def claim_client(self, client: str, connection: socket.socket, *, deadline: float | None = None) -> None:
         """Transfer ownership only after the previous physical state is SAFE."""
 
         with self._client_lock:
@@ -995,11 +1050,11 @@ class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         if connection_to_drop is not None:
             drop_connection(connection_to_drop)
 
-        self._safe_beside_the_lane()
+        self._safe_beside_the_lane(deadline=deadline)
 
         failure_message: str | None = None
-        with self._command_lock:
-            _result, safe_failure = self._safe_on_the_lane()
+        with _deadline_lock(self._command_lock, deadline):
+            _result, safe_failure = self._safe_on_the_lane(deadline=deadline)
             with self._client_lock:
                 if self._owner_epoch != transition_epoch:
                     raise RuntimeError("client takeover was superseded")
@@ -1043,6 +1098,27 @@ class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         resends = int(getattr(transport, "resends", 0) or 0)
         return f" resent_frames={resends}" if resends else ""
 
+    def request_budget(self, method: str, *, taking: bool) -> float:
+        """Reserve the existing JTAG I/O bounds for one complete command."""
+        from .transport import axi
+
+        if not isinstance(self.streamer.transport, axi.VivadoAxiRegisterTransport):
+            return DEFAULT_REQUEST_TIMEOUT
+        io = axi.ACTION_TIMEOUT_SECONDS
+        safe = OBSERVER_STOP_TIMEOUT + io + SAFE_TIMEOUT
+        budget = {
+            "open": axi.STARTUP_TIMEOUT_SECONDS + io,
+            "load": safe + io + LOAD_TIMEOUT,
+            "fire": 2 * io + LOAD_TIMEOUT,
+            "safe": safe,
+            "cursor": io,
+            "close": safe + axi.PROCESS_EXIT_TIMEOUT_SECONDS + axi.PROCESS_KILL_TIMEOUT_SECONDS + axi.READER_EXIT_TIMEOUT_SECONDS,
+        }.get(method, 0.0)
+        with self._client_lock:
+            if taking and (self._owner_client is not None or self._fault is not None):
+                budget += 2 * safe
+        return max(DEFAULT_REQUEST_TIMEOUT, budget)
+
     def dispatch(
         self,
         method: str,
@@ -1050,6 +1126,7 @@ class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         *,
         client: str,
         connection: socket.socket,
+        deadline: float | None = None,
     ) -> Any:
         with self._client_lock:
             if (
@@ -1060,7 +1137,7 @@ class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
                 raise RuntimeError("this connection no longer owns the pulse server")
             owner_epoch = self._owner_epoch
 
-        with self._command_lock:
+        with _deadline_lock(self._command_lock, deadline):
             with self._client_lock:
                 if (
                     self._fault is not None
@@ -1070,6 +1147,7 @@ class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
                 ):
                     raise RuntimeError("this connection no longer owns the pulse server")
             try:
+                options = {} if deadline is None else {"deadline": deadline}
                 no_params = {
                     "describe",
                     "close",
@@ -1083,7 +1161,7 @@ class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
                     if method == "load"
                     else {"run_repeats", "scan_repeats"}
                     if method == "fire"
-                    else {"command_protocol"}
+                    else {"board_protocol", "operation_budget"}
                     if method == "open"
                     else set()
                 )
@@ -1096,14 +1174,15 @@ class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
                         f"{method} parameters must be exactly {', '.join(sorted(expected))}"
                     )
                 if method == "open":
-                    self.streamer.open()
+                    self.streamer.open() if deadline is None else self.streamer._open(deadline=deadline)
                     _server_log("OPEN", client=client, detail=_log_fields(device_session="ready"))
                     # The owner learns how to name itself on the cancel
                     # lane; the ownership checks around this lane have
                     # already proved the token is this connection's.
                     with self._client_lock:
                         result = {"cancel_token": self._owner_token,
-                                  "command_protocol": LAYOUT_STRUCT_VERSION,
+                                  "board_protocol": LAYOUT_STRUCT_VERSION,
+                                  "operation_budget": True,
                                   "completion_notifications": True}
                 elif method == "describe":
                     result = self.streamer.describe()
@@ -1119,8 +1198,8 @@ class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
                         ),
                     )
                 elif method == "close":
-                    before = self.streamer.snapshot()
-                    self.streamer.close()
+                    before = self.streamer.snapshot() if deadline is None else self.streamer._snapshot(deadline=deadline)
+                    self.streamer.close() if deadline is None else self.streamer._close(deadline=deadline)
                     _server_log(
                         "CLOSE",
                         client=client,
@@ -1157,6 +1236,7 @@ class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
                     self.streamer._load_program(
                         program, source=source,
                         authored_source=authored_source, rows=rows,
+                        **options,
                     )
                     _server_log(
                         "LOAD",
@@ -1186,6 +1266,7 @@ class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
                     applied = self.streamer._fire_program(
                         run_repeats=run_repeats,
                         scan_repeats=scan_repeats,
+                        **options,
                     )
                     program = applied.program if applied is not None else None
                     fire_fields = _log_fields(
@@ -1204,9 +1285,9 @@ class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
                     # Not narrated: a scan moves it on every poll, and a
                     # line per step pushes LOAD/FIRE/ERROR out of the bench
                     # log.  DONE reports the final cursor.
-                    result = self.streamer.cursor()
+                    result = self.streamer.cursor() if deadline is None else self.streamer._cursor(deadline=deadline)
                 elif method == "safe":
-                    result = self.streamer.safe()
+                    result = self.streamer.safe() if deadline is None else self.streamer._safe(deadline=deadline)
                     _server_log(
                         "STOP/SAFE",
                         client=client,
@@ -1217,7 +1298,7 @@ class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
                         ),
                     )
                 elif method == "snapshot":
-                    result = self.streamer.snapshot()
+                    result = self.streamer.snapshot() if deadline is None else self.streamer._snapshot(deadline=deadline)
                     _server_log_change(
                         "SNAPSHOT",
                         client=client,
@@ -1426,27 +1507,28 @@ class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
 
 
 class RemotePulseStreamer(ConfigValueHolder):
-    """Pulse control and completion waits on independent TCP connections."""
+    """Auto waits accept server budgets; an explicit request timeout is a hard limit."""
 
     def __init__(
         self,
         host: str,
         port: int,
         *,
-        request_timeout: float = DEFAULT_REQUEST_TIMEOUT,
+        request_timeout: float | None = None,
         connect_timeout: float = DEFAULT_CONNECT_TIMEOUT,
     ) -> None:
         if not isinstance(host, str) or not host:
             raise ValueError("remote host is required")
         if isinstance(port, bool) or not isinstance(port, int) or not 0 < port <= 65535:
             raise ValueError("remote port is outside the TCP range")
-        if request_timeout <= 0 or not math.isfinite(float(request_timeout)):
+        if request_timeout is not None and (request_timeout <= 0 or not math.isfinite(float(request_timeout))):
             raise ValueError("request_timeout must be finite and positive")
         if connect_timeout <= 0 or not math.isfinite(float(connect_timeout)):
             raise ValueError("connect_timeout must be finite and positive")
         self.host = host
         self.port = port
-        self.request_timeout = float(request_timeout)
+        self._automatic_timeout = request_timeout is None
+        self.request_timeout = DEFAULT_REQUEST_TIMEOUT if request_timeout is None else float(request_timeout)
         self.connect_timeout = float(connect_timeout)
         self._socket: socket.socket | None = None
         self._request_id = 0
@@ -1472,19 +1554,19 @@ class RemotePulseStreamer(ConfigValueHolder):
         with self._io_lock:
             try:
                 self._connect_locked()
-                answer = self._call_locked("open", {"command_protocol": LAYOUT_STRUCT_VERSION})
+                answer = self._call_locked("open", {"board_protocol": LAYOUT_STRUCT_VERSION, "operation_budget": True})
                 if (
                     not isinstance(answer, Mapping)
-                    or set(answer) != {"cancel_token", "command_protocol", "completion_notifications"}
-                    or answer.get("command_protocol") != LAYOUT_STRUCT_VERSION
+                    or set(answer) != {"cancel_token", "board_protocol", "operation_budget", "completion_notifications"}
+                    or answer.get("board_protocol") != LAYOUT_STRUCT_VERSION
+                    or answer.get("operation_budget") is not True
                     or answer.get("completion_notifications") is not True
                     or not isinstance(answer["cancel_token"], str)
                     or not answer["cancel_token"]
                 ):
                     raise ConnectionError(
-                        "Pulse server command protocol differs; update the machine that serves the board "
-                        "and restart its pulse server (initialize its devices again, or restart "
-                        "zlc pulse_server) before connecting"
+                        "Pulse server RPC/board contract differs; update both Pulse client and server software "
+                        "and restart the server before connecting"
                     )
                 self._cancel_token = answer["cancel_token"]
             except Exception:
@@ -1817,14 +1899,25 @@ class RemotePulseStreamer(ConfigValueHolder):
             "params": dict(params),
         }
         sent = False
+        started = time.monotonic()
+        deadline = started + self.request_timeout
         try:
-            _send_frame(self._socket, request)
+            _send_frame(self._socket, request, deadline=deadline)
             sent = True
-            response = _recv_frame(self._socket)
+            response = _recv_frame(self._socket, deadline=deadline)
+            if isinstance(response, Mapping) and "budget_seconds" in response:
+                budget = response["budget_seconds"]
+                if (set(response) != {"id", "budget_seconds"} or response["id"] != self._request_id
+                        or type(budget) not in (int, float) or not math.isfinite(budget) or budget <= 0):
+                    raise ValueError("invalid Pulse operation budget")
+                if self._automatic_timeout:
+                    deadline = max(deadline, time.monotonic() + budget + DEFAULT_REQUEST_TIMEOUT)
+                response = _recv_frame(self._socket, deadline=deadline)
+            self._socket.settimeout(self.request_timeout)
         except TimeoutError as exc:
             self._disconnect_locked()
             raise ConnectionError(
-                f"the pulse server did not answer within {self.request_timeout:g}s"
+                f"the pulse server did not answer within {time.monotonic() - started:.3f}s"
             ) from exc
         except OSError as exc:
             # The one "ended" type (with end of stream below), so a caller

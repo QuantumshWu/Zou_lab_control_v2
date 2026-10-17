@@ -13,7 +13,7 @@ import time
 from pathlib import Path
 from typing import Callable, Sequence
 
-from .base import JTAG_AXI_OBSERVER_INTERVAL, TransportAborted
+from .base import JTAG_AXI_OBSERVER_INTERVAL, TransportAborted, _deadline_lock
 from ..wire import CtrlWords
 
 
@@ -84,6 +84,9 @@ STARTUP_TIMEOUT_SECONDS = 180.0
 
 #: And how long any one AXI action may take once it is up.
 ACTION_TIMEOUT_SECONDS = 120.0
+PROCESS_EXIT_TIMEOUT_SECONDS = 5.0
+PROCESS_KILL_TIMEOUT_SECONDS = 3.0
+READER_EXIT_TIMEOUT_SECONDS = 5.0
 
 #: Writes per Tcl block.  A block is one round trip, so this trades the
 #: number of trips against how much is in flight when one is cancelled.
@@ -132,8 +135,8 @@ class VivadoAxiRegisterTransport:
         self._counter = 0
         self._closed = True
 
-    def start(self) -> None:
-        with self._io_lock:
+    def start(self, *, deadline: float | None = None) -> None:
+        with _deadline_lock(self._io_lock, deadline):
             if not self._closed:
                 return
             self._closed = False
@@ -170,7 +173,8 @@ class VivadoAxiRegisterTransport:
                 self._run_tcl(
                     self._init_tcl(),
                     action="transport_start",
-                    deadline=time.monotonic() + STARTUP_TIMEOUT_SECONDS,
+                    deadline=min(time.monotonic() + STARTUP_TIMEOUT_SECONDS,
+                                 float("inf") if deadline is None else deadline),
                 )
             except BaseException:
                 self._closed = True
@@ -275,13 +279,11 @@ class VivadoAxiRegisterTransport:
             pass
 
     def _effective_deadline(self, value: float | None) -> float:
-        deadline = (
-            time.monotonic() + ACTION_TIMEOUT_SECONDS
-            if value is None
-            else float(value)
-        )
+        local = time.monotonic() + ACTION_TIMEOUT_SECONDS
+        deadline = local if value is None else float(value)
         if not math.isfinite(deadline):
             raise ValueError("AXI transaction deadline must be finite")
+        deadline = min(local, deadline)
         if deadline <= time.monotonic():
             raise TimeoutError("AXI transaction deadline expired before issue")
         return deadline
@@ -480,15 +482,15 @@ class VivadoAxiRegisterTransport:
                 except OSError:
                     pass
             try:
-                process.wait(timeout=5 if graceful else 3)
+                process.wait(timeout=PROCESS_EXIT_TIMEOUT_SECONDS if graceful else PROCESS_KILL_TIMEOUT_SECONDS)
             except subprocess.TimeoutExpired:
                 try:
                     process.kill()
                 except OSError:
                     pass
-                process.wait(timeout=3)
+                process.wait(timeout=PROCESS_KILL_TIMEOUT_SECONDS)
         if reader is not None and reader is not threading.current_thread():
-            reader.join(timeout=5)
+            reader.join(timeout=READER_EXIT_TIMEOUT_SECONDS)
             if reader.is_alive():
                 raise RuntimeError("Vivado AXI reader did not stop")
         self._queue = queue.Queue()

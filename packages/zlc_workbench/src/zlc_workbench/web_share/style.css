@@ -39,6 +39,8 @@ input:focus, select:focus, textarea:focus { border-color: var(--focus); }
 #video, #popups img { position: absolute; display: block; pointer-events: none; }
 #video { object-fit: fill; }
 #popups { position: absolute; inset: 0; pointer-events: none; }
+.pending #video, .pending #popups { opacity: 0; }
+#screen.pending + #placeholder { position: absolute; inset: var(--window-pad); display: grid; place-content: center; }
 #placeholder { text-align: center; color: var(--muted); padding: var(--window-pad); }
 .direct-input { position: fixed; opacity: 0; pointer-events: none; padding: 0; border: 0; resize: none; font-size: 16px; }
 .immersive header, .immersive footer { display: none; }

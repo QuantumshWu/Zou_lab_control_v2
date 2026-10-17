@@ -57,12 +57,7 @@ DEFAULT_BIND_HOST = "0.0.0.0"
 #: Where a client looks by default: this machine, because it usually is.
 DEFAULT_HOST = "127.0.0.1"
 
-#: How long a client waits for the server to ANSWER.  A request can be
-#: slow for honest reasons -- the board is mid-shot and holding its lock,
-#: a session is warming up -- so this is generous.  It used to be written
-#: down three other places instead: the server prints 30 in the connect
-#: example it hands operators, the apparatus device passes 30, and the
-#: client class defaulted to 5 -- which is the one the pulse editor got.
+#: Ordinary network-silence allowance, separate from an announced device operation budget.
 DEFAULT_REQUEST_TIMEOUT = 30.0
 
 #: How long a client waits to REACH the server at all.  A different

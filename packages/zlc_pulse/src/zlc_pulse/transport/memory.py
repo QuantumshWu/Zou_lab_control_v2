@@ -18,7 +18,7 @@ from ..wire import (
     StreamerParams,
     build_fingerprint,
 )
-from .base import DEFAULT_OBSERVER_INTERVAL
+from .base import DEFAULT_OBSERVER_INTERVAL, _deadline_lock
 
 
 class MemoryRegisterTransport:
@@ -54,8 +54,8 @@ class MemoryRegisterTransport:
         self._last_command_reply = (0, 0)
         self._lock = threading.RLock()
 
-    def start(self) -> None:
-        with self._lock:
+    def start(self, *, deadline: float | None = None) -> None:
+        with _deadline_lock(self._lock, deadline):
             self.started = True
             self.closed = False
 

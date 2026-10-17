@@ -25,6 +25,15 @@ dependencies = [
     "libusb-package==1.0.30.0",
     "scipy==1.17.1",
     "tornado==6.5.8",
+    "winrt-runtime==3.2.1; sys_platform == 'win32'",
+    "winrt-Windows.Foundation==3.2.1; sys_platform == 'win32'",
+    "winrt-Windows.Foundation.Collections==3.2.1; sys_platform == 'win32'",
+    "winrt-Windows.Graphics==3.2.1; sys_platform == 'win32'",
+    "winrt-Windows.Graphics.Capture==3.2.1; sys_platform == 'win32'",
+    "winrt-Windows.Graphics.Capture.Interop==3.2.1; sys_platform == 'win32'",
+    "winrt-Windows.Graphics.DirectX==3.2.1; sys_platform == 'win32'",
+    "winrt-Windows.Graphics.DirectX.Direct3D11==3.2.1; sys_platform == 'win32'",
+    "winrt-Windows.Graphics.DirectX.Direct3D11.Interop==3.2.1; sys_platform == 'win32'",
 ]
 
 [project.optional-dependencies]
