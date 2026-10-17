@@ -143,13 +143,7 @@ class WindowCapture:
         self.hwnd, self.client_crop = hwnd, tuple(crop)
         geometry = self._geometry(hwnd)
         self.clear()
-        item_key = (identity, hwnd)
-        item = self.items.get(item_key)
-        if item is None or (item.size.width, item.size.height) not in geometry[2]:
-            item = self.items[item_key] = create_for_window(hwnd)
-        self.frame_size = (item.size.width, item.size.height)
-        self._place_crop(geometry)
-        self.pool = Direct3D11CaptureFramePool.create_free_threaded(self.wrapped, 87, 3, item.size)
+        self.frame_size = None
         serial = self.serial
 
         def arrived(pool, _args):
@@ -164,11 +158,27 @@ class WindowCapture:
                         self.latest.close()
                     self.latest = frame
                 except OSError as error:
+                    error.add_note(f"TryGetNextFrame: HWND=0x{hwnd:x}")
                     self.failure = error
                 self.condition.notify()
 
+        phase = "GraphicsCaptureItem.Size"
         try:
+            item_key = (identity, hwnd)
+            item = self.items.get(item_key)
+            if item is None or (item.size.width, item.size.height) not in geometry[2]:
+                phase = "CreateForWindow"
+                item = self.items[item_key] = create_for_window(hwnd)
+            phase = "GraphicsCaptureItem.Size"
+            size = item.size
+            self.frame_size = (size.width, size.height)
+            phase = "Native capture geometry"
+            self._place_crop(geometry)
+            phase = "FramePool.CreateFreeThreaded"
+            self.pool = Direct3D11CaptureFramePool.create_free_threaded(self.wrapped, 87, 3, size)
+            phase = "AddFrameArrived"
             self.token = self.pool.add_frame_arrived(arrived)
+            phase = "CreateCaptureSession"
             self.session = self.pool.create_capture_session(item)
             for name, value in (("is_cursor_capture_enabled", False), ("is_border_required", False),
                                 ("min_update_interval", timedelta(seconds=1 / (2 * self.fps)))):
@@ -177,8 +187,10 @@ class WindowCapture:
                 except (AttributeError, OSError) as error:
                     # PyWinRT reports an absent optional property as AttributeError.
                     logging.getLogger(__name__).warning("Windows capture option %s is unavailable: %s", name, error)
+            phase = "StartCapture"
             self.session.start_capture()
-        except BaseException:
+        except BaseException as error:
+            error.add_note(f"{phase}: HWND=0x{hwnd:x}, capture={self.frame_size}, client_crop={self.client_crop}, output={self.size}")
             self.clear()
             raise
 
@@ -298,6 +310,7 @@ class WindowCapture:
             return
         dxgi = texture = input_view = None
         mapped = False
+        phase = "Frame.ContentSize"
         try:
             content_size = frame.content_size
             if (content_size.width, content_size.height) != self.frame_size:
@@ -307,6 +320,7 @@ class WindowCapture:
                     if self.latest is not None:
                         self.latest.close()
                         self.latest = None
+                phase = "FramePool.Recreate"
                 self.pool.recreate(self.wrapped, 87, 3, content_size)
                 with self.condition:
                     if self.latest is not None:
@@ -319,7 +333,9 @@ class WindowCapture:
             if self.crop is None:
                 yield None
                 return
+            phase = "Frame.Surface / GetDXGISurface"
             dxgi = c.c_void_p(get_dxgi_surface_from_object(frame.surface))
+            phase = "D3D texture conversion / Map"
             texture = _query(dxgi, "6f15aaf2-d208-4e89-9ab4-489535d34f9c")
             desc = (c.c_uint * 11)()
             _call(texture, 10, None, (c.c_void_p, c.addressof(desc)))
@@ -383,6 +399,7 @@ class WindowCapture:
             shape, strides = ((rows, width), (stride, 1)) if gpu else ((height, width, 4), (stride, 4, 1))
             pixels = np.ndarray(shape, np.uint8, buffer=(c.c_ubyte * (stride * rows)).from_address(address),
                                 strides=strides)
+            phase = "Frame.SystemRelativeTime"
             pts = int(frame.system_relative_time.total_seconds() * 90000)
             # Map has completed the GPU copy; encoding needs only our staging texture.
             _release(input_view)
@@ -391,7 +408,11 @@ class WindowCapture:
             input_view = texture = dxgi = None
             frame.close()
             frame = None
+            phase = "Video frame consumer"
             yield pixels, pts, "nv12" if gpu else "bgra"
+        except BaseException as error:
+            error.add_note(f"{phase}: HWND=0x{self.hwnd:x}, capture={self.frame_size}, crop={self.crop}, output={self.size}")
+            raise
         finally:
             if mapped:
                 _call(self.context, 15, None, (c.c_void_p, self.staging), (c.c_uint, 0))

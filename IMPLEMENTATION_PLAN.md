@@ -10,6 +10,8 @@
 
 ## 1. 当前实施范围
 
+- 实验机文件框E_INVALIDARG（2026-10-17，未定位根因）：用户报告Device Manager Open后WinError -2147024809；随后终端只有两个optional属性警告，说明该轮CreateForWindow/FramePool/CreateSession已执行，但不能唯一证明失败在StartCapture。本机aaa2ddfe真实Open→native #32770→Cancel未复现，物理HWND归属及各WinRT建源调用均成功（media-ew9wslp0）。修复诊断丢失：服务端保留完整异常链/Windows版本/HWND，客户端接收原异常和WinRT API阶段、捕获/crop/output尺寸；不新增截图fallback或猜测OS分支。仅在真实文件框StartCapture边界注入同一WinError，已确认浏览器及终端完整显示定位信息，关闭无残留（media-j6wf0lck）。此证据证明诊断链，不代表实验机故障已解决；下一步需要实验机实际失败API/trace，不重复拿本机通过作结论。
+
 - Windows捕获可选属性（2026-10-17）：PyWinRT3.2.1在系统缺少属性时抛AttributeError，原optional设置只处理OSError，造成整个视频启动失败。现在只在光标/边框/刷新间隔的既有设置入口处理两类异常，核心捕获错误不吞、无新依赖或OS版本分支。正式Qt＋浏览器入口注入用户原文异常：未修版立即复现同一Window capture failed（switch-ehcmocv3）；修复版三项缺失均继续，真实2160×1224首帧呈现且可输入、关闭无残留线程（switch-7w0own7_）。这是精确故障注入，不冒充旧Windows实机验收；未重跑性能矩阵或新增持久测试。
 
 - Pulse remote超时与诊断（2026-10-17，worktree）：确认command socket没有idle timeout，∞observer的阻塞读不持设备状态锁，finite完成只释放lease，不关闭连接。原client30秒与JTAG单次120秒/启动180秒预算不匹配：缩放假AXI的0.6秒合法写入被0.3秒RPC主动断连，已复现这一类风险，但未证明实验机实际走JTAG或这是唯一断连根因。现同socket预告完整操作预算并透传绝对deadline；默认auto、显式finite硬上限、原UART/命令预算和Stop旁路保留，两个安装器不再暗中强制30秒。直接本地TCP＋假硬件验证合法慢LOAD保持连接、显式超时仍结束、pending Load/Fire可Stop、takeover与∞→Stop→1→∞；20轮切换同socket/owner零RPC错误。日志区分EOF/正常Close后EOF/socket errno/协议/handler故障，带最后请求阶段、耗时、成功Fire计数与owner，异常因果有界。未连接实验板、未改FPGA、未调大UART重试或承诺现场问题已全部复现。

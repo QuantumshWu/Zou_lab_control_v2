@@ -170,11 +170,14 @@ def start_server(flow, *, on_clients, host="0.0.0.0", port=80, fps=60):
                                 self.request = None
                         self.loop.call_soon_threadsafe(self._finish, future, packet, source)
                     except Exception as error:
-                        self.failure, failed = (target[3], str(error)), target
+                        logging.getLogger(__name__).exception("Window video failed: window=%s HWND=0x%x source=%s Windows=%s",
+                            target[0]["id"], target[0]["hwnd"], target[3], sys.getwindowsversion())
+                        self.failure, failed = (target[3], "\n".join((str(error), *getattr(error, "__notes__", ())))), target
                         capture.clear()
             except Exception as error:
+                logging.getLogger(__name__).exception("Window video worker failed")
                 source = self.target[3] if self.target is not None else None
-                self.failure = (source, str(error))
+                self.failure = (source, "\n".join((str(error), *getattr(error, "__notes__", ()))))
                 self.loop.call_soon_threadsafe(self.stop)
             finally:
                 self.capture = None
