@@ -871,7 +871,12 @@ class NodeHost:
             # this Start FAILED, with its Task run recorded as such, not a
             # host left "starting" beside an empty run directory.
             if self._dataset_outputs:
-                self._generation = self._data_plane.begin_generation(self)
+                self._generation = self._data_plane.begin_generation(
+                    self,
+                    source_name=(
+                        self._source_signal if self._input_delivery == "exact" else None
+                    ),
+                )
                 self._plane_state = True
             if self._task_run is not None:
                 self._task_run.mark_running()

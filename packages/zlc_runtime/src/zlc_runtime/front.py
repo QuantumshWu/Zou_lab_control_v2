@@ -164,8 +164,8 @@ def build_front(
                 adjacency.setdefault(name, set()).update(
                     candidate for candidate in siblings if candidate != name
                 )
-        if getattr(state, "kind") == "processor" and getattr(
-            state, "coherent"
+        if getattr(state, "coherent") and (
+            getattr(state, "kind") == "processor" or not getattr(state, "terminal")
         ):
             # A presentation-paced follower (coherent=False) keeps lineage
             # but never joins its source's same-shot component: it advances

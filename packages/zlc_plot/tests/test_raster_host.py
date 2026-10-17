@@ -874,8 +874,8 @@ def test_fit_switches_a_native_curve_to_source_scatter_without_a_pointer(kind) -
     finally:
         session.close()
 
-def test_partial_grouped_scan_keeps_lines_and_isolated_points_visible() -> None:
-    short = axis("short", values=np.linspace(0.0, 1.0, 8))
+def test_partial_grouped_scan_keeps_lines_and_isolated_points_visible(monkeypatch) -> None:
+    short = axis("short", values=(1.0, 1.001, 1.002, 1.4, 1.6, 1.8, 1.9, 2.0))
     long = axis("long", values=(10.0, 20.0, 30.0))
     point_domain = mapped_domain_from_columns(
         {
@@ -890,9 +890,10 @@ def test_partial_grouped_scan_keeps_lines_and_isolated_points_visible() -> None:
     )
     x = np.tile(np.asarray(short.coordinates), 3)
     values = np.stack((np.sin(x), np.sin(x) + 0.05))
+    values[:, 2] = values[:, 0]
     valid = np.zeros(values.shape, dtype=bool)
-    valid[:, :8] = True
-    valid[:, 8] = True
+    valid[:, (0, 2, 16)] = True
+    valid[:, 8:16] = True
     session = PlotSession(
         make_snapshot(schema, values, 0, validity=valid),
         CurvePlot(
@@ -902,14 +903,39 @@ def test_partial_grouped_scan_keeps_lines_and_isolated_points_visible() -> None:
     )
     try:
         renderer = session._renderer
-        assert "curve:prepared" not in renderer._artists
+        assert "curve:prepared" in renderer._artists
+        canvas = renderer.figure.canvas
+        agg = canvas.get_renderer()
+        axes = renderer.primary_axes
+        axes.set_xlim(1.0, 2.0)
+        from zlc_plot import _raster_kernels as kernels
+
+        marker_pixels = []
+        with monkeypatch.context() as patch:
+            patch.setattr(kernels, "raster_polylines", lambda *_args: None)
+            patch.setattr(renderer, "_raster_prepared_error_bars", lambda *_args: True)
+            for scale in ("linear", "log"):
+                axes.set_xscale(scale)
+                agg.clear()
+                assert renderer._raster_prepared_curve_command(canvas)
+                marker_pixels.append(np.array(agg.buffer_rgba(), copy=True))
+        renderer._materialize_prepared_curve()
         entries = renderer._series_lines[id(renderer.primary_axes)]
         assert any(line.get_visible() for line, _identity, _label in entries)
         isolated = next(
-            line for line, _identity, label in entries if "long=20" in label
+            line for line, _identity, label in entries if "long=10" in label
         )
         assert isolated.get_marker() == "_"
-        assert np.asarray(isolated.get_markevery()).size == 1
+        assert np.asarray(isolated.get_markevery()).size == 2
+        assert 0.0 < isolated.get_alpha() < 1.0
+        for scale, expected in zip(("linear", "log"), marker_pixels):
+            axes.set_xscale(scale)
+            axes.set_xlim(1.0, 2.0)
+            agg.clear()
+            for line, _identity, _label in entries:
+                line.set_linestyle("None")
+                line.draw(agg)
+            np.testing.assert_array_equal(np.asarray(agg.buffer_rgba()), expected)
     finally:
         session.close()
 

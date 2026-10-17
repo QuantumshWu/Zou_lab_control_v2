@@ -304,8 +304,8 @@ lane of its own.
 共享内存段、只写一次，主进程按租约读，QImage 不复制像素；静态 Dataset 结构沿 input token 在每个
 子进程里只传一次。`RenderProcessPool` 给每块 live Monitor 面板一个自己的子进程，一面板一子进程、
 绝不合租：同一解释器里的几块面板的 Python（artist 更新、chrome、front 的 pickle）一次只能跑一块。
-池提前备着 `DEFAULT_RENDER_SPARES`（4）个没被任何面板碰过的子进程，超过 `DEFAULT_RENDER_SETTLED_SPARES`
-（2）个子进程在画之后降到 2；面板关闭即退休它的子进程，不回收成备用。Edit、point review 与
+池提前备着 `DEFAULT_RENDER_SPARES`（6）个没被任何面板碰过的子进程，一块板挂载时每块面板取走一个、
+备用数逐个降到 `DEFAULT_RENDER_SETTLED_SPARES`（2）；面板关闭即退休它的子进程，不回收成备用。Edit、point review 与
 Figure export 走一个 `RenderProcess`。两者都以 `build_host(plot_input, spec, ...)` 建 host，
 `retain`/`release` 让几个窗口共享同一服务，最后一个 owner 才关闭它。
 
