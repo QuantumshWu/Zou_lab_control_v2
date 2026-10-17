@@ -670,15 +670,19 @@ class SharedWindows(QtCore.QObject):
             self._frames[identity].pop("capture", None)
         return record
 
-    def capture(self, identity: str, max_width: int | None = None, force: bool = False) -> dict[str, Any] | None:
+    def capture(self, identity: str, max_width: int | None = None, force: bool = False,
+                *, root_only: bool = False) -> dict[str, Any] | None:
         """Capture at native density, optionally capped by a physical-pixel width."""
         description = self.describe(identity)
+        if root_only:
+            description = {**description, "width": description["root_rect"][2],
+                           "height": description["root_rect"][3], "origin": [0, 0], "popups": ()}
         window = self._windows[identity]
         previous = self._frames[identity]
         scale = description["native_dpr"]
         if max_width is not None:
             scale = min(scale, max(1, int(max_width)) / description["width"])
-        unchanged = previous.get("capture") == (description["epoch"], scale)
+        unchanged = previous.get("capture") == (description["epoch"], scale, root_only)
         if not isinstance(window, int) and not force and unchanged and window not in self._dirty:
             return None
         width, height = math.ceil(description["width"] * scale), math.ceil(description["height"] * scale)
@@ -710,7 +714,7 @@ class SharedWindows(QtCore.QObject):
         self._dirty.discard(window)
         record = {key: description[key] for key in ("id", "epoch", "width", "height", "origin", "inputs")}
         record.update(sequence=previous.get("sequence", 0) + 1, pixel_width=width, pixel_height=height)
-        previous.update(sequence=record["sequence"], capture=(description["epoch"], scale))
+        previous.update(sequence=record["sequence"], capture=(description["epoch"], scale, root_only))
         record["rgba"] = frame.constBits().asstring(frame.sizeInBytes())
         return record
 

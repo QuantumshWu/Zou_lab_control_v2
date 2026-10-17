@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 from concurrent.futures import Future
+from contextlib import nullcontext
 from importlib.resources import files
 from io import BytesIO
 import json
@@ -77,6 +78,7 @@ def start_server(flow, *, on_clients, host="0.0.0.0", port=80, fps=60):
             self.loop = asyncio.get_running_loop()
             self.condition = Condition()
             self.target = self.request = self.capture = self.delivered = None
+            self.snapshot_request = None
             self.failure = None
             self.worker = None
             self.changed = asyncio.Event()
@@ -86,6 +88,9 @@ def start_server(flow, *, on_clients, host="0.0.0.0", port=80, fps=60):
                 self.target = None if description is None else (description, rect, size, source, available)
                 self.failure = None
                 self.condition.notify()
+                pending = self.snapshot_request
+            if pending is not None:
+                pending.cancel()
             if self.capture is not None:
                 self.capture.interrupt()
             self.changed.set()
@@ -108,6 +113,7 @@ def start_server(flow, *, on_clients, host="0.0.0.0", port=80, fps=60):
             codec_size = None
             first = False
             previous_pts = -1
+            native = True
             try:
                 capture = self.capture = WindowCapture(fps=fps)
                 while self.readyState == "live":
@@ -128,7 +134,7 @@ def start_server(flow, *, on_clients, host="0.0.0.0", port=80, fps=60):
                             root, dpr = description["root_rect"], description["native_dpr"]
                             crop = tuple(round((rect[i] - root[i]) * dpr) for i in (0, 1))
                             crop += tuple(round(value * dpr) for value in rect[2:])
-                            capture.select(description["id"], description["hwnd"], crop, available, size)
+                            native = capture.select(description["id"], description["hwnd"], crop, available, size)
                             if size != codec_size:
                                 codec = av.CodecContext.create("libx264", "w")
                                 codec.width, codec.height = size
@@ -145,7 +151,22 @@ def start_server(flow, *, on_clients, host="0.0.0.0", port=80, fps=60):
                                 codec_size = size
                         if future is None:
                             continue
-                        with capture.frame() as captured:
+                        if native:
+                            frame = capture.frame()
+                        else:
+                            pending = asyncio.run_coroutine_threadsafe(owner(self._snapshot_pixels, target), self.loop)
+                            with self.condition:
+                                if target is not self.target or self.readyState != "live":
+                                    pending.cancel()
+                                    continue
+                                self.snapshot_request = pending
+                            try:
+                                frame = nullcontext(pending.result())
+                            finally:
+                                with self.condition:
+                                    if self.snapshot_request is pending:
+                                        self.snapshot_request = None
+                        with frame as captured:
                             if captured is None or target is not self.target:
                                 continue
                             pixels, pts, pixel_format = captured
@@ -170,6 +191,8 @@ def start_server(flow, *, on_clients, host="0.0.0.0", port=80, fps=60):
                                 self.request = None
                         self.loop.call_soon_threadsafe(self._finish, future, packet, source)
                     except Exception as error:
+                        if target is not self.target or self.readyState != "live":
+                            continue
                         logging.getLogger(__name__).exception("Window video failed: window=%s HWND=0x%x source=%s Windows=%s",
                             target[0]["id"], target[0]["hwnd"], target[3], sys.getwindowsversion())
                         self.failure, failed = (target[3], "\n".join((str(error), *getattr(error, "__notes__", ())))), target
@@ -185,27 +208,49 @@ def start_server(flow, *, on_clients, host="0.0.0.0", port=80, fps=60):
                     capture.close()
                 codec = None
 
+        def _snapshot_pixels(self, target):
+            import numpy as np
+
+            if target is not self.target or self.readyState != "live":
+                return None
+            description, rect, size, _source, _available = target
+            if not any(item["id"] == description["id"] and item["visible"] for item in surface.catalog()["windows"]):
+                return None
+            root_only = sys.platform == "win32"
+            root = description["root_rect"]
+            scale = min(description["native_dpr"], size[0] / rect[2], size[1] / rect[3])
+            width = root[2] if root_only else description["width"]
+            snapshot = surface.capture(description["id"], math.ceil(width * scale), True, root_only=root_only)
+            if (target is not self.target or
+                    (root_only and (snapshot["width"], snapshot["height"]) != tuple(root[2:])) or
+                    (not root_only and snapshot["epoch"] != description["epoch"])):
+                return None
+            pixels = np.frombuffer(snapshot["rgba"], np.uint8).reshape(snapshot["pixel_height"], snapshot["pixel_width"], 4)
+            scale = snapshot["pixel_width"] / snapshot["width"]
+            origin = (-root[0], -root[1]) if root_only else description["origin"]
+            x, y = (round((rect[i] + origin[i] - snapshot["origin"][i]) * scale) for i in (0, 1))
+            width, height = (round(value * scale) for value in rect[2:])
+            return pixels[y:y + height, x:x + width], int(monotonic() * 90000), "rgba"
+
         async def recv(self):
             if sys.platform != "win32":
-                import numpy as np
                 from fractions import Fraction
-                while self.target is None and self.readyState == "live":
-                    self.changed.clear()
-                    await self.changed.wait()
-                if self.readyState != "live":
-                    raise MediaStreamError
-                description, rect, size, source, _available = self.target
-                await asyncio.sleep(1 / float(fps))
-                scale = min(description["native_dpr"], size[0] / rect[2], size[1] / rect[3])
-                snapshot = await owner(surface.capture, description["id"], math.ceil(description["width"] * scale), True)
-                pixels = np.frombuffer(snapshot["rgba"], np.uint8).reshape(snapshot["pixel_height"], snapshot["pixel_width"], 4)
-                scale = snapshot["pixel_width"] / snapshot["width"]
-                x, y = (round((rect[i] + description["origin"][i] - snapshot["origin"][i]) * scale) for i in (0, 1))
-                width, height = (round(value * scale) for value in rect[2:])
-                image = av.VideoFrame.from_ndarray(pixels[y:y + height, x:x + width], format="rgba").reformat(width=size[0], height=size[1])
-                image.pts, image.time_base = int(monotonic() * 90000), Fraction(1, 90000)
-                self.delivered = (source, image.pts)
-                return image
+                while self.readyState == "live":
+                    if self.target is None:
+                        self.changed.clear()
+                        await self.changed.wait()
+                        continue
+                    target = self.target
+                    await asyncio.sleep(1 / float(fps))
+                    captured = await owner(self._snapshot_pixels, target)
+                    if captured is None:
+                        continue
+                    pixels, pts, pixel_format = captured
+                    image = av.VideoFrame.from_ndarray(pixels, format=pixel_format).reformat(width=target[2][0], height=target[2][1])
+                    image.pts, image.time_base = pts, Fraction(1, 90000)
+                    self.delivered = (target[3], image.pts)
+                    return image
+                raise MediaStreamError
             if self.readyState != "live":
                 raise MediaStreamError
             future = self.loop.create_future()
@@ -222,6 +267,9 @@ def start_server(flow, *, on_clients, host="0.0.0.0", port=80, fps=60):
                 if self.request is not None and not self.request.done():
                     self.request.set_exception(MediaStreamError())
                 self.condition.notify()
+                pending = self.snapshot_request
+            if pending is not None:
+                pending.cancel()
             if self.capture is not None:
                 self.capture.interrupt()
             self.changed.set()

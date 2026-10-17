@@ -78,6 +78,11 @@ class WindowCapture:
         self.api.GetClientRect.argtypes = (wintypes.HWND, c.POINTER(wintypes.RECT))
         self.api.GetWindowRect.argtypes = (wintypes.HWND, c.POINTER(wintypes.RECT))
         self.api.ClientToScreen.argtypes = (wintypes.HWND, c.POINTER(wintypes.POINT))
+        self.api.IsWindowVisible.argtypes = (wintypes.HWND,)
+        self.api.IsIconic.argtypes = (wintypes.HWND,)
+        self.api.GetAncestor.argtypes = (wintypes.HWND, wintypes.UINT)
+        self.api.GetAncestor.restype = wintypes.HWND
+        self.api.GetWindowDisplayAffinity.argtypes = (wintypes.HWND, c.POINTER(wintypes.DWORD))
         self.dwm = c.WinDLL("dwmapi")
         self.dwm.DwmGetWindowAttribute.argtypes = (wintypes.HWND, wintypes.DWORD, c.c_void_p, wintypes.DWORD)
         create = c.WinDLL("d3d11").D3D11CreateDevice
@@ -168,7 +173,19 @@ class WindowCapture:
             item = self.items.get(item_key)
             if item is None or (item.size.width, item.size.height) not in geometry[2]:
                 phase = "CreateForWindow"
-                item = self.items[item_key] = create_for_window(hwnd)
+                try:
+                    item = self.items[item_key] = create_for_window(hwnd)
+                except OSError as error:
+                    affinity = wintypes.DWORD()
+                    code = getattr(error, "winerror", error.errno)
+                    if (code is not None and code & 0xffffffff == 0x80070057
+                            and self.api.IsWindowVisible(hwnd) and not self.api.IsIconic(hwnd)
+                            and self.api.GetAncestor(hwnd, 2) == hwnd
+                            and self.api.GetWindowDisplayAffinity(hwnd, c.byref(affinity)) and not affinity.value):
+                        logging.getLogger(__name__).warning(
+                            "CreateForWindow rejected HWND=0x%x; using the authorized window pixel capture: %s", hwnd, error)
+                        return False
+                    raise
             phase = "GraphicsCaptureItem.Size"
             size = item.size
             self.frame_size = (size.width, size.height)
@@ -189,6 +206,7 @@ class WindowCapture:
                     logging.getLogger(__name__).warning("Windows capture option %s is unavailable: %s", name, error)
             phase = "StartCapture"
             self.session.start_capture()
+            return True
         except BaseException as error:
             error.add_note(f"{phase}: HWND=0x{hwnd:x}, capture={self.frame_size}, client_crop={self.client_crop}, output={self.size}")
             self.clear()

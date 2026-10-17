@@ -10,7 +10,7 @@
 
 ## 1. 当前实施范围
 
-- 实验机文件框E_INVALIDARG（2026-10-17，未定位根因）：用户报告Device Manager Open后WinError -2147024809；随后终端只有两个optional属性警告，说明该轮CreateForWindow/FramePool/CreateSession已执行，但不能唯一证明失败在StartCapture。本机aaa2ddfe真实Open→native #32770→Cancel未复现，物理HWND归属及各WinRT建源调用均成功（media-ew9wslp0）。修复诊断丢失：服务端保留完整异常链/Windows版本/HWND，客户端接收原异常和WinRT API阶段、捕获/crop/output尺寸；不新增截图fallback或猜测OS分支。仅在真实文件框StartCapture边界注入同一WinError，已确认浏览器及终端完整显示定位信息，关闭无残留（media-j6wf0lck）。此证据证明诊断链，不代表实验机故障已解决；下一步需要实验机实际失败API/trace，不重复拿本机通过作结论。
+- 实验机文件框E_INVALIDARG（2026-10-17，已实现，运行验收未做）：用户完整堆栈确认Windows10 build19045的实际文件框在CreateForWindow被拒绝，capture=None，尚未进入帧池/编码；不能用前一窗口的optional警告推断本轮已过建源。现仅对该API的E_INVALIDARG且仍可见、非最小化、有效顶层且未排除捕获的窗口，由select返回能力不可用，当前track复用SharedWindows.capture的root-only像素；native文件框继续PrintWindow和原输入，不改样式或重建peer/codec，不永久记录失败HWND。非Windows与备用路径共用同一截图裁剪，popup不重复烘焙；切源/Stop取消在途未执行截图，过期结果丢弃，其它错误继续保留完整诊断。用户要求立即合并并停止测试，故本次只完成实现和语法检查，未执行准备好的CreateForWindow拒绝→真实Open/Load→返回GPU验收，不宣称实验机已通过或备用路径达到30/60fps。
 
 - Windows捕获可选属性（2026-10-17）：PyWinRT3.2.1在系统缺少属性时抛AttributeError，原optional设置只处理OSError，造成整个视频启动失败。现在只在光标/边框/刷新间隔的既有设置入口处理两类异常，核心捕获错误不吞、无新依赖或OS版本分支。正式Qt＋浏览器入口注入用户原文异常：未修版立即复现同一Window capture failed（switch-ehcmocv3）；修复版三项缺失均继续，真实2160×1224首帧呈现且可输入、关闭无残留线程（switch-7w0own7_）。这是精确故障注入，不冒充旧Windows实机验收；未重跑性能矩阵或新增持久测试。
 
