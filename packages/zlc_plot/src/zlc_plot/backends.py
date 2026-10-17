@@ -416,6 +416,7 @@ def _qt5_plot_widget_class() -> type[Any]:
             self._gesture_axes: AxisTransform | None = None
             self._candidate: SelectorState | ColorLimitCandidate | None = None
             self._pointer_button: int | None = None
+            self._wheel_pan: object | None = None
             #: Every pointer submission in order, and the one that latched
             #: the button.  An answer is only entitled to undo state that
             #: existed when it was computed.
@@ -1184,6 +1185,8 @@ def _qt5_plot_widget_class() -> type[Any]:
             if button is None:
                 super().mousePressEvent(event)
                 return
+            if self._wheel_pan is not None:
+                self._cancel_active_interaction()
             self._pointer_button = button
             if button in (1, 2):
                 self.grabMouse()
@@ -1212,6 +1215,9 @@ def _qt5_plot_widget_class() -> type[Any]:
             event.accept()
 
         def mouseMoveEvent(self, event: object) -> None:
+            if self._wheel_pan is not None:
+                event.accept()
+                return
             button = self._pointer_button
             if self._closed:
                 super().mouseMoveEvent(event)
@@ -1236,6 +1242,9 @@ def _qt5_plot_widget_class() -> type[Any]:
             super().leaveEvent(event)
 
         def mouseReleaseEvent(self, event: object) -> None:
+            if self._wheel_pan is not None:
+                event.accept()
+                return
             button = self._button_number(event.button())
             if self._closed or button is None:
                 super().mouseReleaseEvent(event)
@@ -1253,9 +1262,30 @@ def _qt5_plot_widget_class() -> type[Any]:
         def wheelEvent(self, event: object) -> None:
             if (
                 self._closed
-                or self._pointer_button is not None
                 or not self._interaction_gate.enabled
             ):
+                event.ignore()
+                return
+            phase = event.phase()
+            if phase != QtCore.Qt.NoScrollPhase:
+                if phase == QtCore.Qt.ScrollBegin:
+                    self._cancel_active_interaction()
+                    self._wheel_pan = QtCore.QPointF(event.position())
+                    self._pointer_button = 2
+                    self._submit_pointer("press", self._wheel_pan, button=2)
+                    self._latch_serial = self._pointer_serial
+                elif self._wheel_pan is not None:
+                    if phase == QtCore.Qt.ScrollEnd:
+                        self._submit_pointer("release", self._wheel_pan, button=2)
+                        self._wheel_pan = None
+                        self._pointer_button = None
+                        self._show_grabbed(False)
+                    else:
+                        self._wheel_pan += QtCore.QPointF(event.pixelDelta())
+                        self._submit_pointer("move", self._wheel_pan, button=2, held=True)
+                event.accept()
+                return
+            if self._pointer_button is not None:
                 event.ignore()
                 return
             delta = float(event.angleDelta().y())
@@ -1313,6 +1343,7 @@ def _qt5_plot_widget_class() -> type[Any]:
             self._gesture_axes = None
             self._candidate = None
             self._pointer_button = None
+            self._wheel_pan = None
             self.update()
 
         def _cancel_active_interaction(self, *, force: bool = False) -> None:

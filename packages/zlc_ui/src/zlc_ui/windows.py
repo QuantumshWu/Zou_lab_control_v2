@@ -79,10 +79,10 @@ class SharedWindows(QtCore.QObject):
         self.control_enabled = sys.platform == "win32" and app.platformName() == "windows"
         self._hooks: list[Any] = []
         self._native_windows: set[int] = set()
-        self._key_origins = deque(maxlen=512)
-        self._key_event: Any = None
-        self._key_kind: Any = None
-        self._key_origin: Any = False
+        self._input_origins = deque(maxlen=512)
+        self._input_event: Any = None
+        self._input_origin: Any = (False, None)
+        self._touch_press: Any = None
         if self.control_enabled:
             self._init_native_input()
         self._native_dialogs = app.testAttribute(QtCore.Qt.AA_DontUseNativeDialogs)
@@ -113,9 +113,9 @@ class SharedWindows(QtCore.QObject):
             function = getattr(self._win, name)
             function.restype, function.argtypes = restype, argtypes
         self._wide_input = ctypes.sizeof(pointer) == 8
-        # Windows mouse dispatch can retain only the low DWORD of dwExtraInfo.
+        # Windows can retain only the low DWORD; keep private tags below its pointer signatures.
         self._input_mask = 0xFFFF0000
-        self._input_tag = (secrets.randbits(16) or 1) << 16
+        self._input_tag = (secrets.randbelow(0xFF50) + 1) << 16
         root = next(window for value in self._roots() if (window := _handle_window(value)) is not None)
         self._dispatch_hwnd = int(root.winId())
         self._wake_message = self._win.RegisterWindowMessageW("ZLC SharedWindows owner turn")
@@ -154,13 +154,16 @@ class SharedWindows(QtCore.QObject):
         if not send(self._dispatch_hwnd, self._wake_message, 0, 0):
             raise ctypes.WinError(ctypes.get_last_error())
 
-    def _native_marker(self, *, cleanup: bool = False) -> int:
-        return self._input_tag | (1 if cleanup else ((self._control_epoch + 1) & 0x7FFF) << 1)
+    def _native_marker(self, *, cleanup: bool = False, touch_click: bool | None = None) -> int:
+        return (self._input_tag | (1 if cleanup else ((self._control_epoch + 1) & 0x1FFF) << 3)
+                | (0 if touch_click is None else 2 | (4 if touch_click else 0)))
 
-    def _send_native(self, records: list[tuple[int, tuple[int, ...]]], *, cleanup: bool = False) -> None:
-        marker = self._native_marker(cleanup=cleanup)
+    def _send_native(self, records: list[tuple[int, tuple[int, ...]]], *, cleanup: bool = False,
+                     touch_click: bool | None = None) -> None:
         packets = []
         for kind, values in records:
+            marker = self._native_marker(cleanup=cleanup,
+                touch_click=touch_click if kind == 0 and values[3] & 0x2 else None)
             fmt = ("<llIII4xQ" if self._wide_input else "<llIIII") if kind == 0 else (
                 "<HHII4xQ" if self._wide_input else "<HHIII")
             payload = struct.pack(fmt, *values, 0, marker)
@@ -207,8 +210,8 @@ class SharedWindows(QtCore.QObject):
                 extra_offset = 16 if keyboard else (24 if self._wide_input else 20)
                 extra = ctypes.c_size_t.from_address(data + extra_offset).value & 0xFFFFFFFF
                 own = extra & self._input_mask == self._input_tag
-                if own and extra != self._native_marker(cleanup=True):
-                    if self._controller is None or extra != self._native_marker():
+                if own and not extra & 1:
+                    if self._controller is None or (extra & ~6) != self._native_marker():
                         return 1
                     if keyboard:
                         self._allowed_native_target(self._win.GetForegroundWindow())
@@ -234,17 +237,21 @@ class SharedWindows(QtCore.QObject):
             if not self._closed:
                 self.owner_turn_requested.emit()
             return 0
-        if message in (0x100, 0x101, 0x104, 0x105):
+        if message in (0x100, 0x101, 0x104, 0x105, 0x201, 0x203):
             extra = self._win.GetMessageExtraInfo() & 0xFFFFFFFF
             origin = None
             if extra & self._input_mask == self._input_tag:
                 origin = ((self._controller, self._control_epoch)
-                          if extra in (self._native_marker(), self._native_marker(cleanup=True)) else (None, -1))
-            kind = QtCore.QEvent.KeyRelease if message in (0x101, 0x105) else QtCore.QEvent.KeyPress
-            self._key_origins.append((hwnd, int(wparam), kind, origin))
+                          if (extra & ~6) in (self._native_marker(), self._native_marker(cleanup=True)) else (None, -1))
+            if message in (0x201, 0x203):
+                click = bool(extra & 4) if origin is not None and extra & 2 else None
+                self._input_origins.append((hwnd, int(QtCore.Qt.LeftButton), QtCore.QEvent.MouseButtonPress, origin, click))
+            else:
+                kind = QtCore.QEvent.KeyRelease if message in (0x101, 0x105) else QtCore.QEvent.KeyPress
+                self._input_origins.append((hwnd, int(wparam), kind, origin, None))
         elif message == 0x82:  # WM_NCDESTROY
             self._native_windows.discard(hwnd)
-            self._key_origins = deque((item for item in self._key_origins if item[0] != hwnd), maxlen=512)
+            self._input_origins = deque((item for item in self._input_origins if item[0] != hwnd), maxlen=512)
         return self._controls.DefSubclassProc(hwnd, message, wparam, lparam)
 
     def _check_thread(self) -> None:
@@ -320,7 +327,7 @@ class SharedWindows(QtCore.QObject):
                 self._controls.RemoveWindowSubclass(hwnd, self._window_proc, id(self))
                 self._native_windows.discard(hwnd)
             if removed:
-                self._key_origins = deque((item for item in self._key_origins if item[0] in handles), maxlen=512)
+                self._input_origins = deque((item for item in self._input_origins if item[0] in handles), maxlen=512)
         self._frames = {key: value for key, value in self._frames.items() if key in self._windows}
         self._dirty.intersection_update(owners)
 
@@ -485,6 +492,7 @@ class SharedWindows(QtCore.QObject):
         return {"accepted": True}
 
     def _release_inputs(self, *, cancel: bool = True) -> None:
+        self._touch_press = None
         if not self.control_enabled:
             return
         target = self._pressed
@@ -620,10 +628,29 @@ class SharedWindows(QtCore.QObject):
             self._release_inputs(cancel=True)
             return {"accepted": False, "reason": "pointer left the experiment window; gesture cancelled"}
         target = surface.childAt(local) or surface
+        if kind == "wheel" and message.get("touch") and self._pressed is not None and not self._buttons:
+            if sip.isdeleted(self._pressed):
+                self._release_inputs()
+                return {"accepted": False, "reason": "the scrolling control was closed"}
+            target = self._pressed
         if not target.isEnabled() and kind not in ("move", "up"):
             return {"accepted": False, "reason": "the control is disabled"}
         self._require_remote_input(target)
         if kind in ("move", "down", "up"):
+            touch_click = None
+            touch = message.get("pointerType") == "touch"
+            hints = self._app.styleHints()
+            last = self._touch_press
+            if last is not None and (not touch or max(abs(position.x() - last[1].x()),
+                    abs(position.y() - last[1].y())) > hints.touchDoubleTapDistance()):
+                self._touch_press = last = None
+            if kind == "down" and touch and message.get("button", 0) == 0:
+                timestamp = float(message["timestamp"])
+                if not math.isfinite(timestamp):
+                    raise ValueError("touch timestamp must be finite")
+                touch_click = bool(last is not None and last[0]() is target
+                                   and 0 < timestamp - last[2] < hints.mouseDoubleClickInterval())
+                self._touch_press = None if touch_click else (weakref.ref(target), position, timestamp)
             rect, hwnd = wintypes.RECT(), int(surface.winId())
             self._win.GetClientRect(hwnd, ctypes.byref(rect))
             physical = wintypes.POINT(round(local.x() * rect.right / surface.width()),
@@ -647,13 +674,15 @@ class SharedWindows(QtCore.QObject):
                     records.append((0, (0, 0, 0, up)))
                     if not self._buttons:
                         self._pressed = self._press_source = None
-            self._send_native(records)
+            self._send_native(records, touch_click=touch_click)
         elif kind in ("wheel", "pinch"):
             delta = QtCore.QPoint(round(-float(message.get("delta_x", 0))), round(-float(message.get("delta_y", 0))))
             pixel_delta = delta if message.get("deltaMode", 0) == 0 else QtCore.QPoint()
             scale = float(message.get("scale", 1.0))
             if not math.isfinite(scale) or scale <= 0:
                 raise ValueError("pinch scale must be positive and finite")
+            phase = {"begin": QtCore.Qt.ScrollBegin, "update": QtCore.Qt.ScrollUpdate,
+                     "end": QtCore.Qt.ScrollEnd}.get(message.get("phase"), QtCore.Qt.NoScrollPhase)
             while target is not None:
                 local = QtCore.QPointF(target.mapFromGlobal(position))
                 if kind == "pinch":
@@ -662,16 +691,37 @@ class SharedWindows(QtCore.QObject):
                 else:
                     event = QtGui.QWheelEvent(local, QtCore.QPointF(position),
                                              pixel_delta, delta, QtCore.Qt.MouseButtons(self._buttons), modifiers,
-                                             QtCore.Qt.ScrollUpdate if not pixel_delta.isNull() else QtCore.Qt.NoScrollPhase, False)
+                                             phase, False)
                 event._zlc_shared_control = (self._controller, self._control_epoch)
                 event.ignore()
                 self._app.sendEvent(target, event)
                 if event.isAccepted() or target.isWindow():
                     break
                 target = target.parentWidget()
+            if kind == "wheel" and message.get("touch"):
+                if phase == QtCore.Qt.ScrollEnd:
+                    self._pressed = self._press_source = None
+                elif event.isAccepted() and self._pressed is None:
+                    self._pressed = target
+                    self._press_source = (identity, message["epoch"], bounds.topLeft())
         else:
             raise ValueError("unsupported input event")
         return {"accepted": True}
+
+    def _input_metadata(self, watched: Any, event: Any, code: int, kind: Any) -> tuple[Any, Any]:
+        # Qt can reuse the same Python event wrapper for a later native input.
+        identity = (event, event.type(), event.timestamp())
+        if identity != self._input_event:
+            lookup = (int(watched.window().winId()), code, kind)
+            metadata = (False, None)
+            for index, item in enumerate(self._input_origins):
+                if item[:3] == lookup:
+                    metadata = item[3:]
+                    if event.type() != QtCore.QEvent.ShortcutOverride:
+                        del self._input_origins[index]
+                    break
+            self._input_event, self._input_origin = identity, metadata
+        return self._input_origin
 
     def eventFilter(self, watched: Any, event: Any) -> bool:
         control = getattr(event, "_zlc_shared_control", None)
@@ -683,19 +733,9 @@ class SharedWindows(QtCore.QObject):
         if self.control_enabled and event.spontaneous() and kind in (
             QtCore.QEvent.KeyPress, QtCore.QEvent.KeyRelease, QtCore.QEvent.ShortcutOverride,
         ):
-            # Qt drops native extra-info and retimestamps keys; retain only bounded, in-flight provenance.
-            if event is not self._key_event or kind != self._key_kind:
-                lookup = (int(watched.window().winId()), int(event.nativeVirtualKey()),
-                          QtCore.QEvent.KeyPress if kind == QtCore.QEvent.ShortcutOverride else kind)
-                origin = False
-                for index, item in enumerate(self._key_origins):
-                    if item[:3] == lookup:
-                        origin = item[3]
-                        if kind != QtCore.QEvent.ShortcutOverride:
-                            del self._key_origins[index]
-                        break
-                self._key_event, self._key_kind, self._key_origin = event, kind, origin
-            origin = self._key_origin
+            # Qt drops native extra-info and retimestamps input; provenance crosses that boundary once.
+            origin, _click = self._input_metadata(watched, event, int(event.nativeVirtualKey()),
+                QtCore.QEvent.KeyPress if kind == QtCore.QEvent.ShortcutOverride else kind)
             if origin is not None and origin is not False and (
                     origin[0] is None or origin != (self._controller, self._control_epoch)):
                 event.accept()
@@ -712,9 +752,22 @@ class SharedWindows(QtCore.QObject):
             QtCore.QEvent.MouseButtonPress, QtCore.QEvent.MouseButtonRelease, QtCore.QEvent.MouseButtonDblClick,
             QtCore.QEvent.MouseMove, QtCore.QEvent.ContextMenu,
         ):
+            if kind in (QtCore.QEvent.MouseButtonPress, QtCore.QEvent.MouseButtonDblClick):
+                origin, touch_click = self._input_metadata(watched, event, int(event.button()), QtCore.QEvent.MouseButtonPress)
+                if origin is not None and origin is not False and (
+                        origin[0] is None or origin != (self._controller, self._control_epoch)):
+                    return True
+                if touch_click is not None:
+                    expected = QtCore.QEvent.MouseButtonDblClick if touch_click else QtCore.QEvent.MouseButtonPress
+                    if kind != expected:
+                        replacement = QtGui.QMouseEvent(expected, event.localPos(), event.windowPos(), event.screenPos(),
+                            event.button(), event.buttons(), event.modifiers(), QtCore.Qt.MouseEventSynthesizedByApplication)
+                        replacement._zlc_shared_control = origin
+                        self._app.sendEvent(watched, replacement)
+                        return True
             extra = self._win.GetMessageExtraInfo() & 0xFFFFFFFF
-            if extra & self._input_mask == self._input_tag and extra != self._native_marker(cleanup=True):
-                if self._controller is None or extra != self._native_marker():
+            if extra & self._input_mask == self._input_tag and not extra & 1:
+                if self._controller is None or (extra & ~6) != self._native_marker():
                     return True
             if self._controller is not None:
                 try:
@@ -746,8 +799,8 @@ class SharedWindows(QtCore.QObject):
                 self._controls.RemoveWindowSubclass(hwnd, self._window_proc, id(self))
             self._native_windows.clear()
             QtCore.QTimer.singleShot(0, lambda: setattr(self, "_window_proc", None))
-        self._key_origins.clear()
-        self._key_event = None
+        self._input_origins.clear()
+        self._input_event = None
         for handle, _handler in self._hooks:
             self._win.UnhookWindowsHookEx(handle)
         # A native callback may be executing this close; retain its ctypes trampoline until it returns.

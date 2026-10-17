@@ -37,13 +37,15 @@ function flushMove() {
       const separation = Math.abs(current.distance - gesture.start.distance) / 2;
       if (Math.max(translation, separation) < 6) return;
       gesture.mode = separation >= translation ? "pinch" : "wheel";
+      if (gesture.mode === "wheel") input("wheel", {...point(gesture.event, gesture.start),
+        buttons: 0, touch: true, phase: "begin", deltaMode: 0, deltaX: 0, deltaY: 0});
     }
     const location = point(gesture.event, current);
     if (gesture.mode === "pinch") {
       if (current.distance > 0 && gesture.last.distance > 0) input("pinch", {...location, buttons: 0, scale: current.distance / gesture.last.distance});
     } else {
       const previous = point(gesture.event, gesture.last);
-      input("wheel", {...location, buttons: 0, touch: true, deltaMode: 0, deltaX: previous.x - location.x, deltaY: previous.y - location.y});
+      input("wheel", {...location, buttons: 0, touch: true, phase: "update", deltaMode: 0, deltaX: previous.x - location.x, deltaY: previous.y - location.y});
     }
     gesture.last = current;
   }
@@ -253,7 +255,8 @@ function syncInput() {
 }
 function point(e, location = e) {
   const bounds = canvas.getBoundingClientRect();
-  return {x: (location.clientX - bounds.left) * frame.width / bounds.width, y: (location.clientY - bounds.top) * frame.height / bounds.height, button: e.button, buttons: e.buttons, modifiers: modifiers(e)};
+  return {x: (location.clientX - bounds.left) * frame.width / bounds.width, y: (location.clientY - bounds.top) * frame.height / bounds.height,
+    button: e.button, buttons: e.buttons, pointerType: e.pointerType || "mouse", timestamp: e.timeStamp, modifiers: modifiers(e)};
 }
 function touchPair() {
   if (touches.size < 2) return null;
@@ -305,7 +308,10 @@ canvas.onpointermove = e => {
 };
 canvas.onpointerup = e => {
   if (touches.has(e.pointerId) && gesture) {
-    e.preventDefault(); flushMove(); gesture.ended = true;
+    e.preventDefault(); flushMove();
+    if (!gesture.ended && gesture.mode === "wheel") input("wheel", {...point(gesture.event, gesture.last),
+      buttons: 0, touch: true, phase: "end", deltaMode: 0, deltaX: 0, deltaY: 0});
+    gesture.ended = true;
     touches.delete(e.pointerId);
     if (!touches.size) gesture = null;
     if (canvas.hasPointerCapture(e.pointerId)) canvas.releasePointerCapture(e.pointerId);
