@@ -89,8 +89,16 @@ def start_server(flow, *, on_clients, host="0.0.0.0", port=80, fps=60):
                 future.set_result(function(*arguments))
             except BaseException as error:
                 future.set_exception(error)
+            if surface.control_enabled and not closed.is_set():
+                if not inbox.empty():
+                    wake()
+                return
 
-    wake = attach_qt_owner_turn(drain)
+    if surface.control_enabled:
+        surface.owner_turn_requested.connect(drain)
+        wake = surface.wake_owner
+    else:
+        wake = attach_qt_owner_turn(drain)
 
     def submit(function, *arguments):
         if closed.is_set():
@@ -203,7 +211,7 @@ def start_server(flow, *, on_clients, host="0.0.0.0", port=80, fps=60):
                         raise ValueError("unknown experiment window")
                     if self.selected != selected:
                         if catalog["controller"] == self.identity:
-                            await owner(surface.input, self.identity, {"type": "release"})
+                            await owner(surface.take_control, self.identity, selected)
                     self.selected, self.frame, self.sent_sequence = selected, None, None
                     frame_ready.set()
                 elif kind == "ack":
@@ -213,8 +221,8 @@ def start_server(flow, *, on_clients, host="0.0.0.0", port=80, fps=60):
                         frame_ready.set()
                 elif kind in ("control", "show", "input"):
                     if kind == "control":
-                        operation = surface.take_control if message.get("take") is True else surface.release_control
-                        result = await owner(operation, self.identity)
+                        result = (await owner(surface.take_control, self.identity, self.selected)
+                                  if message.get("take") is True else await owner(surface.release_control, self.identity))
                     elif kind == "show":
                         result = await owner(surface.show, self.identity, message.get("window"))
                     else:
@@ -254,7 +262,7 @@ def start_server(flow, *, on_clients, host="0.0.0.0", port=80, fps=60):
                 return
             try:
                 await client.write_message(dict(type="hello", client=identity, controller=None,
-                                                control_enabled=True))
+                                                control_enabled=surface.control_enabled))
             except tornado.websocket.WebSocketClosedError:
                 clients.discard(client)
                 notify_clients()
@@ -305,7 +313,7 @@ def start_server(flow, *, on_clients, host="0.0.0.0", port=80, fps=60):
                         capture = prefetched
                         prefetched = None
                         catalog, frames = await capture
-                    state = dict(type="state", control_enabled=True, **catalog)
+                    state = dict(type="state", control_enabled=surface.control_enabled, **catalog)
                     visible = {item["id"] for item in catalog["windows"] if item["visible"]}
                     available = {item["id"] for item in catalog["windows"]}
                     for key in tuple(latest):
@@ -390,6 +398,15 @@ def start_server(flow, *, on_clients, host="0.0.0.0", port=80, fps=60):
             loop.close(all_fds=True)
 
     thread = Thread(target=serve, name="zlc-share-http", daemon=True)
+
+    async def input_failed(identity, message):
+        for client in tuple(clients):
+            if client.identity == identity and client.ws_connection is not None:
+                await client.write_message(dict(type="error", message=message))
+        frame_ready.set()
+
+    surface.input_failed.connect(lambda identity, message:
+        network["loop"].add_callback(input_failed, identity, message) if "loop" in network else None)
 
     def close():
         if closed.is_set():
