@@ -44,6 +44,7 @@ notebook = [
     "jupyterlab==4.6.2",
     "nbclient==0.10.4",
     "nbformat==5.10.4",
+    "notebook==7.6.1",
 ]
 dev = [
     "anywidget==0.11.0",
@@ -53,6 +54,7 @@ dev = [
     "jupyterlab==4.6.2",
     "nbclient==0.10.4",
     "nbformat==5.10.4",
+    "notebook==7.6.1",
     "psutil==7.2.2",
     "pytest==9.0.3",
 ]
