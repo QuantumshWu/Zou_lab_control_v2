@@ -6,7 +6,7 @@ from PyQt5 import QtCore, QtWidgets
 
 from zlc_ui.fluent import (
     ElidedLabel, FluentButton, FluentComboBox,
-    FluentFrame, FluentGroupBox, FluentLabel, FluentLineEdit, FluentScrollArea,
+    FluentFrame, FluentGroupBox, FluentLabel, FluentLineEdit, FluentPageBody, FluentScrollArea,
     fill_editable_combo, read_editable_combo, retire_widget,
     set_status_ink, setting_label_width, signals_blocked,
 )
@@ -49,7 +49,7 @@ class PulseComponentView(QtWidgets.QWidget):
         self._pinned.setSpacing(section_gap())
         outer.addLayout(self._pinned)
         scroll = FluentScrollArea()
-        page_body = QtWidgets.QWidget()
+        page_body = FluentPageBody()
         self._page = QtWidgets.QVBoxLayout(page_body)
         self._page.setSpacing(section_gap())
         scroll.set_width_bounded_widget(page_body, inset=page, top=False)

@@ -5,6 +5,8 @@
 # prerequisites in the hardware runbooks: pip carries PyVISA and its fallback
 # backend, but a USB-TMC instrument still needs its driver bound by NI-VISA
 # or the vendor's own installer, and no PyPI package supplies that.
+aioice==0.10.2
+aiortc==1.14.0
 anyio==4.14.2
 annotated-types==0.8.0
 anywidget==0.11.0
@@ -14,6 +16,7 @@ arrow==1.4.0
 asttokens==3.0.2
 async-lru==2.3.0
 attrs==26.1.0
+av==16.1.0
 babel==2.18.0
 beautifulsoup4==4.15.0
 bleach==6.4.0
@@ -27,16 +30,19 @@ cycler==0.12.1
 debugpy==1.8.21
 decorator==5.3.1
 defusedxml==0.7.1
+dnspython==2.9.0
 executing==2.2.1
 fastjsonschema==2.22.2
 fonttools==4.63.0
 fqdn==1.5.1
+google-crc32c==1.9.0
 h11==0.16.0
 httpcore==1.0.9
 httpcore2==2.13.1
 httpx==0.28.1
 httpx2==2.13.1
 idna==3.19
+ifaddr==0.2.0
 iniconfig==2.3.0
 ipykernel==7.2.0
 ipython==9.10.0
@@ -87,7 +93,10 @@ psutil==7.2.2
 psygnal==0.15.1
 pure-eval==0.2.3
 pycparser==3.0
+pyee==13.0.1
 Pygments==2.21.0
+pylibsrtp==1.0.0
+pyopenssl==25.3.0
 pyparsing==3.3.2
 PyQt5==5.15.11
 PyQt5-Frameless-Window==0.8.0

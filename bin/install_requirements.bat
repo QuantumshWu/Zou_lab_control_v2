@@ -34,18 +34,25 @@ echo Extras:      %ZLC_INSTALL_EXTRAS%
 if defined ZLC_INSTALL_LOG echo Log:         %ZLC_INSTALL_LOG%
 echo ============================================================
 if /I "%ZLC_INSTALL_EXTRAS%"=="slm-gpu" goto zlc_gpu_install
-echo [1/3] Installing product dependencies...
+echo [1/4] Installing product dependencies...
 set "ZLC_INSTALL_COMMAND=%ZLC_PY_CMD% -m pip install --constraint "%ZLC_HOME%\constraints.txt" --editable "%ZLC_HOME%[%ZLC_INSTALL_EXTRAS%]""
 call :zlc_run_step
 set "ZLC_STATUS=%ERRORLEVEL%"
 if not "%ZLC_STATUS%"=="0" goto zlc_failed
-echo [2/3] Checking dependency consistency...
+echo [2/4] Checking dependency consistency...
 set "ZLC_INSTALL_COMMAND=%ZLC_PY_CMD% -m pip check"
 call :zlc_run_step
 set "ZLC_STATUS=%ERRORLEVEL%"
 if not "%ZLC_STATUS%"=="0" goto zlc_failed
 pushd "%TEMP%"
-echo [3/3] Checking the installed product...
+echo [3/4] Installing the browser-sharing media runtime...
+set "ZLC_INSTALL_COMMAND=%ZLC_PY_CMD% -c "from zlc_workbench.apps.share import install_media_runtime; install_media_runtime()""
+call :zlc_run_step
+set "ZLC_STATUS=%ERRORLEVEL%"
+popd
+if not "%ZLC_STATUS%"=="0" goto zlc_failed
+pushd "%TEMP%"
+echo [4/4] Checking the installed product...
 set "ZLC_INSTALL_COMMAND=%ZLC_PY_CMD% -m zou_lab_control check"
 call :zlc_run_step
 set "ZLC_STATUS=%ERRORLEVEL%"

@@ -35,7 +35,10 @@ input:focus, select:focus, textarea:focus { border-color: var(--focus); }
 .segmented button { border-radius: 0; }
 #ownership { color: var(--muted); }
 #viewport { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: none; padding: var(--window-pad); position: relative; }
-#screen { display: block; margin: auto; background: var(--surface); touch-action: none; }
+#screen { display: block; position: relative; margin: auto; background: var(--surface); touch-action: none; overflow: hidden; }
+#video, #popups img { position: absolute; display: block; pointer-events: none; }
+#video { object-fit: fill; }
+#popups { position: absolute; inset: 0; pointer-events: none; }
 #placeholder { text-align: center; color: var(--muted); padding: var(--window-pad); }
 .direct-input { position: fixed; opacity: 0; pointer-events: none; padding: 0; border: 0; resize: none; font-size: 16px; }
 .immersive header, .immersive footer { display: none; }

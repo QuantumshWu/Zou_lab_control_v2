@@ -24,7 +24,10 @@
     <p id="error" role="alert" hidden></p>
   </header>
   <main id="viewport" aria-label="Experiment window view">
-    <canvas id="screen" tabindex="0" aria-label="Shared experiment window. Take control to interact." hidden></canvas>
+    <div id="screen" tabindex="0" aria-label="Shared experiment window. Take control to interact." hidden>
+      <video id="video" autoplay muted playsinline disablepictureinpicture disableremoteplayback></video>
+      <div id="popups"></div>
+    </div>
     <div id="placeholder"><p id="placeholder-text">Only the experiment application is shared, not the desktop. Connecting does not start or stop an experiment.</p><button id="show-window" hidden>Show window</button></div>
   </main>
   <footer>

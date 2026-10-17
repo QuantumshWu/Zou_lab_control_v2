@@ -18,6 +18,7 @@ from zlc_ui.fluent import (
     FluentButton,
     FluentComboBox,
     FluentLabel,
+    FluentPageBody,
     FluentReadoutEdit,
     FluentScrollArea,
     FluentSectionLabel,
@@ -103,8 +104,7 @@ class LogicEditorView(QtWidgets.QWidget):
         #: Whether the page has been shown yet: a newly opened page starts
         #: at its first row (:meth:`showEvent`).
         self._opened = False
-        body = QtWidgets.QWidget()
-        body.setStyleSheet("background: transparent;")
+        body = FluentPageBody()
         # ONE RHYTHM.  Selectors, both forms, a contribution's rows and the
         # results are one run of rows, a form gap apart whichever widget
         # holds them; a section gap sits after the header, before a

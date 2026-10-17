@@ -17,6 +17,7 @@ from zlc_ui.fluent import (
     FluentComboBox,
     FluentFrame,
     FluentLabel,
+    FluentPageBody,
     FluentScrollArea,
     FluentStatusDot,
     FluentSwitch,
@@ -218,8 +219,7 @@ class TaskConsoleView(QtWidgets.QWidget):
         logic_outer = QtWidgets.QVBoxLayout(logic_page)
         logic_outer.setContentsMargins(0, 0, 0, 0)
         self.logic_scroll = FluentScrollArea()
-        self.logic_body = QtWidgets.QWidget()
-        self.logic_body.setStyleSheet("background: transparent;")
+        self.logic_body = FluentPageBody()
         self.logic_layout = QtWidgets.QVBoxLayout(self.logic_body)
         # Cards stack a form gap apart, like rows.
         self.logic_layout.setSpacing(row_gap())

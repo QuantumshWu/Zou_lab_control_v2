@@ -20,6 +20,7 @@ from zlc_ui.fluent import (
     FluentFrame,
     FluentGroupBox,
     FluentLineEdit,
+    FluentPageBody,
     FluentReadoutEdit,
     FluentScrollArea,
     FluentSettingRow,
@@ -908,7 +909,7 @@ class DeviceManagerView(QtWidgets.QWidget):
         columns.setSpacing(max(0, section_gap() - gutter))
 
         self.left_scroll = FluentScrollArea()
-        self.left_body = QtWidgets.QWidget()
+        self.left_body = FluentPageBody()
         self.domain_column = QtWidgets.QVBoxLayout(self.left_body)
         self.domain_column.setContentsMargins(0, 0, 0, 0)
         self.domain_column.setSpacing(row_gap())
@@ -924,7 +925,7 @@ class DeviceManagerView(QtWidgets.QWidget):
         columns.addWidget(self.left_scroll, 3)
 
         self.right_scroll = FluentScrollArea()
-        self.right_body = QtWidgets.QWidget()
+        self.right_body = FluentPageBody()
         right = QtWidgets.QVBoxLayout(self.right_body)
         right.setContentsMargins(0, 0, 0, 0)
         right.setSpacing(row_gap())

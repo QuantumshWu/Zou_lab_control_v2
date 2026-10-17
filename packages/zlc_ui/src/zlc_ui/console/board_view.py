@@ -15,7 +15,7 @@ from zlc_ui.board import (
     pack,
     slot_under,
 )
-from zlc_ui.fluent import ACCENT_TINT, RADIUS, SELECTION_EDGE, card_pad, retire_widget, scaled_px
+from zlc_ui.fluent import ACCENT_TINT, RADIUS, SELECTION_EDGE, FluentPageBody, card_pad, retire_widget, scaled_px
 from zlc_ui.fluent.fluent import frame_pen, frame_stroke_rect
 
 from .panel_card_view import PanelCardView
@@ -31,7 +31,7 @@ class _DragFrame(NamedTuple):
     board_w: int
 
 
-class ConsoleBoardView(QtWidgets.QWidget):
+class ConsoleBoardView(FluentPageBody):
     """Cards carried by their grip and put down where they are seen.
 
     The placement rules -- a card let go onto another swaps with it, on
@@ -59,7 +59,6 @@ class ConsoleBoardView(QtWidgets.QWidget):
     def __init__(self, parent=None, *, metrics: BoardMetrics | None = None) -> None:
         super().__init__(parent)
         self.setMinimumSize(0, 0)
-        self.setStyleSheet("background: transparent;")
         # One card pad between cards and from the board's edges.  The host
         # mounts the board that pad short of its page's content edge, so the
         # first card stands on that edge, under the first tab's underline.
@@ -201,7 +200,7 @@ class ConsoleBoardView(QtWidgets.QWidget):
         out of the way, so nothing lies on top of it but the card itself.
         """
 
-        del event
+        super().paintEvent(event)
         rect = self._drop_rect
         if rect is None:
             return

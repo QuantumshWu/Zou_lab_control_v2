@@ -14,6 +14,7 @@ from zlc_ui.fluent import (
     FluentFrame,
     FluentLabel,
     FluentLineEdit,
+    FluentPageBody,
     FluentScrollArea,
     FluentStatusStrip,
     scaled_px,
@@ -123,8 +124,7 @@ class PointReviewView(FluentFrame):
             QtWidgets.QSizePolicy.Expanding,
             QtWidgets.QSizePolicy.Ignored,
         )
-        point_body = QtWidgets.QWidget()
-        point_body.setStyleSheet("background: transparent;")
+        point_body = FluentPageBody()
         point_layout = QtWidgets.QVBoxLayout(point_body)
         point_layout.setContentsMargins(0, 0, 0, 0)
         point_layout.setSpacing(0)

@@ -26,6 +26,7 @@ from zlc_ui.fluent import (
     FluentGroupBox,
     FluentLabel,
     FluentOverlayFrame,
+    FluentPageBody,
     FluentScrollArea,
     FluentSectionLabel,
     FluentSettingsPopupAnchor,
@@ -1442,8 +1443,7 @@ class PanelCardView(FluentGroupBox):
             close_button.clicked.connect(self.retire_settings_popup)
             header_layout.addWidget(close_button, 0)
             layout.addWidget(header)
-            body = QtWidgets.QWidget()
-            body.setStyleSheet("background: transparent;")
+            body = FluentPageBody()
             body_layout = QtWidgets.QVBoxLayout(body)
             body_layout.setContentsMargins(0, 0, pad, 0)
             # The sections of the Edit page, each under its title, a section

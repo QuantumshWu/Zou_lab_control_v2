@@ -8,7 +8,7 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 
 from zlc_ui.fluent import (
     FluentButton, FluentComboBox, set_status_ink, ElidedLabel, FluentGroupBox,
-    FluentLabel, FluentReadoutEdit, FluentScrollArea, FluentSectionLabel, FluentTableView, centred_line_top,
+    FluentLabel, FluentPageBody, FluentReadoutEdit, FluentScrollArea, FluentSectionLabel, FluentTableView, centred_line_top,
     column_header_label, field_text_inset, fill_editable_combo, read_editable_combo,
     retire_widget, set_muted, signals_blocked,
 )
@@ -51,7 +51,7 @@ class PulseConfigView(QtWidgets.QWidget):
         outer = QtWidgets.QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         self.scroll = FluentScrollArea(self)
-        body = QtWidgets.QWidget()
+        body = FluentPageBody()
         content = QtWidgets.QVBoxLayout(body)
         content.setSpacing(section_gap())
         self.scroll.set_width_bounded_widget(body, inset=section_gap())

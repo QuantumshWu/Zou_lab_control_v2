@@ -16,7 +16,7 @@ from zlc_data import SPATIAL_X, SPATIAL_Y
 from zlc_plot import PANEL_SIZE_NAMES, AxisRef, ImagePlot, PlotLabels
 from zlc_ui.fluent import (
     FluentButton, FluentComboBox, FluentDoubleSpinBox, FluentFrame, FluentLabel,
-    FluentLineEdit, FluentPopup, FluentScrollArea, FluentSegmentedButtons, FluentSettingsPopupAnchor,
+    FluentLineEdit, FluentPageBody, FluentPopup, FluentScrollArea, FluentSegmentedButtons, FluentSettingsPopupAnchor,
     FluentSpinBox, FluentSwitch, FluentTabWidget, add_row_switch, fluent_open_path, fluent_save_path,
     open_fluent_window, set_status_ink,
 )
@@ -354,7 +354,7 @@ class SlmEditorControl(QtCore.QObject):
         layer_layout.setColumnStretch(1, 1)
         root.addWidget(layers)
 
-        self._plot_panel = QtWidgets.QWidget(page)
+        self._plot_panel = FluentPageBody(page)
         panes = QtWidgets.QHBoxLayout(self._plot_panel)
         panes.setContentsMargins(0, 0, 0, 0)
         panes.setSizeConstraint(QtWidgets.QLayout.SetFixedSize)
@@ -659,7 +659,7 @@ class SlmEditorControl(QtCore.QObject):
         wave_root.setContentsMargins(8, 8, 8, 8)
         wave_root.setSpacing(8)
         self._wavefront_parameter_scroll = FluentScrollArea(wave_page)
-        parameter_page = QtWidgets.QWidget(self._wavefront_parameter_scroll)
+        parameter_page = FluentPageBody(self._wavefront_parameter_scroll)
         self._wavefront_parameter_scroll.set_width_bounded_widget(parameter_page)
         parameter_page.setMinimumWidth(440)
         wave_layout = QtWidgets.QGridLayout(parameter_page)
@@ -704,7 +704,7 @@ class SlmEditorControl(QtCore.QObject):
         wave_layout.addWidget(reset, 7, 0, 1, 4)
         wave_root.addWidget(self._wavefront_parameter_scroll, 0)
 
-        self._wavefront_plot_panel = QtWidgets.QWidget(wave_page)
+        self._wavefront_plot_panel = FluentPageBody(wave_page)
         plot_layout = QtWidgets.QVBoxLayout(self._wavefront_plot_panel)
         plot_layout.setContentsMargins(0, 0, 0, 0)
         plot_layout.setSizeConstraint(QtWidgets.QLayout.SetFixedSize)

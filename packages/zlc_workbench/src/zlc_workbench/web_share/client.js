@@ -1,8 +1,9 @@
 "use strict";
 const $ = (id) => document.getElementById(id);
-const canvas = $("screen"), ctx = canvas.getContext("2d", {alpha: false});
+const stage = $("screen"), video = $("video"), popups = $("popups");
 let socket, client, controller, selected = "", windows = [], frame = null;
-let incoming = Promise.resolve(), header = null, fitted = true, connected = false, controlEnabled = false;
+let incoming = Promise.resolve(), fitted = true, connected = false, controlEnabled = false;
+let peer = null, media = null, mediaReady = false, videoCallback = 0, viewportSignature = "";
 let connectionMessage = "Only the experiment application is shared, not the desktop. Connecting does not start or stop an experiment.";
 let immersive = false;
 let move = null, moveRequest = 0, pointer = null, composing = false;
@@ -12,7 +13,7 @@ const touches = new Map();
 const keys = new Map();
 const modifiers = (e) => ({ctrl: e.ctrlKey, shift: e.shiftKey, alt: e.altKey, meta: e.metaKey});
 const ownsControl = () => connected && controlEnabled && client === controller;
-const canInput = () => ownsControl() && frame?.window === selected && windows.some(w => w.id === selected && w.visible && !w.blocked);
+const canInput = () => ownsControl() && mediaReady && frame?.window === selected && windows.some(w => w.id === selected && w.visible && !w.blocked);
 function send(message) {
   if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
 }
@@ -57,16 +58,95 @@ function release() {
   const captured = [pointer?.id, ...touches.keys()];
   pointer = null; keys.clear();
   touches.clear(); gesture = null;
-  for (const id of captured) if (id != null && canvas.hasPointerCapture(id)) canvas.releasePointerCapture(id);
+  for (const id of captured) if (id != null && stage.hasPointerCapture(id)) stage.releasePointerCapture(id);
 }
-function resize() {
-  if (!frame) return;
+function resize(report = true) {
+  const scene = media || windows.find(window => window.id === selected);
+  if (!scene?.width || !scene.height) return;
   const box = $("viewport"), padding = parseFloat(getComputedStyle(box).paddingLeft) * 2;
   const cap = immersive && !windows.find(window => window.id === selected)?.modal ? Infinity : 1;
-  const scale = fitted ? Math.min(cap, (box.clientWidth - padding) / frame.width, (box.clientHeight - padding) / frame.height) : 1;
-  canvas.style.width = `${Math.max(1, frame.width * scale)}px`;
-  canvas.style.height = `${Math.max(1, frame.height * scale)}px`;
+  const scale = fitted ? Math.min(cap, (box.clientWidth - padding) / scene.width, (box.clientHeight - padding) / scene.height) : 1;
+  const width = Math.max(1, scene.width * scale), height = Math.max(1, scene.height * scale);
+  stage.style.width = `${width}px`; stage.style.height = `${height}px`;
   positionInput();
+  if (report && connected && !editing) {
+    const pixel_width = Math.max(1, Math.round(width * devicePixelRatio)), pixel_height = Math.max(1, Math.round(height * devicePixelRatio));
+    const signature = `${selected}/${pixel_width}/${pixel_height}`;
+    if (signature !== viewportSignature) {
+      viewportSignature = signature;
+      send({type: "viewport", pixel_width, pixel_height});
+    }
+  }
+}
+function clearMedia(closePeer = true) {
+  if (closePeer) { const previous = peer; peer = null; previous?.close(); }
+  if (videoCallback) video.cancelVideoFrameCallback(videoCallback);
+  videoCallback = 0; mediaReady = false; frame = media = null;
+  video.srcObject = null; video.load(); popups.replaceChildren();
+}
+function place(element, rect, scene) {
+  Object.assign(element.style, {left: `${100*rect[0]/scene.width}%`, top: `${100*rect[1]/scene.height}%`,
+    width: `${100*rect[2]/scene.width}%`, height: `${100*rect[3]/scene.height}%`});
+}
+async function startMedia(scene, ws) {
+  if (!window.RTCPeerConnection || !video.requestVideoFrameCallback) throw new Error("This browser does not support the experiment video stream.");
+  const current = new RTCPeerConnection({iceServers: []}); peer = current;
+  const receiver = current.addTransceiver("video", {direction: "recvonly"});
+  const codecs = RTCRtpReceiver.getCapabilities("video").codecs.filter(codec => codec.mimeType === "video/H264");
+  if (!codecs.length) throw new Error("This browser does not support H264 experiment video.");
+  receiver.setCodecPreferences(codecs);
+  const active = () => peer === current && socket === ws && media?.stream === scene.stream;
+  current.ontrack = event => {
+    if (!active()) return;
+    video.srcObject = new MediaStream([event.track]);
+    videoCallback = video.requestVideoFrameCallback(() => {
+      if (!active()) return;
+      videoCallback = 0;
+      mediaReady = true; frame = media; syncInput(); refreshControls();
+    });
+    video.play().catch(cause => { if (active()) error(String(cause.message || cause)); });
+  };
+  current.onconnectionstatechange = () => {
+    if (active() && current.connectionState === "failed") {
+      release(); clearMedia(); error("The experiment video connection failed. Reconnect to request a new connection."); refreshControls();
+    }
+  };
+  let offered = false;
+  const offer = () => {
+    if (!offered && active() && current.iceGatheringState === "complete") {
+      offered = true;
+      send({type: "offer", stream: scene.stream, sdp: current.localDescription.sdp, description_type: current.localDescription.type});
+    }
+  };
+  current.onicegatheringstatechange = offer;
+  await current.setLocalDescription(await current.createOffer());
+  offer();
+}
+async function showMedia(message, ws) {
+  if (message.window !== selected || !windows.some(window => window.id === selected && window.visible)) return;
+  if (message.stream == null) { release(); clearMedia(); refreshControls(); return; }
+  const changed = media?.stream !== message.stream;
+  if (changed) { release(); clearMedia(); refreshControls(); }
+  const shown = new Map([...popups.children].map(image => [image.dataset.id, image]));
+  const images = await Promise.all((message.popups || []).map(async popup => {
+    let image = shown.get(String(popup.id));
+    if (!image || image.src !== popup.url) {
+      image = new Image(); image.src = popup.url; image.alt = ""; image.draggable = false;
+      image.dataset.id = String(popup.id); await image.decode();
+    }
+    return image;
+  }));
+  if (socket !== ws || message.window !== selected || !windows.some(window => window.id === selected && window.visible)) return;
+  images.forEach((image, index) => place(image, message.popups[index].rect, message));
+  media = message; popups.replaceChildren(...images); place(video, message.root, message); resize(false);
+  if (changed) {
+    startMedia(message, ws).catch(cause => {
+      if (socket === ws && media?.stream === message.stream) {
+        release(); clearMedia(); error(String(cause.message || cause)); refreshControls();
+      }
+    });
+  } else if (mediaReady) { frame = media; syncInput(); }
+  refreshControls();
 }
 function refreshControls() {
   const current = windows.find(w => w.id === selected), mine = ownsControl();
@@ -75,8 +155,8 @@ function refreshControls() {
   $("ownership").textContent = !controlEnabled ? "Viewing only on this server" : mine ? "You have control" : controller != null ? "Another client has control · Read-only" : "Read-only";
   if (!mine) closeInput();
   $("show-window").hidden = !current || current.visible || !mine;
-  const ready = connected && current?.visible && frame?.window === selected;
-  canvas.hidden = !ready;
+  const ready = connected && current?.visible && media?.window === selected;
+  stage.hidden = !ready;
   $("placeholder").hidden = ready;
   $("placeholder-text").textContent = !connected ? connectionMessage : !current ? "No experiment windows are available to share." : !current.visible ? "This window is hidden on the experiment computer. Take control to show it." : "Receiving the window view…";
   $("hint").textContent = current?.blocked ? "This window is waiting for an experiment dialog. Complete the dialog first." : current?.modal ? "Experiment dialog. Confirm or cancel to return to the previous window." : mine ? "Tap a field to type. Drag with one finger; scroll with two, or pinch to zoom a plot. Disconnecting does not stop the experiment." : "Read-only viewing does not change the experiment computer's windows or experiment state.";
@@ -84,9 +164,10 @@ function refreshControls() {
 function selectWindow(id) {
   if (windows.find(w => w.id === id)?.blocked) id = windows.find(w => w.modal && w.visible && !w.blocked)?.id || id;
   if (id === selected) return;
-  release(); selected = id; frame = null;
+  release(); clearMedia(!id); selected = id; viewportSignature = "";
   $("windows").value = id;
   if (id) send({type: "select", window: id});
+  resize();
   refreshControls();
 }
 function updateState(message) {
@@ -106,66 +187,44 @@ function updateState(message) {
   const blocked = windows.find(w => w.id === next)?.blocked;
   const modal = windows.find(w => w.modal && w.visible && !w.blocked && (blocked || (!oldModals.has(w.id) && (!w.parent || w.parent === next))));
   if (modal) next = modal.id;
-  selectWindow(next); $("windows").value = selected; refreshControls();
+  selectWindow(next); $("windows").value = selected;
+  const current = windows.find(window => window.id === selected);
+  if (!current?.visible && media) { release(); clearMedia(); }
+  if (current?.width !== prior?.width || current?.height !== prior?.height) resize();
+  refreshControls();
 }
 async function receive(data, ws) {
   if (socket !== ws) return;
-  if (typeof data === "string") {
-    const message = JSON.parse(data);
-    if (message.type === "pending") {
-      connectionMessage = message.message;
-      $("connection").textContent = "Waiting for approval";
-      refreshControls();
-    } else if (message.type === "hello") {
-      client = message.client; controller = message.controller; connected = true; controlEnabled = message.control_enabled === true;
-      $("connection-request").hidden = true; $("toolbar").hidden = false;
-      $("connection").textContent = "Connected"; $("connection").dataset.state = "connected";
-      error(); refreshControls();
-    } else if (message.type === "state") updateState(message);
-    else if (message.type === "inputs" && frame?.window === message.window && frame.epoch === message.epoch) {
-      frame.inputs = message.inputs;
-      syncInput();
+  const message = JSON.parse(data);
+  if (message.type === "pending") {
+    connectionMessage = message.message;
+    $("connection").textContent = "Waiting for approval";
+    refreshControls();
+  } else if (message.type === "hello") {
+    client = message.client; controller = message.controller; connected = true; controlEnabled = message.control_enabled === true;
+    $("connection-request").hidden = true; $("toolbar").hidden = false;
+    $("connection").textContent = "Connected"; $("connection").dataset.state = "connected";
+    error(); refreshControls();
+  } else if (message.type === "state") updateState(message);
+  else if (message.type === "media") await showMedia(message, ws);
+  else if (message.type === "answer" && peer && media?.stream === message.stream) {
+    await peer.setRemoteDescription({type: message.description_type, sdp: message.sdp});
+  } else if (message.type === "error" || (message.type === "result" && message.ok === false)) {
+    if ("stream" in message) {
+      if (message.window !== selected || message.stream !== media?.stream) return;
+      release(); clearMedia(); refreshControls();
     }
-    else if (message.type === "frame") header = message;
-    else if (message.type === "error" || (message.type === "result" && message.ok === false)) error(message.message || message.error || "The operation did not complete.");
-    return;
+    error(message.message || message.error || "The operation did not complete.");
   }
-  const patch = header; header = null;
-  if (!patch) throw new Error("Received a window image without its frame metadata. Please reconnect.");
-  try {
-    if (patch.window !== selected) return;
-    if (!patch.reset && (!frame || frame.window !== patch.window || frame.epoch !== patch.epoch || frame.sequence !== patch.base_sequence)) {
-      if (frame) {
-        frame = null;
-        send({type: "select", window: selected});
-        refreshControls();
-      }
-      return;
-    }
-    const baseline = frame;
-    const bitmap = await createImageBitmap(data);
-    try {
-      if (socket !== ws || patch.window !== selected || (!patch.reset && frame !== baseline)) return;
-      if (patch.reset) {
-        canvas.width = patch.pixel_width; canvas.height = patch.pixel_height;
-        ctx.fillStyle = "white"; ctx.fillRect(0, 0, canvas.width, canvas.height);
-      }
-      ctx.drawImage(bitmap, patch.x, patch.y);
-      const resized = !frame || frame.width !== patch.width || frame.height !== patch.height;
-      frame = patch;
-      syncInput();
-      if (resized) resize();
-      if (canvas.hidden) refreshControls();
-    } finally { bitmap.close(); }
-  } finally { if (socket === ws) send({type: "ack", window: patch.window, epoch: patch.epoch, sequence: patch.sequence}); }
 }
 function connect() {
+  release(); clearMedia(); connected = false; selected = ""; windows = []; viewportSignature = "";
   if (socket) socket.close();
   error(); $("connect").textContent = "Cancel request";
   connectionMessage = "Connecting to the experiment computer…";
   $("connection").textContent = "Connecting…"; $("connection").dataset.state = "";
   const ws = new WebSocket(`${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/zlc/ws`);
-  socket = ws; incoming = Promise.resolve(); header = null;
+  socket = ws; incoming = Promise.resolve();
   ws.onmessage = (event) => {
     if (socket !== ws) return;
     incoming = incoming.then(() => receive(event.data, ws)).catch(cause => { if (socket === ws) error(String(cause.message || cause)); ws.close(); });
@@ -173,7 +232,7 @@ function connect() {
   ws.onerror = () => { if (socket === ws) error("Cannot connect to the experiment computer. Check that sharing is enabled in Device Manager and the address and local network connection are correct."); };
   ws.onclose = event => {
     if (socket !== ws) return;
-    release(); connected = false; client = null; controller = null; frame = null; selected = ""; windows = []; controlEnabled = false;
+    release(); clearMedia(); connected = false; client = null; controller = null; selected = ""; windows = []; controlEnabled = false; viewportSignature = "";
     $("connect").textContent = "Request connection"; $("connection-request").hidden = false; $("toolbar").hidden = true;
     connectionMessage = "Request a connection to ask for approval in Device Manager. Disconnecting does not stop the experiment.";
     if (event.reason) error(event.reason);
@@ -220,18 +279,28 @@ $("fullscreen-controls").onclick = () => {
   $("fullscreen-controls").title = label;
   resize();
 };
-document.addEventListener("fullscreenchange", resize);
-new ResizeObserver(resize).observe($("viewport"));
+document.addEventListener("fullscreenchange", () => resize());
+window.addEventListener("resize", () => resize());
+new ResizeObserver(() => resize(false)).observe($("viewport"));
+let resolutionQuery;
+function watchResolution() {
+  resolutionQuery?.removeEventListener("change", watchResolution);
+  resolutionQuery = matchMedia(`(resolution: ${devicePixelRatio}dppx)`);
+  resolutionQuery.addEventListener("change", watchResolution);
+  resize();
+}
+watchResolution();
 function closeInput() {
   const previous = editor, field = editing;
   editor = null; editing = null;
   if (composing && field) input("text", {preedit: ""});
   composing = false;
   if (previous) { previous.value = ""; previous.blur(); previous.hidden = true; }
+  if (previous) resize();
 }
 function positionInput() {
   if (!editor || !editing || !frame) return;
-  const bounds = canvas.getBoundingClientRect(), [x, y, width, height] = editing.rect;
+  const bounds = stage.getBoundingClientRect(), [x, y, width, height] = editing.rect;
   Object.assign(editor.style, {left: `${bounds.left+x*bounds.width/frame.width}px`, top: `${bounds.top+y*bounds.height/frame.height}px`,
     width: `${width*bounds.width/frame.width}px`, height: `${height*bounds.height/frame.height}px`});
 }
@@ -254,7 +323,7 @@ function syncInput() {
   positionInput();
 }
 function point(e, location = e) {
-  const bounds = canvas.getBoundingClientRect();
+  const bounds = stage.getBoundingClientRect();
   return {x: (location.clientX - bounds.left) * frame.width / bounds.width, y: (location.clientY - bounds.top) * frame.height / bounds.height,
     button: e.button, buttons: e.buttons, pointerType: e.pointerType || "mouse", timestamp: e.timeStamp, modifiers: modifiers(e)};
 }
@@ -264,11 +333,11 @@ function touchPair() {
   return {clientX: (first.clientX + second.clientX) / 2, clientY: (first.clientY + second.clientY) / 2,
     distance: Math.hypot(second.clientX - first.clientX, second.clientY - first.clientY)};
 }
-canvas.onpointerdown = e => {
+stage.onpointerdown = e => {
   if (!canInput()) return;
   if (e.pointerType === "touch") {
     touches.set(e.pointerId, {clientX: e.clientX, clientY: e.clientY});
-    canvas.setPointerCapture(e.pointerId);
+    stage.setPointerCapture(e.pointerId);
     if (touches.size > 1 || gesture) {
       e.preventDefault();
       if (!gesture) {
@@ -286,12 +355,12 @@ canvas.onpointerdown = e => {
   const p = point(e);
   const target = [...(frame.inputs || [])].reverse().find(item => !item.readonly && p.x >= item.rect[0] && p.y >= item.rect[1] && p.x < item.rect[0]+item.rect[2] && p.y < item.rect[1]+item.rect[3]);
   if (editing?.id !== target?.id) closeInput();
-  if (!target) canvas.focus({preventScroll: true});
+  if (!target) stage.focus({preventScroll: true});
   pointer = {id: e.pointerId, field: target};
-  canvas.setPointerCapture(e.pointerId);
+  stage.setPointerCapture(e.pointerId);
   input("down", p);
 };
-canvas.onpointermove = e => {
+stage.onpointermove = e => {
   if (touches.has(e.pointerId)) {
     touches.set(e.pointerId, {clientX: e.clientX, clientY: e.clientY});
     if (gesture) {
@@ -306,7 +375,7 @@ canvas.onpointermove = e => {
   const p = point(e);
   move = p; if (!moveRequest) moveRequest = requestAnimationFrame(flushMove);
 };
-canvas.onpointerup = e => {
+stage.onpointerup = e => {
   if (touches.has(e.pointerId) && gesture) {
     e.preventDefault(); flushMove();
     if (!gesture.ended && gesture.mode === "wheel") input("wheel", {...point(gesture.event, gesture.last),
@@ -314,7 +383,7 @@ canvas.onpointerup = e => {
     gesture.ended = true;
     touches.delete(e.pointerId);
     if (!touches.size) gesture = null;
-    if (canvas.hasPointerCapture(e.pointerId)) canvas.releasePointerCapture(e.pointerId);
+    if (stage.hasPointerCapture(e.pointerId)) stage.releasePointerCapture(e.pointerId);
     return;
   }
   touches.delete(e.pointerId);
@@ -322,29 +391,29 @@ canvas.onpointerup = e => {
   e.preventDefault(); flushMove(); const p = point(e); input("up", p);
   const field = pointer.field;
   pointer = null;
-  if (canvas.hasPointerCapture(e.pointerId)) canvas.releasePointerCapture(e.pointerId);
+  if (stage.hasPointerCapture(e.pointerId)) stage.releasePointerCapture(e.pointerId);
   if (field) openInput(field);
 };
-canvas.onpointercancel = release;
-canvas.onlostpointercapture = e => { if (pointer || touches.has(e.pointerId)) release(); };
-canvas.oncontextmenu = e => e.preventDefault();
-canvas.ondblclick = e => e.preventDefault();
-canvas.addEventListener("wheel", e => {
+stage.onpointercancel = release;
+stage.onlostpointercapture = e => { if (pointer || touches.has(e.pointerId)) release(); };
+stage.oncontextmenu = e => e.preventDefault();
+stage.ondblclick = e => e.preventDefault();
+stage.addEventListener("wheel", e => {
   if (!canInput()) return;
   e.preventDefault(); flushMove(); input("wheel", {...point(e), deltaX: e.deltaX, deltaY: e.deltaY, deltaMode: e.deltaMode});
 }, {passive: false});
-canvas.onkeydown = e => {
+stage.onkeydown = e => {
   if (!canInput() || e.isComposing || e.key === "Process" || e.key === "Dead") return;
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "v") return;
   e.preventDefault(); flushMove(); keys.set(e.code, e.key);
   input("key_down", {key: e.key, code: e.code, modifiers: modifiers(e), repeat: e.repeat});
 };
-canvas.onkeyup = e => {
+stage.onkeyup = e => {
   if (!keys.has(e.code)) return;
   e.preventDefault(); keys.delete(e.code); input("key_up", {key: e.key, code: e.code, modifiers: modifiers(e)});
 };
-canvas.onpaste = e => { if (canInput()) { e.preventDefault(); input("text", {text: e.clipboardData.getData("text/plain")}); } };
-canvas.onblur = event => { if (event.relatedTarget !== editor) release(); };
+stage.onpaste = e => { if (canInput()) { e.preventDefault(); input("text", {text: e.clipboardData.getData("text/plain")}); } };
+stage.onblur = event => { if (event.relatedTarget !== editor) release(); };
 window.addEventListener("blur", release);
 document.addEventListener("visibilitychange", () => { if (document.hidden) release(); });
 function sendText() {

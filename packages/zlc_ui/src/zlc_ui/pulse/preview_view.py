@@ -11,7 +11,7 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 
 from zlc_ui.fluent import (
     detach_widget,
-    FluentButton, FluentComboBox, FluentFrame, FluentLabel,
+    FluentButton, FluentComboBox, FluentFrame, FluentLabel, FluentPageBody,
     FluentReadoutEdit, FluentScrollArea, FluentSwitch, LinkedScrollPanes, add_row_switch,
     set_status_ink, signals_blocked,
 )
@@ -85,7 +85,7 @@ class PulsePreviewView(QtWidgets.QWidget):
         # Installed after the group's own, so it is asked first: a wheel over
         # the drawing is the drawing's, anywhere else it scrolls the page.
         self.preview_scroll.viewport().installEventFilter(self)
-        self.preview_body = QtWidgets.QWidget()
+        self.preview_body = FluentPageBody()
         self.preview_body_layout = QtWidgets.QVBoxLayout(self.preview_body)
         self.preview_body_layout.setContentsMargins(0, 0, 0, 0)
         self.preview_placeholder = FluentLabel("Open Preview to render the pulse plot.")

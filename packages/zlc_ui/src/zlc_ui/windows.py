@@ -383,9 +383,8 @@ class SharedWindows(QtCore.QObject):
             target = (popups[-1][0] if popups else window).focusWidget()
         return target
 
-    def input_targets(self, identity: str) -> list[dict[str, Any]]:
+    def _input_targets(self, window: Any, bounds: Any, popups: Any) -> list[dict[str, Any]]:
         """Expose visible native text-input geometry, never field contents."""
-        window, bounds, popups = self._surface(identity)
         origin = window.mapToGlobal(bounds.topLeft())
         focused = self._focused_input(window, popups)
         targets = []
@@ -418,39 +417,88 @@ class SharedWindows(QtCore.QObject):
                         focused=(widget is focused or context is focused or widget.isAncestorOf(focused)) if focused is not None else False))
         return targets
 
-    def capture(self, identity: str, max_width: int = 1600, force: bool = False) -> dict[str, Any] | None:
+    def describe(self, identity: str) -> dict[str, Any]:
+        """Describe one logical input surface; native handles and popup pixels stay server-side."""
         self._check_thread()
         window, bounds, popups = self._surface(identity)
         geometry = self._geometry(window, bounds, popups)
         previous = self._frames.get(identity, {})
-        changed = previous.get("geometry") != geometry
-        if (not force and not changed and previous.get("max_width") == max_width
-                and not any(w in self._dirty for w in (window, *(p[0] for p in popups)))):
+        cached = previous.get("popup_images", {})
+        images, overlays = {}, []
+        popup_redrawn = False
+        for popup, rect in popups:
+            key = self._ids[popup]
+            dpr = float(popup.devicePixelRatioF())
+            pixel_geometry = (popup.width(), popup.height(), dpr, popup.logicalDpiX(), popup.logicalDpiY())
+            image = cached.get(key)
+            if image is None or image[0] != pixel_geometry or popup in self._dirty:
+                width, height = math.ceil(popup.width() * dpr), math.ceil(popup.height() * dpr)
+                pixels = QtGui.QImage(width, height, QtGui.QImage.Format_RGBA8888)
+                pixels.setDevicePixelRatio(dpr)
+                pixels.setDotsPerMeterX(round(popup.logicalDpiX() / .0254))
+                pixels.setDotsPerMeterY(round(popup.logicalDpiY() / .0254))
+                pixels.fill(QtCore.Qt.transparent)
+                painter = QtGui.QPainter(pixels)
+                self._capturing = True
+                try:
+                    popup.render(painter)
+                finally:
+                    painter.end()
+                    self._capturing = False
+                image = (pixel_geometry, width, height, pixels.constBits().asstring(pixels.sizeInBytes()))
+                self._dirty.discard(popup)
+                popup_redrawn = True
+            images[key] = image
+            placed = rect.translated(-bounds.topLeft())
+            overlays.append(dict(id=key, rect=list(placed.getRect()), native_dpr=dpr,
+                                 pixel_width=image[1], pixel_height=image[2], rgba=image[3]))
+        record = dict(
+            id=identity, epoch=previous.get("epoch", 0) + int(previous.get("geometry") != geometry),
+            width=bounds.width(), height=bounds.height(), origin=[bounds.x(), bounds.y()],
+            inputs=self._input_targets(window, bounds, popups), hwnd=int(window.winId()),
+            root_rect=[-bounds.x(), -bounds.y(), window.width(), window.height()],
+            native_dpr=float(window.devicePixelRatioF()), popups=tuple(overlays),
+        )
+        self._frames[identity] = {**previous, **record, "geometry": geometry, "popup_images": images}
+        if popup_redrawn:
+            self._frames[identity].pop("capture", None)
+        return record
+
+    def capture(self, identity: str, max_width: int | None = None, force: bool = False) -> dict[str, Any] | None:
+        """Capture at native density, optionally capped by a physical-pixel width."""
+        description = self.describe(identity)
+        window = self._windows[identity]
+        previous = self._frames[identity]
+        scale = description["native_dpr"]
+        if max_width is not None:
+            scale = min(scale, max(1, int(max_width)) / description["width"])
+        unchanged = previous.get("capture") == (description["epoch"], scale)
+        if not force and unchanged and window not in self._dirty:
             return None
-        scale = min(1.0, max(1, int(max_width)) / bounds.width())
-        width, height = math.ceil(bounds.width() * scale), math.ceil(bounds.height() * scale)
+        width, height = math.ceil(description["width"] * scale), math.ceil(description["height"] * scale)
         frame = self._capture_image
         if frame.width() != width or frame.height() != height:
             frame = self._capture_image = QtGui.QImage(width, height, QtGui.QImage.Format_RGBA8888)
+        frame.setDevicePixelRatio(scale)
+        frame.setDotsPerMeterX(round(window.logicalDpiX() / .0254))
+        frame.setDotsPerMeterY(round(window.logicalDpiY() / .0254))
         frame.fill(QtCore.Qt.white)
         painter = QtGui.QPainter(frame)
-        painter.scale(scale, scale)
         self._capturing = True
         try:
-            window.render(painter, -bounds.topLeft())
-            for popup, rect in popups:
-                popup.render(painter, rect.topLeft() - bounds.topLeft())
+            window.render(painter, -QtCore.QPoint(*description["origin"]))
+            for popup in description["popups"]:
+                image = QtGui.QImage(popup["rgba"], popup["pixel_width"], popup["pixel_height"],
+                                     popup["pixel_width"] * 4, QtGui.QImage.Format_RGBA8888)
+                image.setDevicePixelRatio(popup["native_dpr"])
+                painter.drawImage(QtCore.QRectF(*popup["rect"]), image)
         finally:
             painter.end()
             self._capturing = False
-        self._dirty.difference_update((window, *(p[0] for p in popups)))
-        record = dict(
-            id=identity, epoch=previous.get("epoch", 0) + int(changed),
-            sequence=previous.get("sequence", 0) + 1, width=bounds.width(), height=bounds.height(),
-            origin=[bounds.x(), bounds.y()], pixel_width=width, pixel_height=height,
-            inputs=self.input_targets(identity),
-        )
-        self._frames[identity] = {**record, "geometry": geometry, "max_width": max_width}
+        self._dirty.discard(window)
+        record = {key: description[key] for key in ("id", "epoch", "width", "height", "origin", "inputs")}
+        record.update(sequence=previous.get("sequence", 0) + 1, pixel_width=width, pixel_height=height)
+        previous.update(sequence=record["sequence"], capture=(description["epoch"], scale))
         record["rgba"] = frame.constBits().asstring(frame.sizeInBytes())
         return record
 

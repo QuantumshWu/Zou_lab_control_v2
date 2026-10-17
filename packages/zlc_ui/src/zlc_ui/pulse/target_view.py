@@ -14,7 +14,7 @@ from PyQt5 import QtCore, QtWidgets
 from zlc_ui.form import being_edited
 from zlc_ui.fluent import (
     FluentButton, FluentFrame, FluentGroupBox, FluentLabel,
-    FluentLineEdit, FluentScrollArea, FluentSpinBox, column_header_label, field_text_inset,
+    FluentLineEdit, FluentPageBody, FluentScrollArea, FluentSpinBox, column_header_label, field_text_inset,
     fluent_scrollbar_thickness, set_status_ink, signals_blocked,
 )
 
@@ -85,7 +85,7 @@ class PulseTargetView(QtWidgets.QWidget):
         # A bar that is always there but cannot move says "there is more below"
         # when there is not.  Let the content decide.
         self.cards_scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
-        self.cards_body = QtWidgets.QWidget()
+        self.cards_body = FluentPageBody()
         self.cards_layout = QtWidgets.QVBoxLayout(self.cards_body)
         self.cards_layout.setContentsMargins(0, 0, max(0, page - fluent_scrollbar_thickness()), 0)
         self.cards_layout.setSpacing(section_gap())

@@ -17,7 +17,7 @@ from zlc_ui.fluent import (
     SELECTION_EDGE, TEXT, CONFIG_GREEN,
     CONFIG_GREEN_DARK, CONFIG_GREEN_TINT, FluentButton, FluentCheckBox, FluentSegmentedButtons,
     FluentSwitch, FluentComboBox, FluentFrame, FluentGroupBox, fluent_count_box,
-    FluentLabel, FluentLineEdit, FluentReadoutEdit, FluentScrollArea, LinkedScrollPanes,
+    FluentLabel, FluentLineEdit, FluentPageBody, FluentReadoutEdit, FluentScrollArea, LinkedScrollPanes,
     ElidedLabel, FluentPopup, FluentSettingRow, FluentSettingsPopupAnchor, field_text_inset,
     set_status_ink, show_fluent_popup_for_anchor, signals_blocked,
 )
@@ -1242,7 +1242,7 @@ class ComponentCard(FluentGroupBox):
         self._project_source()
 
 
-class PulseDragContainer(QtWidgets.QWidget):
+class PulseDragContainer(FluentPageBody):
     """Horizontal card strip whose drag releases are proposal-only."""
 
     reorder_items_requested = QtCore.pyqtSignal(object)
@@ -1776,7 +1776,7 @@ class PulseScheduleView(QtWidgets.QWidget):
             QtWidgets.QSizePolicy.Maximum,
             QtWidgets.QSizePolicy.Expanding,
         )
-        self.left_body = QtWidgets.QWidget()
+        self.left_body = FluentPageBody()
         left_body = self.left_body
         left = QtWidgets.QHBoxLayout(left_body)
         left.setSizeConstraint(QtWidgets.QLayout.SetMinimumSize)
