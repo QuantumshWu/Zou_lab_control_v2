@@ -46,6 +46,10 @@ input:focus, select:focus, textarea:focus { border-color: var(--focus); }
 .immersive header { padding-right: calc(var(--window-pad) + var(--control-height) + var(--row-gap)); }
 .immersive #viewport { padding: 0; }
 #fullscreen-controls { position: fixed; z-index: 1; top: max(var(--row-gap), env(safe-area-inset-top)); right: max(var(--row-gap), env(safe-area-inset-right)); width: var(--control-height); padding: 0; }
+#panel-back { position: fixed; z-index: 1; top: max(var(--row-gap), env(safe-area-inset-top)); left: max(var(--row-gap), env(safe-area-inset-left)); }
+.panel-view #viewport { display: flex; background: var(--surface); }
+.panel-view #screen { flex: none; }
+.panel-view.show-controls header { padding-top: calc(var(--window-pad) + var(--control-height) + var(--row-gap)); }
 [hidden] { display: none !important; }
 @media (max-width: 50em) {
   #windows { max-width: none; flex-basis: calc(100% - 4em); }

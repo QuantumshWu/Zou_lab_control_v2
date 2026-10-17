@@ -346,7 +346,9 @@ class SharedWindows(QtCore.QObject):
                 modal=window.isModal(), parent=None if parent is None else self._ids.get(parent),
                 blocked=modal is not None and modal is not window and not modal.isAncestorOf(window),
             ))
-        return {"windows": sorted(records, key=lambda item: int(item["id"][1:])), "controller": self._controller}
+        hints = self._app.styleHints()
+        return {"windows": sorted(records, key=lambda item: int(item["id"][1:])), "controller": self._controller,
+                "hold_ms": hints.mousePressAndHoldInterval(), "drag_distance": hints.startDragDistance()}
 
     def _surface(self, identity: str) -> tuple[Any, Any, Any]:
         self._refresh()
@@ -419,6 +421,9 @@ class SharedWindows(QtCore.QObject):
 
     def describe(self, identity: str) -> dict[str, Any]:
         """Describe one logical input surface; native handles and popup pixels stay server-side."""
+        from .console.panel_card_view import PanelCardView
+        from .fluent import FluentOverlayFrame
+
         self._check_thread()
         window, bounds, popups = self._surface(identity)
         geometry = self._geometry(window, bounds, popups)
@@ -452,12 +457,32 @@ class SharedWindows(QtCore.QObject):
             placed = rect.translated(-bounds.topLeft())
             overlays.append(dict(id=key, rect=list(placed.getRect()), native_dpr=dpr,
                                  pixel_width=image[1], pixel_height=image[2], rgba=image[3]))
+        covered = QtGui.QRegion()
+        for overlay in window.findChildren(FluentOverlayFrame):
+            if overlay.isVisible() and overlay.window() is window:
+                covered |= overlay.visibleRegion().translated(overlay.mapTo(window, QtCore.QPoint()))
+        panels = []
+        for card in window.findChildren(PanelCardView):
+            surface = card.surface
+            if surface is None or sip.isdeleted(surface) or surface.window() is not window or not surface.isVisible():
+                continue
+            position = surface.mapTo(window, QtCore.QPoint())
+            visible = surface.visibleRegion().subtracted(covered.translated(-position))
+            if visible.isEmpty():
+                continue
+            rect = QtCore.QRect(position, surface.size())
+            available = QtGui.QRegion(surface.rect()).subtracted(visible).isEmpty() and window.rect().contains(rect)
+            panels.append(dict(id=card.panel_id, rect=list(rect.translated(-bounds.topLeft()).getRect()),
+                               hit_rects=[list(part.translated(position - bounds.topLeft()).getRect())
+                                          for part in visible.rects()],
+                               available=available, reason="" if available else
+                               "Show the whole panel in the experiment window before opening its full-screen view."))
         record = dict(
             id=identity, epoch=previous.get("epoch", 0) + int(previous.get("geometry") != geometry),
             width=bounds.width(), height=bounds.height(), origin=[bounds.x(), bounds.y()],
             inputs=self._input_targets(window, bounds, popups), hwnd=int(window.winId()),
             root_rect=[-bounds.x(), -bounds.y(), window.width(), window.height()],
-            native_dpr=float(window.devicePixelRatioF()), popups=tuple(overlays),
+            native_dpr=float(window.devicePixelRatioF()), popups=tuple(overlays), panels=panels,
         )
         self._frames[identity] = {**previous, **record, "geometry": geometry, "popup_images": images}
         if popup_redrawn:
@@ -601,6 +626,8 @@ class SharedWindows(QtCore.QObject):
 
     def input(self, client_id: str, message: dict[str, Any]) -> dict[str, Any]:
         self._check_thread()
+        if self._controller is None:
+            return {"accepted": False, "reason": "remote control was released"}
         if client_id != self._controller:
             raise ValueError("this browser does not control the experiment")
         if message["type"] in ("release", "cancel"):
@@ -615,16 +642,25 @@ class SharedWindows(QtCore.QObject):
         identity = str(message["window"])
         if identity != self._input_window:
             raise ValueError("select the experiment window before sending input")
-        window, bounds, popups = self._surface(identity)
+        try:
+            window, bounds, popups = self._surface(identity)
+        except ValueError:
+            current = self._windows.get(identity)
+            if current is not None and current.isVisible() and not current.isMinimized():
+                raise
+            self._release_inputs(cancel=True)
+            return {"accepted": False, "reason": "the selected window is no longer visible"}
         frame = self._frames.get(identity)
         releasing = (message["type"] == "up" and self._pressed is not None
                      and self._press_source is not None and self._press_source[:2] == (identity, message.get("epoch")))
         if not releasing and (frame is None or message.get("epoch") != frame["epoch"]
                 or frame["geometry"] != self._geometry(window, bounds, popups)):
-            raise ValueError("window geometry changed; wait for its current image")
+            self._release_inputs(cancel=True)
+            return {"accepted": False, "reason": "window geometry changed; wait for its current image"}
         modal = self._app.activeModalWidget()
         if modal is not None and modal is not window and not modal.isAncestorOf(window):
-            raise ValueError("a modal dialog must be answered first")
+            self._release_inputs(cancel=True)
+            return {"accepted": False, "reason": "a modal dialog must be answered first"}
         kind, modifiers = str(message["type"]), self._modifiers(message)
         if kind in ("key_down", "text"):
             self._allowed_native_target(self._win.GetForegroundWindow())
